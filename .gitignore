@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Secrets & credentials
+.env
+.env.*
+*.credentials.*
+credentials.*
+*.key
+*.pem
+
+# Logs & runtime data
+*.log
+data/
+
+# Claude / editor
+.claude/
+
+# macOS
+.DS_Store
