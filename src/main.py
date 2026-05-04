@@ -16,6 +16,7 @@ Changes in this revision:
 """
 
 import datetime
+import json
 import logging
 import os
 import sys
@@ -143,7 +144,11 @@ def add_funds_to_account() -> None:
         return
 
     needed = WEEKLY_INVESTMENT - available
-    if not confirm(f"Cash ${available:,.2f} < target ${WEEKLY_INVESTMENT:,.2f}. Deposit ${needed:,.2f}?"):
+    # Always require manual confirmation for deposits regardless of AUTO_APPROVE
+    resp = input(
+        f"Cash ${available:,.2f} < target ${WEEKLY_INVESTMENT:,.2f}. Deposit ${needed:,.2f}? [y/n] "
+    ).strip().lower()
+    if resp not in ("y", "yes"):
         return
 
     try:
@@ -156,6 +161,30 @@ def add_funds_to_account() -> None:
         logger.info(f"Deposit requested: ${needed:,.2f} — state={resp.get('state')}")
     except Exception as e:
         logger.error(f"Deposit failed: {e}")
+
+
+_PEAK_PRICES_CSV = os.path.join(DATA_DIRECTORY, "peak_prices.csv")
+
+
+def _load_peak_prices() -> dict[str, float]:
+    try:
+        df = pd.read_csv(_PEAK_PRICES_CSV)
+        if "symbol" in df.columns and "peak_price" in df.columns:
+            return dict(zip(df["symbol"], df["peak_price"].astype(float)))
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        logger.warning(f"Could not load peak prices: {e}")
+    return {}
+
+
+def _save_peak_prices(peaks: dict[str, float]) -> None:
+    try:
+        pd.DataFrame(
+            [{"symbol": sym, "peak_price": price} for sym, price in peaks.items()]
+        ).to_csv(_PEAK_PRICES_CSV, index=False)
+    except Exception as e:
+        logger.warning(f"Could not save peak prices: {e}")
 
 
 def wipe_data() -> None:
@@ -201,12 +230,30 @@ def _place_sell(symbol: str, quantity: float) -> bool:
     if not AUTO_APPROVE and not confirm(f"Sell {quantity} shares of {symbol}?"):
         logger.info(f"Sell cancelled for {symbol}")
         return False
-    res = rb.order_sell_market(symbol, quantity)
-    if res:
-        logger.info(f"Sold {quantity} shares of {symbol}: {res.get('state')}")
-        return True
-    logger.warning(f"Sell order returned None for {symbol}")
-    return False
+
+    is_fractional = quantity != int(quantity)
+    try:
+        if is_fractional:
+            res = rb.orders.order_sell_fractional_by_quantity(symbol, quantity)
+        else:
+            res = rb.order_sell_market(symbol, int(quantity), timeInForce="gfd")
+    except Exception as e:
+        logger.error(f"Sell order exception for {symbol}: {e}")
+        return False
+
+    if not res:
+        logger.warning(f"Sell order returned None for {symbol}")
+        return False
+
+    # A valid Robinhood order always carries an 'id'; a missing id means the response
+    # is an API error dict (e.g. {'detail': 'Not found'}) that was truthy but not an order
+    order_id = res.get("id")
+    if not order_id:
+        logger.error(f"Sell rejected for {symbol}: {res.get('detail') or res}")
+        return False
+
+    logger.info(f"Sell order placed for {symbol}: qty={quantity}, state={res.get('state')}, id={order_id[:8]}...")
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -218,7 +265,10 @@ def _load_news_for_symbol(symbol: str, news_df: pd.DataFrame | None) -> dict:
         if news_df is not None and not news_df.empty:
             rows = news_df[news_df["symbol"] == symbol]["news"]
             if not rows.empty:
-                return {symbol: rows.iloc[0] if len(rows) == 1 else rows.tolist()}
+                raw = rows.iloc[0] if len(rows) == 1 else rows.tolist()
+                if isinstance(raw, str):
+                    raw = json.loads(raw)
+                return {symbol: raw}
     except Exception as e:
         logger.debug(f"News load failed for {symbol}: {e}")
     return {}
@@ -410,6 +460,7 @@ def evaluate_sell_candidate(
     symbol: str,
     holding: dict,
     metrics_row: "pd.Series | None",
+    peak_price: float | None = None,
 ) -> dict:
     """
     Evaluate a single holding for sell conditions.
@@ -485,6 +536,19 @@ def evaluate_sell_candidate(
             "severity": "hard",
         }
 
+    trailing_stop = SELL_RULES["trailing_stop_pct"]
+    if peak_price is not None and peak_price > 0:
+        current_p = safe_float(holding.get("price"))
+        if current_p is not None:
+            drawdown = (current_p / peak_price) - 1.0
+            if drawdown <= trailing_stop:
+                return {
+                    **base,
+                    "should_sell": True,
+                    "reason":   f"trailing stop: {drawdown:.1%} from peak ${peak_price:.2f}",
+                    "severity": "hard",
+                }
+
     if sell_yt and yield_trap_flag and value_metric is not None and value_metric < sell_weak:
         return {
             **base,
@@ -554,6 +618,20 @@ def make_sales() -> list[str]:
     except Exception:
         agg_df = None
 
+    # Load and update trailing-stop peak prices for all active holdings
+    peaks = _load_peak_prices()
+    for symbol, data in holdings.items():
+        if symbol in ETFS or float(data.get("quantity", 0)) <= 0:
+            continue
+        current_p = safe_float(data.get("price"))
+        if current_p and current_p > 0:
+            if symbol not in peaks or peaks[symbol] <= 0:
+                avg_buy = safe_float(data.get("average_buy_price"), 0.0) or 0.0
+                peaks[symbol] = max(avg_buy, current_p)
+            else:
+                peaks[symbol] = max(peaks[symbol], current_p)
+    _save_peak_prices(peaks)
+
     scanned    = 0
     hard_sells: dict[str, dict] = {}
     soft_sells: dict[str, dict] = {}
@@ -572,7 +650,7 @@ def make_sales() -> list[str]:
             if not row.empty:
                 metrics_row = row.iloc[0]
 
-        decision = evaluate_sell_candidate(symbol, data, metrics_row)
+        decision = evaluate_sell_candidate(symbol, data, metrics_row, peak_price=peaks.get(symbol))
 
         if not decision["should_sell"]:
             continue
@@ -630,6 +708,12 @@ def make_sales() -> list[str]:
             quantity = float(holdings[symbol].get("quantity", 0))
             if _place_sell(symbol, quantity):
                 sold.append(symbol)
+
+    # Remove sold positions from peak price tracking
+    if sold:
+        for sym in sold:
+            peaks.pop(sym, None)
+        _save_peak_prices(peaks)
 
     logger.info(
         f"Sell summary: {scanned} scanned | "
@@ -824,6 +908,16 @@ def run_daily_strat() -> None:
             input("Press Enter to exit...")
         return
 
+    # Allow strategy to run with whatever cash is available as long as it is positive
+    cash = get_available_cash()
+    if cash <= 0:
+        logger.error("No funds available — aborting strategy")
+        if not AUTO_APPROVE:
+            input("Press Enter to exit...")
+        return
+    if cash < WEEKLY_INVESTMENT:
+        logger.info(f"Proceeding with ${cash:,.2f} available (below ${WEEKLY_INVESTMENT:,.2f} weekly target)")
+
     permanently_skipped: set[str] = set()
 
     for iteration in range(1, 11):
@@ -836,17 +930,24 @@ def run_daily_strat() -> None:
             logger.info("No remaining candidates — exiting")
             break
 
+        made_buys = made_sells = False
+
+        # Sell phase always runs first
+        try:
+            logger.info("=== SELL PHASE ===")
+            sold = make_sales()
+            if sold:
+                made_sells = True
+        except Exception as e:
+            logger.error(f"Sell phase error (iter {iteration}): {e}")
+
         cash = get_available_cash()
         if cash < RISK_LIMITS["min_order_amount"]:
-            logger.info(f"Cash ${cash:.2f} below min order ${RISK_LIMITS['min_order_amount']:.2f} — skipping to sell phase")
-            try:
-                logger.info("=== SELL PHASE (cash exhausted) ===")
-                make_sales()
-            except Exception as e:
-                logger.error(f"Sell phase error: {e}")
-            break
-
-        made_buys = made_sells = False
+            logger.info(f"Cash ${cash:.2f} below min order ${RISK_LIMITS['min_order_amount']:.2f} — skipping buy phase")
+            if not made_sells:
+                logger.info("No sells either — exiting loop")
+                break
+            continue
 
         try:
             logger.info("=== BUY PHASE ===")
@@ -857,14 +958,6 @@ def run_daily_strat() -> None:
             permanently_skipped.update(failed)
         except Exception as e:
             logger.error(f"Buy phase error (iter {iteration}): {e}")
-
-        try:
-            logger.info("=== SELL PHASE ===")
-            sold = make_sales()
-            if sold:
-                made_sells = True
-        except Exception as e:
-            logger.error(f"Sell phase error (iter {iteration}): {e}")
 
         if not made_buys and not made_sells:
             logger.info("No activity this iteration — exiting loop")

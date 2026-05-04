@@ -12,6 +12,7 @@ Two paths:
 
 import asyncio
 import datetime
+import json
 import logging
 import os
 import random
@@ -320,7 +321,10 @@ def _load_news(symbol: str) -> tuple[dict, bool]:
         if news_df is not None and not news_df.empty:
             rows = news_df[news_df["symbol"] == symbol]["news"]
             if not rows.empty:
-                return {symbol: rows.iloc[0] if len(rows) == 1 else rows.tolist()}, True
+                raw = rows.iloc[0] if len(rows) == 1 else rows.tolist()
+                if isinstance(raw, str):
+                    raw = json.loads(raw)
+                return {symbol: raw}, True
     except Exception as e:
         logger.error(f"Error loading news for {symbol}: {e}")
     return {}, False

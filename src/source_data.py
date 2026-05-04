@@ -17,6 +17,7 @@ Changes in this revision:
   - Quote enrichment step adds current_price to fundamental data
 """
 
+import json
 import logging
 import os
 import time
@@ -120,13 +121,22 @@ def gen_symbols_list(force_refresh: bool = False) -> list[str]:
         print(f"Scraping {url}")
         all_symbols.update(_scrape_wikipedia_tickers(url))
 
-    # Robinhood sources
-    rb_sources = [
-        rb.get_top_movers_sp500("down"),
-        rb.get_top_movers(),
-        rb.get_top_100(),
-        rb.get_top_movers_sp500("up"),
-    ]
+    # Robinhood sources — each call wrapped individually so a reset on one doesn't abort all
+    rb_sources: list = []
+    for fn, args, label in [
+        (rb.get_top_movers_sp500, ("down",), "top_movers_sp500(down)"),
+        (rb.get_top_movers,       (),         "top_movers"),
+        (rb.get_top_100,          (),         "top_100"),
+        (rb.get_top_movers_sp500, ("up",),    "top_movers_sp500(up)"),
+    ]:
+        try:
+            result = fn(*args)
+            if result:
+                rb_sources.append(result)
+        except Exception as e:
+            print(f"  {label} failed: {str(e)[:60]}")
+        time.sleep(0.5)
+
     for tag in _ROBINHOOD_TAGS:
         try:
             stocks = rb.get_all_stocks_from_market_tag(tag)
@@ -300,7 +310,7 @@ def _evaluate_stock(symbol: str, stock: dict) -> list | None:
         + SCORE_WEIGHTS["momentum"] * momentum,
         3,
     )
-    buy_to_sell = _get_buy_to_sell_ratio(symbol)
+    buy_to_sell = None  # fetched post-filter for shortlisted candidates only
 
     return [
         stock.get("industry"),
@@ -387,7 +397,34 @@ def _get_robinhood_fundamentals(tickers: list[str], force_refresh: bool) -> pd.D
 
     store_data_as_csv("robinhood_data", AGG_DATA_COLUMNS, rows)
     time.sleep(1)
-    return read_data_as_pd("robinhood_data")
+    df = read_data_as_pd("robinhood_data")
+
+    # Fetch analyst buy/sell ratings only for shortlisted candidates — avoids 1000+
+    # sequential API calls during bulk collection while still giving Claude a signal
+    # and incorporating consensus into the score (±5% multiplier).
+    if df is not None and not df.empty:
+        df["value_metric"] = pd.to_numeric(df["value_metric"], errors="coerce")
+        candidates = df[df["value_metric"] >= METRIC_THRESHOLD]["symbol"].tolist()
+        if candidates:
+            print(f"Fetching analyst ratings for {len(candidates)} shortlisted stocks...")
+            for sym in candidates:
+                ratio = _get_buy_to_sell_ratio(sym)
+                df.loc[df["symbol"] == sym, "buy_to_sell_ratio"] = ratio
+                if ratio is not None:
+                    # Strong buy consensus (ratio ≥ 5) → +5%; net sell (ratio < 1) → −5%
+                    multiplier = 1.05 if ratio >= 5 else (0.95 if ratio < 1 else 1.0)
+                    if multiplier != 1.0:
+                        cur = df.loc[df["symbol"] == sym, "value_metric"]
+                        if not cur.empty and pd.notna(cur.iloc[0]):
+                            df.loc[df["symbol"] == sym, "value_metric"] = round(
+                                float(cur.iloc[0]) * multiplier, 3
+                            )
+                time.sleep(0.3)
+            store_data_as_csv("robinhood_data", AGG_DATA_COLUMNS, df)
+            time.sleep(1)
+            df = read_data_as_pd("robinhood_data")
+
+    return df
 
 
 def _get_news(tickers: list[str], force_refresh: bool) -> pd.DataFrame | None:
@@ -409,7 +446,7 @@ def _get_news(tickers: list[str], force_refresh: bool) -> pd.DataFrame | None:
         news_by_symbol.setdefault(t, [])
 
     news_df = pd.DataFrame([
-        {"symbol": sym, "news": articles}
+        {"symbol": sym, "news": json.dumps(articles)}
         for sym, articles in news_by_symbol.items()
     ])
     store_data_as_csv("news", ["symbol", "news"], news_df)

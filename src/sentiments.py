@@ -154,32 +154,45 @@ def _fetch_news_with_retry(ticker: str, max_articles: int, max_retries: int = 3)
 # Public entry point
 # ---------------------------------------------------------------------------
 
+MAX_NEWS_CONCURRENT = 10  # thread workers running concurrently via asyncio.to_thread
+
+
+async def _fetch_all_news_async(tickers: list[str], max_articles: int) -> dict[str, list]:
+    semaphore = asyncio.Semaphore(MAX_NEWS_CONCURRENT)
+    total = len(tickers)
+    completed = 0
+
+    async def _one(ticker: str) -> tuple[str, list]:
+        nonlocal completed
+        async with semaphore:
+            # _fetch_news_with_retry is synchronous (yfinance + time.sleep backoff);
+            # run it in a thread so it doesn't block the event loop
+            articles = await asyncio.to_thread(_fetch_news_with_retry, ticker, max_articles)
+            completed += 1
+            if completed % 50 == 0 or completed == total:
+                print(f"News: {completed}/{total} fetched")
+            return ticker, articles
+
+    results = await asyncio.gather(*[_one(t) for t in tickers])
+    return dict(results)
+
+
 def get_news_for_tickers_by_symbol(
     tickers: list[str],
     max_articles: int = 3,
 ) -> dict[str, list[dict[str, Any]]]:
     """
-    Fetch news for all tickers. Returns {symbol: [article, ...]}.
+    Fetch news for all tickers concurrently. Returns {symbol: [article, ...]}.
 
     No volume pre-filtering here — callers should pass an already-screened
     list (source_data.py filters by volume via agg_data fundamentals).
     """
-    result: dict[str, list] = {}
-    batch_size = 10
-
-    print(f"Fetching news for {len(tickers)} tickers in batches of {batch_size}...")
-
-    for batch_start in range(0, len(tickers), batch_size):
-        batch = tickers[batch_start: batch_start + batch_size]
-        batch_num = (batch_start // batch_size) + 1
-        total_batches = (len(tickers) + batch_size - 1) // batch_size
-        print(f"News batch {batch_num}/{total_batches} ({len(batch)} tickers)...")
-
-        for ticker in batch:
-            result[ticker] = _fetch_news_with_retry(ticker, max_articles)
-            time.sleep(random.uniform(0.1, 0.3))
-
-        if batch_start + batch_size < len(tickers):
-            time.sleep(2)
-
-    return result
+    print(f"Fetching news for {len(tickers)} tickers ({MAX_NEWS_CONCURRENT} concurrent threads)...")
+    try:
+        asyncio.get_running_loop()
+        # Already inside a running loop (e.g. Jupyter) — offload to a thread
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, _fetch_all_news_async(tickers, max_articles)).result()
+    except RuntimeError:
+        return asyncio.run(_fetch_all_news_async(tickers, max_articles))
