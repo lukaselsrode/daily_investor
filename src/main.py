@@ -963,6 +963,18 @@ def run_daily_strat() -> None:
             logger.info("No activity this iteration — exiting loop")
             break
 
+    # Sweep any remaining cash into ETFs so nothing sits idle
+    remaining = get_available_cash()
+    if remaining > 0 and ETFS:
+        per_etf = remaining / len(ETFS)
+        logger.info(f"=== CASH SWEEP: ${remaining:,.2f} → ETFs (${per_etf:.2f} each) ===")
+        for etf in ETFS:
+            try:
+                res = rb.orders.order_buy_fractional_by_price(etf, per_etf)
+                logger.info(f"Sweep {etf}: {res.get('state') if res else 'None'}")
+            except Exception as e:
+                logger.error(f"Sweep failed for {etf}: {e}")
+
     logger.info(
         f"\n{'='*60}\n"
         f"STRATEGY COMPLETE\n"

@@ -164,15 +164,6 @@ def _parse_response(text: str) -> dict:
 # Batch async path
 # ---------------------------------------------------------------------------
 
-_semaphore: asyncio.Semaphore | None = None
-
-
-def _get_semaphore() -> asyncio.Semaphore:
-    global _semaphore
-    if _semaphore is None:
-        _semaphore = asyncio.Semaphore(MAX_CONCURRENT)
-    return _semaphore
-
 
 def _build_batch_prompt(batch: list[dict], action: str) -> tuple[str, str]:
     system = (
@@ -257,7 +248,7 @@ async def _call_batch_async(
 
 
 async def _run_all_batches(stocks_data: list[dict], action: str) -> dict[str, dict]:
-    semaphore = _get_semaphore()
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT)  # always fresh — global semaphores bind to a specific loop
     chunks = [stocks_data[i: i + BATCH_SIZE] for i in range(0, len(stocks_data), BATCH_SIZE)]
     logger.info(f"Dispatching {len(chunks)} batch(es) for {len(stocks_data)} stocks")
     chunk_results = await asyncio.gather(*[_call_batch_async(c, action, semaphore) for c in chunks])
