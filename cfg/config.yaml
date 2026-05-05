@@ -4,7 +4,7 @@ dividend_threshold: 0.03
 metric_threshold: 1.0146
 selloff_threshold: 30
 weekly_investment: 400
-index_pct: 0.3671
+index_pct: 0.65
 auto_approve: true
 use_sentiment_analysis: true
 confidence_threshold: 65
