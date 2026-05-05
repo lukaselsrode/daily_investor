@@ -19,6 +19,8 @@ import aiohttp
 import robin_stocks.robinhood as rb
 import yfinance as yf
 
+from util import run_async
+
 
 # ---------------------------------------------------------------------------
 # Reddit sentiment
@@ -188,11 +190,4 @@ def get_news_for_tickers_by_symbol(
     list (source_data.py filters by volume via agg_data fundamentals).
     """
     print(f"Fetching news for {len(tickers)} tickers ({MAX_NEWS_CONCURRENT} concurrent threads)...")
-    try:
-        asyncio.get_running_loop()
-        # Already inside a running loop (e.g. Jupyter) — offload to a thread
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(asyncio.run, _fetch_all_news_async(tickers, max_articles)).result()
-    except RuntimeError:
-        return asyncio.run(_fetch_all_news_async(tickers, max_articles))
+    return run_async(_fetch_all_news_async(tickers, max_articles))

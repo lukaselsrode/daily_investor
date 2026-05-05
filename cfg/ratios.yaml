@@ -1,68 +1,26 @@
-config:
-  ignore_negative_pe: true
-  ignore_negative_pb: false
-  dividend_threshold: 0.03
-  metric_threshold: 1
-  selloff_threshold: 30
-  weekly_investment: 400
-  index_pct: 0.7
-  auto_approve: true
-  use_sentiment_analysis: true
-  confidence_threshold: 65
-  etfs:
-  - SPY
-  - VOO
-  - VTI
-  - QQQ
-  - SCHD
-  - MPLY
-  - SMH
-  - VXUS
-  - VNQ
-  - IWM
-  score_weights:
-    value: 0.45
-    quality: 0.25
-    income: 0.15
-    momentum: 0.15
-  valuation_guardrails:
-    max_pe_component: 5.0
-    max_pb_component: 5.0
-    min_pe_ratio: 1.0
-    min_pb_ratio: 0.1
-  risk:
-    max_single_position_pct: 0.05
-    max_sector_pct: 0.25
-    max_order_pct_of_cash: 0.1
-    min_order_amount: 5.0
-    min_liquidity_volume: 500000
-  sell_rules:
-    stop_loss_pct: -0.2
-    trailing_stop_pct: -0.15
-    take_profit_pct: 0.4
-    sell_weak_value_below: 0.5
-    sell_yield_trap: true
-    sell_low_quality_below: -0.25
-    min_days_held_before_value_exit: 21
+# Sector and industry PE / PB valuation thresholds
+# Format: [PE_threshold, PB_threshold]  (null = use sector default)
+# Updated automatically by update_industry_valuations() via Finviz
+
 Consumer Services:
   default:
-  - 30.58
-  - 4.71
+  - 30.5
+  - 4.69
   Other Consumer Services:
   - 20
   - 5.5
   Broadcasting:
-  - 44.45
-  - 2.06
+  - 44.96
+  - 2.08
   Casinos:
   - 18
   - 11
   Entertainment:
-  - 29.69
-  - 3.71
+  - 30.35
+  - 3.79
   Restaurants:
-  - 30.1
-  - 22.32
+  - 30.39
+  - 22.52
   Resorts:
   - 15
   - 11
@@ -71,21 +29,21 @@ Consumer Services:
   - null
 Technology Services:
   default:
-  - 38.12
-  - 10.35
+  - 37.67
+  - 10.21
   Software:
   - 37
   - 9
   Information Technology Services:
-  - 17.0
-  - 3.19
+  - 17.27
+  - 3.24
 Retail Trade:
   default:
-  - 30.58
-  - 4.71
+  - 30.5
+  - 4.69
   Discount Stores:
-  - 43.02
-  - 9.78
+  - 43.11
+  - 9.8
   Specialty Stores:
   - null
   - 7.4
@@ -103,31 +61,31 @@ Retail Trade:
   - 2.92
 Health Technology:
   default:
-  - 28.69
-  - 4.36
+  - 28.72
+  - 4.35
   Pharmaceuticals:
   - 80
   - 5.2
   Biotechnology:
-  - 56.25
-  - 4.85
+  - 56.89
+  - 4.84
   Medical:
   - 35
   - 5.12
 Communications:
   default:
-  - 39.25
-  - 8.15
+  - 38.93
+  - 8.08
   Wireless Telecommunications:
   - 36
   - 5
 Electronic Technology:
   default:
-  - 38.12
-  - 10.35
+  - 37.67
+  - 10.21
   Semiconductors:
-  - 46.82
-  - 14.19
+  - 45.89
+  - 13.88
   Telecommunications Equipment:
   - 48
   - 5.14
@@ -148,15 +106,15 @@ Electronic Technology:
   - 5.08
 Consumer Durables:
   default:
-  - 30.58
-  - 4.71
+  - 30.5
+  - 4.69
   Motor Vehicles:
   - 12.3
   - 4.6
 Transportation:
   default:
-  - 32.39
-  - 5.76
+  - 32.17
+  - 5.71
 Basic Materials:
   default:
   - 16.5
@@ -165,11 +123,11 @@ Basic Materials:
   - 28.0
   - 2.0
   Steel:
-  - 24.63
-  - 1.26
+  - 24.14
+  - 1.24
   Chemicals:
-  - 256.84
-  - 1.77
+  - 254.06
+  - 1.75
   Construction Materials:
   - 19.0
   - 2.8
@@ -181,8 +139,8 @@ Financial:
   - 12.0
   - 1.2
   Asset Management:
-  - 26.94
-  - 3.02
+  - 27.07
+  - 3.0
   Insurance:
   - 14.0
   - 1.5
@@ -190,12 +148,12 @@ Financial:
   - 11.0
   - 1.8
   Capital Markets:
-  - 20.83
-  - 3.05
+  - 20.63
+  - 3.02
 Real Estate:
   default:
-  - 32.39
-  - 2.44
+  - 32.66
+  - 2.47
   Diversified REITs:
   - 34.0
   - 1.6
@@ -219,17 +177,17 @@ Real Estate:
   - 1.9
 Energy:
   default:
-  - 19.69
+  - 19.54
   - 2.32
   Oil & Gas Exploration & Production:
   - 12.0
   - 1.5
   Oil & Gas Integrated:
-  - 19.72
-  - 2.02
+  - 19.6
+  - 2.01
   Oil & Gas Midstream:
-  - 19.19
-  - 3.45
+  - 19.28
+  - 3.47
   Oil & Gas Services:
   - 18.0
   - 1.6
@@ -238,23 +196,23 @@ Energy:
   - 2.2
 Industrials:
   default:
-  - 32.39
-  - 5.76
+  - 32.17
+  - 5.71
   Aerospace Defense:
   - 26.0
   - 4.5
   Airlines:
-  - 11.31
-  - 2.4
+  - 11.26
+  - 2.39
   Railroads:
-  - 24.17
-  - 4.5
+  - 24.32
+  - 4.53
   Trucking:
-  - 55.94
-  - 4.25
+  - 55.51
+  - 4.22
   Waste Management:
-  - 35.83
-  - 5.74
+  - 36.47
+  - 5.91
   Engineering & Construction:
-  - 49.89
-  - 8.29
+  - 48.48
+  - 8.02

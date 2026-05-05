@@ -25,12 +25,14 @@ import time
 import pandas as pd
 import requests
 import robin_stocks.robinhood as rb
+import yfinance as yf
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
 from sentiments import get_news_for_tickers_by_symbol
 from util import (
     AGG_DATA_COLUMNS,
+    ANALYST_PARAMS,
     DATA_DIRECTORY,
     DIVIDEND_THRESHOLD,
     IGNORE_NEGATIVE_PB,
@@ -41,7 +43,9 @@ from util import (
     MIN_PB_RATIO,
     METRIC_KEYS,
     METRIC_THRESHOLD,
+    MOMENTUM_PARAMS,
     SCORE_WEIGHTS,
+    SCORING_PARAMS,
     get_investment_ratios,
     read_data_as_pd,
     safe_float,
@@ -169,10 +173,10 @@ def _dividend_income_score(dividend_yield: float) -> tuple[float, bool]:
     """Return (income_score, yield_trap_flag)."""
     if not dividend_yield or dividend_yield <= 0:
         return 0.0, False
-    if dividend_yield >= 0.10:          # Suspiciously high — probable trap
+    if dividend_yield >= SCORING_PARAMS["yield_trap_threshold"]:
         return 0.0, True
     if dividend_yield >= DIVIDEND_THRESHOLD:
-        return min(dividend_yield / DIVIDEND_THRESHOLD, 1.5), False
+        return min(dividend_yield / DIVIDEND_THRESHOLD, SCORING_PARAMS["income_score_cap"]), False
     return 0.0, False
 
 
@@ -182,21 +186,22 @@ def _quality_score(
     volume: float,
     dividend_yield: float,
 ) -> float:
+    sp = SCORING_PARAMS
     score = 0.0
     if pe_ratio is not None and pe_ratio > 0:
-        score += 0.5
-    if pe_ratio is not None and 0 < pe_ratio < 5:   # Distress signal
-        score -= 0.4
+        score += sp["quality_weight_has_positive_pe"]
+    if pe_ratio is not None and 0 < pe_ratio < sp["distress_pe_max"]:
+        score += sp["quality_weight_distress_pe"]
     if pb_ratio is not None and pb_ratio > 0:
-        score += 0.2
-    if volume >= 1_000_000:
-        score += 0.3
-    elif volume < 100_000:
-        score -= 0.3
-    if dividend_yield >= 0.10:
-        score -= 0.6
-    elif 0.02 <= dividend_yield <= 0.06:
-        score += 0.2
+        score += sp["quality_weight_has_positive_pb"]
+    if volume >= sp["quality_volume_high"]:
+        score += sp["quality_weight_high_volume"]
+    elif volume < sp["quality_volume_low"]:
+        score += sp["quality_weight_low_volume"]
+    if dividend_yield >= sp["yield_trap_threshold"]:
+        score += sp["quality_weight_yield_trap"]
+    elif sp["quality_dividend_min"] <= dividend_yield <= sp["quality_dividend_max"]:
+        score += sp["quality_weight_healthy_dividend"]
     return round(score, 3)
 
 
@@ -214,19 +219,29 @@ def _position_52w(
     return max(0.0, min(1.0, raw))
 
 
-def get_momentum_score(position_52w: float | None) -> float:
-    """Map 52-week position [0,1] to a momentum score."""
+def get_momentum_score(position_52w: float | None, return_1m: float | None = None) -> float:
+    """Map 52-week position and 1-month return to a momentum score."""
     if position_52w is None:
         return 0.0
-    if position_52w < 0.15:
-        return -0.4      # possible falling knife
-    if position_52w < 0.35:
-        return 0.1       # beaten down but not dead
-    if position_52w < 0.75:
-        return 0.3       # healthy middle/upper range
-    if position_52w <= 0.95:
-        return 0.5       # strong momentum
-    return 0.2           # near high, possible extension
+
+    mp = MOMENTUM_PARAMS
+    bins   = mp["position_bin_boundaries"]
+    scores = mp["position_bin_scores"]
+
+    base = scores[-1]
+    for i, boundary in enumerate(bins):
+        if position_52w < boundary:
+            base = scores[i]
+            break
+
+    cutoff = mp["return_1m_low_position_cutoff"]
+    if return_1m is not None and position_52w < cutoff:
+        if return_1m >= mp["return_1m_recovery_threshold"]:
+            base += mp["return_1m_recovery_bonus"]
+        elif return_1m <= mp["return_1m_falling_knife_threshold"]:
+            base -= mp["return_1m_falling_knife_penalty"]
+
+    return round(base, 3)
 
 
 def _get_buy_to_sell_ratio(symbol: str) -> float | None:
@@ -275,8 +290,9 @@ def _evaluate_stock(symbol: str, stock: dict) -> list | None:
     )
     low_52w  = safe_float(stock.get("low_52w")  or stock.get("low_52_weeks"))
     high_52w = safe_float(stock.get("high_52w") or stock.get("high_52_weeks"))
-    pos_52w  = _position_52w(current_price, low_52w, high_52w)
-    momentum = get_momentum_score(pos_52w)
+    pos_52w   = _position_52w(current_price, low_52w, high_52w)
+    return_1m = safe_float(stock.get("return_1m"))
+    momentum  = get_momentum_score(pos_52w, return_1m)
 
     pe_threshold, pb_threshold = get_investment_ratios(stock.get("sector"), stock.get("industry"))
 
@@ -299,7 +315,11 @@ def _evaluate_stock(symbol: str, stock: dict) -> list | None:
             f"pb_raw={pb_comp_raw:.3f}, pb_capped={pb_comp:.3f}"
         )
 
-    value_score  = round(0.6 * pe_comp + 0.4 * pb_comp, 3)
+    value_score  = round(
+        SCORING_PARAMS["value_pe_weight"] * pe_comp
+        + SCORING_PARAMS["value_pb_weight"] * pb_comp,
+        3,
+    )
     income_score, yield_trap_flag = _dividend_income_score(dividend_yield)
     quality      = _quality_score(pe_ratio, pb_ratio, volume, dividend_yield)
 
@@ -323,6 +343,7 @@ def _evaluate_stock(symbol: str, stock: dict) -> list | None:
         low_52w,
         high_52w,
         pos_52w,
+        return_1m,
         pe_comp,
         pb_comp,
         value_score,
@@ -362,6 +383,34 @@ def _enrich_with_quotes(symbols: list[str], fundamentals: dict[str, dict]) -> No
     logger.info(f"Quote enrichment: {enriched}/{len(symbols)} symbols have current_price")
 
 
+def _enrich_with_momentum(symbols: list[str], fundamentals: dict[str, dict]) -> None:
+    """Batch-fetch 1-month price returns via yfinance and merge into fundamentals."""
+    batch_size = 100
+    enriched = 0
+    for i in range(0, len(symbols), batch_size):
+        batch = symbols[i: i + batch_size]
+        try:
+            raw = yf.download(batch, period="35d", progress=False, auto_adjust=True)
+            if raw.empty:
+                continue
+            try:
+                closes = raw["Close"]
+                if isinstance(closes, pd.Series):
+                    closes = closes.to_frame(name=batch[0])
+            except KeyError:
+                continue
+            for sym in batch:
+                if sym not in closes.columns:
+                    continue
+                col = closes[sym].dropna()
+                if len(col) >= 15:  # ~3 weeks of trading days
+                    fundamentals[sym]["return_1m"] = round(float(col.iloc[-1] / col.iloc[0]) - 1.0, 4)
+                    enriched += 1
+        except Exception as e:
+            logger.warning(f"Momentum batch {i // batch_size + 1} failed: {str(e)[:60]}")
+    logger.info(f"Momentum enrichment: {enriched}/{len(symbols)} symbols have return_1m")
+
+
 def _get_robinhood_fundamentals(tickers: list[str], force_refresh: bool) -> pd.DataFrame | None:
     if not force_refresh:
         return read_data_as_pd("robinhood_data")
@@ -389,6 +438,9 @@ def _get_robinhood_fundamentals(tickers: list[str], force_refresh: bool) -> pd.D
     # Enrich with current prices from quotes
     _enrich_with_quotes(list(fundamentals.keys()), fundamentals)
 
+    # Enrich with 1-month price returns for directional momentum scoring
+    _enrich_with_momentum(list(fundamentals.keys()), fundamentals)
+
     rows = []
     for symbol, data in fundamentals.items():
         metrics = _evaluate_stock(symbol, data)
@@ -411,8 +463,12 @@ def _get_robinhood_fundamentals(tickers: list[str], force_refresh: bool) -> pd.D
                 ratio = _get_buy_to_sell_ratio(sym)
                 df.loc[df["symbol"] == sym, "buy_to_sell_ratio"] = ratio
                 if ratio is not None:
-                    # Strong buy consensus (ratio ≥ 5) → +5%; net sell (ratio < 1) → −5%
-                    multiplier = 1.05 if ratio >= 5 else (0.95 if ratio < 1 else 1.0)
+                    ap = ANALYST_PARAMS
+                    multiplier = (
+                        ap["strong_buy_multiplier"] if ratio >= ap["strong_buy_ratio"]
+                        else ap["net_sell_multiplier"] if ratio < ap["net_sell_ratio"]
+                        else 1.0
+                    )
                     if multiplier != 1.0:
                         cur = df.loc[df["symbol"] == sym, "value_metric"]
                         if not cur.empty and pd.notna(cur.iloc[0]):

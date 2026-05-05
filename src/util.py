@@ -10,6 +10,8 @@ Single source of truth for:
   - Finviz valuation updater
 """
 
+import asyncio
+import concurrent.futures
 import csv
 import datetime
 import logging
@@ -29,9 +31,11 @@ logger = logging.getLogger(__name__)
 # Paths
 # ---------------------------------------------------------------------------
 
-ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT_DIR       = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CFG_DIRECTORY  = os.path.join(ROOT_DIR, "cfg")
 DATA_DIRECTORY = os.path.join(ROOT_DIR, "data")
-INVESTMENTS_FILE = os.path.join(ROOT_DIR, "investments.yaml")
+CONFIG_FILE    = os.path.join(CFG_DIRECTORY, "config.yaml")
+RATIOS_FILE    = os.path.join(CFG_DIRECTORY, "ratios.yaml")
 
 os.makedirs(DATA_DIRECTORY, exist_ok=True)
 
@@ -39,14 +43,18 @@ os.makedirs(DATA_DIRECTORY, exist_ok=True)
 # Config loading
 # ---------------------------------------------------------------------------
 
-def _load_cfg() -> dict:
-    with open(INVESTMENTS_FILE, "r") as f:
+def _load_config() -> dict:
+    with open(CONFIG_FILE, "r") as f:
         return yaml.safe_load(f)
 
 
-_cfg = _load_cfg()
-_app = _cfg.get("config", {})
-_inv = {k: v for k, v in _cfg.items() if k != "config"}
+def _load_ratios() -> dict:
+    with open(RATIOS_FILE, "r") as f:
+        return yaml.safe_load(f)
+
+
+_app    = _load_config()
+_ratios = _load_ratios()
 
 # ---------------------------------------------------------------------------
 # Public config constants
@@ -122,14 +130,78 @@ RISK_LIMITS: dict = {
 
 _sr = _app.get("sell_rules", {})
 SELL_RULES: dict = {
-    "stop_loss_pct":                  float(_sr.get("stop_loss_pct",                  -0.12)),
-    "trailing_stop_pct":              float(_sr.get("trailing_stop_pct",              -0.15)),
-    "take_profit_pct":                float(_sr.get("take_profit_pct",                 0.35)),
-    "sell_weak_value_below":          float(_sr.get("sell_weak_value_below",           0.25)),
-    "sell_yield_trap":                bool(_sr.get("sell_yield_trap",                  True)),
-    "sell_low_quality_below":         float(_sr.get("sell_low_quality_below",         -0.25)),
-    "min_days_held_before_value_exit": int(_sr.get("min_days_held_before_value_exit",    7)),
+    "stop_loss_pct":                       float(_sr.get("stop_loss_pct",                       -0.12)),
+    "trailing_stop_pct":                   float(_sr.get("trailing_stop_pct",                   -0.15)),
+    "take_profit_pct":                     float(_sr.get("take_profit_pct",                      0.35)),
+    "take_profit_value_floor_multiplier":  float(_sr.get("take_profit_value_floor_multiplier",   1.20)),
+    "sell_weak_value_below":               float(_sr.get("sell_weak_value_below",                0.25)),
+    "sell_yield_trap":                     bool(_sr.get("sell_yield_trap",                       True)),
+    "sell_low_quality_below":              float(_sr.get("sell_low_quality_below",              -0.25)),
+    "min_days_held_before_value_exit":     int(_sr.get("min_days_held_before_value_exit",          7)),
 }
+
+# ---------------------------------------------------------------------------
+# Bear market regime
+# ---------------------------------------------------------------------------
+
+_bm = _app.get("bear_market", {})
+BEAR_MARKET_PARAMS: dict = {
+    "spy_ma_period": int(_bm.get("spy_ma_period", 200)),
+    "vix_threshold": float(_bm.get("vix_threshold", 25.0)),
+}
+
+# ---------------------------------------------------------------------------
+# Scoring parameters
+# ---------------------------------------------------------------------------
+
+_sc = _app.get("scoring", {})
+SCORING_PARAMS: dict = {
+    "value_pe_weight":                float(_sc.get("value_pe_weight",                0.6)),
+    "value_pb_weight":                float(_sc.get("value_pb_weight",                0.4)),
+    "income_score_cap":               float(_sc.get("income_score_cap",               1.5)),
+    "yield_trap_threshold":           float(_sc.get("yield_trap_threshold",           0.10)),
+    "distress_pe_max":                float(_sc.get("distress_pe_max",                5.0)),
+    "quality_volume_high":            float(_sc.get("quality_volume_high",            1_000_000)),
+    "quality_volume_low":             float(_sc.get("quality_volume_low",             100_000)),
+    "quality_dividend_min":           float(_sc.get("quality_dividend_min",           0.02)),
+    "quality_dividend_max":           float(_sc.get("quality_dividend_max",           0.06)),
+    "quality_weight_has_positive_pe": float(_sc.get("quality_weight_has_positive_pe", 0.5)),
+    "quality_weight_distress_pe":     float(_sc.get("quality_weight_distress_pe",     -0.4)),
+    "quality_weight_has_positive_pb": float(_sc.get("quality_weight_has_positive_pb", 0.2)),
+    "quality_weight_high_volume":     float(_sc.get("quality_weight_high_volume",     0.3)),
+    "quality_weight_low_volume":      float(_sc.get("quality_weight_low_volume",      -0.3)),
+    "quality_weight_yield_trap":      float(_sc.get("quality_weight_yield_trap",      -0.6)),
+    "quality_weight_healthy_dividend":float(_sc.get("quality_weight_healthy_dividend", 0.2)),
+}
+
+# ---------------------------------------------------------------------------
+# Momentum parameters
+# ---------------------------------------------------------------------------
+
+_mo = _app.get("momentum", {})
+MOMENTUM_PARAMS: dict = {
+    "position_bin_boundaries":           _mo.get("position_bin_boundaries",           [0.15, 0.35, 0.75, 0.95]),
+    "position_bin_scores":               _mo.get("position_bin_scores",               [-0.4, 0.1, 0.3, 0.5, 0.2]),
+    "return_1m_low_position_cutoff":     float(_mo.get("return_1m_low_position_cutoff",      0.40)),
+    "return_1m_recovery_threshold":      float(_mo.get("return_1m_recovery_threshold",        0.05)),
+    "return_1m_falling_knife_threshold": float(_mo.get("return_1m_falling_knife_threshold",  -0.10)),
+    "return_1m_recovery_bonus":          float(_mo.get("return_1m_recovery_bonus",           0.15)),
+    "return_1m_falling_knife_penalty":   float(_mo.get("return_1m_falling_knife_penalty",    0.20)),
+}
+
+# ---------------------------------------------------------------------------
+# Analyst ratings parameters
+# ---------------------------------------------------------------------------
+
+_ar = _app.get("analyst_ratings", {})
+ANALYST_PARAMS: dict = {
+    "strong_buy_ratio":      float(_ar.get("strong_buy_ratio",      5.0)),
+    "net_sell_ratio":        float(_ar.get("net_sell_ratio",        1.0)),
+    "strong_buy_multiplier": float(_ar.get("strong_buy_multiplier", 1.05)),
+    "net_sell_multiplier":   float(_ar.get("net_sell_multiplier",   0.95)),
+}
+
+MAX_ITERATIONS: int = int(_app.get("max_iterations", 10))
 
 # ---------------------------------------------------------------------------
 # Canonical agg_data schema — single definition used by all modules
@@ -146,6 +218,7 @@ METRIC_KEYS: list[str] = [
     "low_52w",
     "high_52w",
     "position_52w",
+    "return_1m",
     "pe_comp",
     "pb_comp",
     "value_score",
@@ -162,6 +235,16 @@ AGG_DATA_COLUMNS: list[str] = ["symbol"] + METRIC_KEYS
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
+
+def run_async(coro):
+    """Run a coroutine from sync code, handling an already-running loop (e.g. Jupyter)."""
+    try:
+        asyncio.get_running_loop()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, coro).result()
+    except RuntimeError:
+        return asyncio.run(coro)
+
 
 def safe_float(value, default: Optional[float] = None) -> Optional[float]:
     """Convert value to float, returning default on failure or None/NaN input."""
@@ -228,7 +311,6 @@ def read_data_as_pd(dataset: str) -> pd.DataFrame | None:
     # Date-suffixed filenames sort chronologically — take the latest
     path = os.path.join(DATA_DIRECTORY, matches[-1])
     logger.debug(f"Using {matches[-1]} as {dataset} data")
-    print(f"Using {matches[-1]} as {dataset} data")
     return pd.read_csv(path)
 
 
@@ -244,10 +326,10 @@ def get_investment_ratios(sector: str, industry: str | None = None) -> list[floa
     """Return [PE_threshold, PB_threshold] for the given sector/industry."""
     DEFAULT = [15.0, 2.5]
 
-    if not sector or sector not in _inv:
+    if not sector or sector not in _ratios:
         return DEFAULT
 
-    sector_cfg = _inv[sector]
+    sector_cfg = _ratios[sector]
     default = sector_cfg.get("default", DEFAULT)
 
     def _coerce(ratios: list) -> list[float]:
@@ -373,11 +455,11 @@ def update_industry_valuations(verbose: bool = True) -> None:
         logger.error(f"Failed to fetch Finviz data: {e}")
         raise
 
-    cfg = _load_cfg()
+    ratios = _load_ratios()
     changes: list[dict] = []
 
-    for sector_yaml, industries in cfg.items():
-        if sector_yaml == "config" or not isinstance(industries, dict):
+    for sector_yaml, industries in ratios.items():
+        if not isinstance(industries, dict):
             continue
 
         finviz_sector = _SECTOR_MAP.get(sector_yaml)
@@ -421,8 +503,8 @@ def update_industry_valuations(verbose: bool = True) -> None:
                 })
 
     if changes:
-        with open(INVESTMENTS_FILE, "w") as f:
-            yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
+        with open(RATIOS_FILE, "w") as f:
+            yaml.dump(ratios, f, default_flow_style=False, sort_keys=False)
         if verbose:
             logger.info(f"Updated {len(changes)} valuations in investments.yaml")
             for c in changes:

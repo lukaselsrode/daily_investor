@@ -29,7 +29,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from util import CONFIDENCE_THRESHOLD, METRIC_KEYS, read_data_as_pd
+from util import CONFIDENCE_THRESHOLD, METRIC_KEYS, read_data_as_pd, run_async
 
 logger = logging.getLogger("investment_bot")
 
@@ -40,6 +40,8 @@ logger = logging.getLogger("investment_bot")
 BATCH_SIZE     = 6   # stocks per Claude prompt
 MAX_CONCURRENT = 5   # semaphore cap on parallel calls
 MAX_RETRIES    = 5   # exponential-backoff attempts per batch
+
+_CLAUDE_MODEL = "claude-sonnet-4-20250514"
 
 # ---------------------------------------------------------------------------
 # LangGraph state
@@ -67,7 +69,7 @@ def _make_langchain_model() -> ChatAnthropic | None:
     if not os.getenv("ANTHROPIC_API_KEY"):
         logger.warning("ANTHROPIC_API_KEY not set — sentiment analysis disabled")
         return None
-    return ChatAnthropic(model="claude-sonnet-4-20250514", temperature=0.3)
+    return ChatAnthropic(model=_CLAUDE_MODEL, temperature=0.3)
 
 
 def _make_async_client() -> anthropic.AsyncAnthropic | None:
@@ -89,11 +91,13 @@ Scoring guide:
 - PE_COMP/PB_COMP > 1 indicates cheaper than sector threshold (positive signal).
 - INCOME_SCORE rewards reasonable dividend yield.
 - QUALITY_SCORE is a basic quality/liquidity proxy; higher is better.
-- MOMENTUM_SCORE measures 52-week price-location health:
-    position_52w < 0.15 may indicate a falling-knife risk (-0.4 score).
-    position_52w 0.35–0.75 is healthy middle range (+0.3 score).
-    position_52w 0.75–0.95 shows strong momentum (+0.5 score).
-    position_52w > 0.95 may indicate extension near 52-week highs (+0.2 score).
+- MOMENTUM_SCORE measures 52-week price-location and 1-month direction:
+    position_52w < 0.15 may indicate a falling-knife risk (-0.4 base).
+    position_52w 0.35–0.75 is healthy middle range (+0.3 base).
+    position_52w 0.75–0.95 shows strong momentum (+0.5 base).
+    position_52w > 0.95 may indicate extension near 52-week highs (+0.2 base).
+    1M Return >= +5% with position_52w < 0.40 adds +0.15 (recovering from lows).
+    1M Return <= -10% with position_52w < 0.40 adds -0.20 (falling knife warning).
 - YIELD_TRAP_FLAG=True → dividend likely caused by price collapse (major warning).
 - FINAL_VALUE_METRIC combines value + quality + income + momentum; higher is better.
 - Buy/Sell Ratio > 1 supports buying; < 1 is a warning sign."""
@@ -125,7 +129,7 @@ def _valuation_block(symbol: str, f: dict, news_text: str) -> str:
         f"  Dividend Yield={f.get('dividend_yield','N/A')}  Volume={f.get('volume','N/A')}\n"
         f"  Current Price={f.get('current_price','N/A')}\n"
         f"  52W Low={f.get('low_52w','N/A')}  52W High={f.get('high_52w','N/A')}\n"
-        f"  52W Position={f.get('position_52w','N/A')}\n"
+        f"  52W Position={f.get('position_52w','N/A')}  1M Return={f.get('return_1m','N/A')}\n"
         f"  Industry={f.get('industry','N/A')}  Sector={f.get('sector','N/A')}\n\n"
         f"FACTOR SCORES:\n"
         f"  VALUE_SCORE={f.get('value_score','N/A')}  INCOME_SCORE={f.get('income_score','N/A')}\n"
@@ -220,7 +224,7 @@ async def _call_batch_async(
         async with semaphore:
             try:
                 response = await _async_client.messages.create(
-                    model="claude-sonnet-4-20250514",
+                    model=_CLAUDE_MODEL,
                     max_tokens=2048,
                     system=system_prompt,
                     messages=[{"role": "user", "content": user_prompt}],
@@ -278,15 +282,7 @@ def get_batch_sentiment_recommendations(
             for item in stocks_data
         }
 
-    try:
-        asyncio.get_running_loop()
-        # Already inside a running loop (e.g. Jupyter) — offload to thread
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(asyncio.run, _run_all_batches(stocks_data, action)).result()
-    except RuntimeError:
-        # No running loop — safe to call asyncio.run() directly
-        return asyncio.run(_run_all_batches(stocks_data, action))
+    return run_async(_run_all_batches(stocks_data, action))
 
 
 # ---------------------------------------------------------------------------

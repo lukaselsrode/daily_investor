@@ -25,16 +25,19 @@ import time
 import pandas as pd
 import pyotp
 import robin_stocks.robinhood as rb
+import yfinance as yf
 from dotenv import load_dotenv
 
 from sentiment_analysis import get_batch_sentiment_recommendations, get_sentiment_recommendation
 from source_data import get_data as generate_daily_undervalued_stocks
 from util import (
     AUTO_APPROVE,
+    BEAR_MARKET_PARAMS,
     CONFIDENCE_THRESHOLD,
     DATA_DIRECTORY,
     ETFS,
     INDEX_PCT,
+    MAX_ITERATIONS,
     METRIC_KEYS,
     METRIC_THRESHOLD,
     RISK_LIMITS,
@@ -200,6 +203,27 @@ def wipe_data() -> None:
     logger.info("Data directory cleared")
 
 
+def _is_bear_market_regime() -> bool:
+    """Return True when SPY is below its 200-day MA and VIX > 25 (risk-off regime)."""
+    try:
+        ma_period = BEAR_MARKET_PARAMS["spy_ma_period"]
+        spy = yf.Ticker("SPY").history(period="1y")["Close"]
+        if len(spy) < ma_period:
+            return False
+        spy_price = float(spy.iloc[-1])
+        spy_200ma = float(spy.rolling(ma_period).mean().iloc[-1])
+        vix = float(yf.Ticker("^VIX").history(period="5d")["Close"].iloc[-1])
+        regime = spy_price < spy_200ma and vix > BEAR_MARKET_PARAMS["vix_threshold"]
+        logger.info(
+            f"Market regime: {'BEAR — stock buys suspended' if regime else 'normal'} "
+            f"(SPY=${spy_price:.2f} vs 200MA=${spy_200ma:.2f}, VIX={vix:.1f})"
+        )
+        return regime
+    except Exception as e:
+        logger.warning(f"Regime check failed ({e}) — assuming normal market")
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Order helpers
 # ---------------------------------------------------------------------------
@@ -207,22 +231,26 @@ def wipe_data() -> None:
 def _place_buy(symbol: str, allocation: float) -> bool:
     """Try fractional order, fall back to whole-share market order. Returns True on success."""
     res = rb.orders.order_buy_fractional_by_price(symbol, allocation)
-    if res is not None:
-        logger.info(f"Buy {symbol} ${allocation:.2f}: {res.get('state')}")
+    if res and res.get("id"):
+        logger.info(f"Buy {symbol} ${allocation:.2f}: state={res.get('state')}, id={res['id'][:8]}...")
         return True
 
-    logger.warning(f"{symbol}: fractional unavailable — retrying as market order (qty=1)")
+    if res:
+        logger.warning(f"{symbol}: fractional buy rejected — {res.get('detail') or res}")
+    else:
+        logger.warning(f"{symbol}: fractional unavailable — retrying as market order (qty=1)")
+
     try:
         res = rb.orders.order_buy_market(symbol, 1)
     except Exception as e:
         logger.error(f"{symbol}: market order fallback failed: {e}")
-        res = None
+        return False
 
-    if res is not None:
-        logger.info(f"Buy {symbol} market order: {res.get('state')}")
+    if res and res.get("id"):
+        logger.info(f"Buy {symbol} market order: state={res.get('state')}, id={res['id'][:8]}...")
         return True
 
-    logger.warning(f"{symbol}: both order types failed")
+    logger.warning(f"{symbol}: both order types failed — {res.get('detail') if res else 'None'}")
     return False
 
 
@@ -288,18 +316,22 @@ def _build_stocks_data(candidates: pd.DataFrame, action: str) -> list[dict]:
     except Exception:
         news_df = None
 
+    # Index once for O(1) per-symbol lookups instead of a full scan per candidate
+    agg_index = (
+        agg_df.set_index("symbol")
+        if agg_df is not None and not agg_df.empty and "symbol" in agg_df.columns
+        else None
+    )
+
     stocks_data = []
     for _, row in candidates.iterrows():
         symbol = row["symbol"]
 
-        # Prefer agg_data CSV values; fall back to row values from the passed DataFrame
-        if agg_df is not None and not agg_df.empty and "symbol" in agg_df.columns:
-            agg_row = agg_df[agg_df["symbol"] == symbol]
-            fundamentals = (
-                {k: agg_row.iloc[0].get(k) for k in METRIC_KEYS}
-                if not agg_row.empty
-                else {k: row.get(k) for k in METRIC_KEYS}
-            )
+        if agg_index is not None and symbol in agg_index.index:
+            agg_row = agg_index.loc[symbol]
+            if isinstance(agg_row, pd.DataFrame):
+                agg_row = agg_row.iloc[0]
+            fundamentals = {k: agg_row.get(k) for k in METRIC_KEYS}
         else:
             fundamentals = {k: row.get(k) for k in METRIC_KEYS}
 
@@ -364,6 +396,7 @@ def can_buy_symbol(
     agg_df: pd.DataFrame | None,
     portfolio_value: float,
     available_cash: float,
+    sector_exposure: dict | None = None,
 ) -> tuple[bool, str, float]:
     """
     Validate and adjust a proposed buy allocation against risk limits.
@@ -416,7 +449,7 @@ def can_buy_symbol(
         row = agg_df[agg_df["symbol"] == symbol]
         sector = str(row.iloc[0].get("sector") or "") if not row.empty else ""
         if sector:
-            sector_exp     = get_sector_exposure(holdings, agg_df)
+            sector_exp     = sector_exposure if sector_exposure is not None else get_sector_exposure(holdings, agg_df)
             current_sector = sector_exp.get(sector, 0.0)
             max_sector_val = portfolio_value * max_sector
             room = max_sector_val - current_sector
@@ -568,12 +601,19 @@ def evaluate_sell_candidate(
     # ── Soft sells ────────────────────────────────────────────────────────────
 
     if percent_change is not None and percent_change >= take_profit:
-        return {
-            **base,
-            "should_sell": True,
-            "reason":   f"take profit triggered ({percent_change:.1%} ≥ {take_profit:.1%})",
-            "severity": "soft",
-        }
+        floor = SELL_RULES["take_profit_value_floor_multiplier"]
+        if value_metric is not None and value_metric >= METRIC_THRESHOLD * floor:
+            logger.info(
+                f"{symbol}: take-profit threshold hit ({percent_change:.1%}) "
+                f"but still fundamentally cheap (value_metric={value_metric:.3f}) — holding"
+            )
+        else:
+            return {
+                **base,
+                "should_sell": True,
+                "reason":   f"take profit triggered ({percent_change:.1%} ≥ {take_profit:.1%})",
+                "severity": "soft",
+            }
 
     if value_metric is not None and value_metric < sell_weak:
         if days_held is None or days_held >= min_days:
@@ -729,7 +769,7 @@ def make_sales() -> list[str]:
 # Buy cycle
 # ---------------------------------------------------------------------------
 
-def make_buys(df: pd.DataFrame, is_first_iteration: bool = True) -> tuple[list, list, list]:
+def make_buys(df: pd.DataFrame, is_first_iteration: bool = True, bear_market: bool = False) -> tuple[list, list, list]:
     """
     Execute buy orders.
     Returns (purchased, skipped, failed).
@@ -749,6 +789,10 @@ def make_buys(df: pd.DataFrame, is_first_iteration: bool = True) -> tuple[list, 
                     logger.info(f"ETF {etf}: {res.get('state') if res else 'None'}")
             except Exception as e:
                 logger.error(f"ETF buy failed for {etf}: {e}")
+
+    if bear_market:
+        logger.info("Bear market regime — skipping individual stock buys (remaining cash swept to ETFs at end)")
+        return [], [], []
 
     if df.empty or stock_amount <= 0:
         logger.warning("No stock picks or no funds for stocks")
@@ -782,66 +826,39 @@ def make_buys(df: pd.DataFrame, is_first_iteration: bool = True) -> tuple[list, 
     except Exception:
         agg_df = None
 
-    # Fast path — no sentiment
-    if not USE_SENTIMENT_ANALYSIS:
-        purchased, skipped, failed = [], [], []
-        total_value = candidates["value_metric"].sum()
-        for _, row in candidates.iterrows():
-            symbol = row["symbol"]
-            cash   = get_available_cash() * (1 - INDEX_PCT)
-            if cash < RISK_LIMITS["min_order_amount"]:
-                logger.info(f"Cash ${cash:.2f} below min order ${RISK_LIMITS['min_order_amount']:.2f} — exiting buy loop")
-                break
-            alloc = (row["value_metric"] / total_value) * cash if total_value else 0
+    # Sentiment results — empty dict acts as "no filter" when sentiment is disabled
+    sentiment_results: dict[str, dict] = {}
+    if USE_SENTIMENT_ANALYSIS:
+        logger.info(f"Running batch sentiment on {len(candidates)} candidates...")
+        stocks_data = _build_stocks_data(candidates, action="buy")
+        try:
+            sentiment_results = get_batch_sentiment_recommendations(stocks_data, action="buy")
+        except Exception:
+            logger.error("Batch sentiment failed — all candidates skipped", exc_info=True)
+            return [], candidates["symbol"].tolist(), []
 
-            ok, reason, adj_alloc = can_buy_symbol(
-                symbol, alloc, holdings, agg_df, portfolio_value, cash
-            )
-            if not ok:
-                logger.info(f"Skipping {symbol}: {reason}")
-                skipped.append(symbol)
-                continue
-
-            try:
-                if AUTO_APPROVE or confirm(f"Buy ${adj_alloc:,.2f} of {symbol}?"):
-                    if _place_buy(symbol, adj_alloc):
-                        purchased.append(symbol)
-                        time.sleep(0.5)
-                    else:
-                        failed.append(symbol)
-            except Exception as e:
-                logger.error(f"Order failed for {symbol}: {e}")
-                failed.append(symbol)
-        return purchased, skipped, failed
-
-    # Batch sentiment analysis
-    logger.info(f"Running batch sentiment on {len(candidates)} candidates...")
-    stocks_data = _build_stocks_data(candidates, action="buy")
-    try:
-        sentiment_results = get_batch_sentiment_recommendations(stocks_data, action="buy")
-    except Exception:
-        logger.error("Batch sentiment failed — all candidates skipped", exc_info=True)
-        return [], candidates["symbol"].tolist(), []
+    # Pre-compute sector exposure once rather than rebuilding it per candidate
+    sector_exposure = get_sector_exposure(holdings, agg_df) if portfolio_value > 0 else {}
 
     purchased, skipped, failed = [], [], []
     total_value = candidates["value_metric"].sum()
 
     for _, row in candidates.iterrows():
         symbol = row["symbol"]
-        result = sentiment_results.get(
-            symbol,
-            {"recommendation": "NEUTRAL", "confidence": 0.0, "reasoning": "No result"},
-        )
 
-        logger.info(
-            f"{'='*60}\nBUY {symbol} | {result['recommendation']} "
-            f"{result['confidence']:.1f}% | {result['reasoning']}\n{'='*60}"
-        )
-
-        if result["recommendation"] == "NO" or result["confidence"] < CONFIDENCE_THRESHOLD:
-            logger.info(f"Skipping {symbol}")
-            skipped.append(symbol)
-            continue
+        if sentiment_results:
+            result = sentiment_results.get(
+                symbol,
+                {"recommendation": "NEUTRAL", "confidence": 0.0, "reasoning": "No result"},
+            )
+            logger.info(
+                f"{'='*60}\nBUY {symbol} | {result['recommendation']} "
+                f"{result['confidence']:.1f}% | {result['reasoning']}\n{'='*60}"
+            )
+            if result["recommendation"] == "NO" or result["confidence"] < CONFIDENCE_THRESHOLD:
+                logger.info(f"Skipping {symbol}")
+                skipped.append(symbol)
+                continue
 
         cash = get_available_cash() * (1 - INDEX_PCT)
         if cash < RISK_LIMITS["min_order_amount"]:
@@ -849,9 +866,8 @@ def make_buys(df: pd.DataFrame, is_first_iteration: bool = True) -> tuple[list, 
             break
 
         alloc = (row["value_metric"] / total_value) * cash if total_value else 0
-
         ok, reason, adj_alloc = can_buy_symbol(
-            symbol, alloc, holdings, agg_df, portfolio_value, cash
+            symbol, alloc, holdings, agg_df, portfolio_value, cash, sector_exposure
         )
         if not ok:
             logger.info(f"Skipping {symbol}: {reason}")
@@ -860,7 +876,7 @@ def make_buys(df: pd.DataFrame, is_first_iteration: bool = True) -> tuple[list, 
 
         try:
             if AUTO_APPROVE or confirm(
-                f"Buy ${adj_alloc:,.2f} of {symbol}? ({row['value_metric']/total_value:.1%})"
+                f"Buy ${adj_alloc:,.2f} of {symbol}? ({row['value_metric']/total_value:.1%} of stock budget)"
             ):
                 if _place_buy(symbol, adj_alloc):
                     purchased.append(symbol)
@@ -918,9 +934,11 @@ def run_daily_strat() -> None:
     if cash < WEEKLY_INVESTMENT:
         logger.info(f"Proceeding with ${cash:,.2f} available (below ${WEEKLY_INVESTMENT:,.2f} weekly target)")
 
+    bear_market = _is_bear_market_regime()
+
     permanently_skipped: set[str] = set()
 
-    for iteration in range(1, 11):
+    for iteration in range(1, MAX_ITERATIONS + 1):
         logger.info(f"\n{'='*60}\nITERATION {iteration}/10 | skipped so far: {len(permanently_skipped)}\n{'='*60}")
 
         if permanently_skipped:
@@ -951,7 +969,7 @@ def run_daily_strat() -> None:
 
         try:
             logger.info("=== BUY PHASE ===")
-            purchased, skipped, failed = make_buys(df, is_first_iteration=(iteration == 1))
+            purchased, skipped, failed = make_buys(df, is_first_iteration=(iteration == 1), bear_market=bear_market)
             if purchased:
                 made_buys = True
             permanently_skipped.update(skipped)
@@ -985,13 +1003,89 @@ def run_daily_strat() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Tuner CLI
+# ---------------------------------------------------------------------------
+
+def _run_tuner_cli(n_days: int, objective: str) -> None:
+    from tuner import print_config_diff, run_tuner
+    try:
+        best_params, best_result = run_tuner(
+            n_days=n_days,
+            objective=objective,
+            starting_capital=10_000.0,
+        )
+        print_config_diff(best_params, best_result)
+    except RuntimeError as e:
+        logger.error(str(e))
+        sys.exit(1)
+
+
+def _run_auto_tune_cli(n_days: int) -> None:
+    from tuner import apply_config_params, run_auto_tune, _diff_table
+    try:
+        avg_params, sharpe_result, calmar_result, avg_result = run_auto_tune(
+            n_days=n_days,
+            starting_capital=10_000.0,
+        )
+        _diff_table(
+            avg_params,
+            label=f"mean of Sharpe + Calmar over {n_days}d",
+            sharpe_ref=sharpe_result,
+            calmar_ref=calmar_result,
+        )
+        print(
+            f"\nAveraged result:  ret={avg_result.total_return:+.1%}  "
+            f"sharpe={avg_result.sharpe:+.3f}  "
+            f"calmar={avg_result.calmar:+.3f}  "
+            f"trades={avg_result.trades_made}"
+        )
+        apply_config_params(avg_params)
+    except RuntimeError as e:
+        logger.error(str(e))
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    if "--help" in sys.argv or "-h" in sys.argv:
-        print("Usage: python main.py [--skip-data] [--help]")
-        print("  --skip-data   Reuse existing CSV files instead of regenerating")
+    args = sys.argv[1:]
+
+    if "--help" in args or "-h" in args:
+        print("Usage: python main.py [--skip-data] [--tune DAYS] [--auto-tune [DAYS]] [--objective sharpe|calmar] [--help]")
+        print("  --skip-data          Reuse existing CSV files instead of regenerating")
+        print("  --tune DAYS          Back-simulate N days and print suggested config tweaks")
+        print("  --auto-tune [DAYS]   Run Sharpe+Calmar, average results, write config.yaml (default 90d)")
+        print("  --objective METRIC   For --tune only: sharpe (default) or calmar")
+        return
+
+    if "--auto-tune" in args:
+        idx = args.index("--auto-tune")
+        n_days = 90
+        if idx + 1 < len(args) and args[idx + 1].isdigit():
+            n_days = int(args[idx + 1])
+        _run_auto_tune_cli(n_days)
+        return
+
+    if "--tune" in args:
+        idx = args.index("--tune")
+        try:
+            n_days = int(args[idx + 1])
+        except (IndexError, ValueError):
+            print("--tune requires an integer argument, e.g. --tune 90")
+            sys.exit(1)
+        objective = "sharpe"
+        if "--objective" in args:
+            oi = args.index("--objective")
+            try:
+                objective = args[oi + 1].lower()
+                if objective not in ("sharpe", "calmar"):
+                    raise ValueError
+            except (IndexError, ValueError):
+                print("--objective must be 'sharpe' or 'calmar'")
+                sys.exit(1)
+        _run_tuner_cli(n_days, objective)
         return
 
     login()
