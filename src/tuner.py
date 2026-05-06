@@ -146,12 +146,15 @@ def make_objective(
             shortfall = _MIN_TRADES_SOFT - result.trades_made
             penalty = shortfall / _MIN_TRADES_SOFT * 2.0
 
+        # Penalize aggressive churn: >80 new positions in the window is excessive
+        turnover_penalty = max(0.0, result.trades_made - 80) / 80.0
+
         if call_count[0] % 50 == 0:
             print(
                 f"  [{call_count[0]} evals] {objective}={score:.3f} "
                 f"ret={result.total_return:.1%} trades={result.trades_made}"
             )
-        return -score + penalty
+        return -score + penalty + turnover_penalty
 
     return _obj
 
@@ -305,6 +308,10 @@ def run_auto_tune(
         prices=precomp.prices[train_sl],
         etf_prices=precomp.etf_prices[train_sl],
         benchmark_prices=precomp.benchmark_prices[train_sl],
+        position_52w_daily=precomp.position_52w_daily[train_sl],
+        return_1m_daily=precomp.return_1m_daily[train_sl],
+        bin_indices_daily=precomp.bin_indices_daily[train_sl],
+        has_position_52w_daily=precomp.has_position_52w_daily[train_sl],
     )
     train_days = tune_precomp.prices.shape[0]
 

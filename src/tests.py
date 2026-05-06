@@ -35,6 +35,7 @@ try:
         PrecomputedData,
         SimResult,
         compute_performance_metrics,
+        run_simulation,
         score_stocks_at_day,
         select_backtest_universe,
         split_price_window,
@@ -236,10 +237,11 @@ def test_sell_hard_quality_floor():
 def test_sell_soft_take_profit():
     if not _HAS_MAIN:
         return
-    # Use a gain 1pp above the configured take_profit_pct so the test tracks config changes
-    tp_pct_as_pct = (SELL_RULES["take_profit_pct"] + 0.01) * 100  # e.g. 0.4171 → 41.71
+    # Take-profit only fires when gain exceeds threshold AND value_metric < floor
+    # (floor = metric_threshold * 1.2; use value_metric=0.4 to ensure it's below the floor)
+    tp_pct_as_pct = (SELL_RULES["take_profit_pct"] + 0.01) * 100
     holding  = _make_holding(percent_change=tp_pct_as_pct)
-    decision = evaluate_sell_candidate("TEST", holding, _make_metrics())
+    decision = evaluate_sell_candidate("TEST", holding, _make_metrics(value_metric=0.4))
     _assert(decision["should_sell"],        "should_sell must be True")
     _assert(decision["severity"] == "soft", f"expected soft, got {decision['severity']}")
     _assert("take profit" in decision["reason"], decision["reason"])
@@ -599,6 +601,58 @@ def test_universe_min_volume_filter():
     _assert(len(selected) >= 1, "at least one symbol should pass the volume filter")
 
 
+def _make_flat_precomp(n_days: int = 50, n_stocks: int = 5) -> "PrecomputedData":
+    """PrecomputedData with perfectly flat prices — any return reflects contributions, not market."""
+    if not _HAS_BACKTEST:
+        return None
+    prices_flat = np.full((n_days, n_stocks), 100.0)
+    pos_daily = np.full((n_days, n_stocks), 0.5)
+    bin_daily = np.full((n_days, n_stocks), 2, dtype=np.int32)
+    has_pos_daily = np.ones((n_days, n_stocks), dtype=bool)
+    ret_daily = np.zeros((n_days, n_stocks))
+    return PrecomputedData(
+        symbols=[f"S{i}" for i in range(n_stocks)],
+        prices=prices_flat,
+        pe_comp=np.ones(n_stocks) * 0.5, pb_comp=np.ones(n_stocks) * 0.5,
+        quality_scores=np.ones(n_stocks) * 0.5, income_scores=np.ones(n_stocks) * 0.5,
+        yield_trap_mask=np.zeros(n_stocks, dtype=bool),
+        bin_indices=bin_daily[0], has_position_52w=has_pos_daily[0],
+        position_52w_arr=pos_daily[0], return_1m_arr=ret_daily[0],
+        etf_symbols=[], etf_prices=np.zeros((n_days, 0)),
+        baseline_scores=np.ones(n_stocks) * 0.5,
+        sector_labels=["Unknown"] * n_stocks, volume_arr=np.ones(n_stocks) * 1e6,
+        mode="liquid_universe_sanity_test", universe_selection="liquid_sample",
+        lookahead_bias_level="MEDIUM",
+        benchmark_prices=np.ones(n_days) * 100.0, benchmark_symbol="SPY",
+        position_52w_daily=pos_daily, return_1m_daily=ret_daily,
+        bin_indices_daily=bin_daily, has_position_52w_daily=has_pos_daily,
+    )
+
+
+def test_twr_strips_contribution_inflation():
+    """Flat prices + large weekly contributions should yield TWR ≈ 0%, not +80%."""
+    if not _HAS_BACKTEST:
+        return
+    precomp = _make_flat_precomp(n_days=50, n_stocks=5)
+    params = np.array([0.25, 0.35, 0.10, 0.30, 0.65, 0.75, 0.40, 0.25, -0.15, 0.60,
+                       -0.3, 0.1, 0.3, 0.6, 0.2])
+    starting_capital, weekly_contribution = 5_000.0, 400.0
+    result = run_simulation(
+        precomp, params, starting_capital,
+        slippage_bps=0.0, commission_per_trade=0.0,
+        weekly_contribution=weekly_contribution, rebalance_frequency_days=5,
+    )
+    # Flat prices → market return ≈ 0%; contributions should not inflate TWR
+    _assert(abs(result.total_return) < 0.05,
+            f"TWR should be ≈0% for flat prices, got {result.total_return:.2%}")
+    # net_contributions must exceed starting_capital since weekly contributions were made
+    _assert(result.net_contributions > starting_capital,
+            f"net_contributions {result.net_contributions:.0f} should exceed starting_capital {starting_capital:.0f}")
+    # profit ≈ 0 when no market movement
+    _assert(abs(result.profit) < starting_capital * 0.05,
+            f"profit should be ≈0 for flat market, got {result.profit:.2f}")
+
+
 # ---------------------------------------------------------------------------
 # validate_tuned_params tests
 # ---------------------------------------------------------------------------
@@ -848,6 +902,7 @@ _ALL_TESTS = [
     test_universe_top_scores_bias_high,
     test_universe_walk_forward_bias_low,
     test_universe_min_volume_filter,
+    test_twr_strips_contribution_inflation,
     # validation gates
     test_validation_passes_all_gates,
     test_validation_fails_sharpe_gate,

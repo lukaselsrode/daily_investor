@@ -66,8 +66,8 @@ class PrecomputedData(NamedTuple):
 @dataclass
 class SimResult:
     final_value: float
-    total_return: float
-    sharpe: float
+    total_return: float       # time-weighted return (excludes contributions)
+    sharpe: float             # computed from TWR daily series
     calmar: float
     max_drawdown: float
     trades_made: int
@@ -80,6 +80,8 @@ class SimResult:
     average_cash_pct: float = 0.0
     turnover_estimate: float = 0.0
     friction_cost: float = 0.0
+    net_contributions: float = 0.0  # starting_capital + all weekly contributions
+    profit: float = 0.0             # final_value - net_contributions
 
 
 @dataclass
@@ -329,6 +331,11 @@ def run_simulation(
 
     cash = float(starting_capital)
     daily_values = np.zeros(n_days)
+    # Contribution-adjusted daily values for time-weighted return.
+    # Each day: ca_val[d] = ca_val[d-1] * (port_val[d] - contribution[d]) / port_val[d-1]
+    # This strips external cash flows so metrics reflect market performance only.
+    ca_daily_values = np.zeros(n_days)
+    total_contributions = float(starting_capital)
     trades_made = 0
     sells_made = 0
     skipped_buys = 0
@@ -505,10 +512,13 @@ def run_simulation(
             stock_day_bought[sell_mask] = -1
 
         # Rebalance: refresh scores from today's rolling price features, then buy
-        if d > 0 and d % rebalance_frequency_days == 0:
+        is_contrib_day = d > 0 and d % rebalance_frequency_days == 0
+        contrib_today = weekly_contribution if is_contrib_day else 0.0
+        if is_contrib_day:
             current_scores = score_stocks_at_day(precomp, params, d)
             candidate_mask = current_scores >= metric_threshold
             cash += weekly_contribution
+            total_contributions += weekly_contribution
             if cash >= min_order:
                 _do_buy(d, cash)
 
@@ -517,16 +527,26 @@ def run_simulation(
         port_val = cash + stock_value + etf_value
         daily_values[d] = port_val
 
+        # Chain-link TWR: strip the external cash flow so return reflects market performance
+        if d == 0:
+            ca_daily_values[0] = port_val
+        else:
+            prev_port = daily_values[d - 1]
+            factor = (port_val - contrib_today) / max(prev_port, 1e-9)
+            ca_daily_values[d] = ca_daily_values[d - 1] * factor
+
         n_pos = int((stock_shares > 0).sum())
         total_positions_sum += n_pos
         max_positions = max(max_positions, n_pos)
         total_cash_pct_sum += (cash / max(port_val, 1e-9))
 
     final_value = float(daily_values[-1])
-    metrics = compute_performance_metrics(daily_values)
+    # Metrics use contribution-adjusted series (TWR) — contributions don't inflate return
+    metrics = compute_performance_metrics(ca_daily_values)
 
     avg_port = float(daily_values[daily_values > 0].mean()) if daily_values.any() else starting_capital
     turnover = total_traded_notional / max(avg_port, 1.0)
+    profit = final_value - total_contributions
 
     return SimResult(
         final_value=final_value,
@@ -543,6 +563,8 @@ def run_simulation(
         average_cash_pct=float(total_cash_pct_sum / max(n_days, 1)),
         turnover_estimate=turnover,
         friction_cost=total_friction,
+        net_contributions=total_contributions,
+        profit=profit,
     )
 
 
@@ -865,12 +887,13 @@ def print_backtest_report(report: BacktestReport) -> None:
     print(f"{'=' * 64}")
     print(f"  Universe: {r.n_symbols} symbols, {r.n_days} trading days")
     print(f"\n  TRAIN WINDOW")
-    print(f"    Return:          {tr.total_return:+.2%}")
+    print(f"    Return (TWR):    {tr.total_return:+.2%}")
     print(f"    Benchmark:       {r.benchmark_return:+.2%}")
     print(f"    Excess return:   {r.excess_return:+.2%}")
     print(f"    Sharpe:          {tr.sharpe:+.3f}  (benchmark {r.benchmark_sharpe:+.3f})")
     print(f"    Calmar:          {tr.calmar:+.3f}")
     print(f"    Max drawdown:    {tr.max_drawdown:.2%}  (benchmark {r.benchmark_max_drawdown:.2%})")
+    print(f"    Final value:     ${tr.final_value:,.2f}  contributions=${tr.net_contributions:,.2f}  profit=${tr.profit:,.2f}")
     print(f"    Trades:          {tr.trades_made}  sells={tr.sells_made}  skipped={tr.skipped_buys}")
     print(f"    Cap reductions:  {tr.cap_reductions}")
     print(f"    Avg positions:   {tr.average_positions:.1f}  max={tr.max_positions}")
