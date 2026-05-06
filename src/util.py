@@ -117,11 +117,59 @@ VALUATION_GUARDRAILS: dict = {
 
 _rl = _app.get("risk", {})
 RISK_LIMITS: dict = {
-    "max_single_position_pct": float(_rl.get("max_single_position_pct", 0.05)),
-    "max_sector_pct":          float(_rl.get("max_sector_pct",          0.25)),
-    "max_order_pct_of_cash":   float(_rl.get("max_order_pct_of_cash",   0.10)),
-    "min_order_amount":        float(_rl.get("min_order_amount",        5.00)),
-    "min_liquidity_volume":    float(_rl.get("min_liquidity_volume",    500_000)),
+    "max_single_position_pct":              float(_rl.get("max_single_position_pct",              0.05)),
+    "max_sector_pct":                       float(_rl.get("max_sector_pct",                       0.25)),
+    "max_order_pct_of_cash":                float(_rl.get("max_order_pct_of_cash",                0.10)),
+    "min_order_amount":                     float(_rl.get("min_order_amount",                     5.00)),
+    "min_liquidity_volume":                 float(_rl.get("min_liquidity_volume",                 500_000)),
+    "max_buys_per_rebalance":               int(_rl.get("max_buys_per_rebalance",                 10)),
+    "max_sentiment_candidates":             int(_rl.get("max_sentiment_candidates",               20)),
+    "allow_whole_share_fallback":           bool(_rl.get("allow_whole_share_fallback",            False)),
+    "max_whole_share_buys_per_run":         int(_rl.get("max_whole_share_buys_per_run",           3)),
+    "max_whole_share_allocation_multiplier":float(_rl.get("max_whole_share_allocation_multiplier",1.5)),
+    "min_index_pct":                        float(_rl.get("min_index_pct",                        0.60)),
+}
+
+# ---------------------------------------------------------------------------
+# Harvest parameters
+# ---------------------------------------------------------------------------
+
+_hv = _app.get("harvest", {})
+HARVEST_PARAMS: dict = {
+    "min_harvest_amount":           float(_hv.get("min_harvest_amount",           25.0)),
+    "max_harvest_pct_of_portfolio": float(_hv.get("max_harvest_pct_of_portfolio",  0.02)),
+    "harvest_etfs":                 list(_hv.get("harvest_etfs",                  ["SPY", "VTI"])),
+}
+
+# ---------------------------------------------------------------------------
+# Backtest parameters
+# ---------------------------------------------------------------------------
+
+_bt = _app.get("backtest", {})
+BACKTEST_PARAMS: dict = {
+    "default_mode":                 str(_bt.get("default_mode",                 "liquid_universe_sanity_test")),
+    "universe_selection":           str(_bt.get("universe_selection",           "liquid_sample")),
+    "max_symbols":                  int(_bt.get("max_symbols",                  300)),
+    "min_volume":                   float(_bt.get("min_volume",                 500_000)),
+    "random_seed":                  int(_bt.get("random_seed",                  42)),
+    "slippage_bps":                 float(_bt.get("slippage_bps",               10.0)),
+    "commission_per_trade":         float(_bt.get("commission_per_trade",       0.0)),
+    "train_pct":                    float(_bt.get("train_pct",                  0.70)),
+    "benchmark_symbol":             str(_bt.get("benchmark_symbol",             "SPY")),
+    "starting_capital":             float(_bt.get("starting_capital",           5_000.0)),
+    "weekly_contribution":          float(_bt.get("weekly_contribution",        400.0)),
+    "rebalance_frequency_days":     int(_bt.get("rebalance_frequency_days",     5)),
+    "deploy_initial_cash":          bool(_bt.get("deploy_initial_cash",         True)),
+    "reinvest_sell_proceeds":       bool(_bt.get("reinvest_sell_proceeds",      True)),
+    "use_out_of_sample_validation": bool(_bt.get("use_out_of_sample_validation",True)),
+    "auto_apply_if_valid":          bool(_bt.get("auto_apply_if_valid",         False)),
+    "min_validation_excess_return": float(_bt.get("min_validation_excess_return",0.0)),
+    "max_validation_drawdown":      float(_bt.get("max_validation_drawdown",    -0.20)),
+    "min_validation_sharpe":        float(_bt.get("min_validation_sharpe",      0.25)),
+    "llm_review_enabled":           bool(_bt.get("llm_review_enabled",         False)),
+    "llm_review_top_n":             int(_bt.get("llm_review_top_n",             5)),
+    "llm_review_apply":             bool(_bt.get("llm_review_apply",            False)),
+    "llm_review_model":             str(_bt.get("llm_review_model",             "claude-sonnet-4-6")),
 }
 
 # ---------------------------------------------------------------------------

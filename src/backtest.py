@@ -18,8 +18,10 @@ import pandas as pd
 import yfinance as yf
 
 from util import (
+    BACKTEST_PARAMS,
     ETFS,
     MOMENTUM_PARAMS,
+    RISK_LIMITS,
     SCORE_WEIGHTS,
     SCORING_PARAMS,
     read_data_as_pd,
@@ -34,19 +36,31 @@ _STOP_LOSS_PCT = -0.20  # hard-coded; not a tuned param
 
 class PrecomputedData(NamedTuple):
     symbols: list[str]
-    prices: np.ndarray           # (n_days, n_stocks) float64
-    pe_comp: np.ndarray          # (n_stocks,)
-    pb_comp: np.ndarray          # (n_stocks,)
-    quality_scores: np.ndarray   # (n_stocks,)
-    income_scores: np.ndarray    # (n_stocks,)
-    yield_trap_mask: np.ndarray  # (n_stocks,) bool
-    bin_indices: np.ndarray      # (n_stocks,) int 0-4
-    has_position_52w: np.ndarray # (n_stocks,) bool
-    position_52w_arr: np.ndarray # (n_stocks,) float, NaN where missing
-    return_1m_arr: np.ndarray    # (n_stocks,) float, NaN where missing
+    prices: np.ndarray            # (n_days, n_stocks) float64
+    pe_comp: np.ndarray           # (n_stocks,)
+    pb_comp: np.ndarray           # (n_stocks,)
+    quality_scores: np.ndarray    # (n_stocks,)
+    income_scores: np.ndarray     # (n_stocks,)
+    yield_trap_mask: np.ndarray   # (n_stocks,) bool
+    bin_indices: np.ndarray       # (n_stocks,) int 0-4
+    has_position_52w: np.ndarray  # (n_stocks,) bool
+    position_52w_arr: np.ndarray  # (n_stocks,) float, NaN where missing
+    return_1m_arr: np.ndarray     # (n_stocks,) float, NaN where missing
     etf_symbols: list[str]
-    etf_prices: np.ndarray       # (n_days, n_etfs) float64
-    baseline_scores: np.ndarray  # (n_stocks,) scored with current config
+    etf_prices: np.ndarray        # (n_days, n_etfs) float64
+    baseline_scores: np.ndarray   # (n_stocks,) scored with current config
+    sector_labels: list[str]      # (n_stocks,) sector per stock
+    volume_arr: np.ndarray        # (n_stocks,) daily avg volume
+    mode: str                     # lookahead bias mode
+    universe_selection: str       # selection method used
+    lookahead_bias_level: str     # HIGH / MEDIUM / LOW
+    benchmark_prices: np.ndarray  # (n_days,) benchmark close prices
+    benchmark_symbol: str
+    # Daily rolling price-derived features for dynamic re-scoring
+    position_52w_daily: np.ndarray      # (n_days, n_stocks) float, NaN until window fills
+    return_1m_daily: np.ndarray         # (n_days, n_stocks) float, NaN until 21d available
+    bin_indices_daily: np.ndarray       # (n_days, n_stocks) int
+    has_position_52w_daily: np.ndarray  # (n_days, n_stocks) bool
 
 
 @dataclass
@@ -57,6 +71,32 @@ class SimResult:
     calmar: float
     max_drawdown: float
     trades_made: int
+    # extended fields — default to 0 for backward compat with existing tuner calls
+    sells_made: int = 0
+    skipped_buys: int = 0
+    cap_reductions: int = 0
+    average_positions: float = 0.0
+    max_positions: int = 0
+    average_cash_pct: float = 0.0
+    turnover_estimate: float = 0.0
+    friction_cost: float = 0.0
+
+
+@dataclass
+class BacktestReport:
+    mode: str
+    universe_selection: str
+    lookahead_bias_level: str
+    n_symbols: int
+    n_days: int
+    train_result: SimResult
+    validation_result: "SimResult | None"
+    benchmark_return: float            # train-window benchmark
+    benchmark_sharpe: float
+    benchmark_max_drawdown: float
+    excess_return: float               # train excess return
+    validation_benchmark_return: float # validation-window benchmark (0.0 if no val window)
+    notes: list[str]
 
 
 def _col_arr(df: pd.DataFrame, name: str, default: float = 0.0) -> np.ndarray:
@@ -86,6 +126,115 @@ def _momentum_score_vec(
     return base
 
 
+def split_price_window(n_days: int, train_pct: float) -> tuple[slice, slice]:
+    """Split n_days into train and validation slices."""
+    train_end = max(1, int(n_days * train_pct))
+    return slice(0, train_end), slice(train_end, n_days)
+
+
+def compute_performance_metrics(daily_values: np.ndarray) -> dict:
+    """Return sharpe, calmar, max_drawdown, total_return for a daily-value series."""
+    if len(daily_values) < 2 or daily_values[0] <= 0:
+        return {"sharpe": 0.0, "calmar": 0.0, "max_drawdown": 0.0, "total_return": 0.0}
+
+    total_return = float(daily_values[-1] / daily_values[0]) - 1.0
+
+    daily_rets = np.diff(daily_values) / daily_values[:-1]
+    daily_rets = daily_rets[np.isfinite(daily_rets)]
+
+    sharpe = 0.0
+    if len(daily_rets) > 2 and daily_rets.std() > 0:
+        sharpe = float((daily_rets.mean() / daily_rets.std()) * np.sqrt(252))
+
+    cum = daily_values / daily_values[0]
+    roll_max = np.maximum.accumulate(cum)
+    drawdowns = np.where(roll_max > 0, cum / roll_max - 1.0, 0.0)
+    max_drawdown = float(drawdowns.min())
+
+    calmar = 0.0
+    if max_drawdown < -0.001:
+        calmar = float(total_return / abs(max_drawdown))
+
+    return {
+        "sharpe": sharpe,
+        "calmar": calmar,
+        "max_drawdown": max_drawdown,
+        "total_return": total_return,
+    }
+
+
+def select_backtest_universe(
+    agg_df: "pd.DataFrame",
+    mode: str,
+    universe_selection: str,
+    max_symbols: int,
+    min_volume: float,
+    random_seed: int,
+) -> "pd.DataFrame":
+    """
+    Select the universe of symbols for backtesting.
+
+    Modes and their lookahead bias levels:
+      current_universe_stress_test  → HIGH   (uses value_metric ranking)
+      liquid_universe_sanity_test   → MEDIUM (uses volume / random sample)
+      walk_forward_price_only_test  → LOW    (uses volume filter only, no scores)
+
+    universe_selection values:
+      top_current_scores   — rank by value_metric descending (HIGH bias)
+      liquid_all           — all stocks above min_volume (no score bias)
+      liquid_sample        — random sample from liquid universe
+      sector_balanced_sample — equal-weight sectors, random within each
+    """
+    import random as _random
+
+    liquid = agg_df[agg_df["volume"] >= min_volume].copy()
+    if liquid.empty:
+        logger.warning("No symbols pass min_volume filter — using all available")
+        liquid = agg_df.copy()
+
+    if universe_selection == "top_current_scores":
+        selected = liquid.sort_values("value_metric", ascending=False).head(max_symbols)
+        bias = "HIGH"
+        logger.warning(
+            "Universe selection=top_current_scores uses current value_metric. "
+            "LOOK-AHEAD BIAS: HIGH. Results are not predictive."
+        )
+    elif universe_selection == "liquid_all":
+        selected = liquid.head(max_symbols)
+        bias = "MEDIUM"
+    elif universe_selection == "sector_balanced_sample":
+        rng = _random.Random(random_seed)
+        sectors = liquid["sector"].dropna().unique().tolist() if "sector" in liquid.columns else []
+        if not sectors:
+            selected = liquid.sample(n=min(max_symbols, len(liquid)), random_state=random_seed)
+        else:
+            per_sector = max(1, max_symbols // len(sectors))
+            parts = []
+            for s in sectors:
+                pool = liquid[liquid["sector"] == s]
+                n = min(per_sector, len(pool))
+                parts.append(pool.sample(n=n, random_state=random_seed))
+            selected = pd.concat(parts).head(max_symbols)
+        bias = "MEDIUM"
+    else:
+        # Default: liquid_sample — random from liquid universe
+        n = min(max_symbols, len(liquid))
+        selected = liquid.sample(n=n, random_state=random_seed)
+        bias = "MEDIUM"
+
+    if mode == "current_universe_stress_test":
+        bias = "HIGH"
+    elif mode == "walk_forward_price_only_test":
+        bias = "LOW"
+
+    sectors = selected["sector"].value_counts().to_dict() if "sector" in selected.columns else {}
+    logger.info(
+        f"Universe: mode={mode} sel={universe_selection} n={len(selected)} bias={bias} "
+        f"sectors={len(sectors)}"
+    )
+    return selected.reset_index(drop=True), bias
+
+
 def score_stocks(precomp: PrecomputedData, params: np.ndarray) -> np.ndarray:
     """Compute per-stock scores for a trial parameter vector."""
     raw_sw = params[:4]
@@ -110,10 +259,37 @@ def score_stocks(precomp: PrecomputedData, params: np.ndarray) -> np.ndarray:
     )
 
 
+def score_stocks_at_day(precomp: PrecomputedData, params: np.ndarray, day: int) -> np.ndarray:
+    """Score stocks using day-specific rolling momentum features."""
+    raw_sw = params[:4]
+    sw = raw_sw / max(raw_sw.sum(), 1e-9)
+    value_pe_w = params[9]
+    mbin_scores = params[10:15]
+
+    value_score = value_pe_w * precomp.pe_comp + (1.0 - value_pe_w) * precomp.pb_comp
+    momentum_score = _momentum_score_vec(
+        precomp.bin_indices_daily[day],
+        precomp.has_position_52w_daily[day],
+        precomp.position_52w_daily[day],
+        precomp.return_1m_daily[day],
+        mbin_scores,
+    )
+    return (
+        sw[0] * value_score
+        + sw[1] * precomp.quality_scores
+        + sw[2] * precomp.income_scores
+        + sw[3] * momentum_score
+    )
+
+
 def run_simulation(
     precomp: PrecomputedData,
     params: np.ndarray,
     starting_capital: float = 10_000.0,
+    slippage_bps: float = 0.0,
+    commission_per_trade: float = 0.0,
+    weekly_contribution: float = 0.0,
+    rebalance_frequency_days: int = 5,
 ) -> SimResult:
     """
     Simulate the strategy over the precomputed price history.
@@ -133,8 +309,16 @@ def run_simulation(
     sell_weak_below = float(params[7])
     trailing_stop = float(params[8])  # negative
 
-    trial_scores = score_stocks(precomp, params)
-    candidate_mask = trial_scores >= metric_threshold
+    slippage_factor = slippage_bps / 10_000.0
+    min_order = RISK_LIMITS["min_order_amount"]
+    max_single_pct = RISK_LIMITS["max_single_position_pct"]
+    max_sector_pct = RISK_LIMITS["max_sector_pct"]
+    max_order_pct = RISK_LIMITS["max_order_pct_of_cash"]
+    max_buys = RISK_LIMITS["max_buys_per_rebalance"]
+
+    # Scores computed at day 0 and refreshed each rebalance — avoids static lookahead
+    current_scores = score_stocks_at_day(precomp, params, 0)
+    candidate_mask = current_scores >= metric_threshold
 
     # Portfolio state
     stock_shares = np.zeros(n_stocks)
@@ -146,35 +330,114 @@ def run_simulation(
     cash = float(starting_capital)
     daily_values = np.zeros(n_days)
     trades_made = 0
+    sells_made = 0
+    skipped_buys = 0
+    cap_reductions = 0
+    total_positions_sum = 0
+    max_positions = 0
+    total_cash_pct_sum = 0
+    total_friction = 0.0
+    total_traded_notional = 0.0
+
+    def _current_portfolio_value(day: int) -> float:
+        prices_d = precomp.prices[day]
+        valid = np.isfinite(prices_d) & (prices_d > 0)
+        sv = float(np.sum(stock_shares * np.where(valid, prices_d, stock_avg_cost)))
+        ev = float(np.sum(etf_shares * precomp.etf_prices[day])) if n_etfs > 0 else 0.0
+        return cash + sv + ev
+
+    def _sector_exposures(day: int) -> dict:
+        prices_d = precomp.prices[day]
+        valid = np.isfinite(prices_d) & (prices_d > 0)
+        exposure: dict = {}
+        for i in np.where(stock_shares > 0)[0]:
+            s = precomp.sector_labels[i] if i < len(precomp.sector_labels) else "Unknown"
+            val = float(stock_shares[i] * prices_d[i]) if valid[i] else float(stock_shares[i] * stock_avg_cost[i])
+            exposure[s] = exposure.get(s, 0.0) + val
+        return exposure
 
     def _do_buy(day: int, budget: float) -> float:
-        nonlocal cash, trades_made
-        if budget < 5.0:
+        nonlocal cash, trades_made, skipped_buys, cap_reductions, total_friction, total_traded_notional
+
+        if budget < min_order:
             return 0.0
         prices_d = precomp.prices[day]
         eligible = candidate_mask & np.isfinite(prices_d) & (prices_d > 0)
         if not eligible.any():
             return 0.0
-        total_score = trial_scores[eligible].sum()
+        total_score = current_scores[eligible].sum()
         if total_score <= 0:
             return 0.0
+
+        portfolio_value = _current_portfolio_value(day)
+        sector_exp = _sector_exposures(day)
         spent = 0.0
-        for i in np.where(eligible)[0]:
-            alloc = (trial_scores[i] / total_score) * budget
-            if alloc < 5.0:
+        buys_this_pass = 0
+
+        # rank candidates by score descending
+        candidate_indices = sorted(np.where(eligible)[0], key=lambda i: -current_scores[i])
+
+        for i in candidate_indices:
+            if buys_this_pass >= max_buys:
+                skipped_buys += 1
                 continue
+
+            alloc = (current_scores[i] / total_score) * budget
+
+            # cap by max_order_pct_of_cash
+            max_by_cash = cash * max_order_pct
+            if alloc > max_by_cash:
+                alloc = max_by_cash
+                cap_reductions += 1
+
+            # cap by max_single_position_pct
+            if portfolio_value > 0:
+                cur_pos_val = float(stock_shares[i] * prices_d[i])
+                room = portfolio_value * max_single_pct - cur_pos_val
+                if room <= 0:
+                    skipped_buys += 1
+                    continue
+                if alloc > room:
+                    alloc = room
+                    cap_reductions += 1
+
+            # cap by max_sector_pct
+            if portfolio_value > 0:
+                sector = precomp.sector_labels[i] if i < len(precomp.sector_labels) else "Unknown"
+                cur_sector = sector_exp.get(sector, 0.0)
+                sector_room = portfolio_value * max_sector_pct - cur_sector
+                if sector_room <= 0:
+                    skipped_buys += 1
+                    continue
+                if alloc > sector_room:
+                    alloc = sector_room
+                    cap_reductions += 1
+
+            if alloc < min_order:
+                skipped_buys += 1
+                continue
+
             p = prices_d[i]
-            shares = alloc / p
+            # apply slippage on buy
+            effective_price = p * (1.0 + slippage_factor)
+            shares = alloc / effective_price
+            friction = alloc * slippage_factor + commission_per_trade
+            total_friction += friction
+
             if stock_shares[i] > 0:
                 old_cost = stock_avg_cost[i] * stock_shares[i]
                 stock_avg_cost[i] = (old_cost + alloc) / (stock_shares[i] + shares)
             else:
-                stock_avg_cost[i] = p
+                stock_avg_cost[i] = effective_price
                 stock_day_bought[i] = day
                 trades_made += 1
             stock_shares[i] += shares
             stock_peak[i] = max(stock_peak[i], p)
+            sector_exp[sector] = sector_exp.get(sector, 0.0) + alloc
             spent += alloc
+            total_traded_notional += alloc
+            buys_this_pass += 1
+
         cash -= spent
         return spent
 
@@ -186,9 +449,10 @@ def run_simulation(
         n_valid = int(valid_etfs.sum())
         if n_valid > 0:
             per_etf = etf_budget / n_valid
-            for j in np.where(valid_etfs)[0]:
-                etf_shares[j] = per_etf / p0_etf[j]
-                cash -= per_etf
+            if per_etf >= min_order:
+                for j in np.where(valid_etfs)[0]:
+                    etf_shares[j] = per_etf / p0_etf[j]
+                    cash -= per_etf
 
     stock_budget_day0 = cash
     _do_buy(0, stock_budget_day0)
@@ -202,7 +466,7 @@ def run_simulation(
         update_peak = held & valid_price
         stock_peak = np.where(update_peak, np.maximum(stock_peak, prices), stock_peak)
 
-        # Sell conditions — only evaluate held positions with valid prices
+        # Sell conditions
         with np.errstate(invalid="ignore", divide="ignore"):
             pct_from_avg = np.where(
                 held & (stock_avg_cost > 0) & valid_price,
@@ -216,66 +480,102 @@ def run_simulation(
             )
 
         days_held = np.where(stock_day_bought >= 0, d - stock_day_bought, 0)
-        take_profit_ok = trial_scores < metric_threshold * _TAKE_PROFIT_FLOOR_MULTIPLIER
+        take_profit_ok = current_scores < metric_threshold * _TAKE_PROFIT_FLOOR_MULTIPLIER
 
         sell_mask = (
             (held & (pct_from_avg <= _STOP_LOSS_PCT))
             | (held & (pct_from_peak <= trailing_stop))
             | (held & (pct_from_avg >= take_profit_pct) & take_profit_ok)
-            | (held & (trial_scores < sell_weak_below) & (days_held >= _MIN_DAYS_HELD_BEFORE_VALUE_EXIT))
+            | (held & (current_scores < sell_weak_below) & (days_held >= _MIN_DAYS_HELD_BEFORE_VALUE_EXIT))
         )
 
         if sell_mask.any():
-            proceeds = float(np.sum(stock_shares[sell_mask] * prices[sell_mask]))
+            sell_prices = np.where(valid_price, prices, stock_avg_cost)
+            sell_notional = float(np.sum(stock_shares[sell_mask] * sell_prices[sell_mask]))
+            effective_sell = sell_prices * (1.0 - slippage_factor)
+            proceeds = float(np.sum(stock_shares[sell_mask] * effective_sell[sell_mask]))
+            friction = sell_notional * slippage_factor
+            total_friction += friction + commission_per_trade * int(sell_mask.sum())
+            total_traded_notional += sell_notional
             cash += proceeds
+            sells_made += int(sell_mask.sum())
             stock_shares[sell_mask] = 0.0
             stock_avg_cost[sell_mask] = 0.0
             stock_peak[sell_mask] = 0.0
             stock_day_bought[sell_mask] = -1
 
-        # Weekly rebalance buy (sell proceeds get reinvested)
-        if d > 0 and d % 5 == 0 and cash >= 5.0:
-            _do_buy(d, cash)
+        # Rebalance: refresh scores from today's rolling price features, then buy
+        if d > 0 and d % rebalance_frequency_days == 0:
+            current_scores = score_stocks_at_day(precomp, params, d)
+            candidate_mask = current_scores >= metric_threshold
+            cash += weekly_contribution
+            if cash >= min_order:
+                _do_buy(d, cash)
 
         etf_value = float(np.sum(etf_shares * precomp.etf_prices[d])) if n_etfs > 0 else 0.0
         stock_value = float(np.sum(stock_shares * np.where(valid_price, prices, stock_avg_cost)))
-        daily_values[d] = cash + stock_value + etf_value
+        port_val = cash + stock_value + etf_value
+        daily_values[d] = port_val
+
+        n_pos = int((stock_shares > 0).sum())
+        total_positions_sum += n_pos
+        max_positions = max(max_positions, n_pos)
+        total_cash_pct_sum += (cash / max(port_val, 1e-9))
 
     final_value = float(daily_values[-1])
-    total_return = (final_value / starting_capital) - 1.0
+    metrics = compute_performance_metrics(daily_values)
 
-    valid_vals = daily_values[daily_values > 0]
-    if len(valid_vals) > 1:
-        daily_returns = np.diff(valid_vals) / valid_vals[:-1]
-        daily_returns = daily_returns[np.isfinite(daily_returns)]
-    else:
-        daily_returns = np.array([])
-
-    sharpe = 0.0
-    if len(daily_returns) > 2 and daily_returns.std() > 0:
-        sharpe = float((daily_returns.mean() / daily_returns.std()) * np.sqrt(252))
-
-    cum = daily_values / max(daily_values[0], 1e-9)
-    roll_max = np.maximum.accumulate(cum)
-    drawdowns = np.where(roll_max > 0, cum / roll_max - 1.0, 0.0)
-    max_drawdown = float(drawdowns.min())
-
-    calmar = 0.0
-    if max_drawdown < -0.001:
-        calmar = float(total_return / abs(max_drawdown))
+    avg_port = float(daily_values[daily_values > 0].mean()) if daily_values.any() else starting_capital
+    turnover = total_traded_notional / max(avg_port, 1.0)
 
     return SimResult(
         final_value=final_value,
-        total_return=total_return,
-        sharpe=sharpe,
-        calmar=calmar,
-        max_drawdown=max_drawdown,
+        total_return=metrics["total_return"],
+        sharpe=metrics["sharpe"],
+        calmar=metrics["calmar"],
+        max_drawdown=metrics["max_drawdown"],
         trades_made=trades_made,
+        sells_made=sells_made,
+        skipped_buys=skipped_buys,
+        cap_reductions=cap_reductions,
+        average_positions=float(total_positions_sum / max(n_days, 1)),
+        max_positions=max_positions,
+        average_cash_pct=float(total_cash_pct_sum / max(n_days, 1)),
+        turnover_estimate=turnover,
+        friction_cost=total_friction,
     )
 
 
-def load_and_precompute(n_days: int, max_symbols: int = 300) -> PrecomputedData:
-    """Load fundamentals and download price history. Call once before optimization."""
+def _extract_closes(raw: "pd.DataFrame", all_tickers: list[str]) -> "pd.DataFrame":
+    """Extract Close prices from a yfinance download result (handles MultiIndex)."""
+    if isinstance(raw.columns, pd.MultiIndex):
+        closes = raw["Close"] if "Close" in raw.columns.get_level_values(0) else raw["close"]
+    else:
+        closes = raw[["Close"]].rename(columns={"Close": all_tickers[0]})
+    return closes.ffill().bfill()
+
+
+def load_and_precompute(
+    n_days: int,
+    max_symbols: int = 300,
+    mode: str | None = None,
+    universe_selection: str | None = None,
+    min_volume: float | None = None,
+    random_seed: int | None = None,
+    benchmark_symbol: str | None = None,
+) -> PrecomputedData:
+    """
+    Load fundamentals and download price history.
+
+    Defaults for mode/universe_selection/min_volume/random_seed/benchmark_symbol
+    come from BACKTEST_PARAMS so existing callers (tuner.py) need no changes.
+    """
+    mode              = mode              or BACKTEST_PARAMS["default_mode"]
+    universe_selection= universe_selection or BACKTEST_PARAMS["universe_selection"]
+    min_volume        = min_volume        if min_volume is not None else BACKTEST_PARAMS["min_volume"]
+    random_seed       = random_seed       if random_seed is not None else BACKTEST_PARAMS["random_seed"]
+    benchmark_symbol  = benchmark_symbol  or BACKTEST_PARAMS["benchmark_symbol"]
+
     agg_df = read_data_as_pd("agg_data")
     if agg_df is None or agg_df.empty:
         raise RuntimeError(
@@ -290,19 +590,25 @@ def load_and_precompute(n_days: int, max_symbols: int = 300) -> PrecomputedData:
 
     agg_df = agg_df.dropna(subset=["symbol"]).copy()
     agg_df["volume"] = agg_df["volume"].fillna(0)
-    agg_df = agg_df[agg_df["volume"] >= 100_000]
     agg_df["value_metric"] = agg_df["value_metric"].fillna(0)
-    agg_df = agg_df.sort_values("value_metric", ascending=False).head(max_symbols).reset_index(drop=True)
+
+    agg_df, lookahead_bias = select_backtest_universe(
+        agg_df, mode, universe_selection, max_symbols, min_volume, random_seed
+    )
 
     symbols = agg_df["symbol"].tolist()
     etf_list = [e for e in ETFS if e not in set(symbols)]
+    benchmark_tickers = [benchmark_symbol] if benchmark_symbol not in set(symbols + etf_list) else []
 
     n_cal_days = int(n_days * 1.6) + 30
     end_date = datetime.date.today()
     start_date = end_date - datetime.timedelta(days=n_cal_days)
 
-    all_tickers = symbols + etf_list
-    print(f"Downloading price history for {len(all_tickers)} tickers ({n_days} trading days) …")
+    all_tickers = symbols + etf_list + benchmark_tickers
+    print(
+        f"Downloading price history for {len(all_tickers)} tickers "
+        f"({n_days} trading days, mode={mode}, bias={lookahead_bias}) …"
+    )
 
     raw = yf.download(
         all_tickers,
@@ -314,14 +620,7 @@ def load_and_precompute(n_days: int, max_symbols: int = 300) -> PrecomputedData:
     if raw.empty:
         raise RuntimeError("yfinance returned no data.")
 
-    # Close column extraction — handles both MultiIndex and flat column layouts
-    if isinstance(raw.columns, pd.MultiIndex):
-        closes = raw["Close"] if "Close" in raw.columns.get_level_values(0) else raw["close"]
-    else:
-        # Single ticker downloaded (edge case)
-        closes = raw[["Close"]].rename(columns={"Close": all_tickers[0]})
-
-    closes = closes.ffill().bfill()
+    closes = _extract_closes(raw, all_tickers)
 
     if len(closes) < n_days:
         raise RuntimeError(
@@ -331,10 +630,17 @@ def load_and_precompute(n_days: int, max_symbols: int = 300) -> PrecomputedData:
     closes = closes.iloc[-n_days:]
 
     stock_cols = [s for s in symbols if s in closes.columns and closes[s].notna().any()]
-    etf_cols = [e for e in etf_list if e in closes.columns and closes[e].notna().any()]
+    etf_cols   = [e for e in etf_list if e in closes.columns and closes[e].notna().any()]
 
     if not stock_cols:
         raise RuntimeError("No usable stock price data after download.")
+
+    # Benchmark prices
+    bench_prices = np.full(n_days, np.nan)
+    if benchmark_symbol in closes.columns and closes[benchmark_symbol].notna().any():
+        bench_prices = closes[benchmark_symbol].values.astype(np.float64)
+    else:
+        logger.warning(f"Benchmark {benchmark_symbol} not available in price data")
 
     # Re-align fundamentals to available + priced stocks
     agg_df = agg_df[agg_df["symbol"].isin(set(stock_cols))].copy()
@@ -343,16 +649,23 @@ def load_and_precompute(n_days: int, max_symbols: int = 300) -> PrecomputedData:
     stock_cols = agg_df["symbol"].tolist()
 
     stock_prices = closes[stock_cols].values.astype(np.float64)
-    etf_prices = (
+    etf_prices_arr = (
         closes[etf_cols].values.astype(np.float64)
         if etf_cols
         else np.zeros((n_days, 0), dtype=np.float64)
     )
 
-    pe_comp = _col_arr(agg_df, "pe_comp")
-    pb_comp = _col_arr(agg_df, "pb_comp")
-    quality_scores = _col_arr(agg_df, "quality_score")
+    pe_comp       = _col_arr(agg_df, "pe_comp")
+    pb_comp       = _col_arr(agg_df, "pb_comp")
+    quality_scores= _col_arr(agg_df, "quality_score")
     income_scores = _col_arr(agg_df, "income_score")
+    volume_arr    = _col_arr(agg_df, "volume")
+
+    sector_labels = (
+        agg_df["sector"].fillna("Unknown").tolist()
+        if "sector" in agg_df.columns
+        else ["Unknown"] * len(agg_df)
+    )
 
     yield_trap_mask = (
         agg_df["yield_trap_flag"].fillna(False).astype(bool).values
@@ -371,7 +684,46 @@ def load_and_precompute(n_days: int, max_symbols: int = 300) -> PrecomputedData:
         boundaries, np.where(has_pos, pos_arr, 0.5), side="right"
     ).astype(np.int32)
 
-    # Baseline scores using current config (for diff display)
+    # walk_forward_price_only_test: zero fundamental arrays so only momentum drives scores
+    if mode == "walk_forward_price_only_test":
+        pe_comp       = np.zeros(len(agg_df), dtype=np.float64)
+        pb_comp       = np.zeros(len(agg_df), dtype=np.float64)
+        quality_scores= np.zeros(len(agg_df), dtype=np.float64)
+        income_scores = np.zeros(len(agg_df), dtype=np.float64)
+        logger.info("walk_forward_price_only_test: fundamental arrays zeroed — momentum only")
+
+    # Precompute rolling daily price features for dynamic re-scoring in simulation
+    n_stocks = len(stock_cols)
+    pos_52w_daily    = np.full((n_days, n_stocks), np.nan)
+    ret_1m_daily     = np.full((n_days, n_stocks), np.nan)
+    bin_indices_daily= np.zeros((n_days, n_stocks), dtype=np.int32)
+
+    for d in range(n_days):
+        # Rolling 52-week (252 trading day) position — only uses prices up to day d
+        win_start = max(0, d - 251)
+        window = stock_prices[win_start : d + 1]
+        with np.errstate(invalid="ignore"):
+            lo = np.nanmin(window, axis=0)
+            hi = np.nanmax(window, axis=0)
+        rng = hi - lo
+        curr = stock_prices[d]
+        valid52 = (rng > 0) & np.isfinite(curr)
+        raw_pos = np.where(valid52, (curr - lo) / rng, np.nan)
+        pos_52w_daily[d] = np.clip(raw_pos, 0.0, 1.0)
+
+        # Rolling 21-day return
+        if d >= 21:
+            prev = stock_prices[d - 21]
+            valid1m = (prev > 0) & np.isfinite(prev) & np.isfinite(curr)
+            ret_1m_daily[d] = np.where(valid1m, curr / prev - 1.0, np.nan)
+
+        # Bin indices from rolling position
+        valid_pos_d = np.where(np.isfinite(pos_52w_daily[d]), pos_52w_daily[d], 0.5)
+        bin_indices_daily[d] = np.searchsorted(boundaries, valid_pos_d, side="right").astype(np.int32)
+
+    has_pos_daily = np.isfinite(pos_52w_daily)
+
+    # Baseline scores using current config (for diff display in tuner)
     cur_mbin = np.array(MOMENTUM_PARAMS["position_bin_scores"])
     cur_value = (
         SCORING_PARAMS["value_pe_weight"] * pe_comp
@@ -388,10 +740,9 @@ def load_and_precompute(n_days: int, max_symbols: int = 300) -> PrecomputedData:
         + sw[3] * cur_mom
     )
 
-    n_stocks = len(stock_cols)
     print(
-        f"Precomputed: {n_stocks} stocks, {len(etf_cols)} ETFs, {n_days} trading days. "
-        f"Ready for optimization."
+        f"Precomputed: {n_stocks} stocks, {len(etf_cols)} ETFs, {n_days} trading days "
+        f"(lookahead bias: {lookahead_bias}). Ready."
     )
     return PrecomputedData(
         symbols=stock_cols,
@@ -406,6 +757,133 @@ def load_and_precompute(n_days: int, max_symbols: int = 300) -> PrecomputedData:
         position_52w_arr=pos_arr,
         return_1m_arr=ret_arr,
         etf_symbols=etf_cols,
-        etf_prices=etf_prices,
+        etf_prices=etf_prices_arr,
         baseline_scores=baseline_scores,
+        sector_labels=sector_labels,
+        volume_arr=volume_arr,
+        mode=mode,
+        universe_selection=universe_selection,
+        lookahead_bias_level=lookahead_bias,
+        benchmark_prices=bench_prices,
+        benchmark_symbol=benchmark_symbol,
+        position_52w_daily=pos_52w_daily,
+        return_1m_daily=ret_1m_daily,
+        bin_indices_daily=bin_indices_daily,
+        has_position_52w_daily=has_pos_daily,
     )
+
+
+def run_backtest_report(
+    precomp: PrecomputedData,
+    params: np.ndarray,
+    train_slice: slice,
+    val_slice: "slice | None",
+) -> BacktestReport:
+    """
+    Run strategy on train window, optionally evaluate on validation window,
+    and compute benchmark metrics.  Returns a BacktestReport.
+    """
+    bp = BACKTEST_PARAMS
+
+    def _slice_precomp(s: slice) -> PrecomputedData:
+        return precomp._replace(
+            prices=precomp.prices[s],
+            etf_prices=precomp.etf_prices[s],
+            benchmark_prices=precomp.benchmark_prices[s],
+            position_52w_daily=precomp.position_52w_daily[s],
+            return_1m_daily=precomp.return_1m_daily[s],
+            bin_indices_daily=precomp.bin_indices_daily[s],
+            has_position_52w_daily=precomp.has_position_52w_daily[s],
+        )
+
+    train_precomp = _slice_precomp(train_slice)
+    train_n = train_precomp.prices.shape[0]
+    train_result = run_simulation(
+        train_precomp,
+        params,
+        starting_capital=bp["starting_capital"],
+        slippage_bps=bp["slippage_bps"],
+        commission_per_trade=bp["commission_per_trade"],
+        weekly_contribution=bp["weekly_contribution"],
+        rebalance_frequency_days=bp["rebalance_frequency_days"],
+    )
+
+    val_result: "SimResult | None" = None
+    if val_slice is not None:
+        val_precomp = _slice_precomp(val_slice)
+        if val_precomp.prices.shape[0] >= 5:
+            val_result = run_simulation(
+                val_precomp,
+                params,
+                starting_capital=bp["starting_capital"],
+                slippage_bps=bp["slippage_bps"],
+                commission_per_trade=bp["commission_per_trade"],
+                weekly_contribution=bp["weekly_contribution"],
+                rebalance_frequency_days=bp["rebalance_frequency_days"],
+            )
+
+    def _bench_metrics(price_slice: slice) -> dict:
+        vals = precomp.benchmark_prices[price_slice]
+        if len(vals) >= 2 and np.isfinite(vals).all() and vals[0] > 0:
+            arr = vals / vals[0] * bp["starting_capital"]
+            return compute_performance_metrics(arr)
+        return {"total_return": 0.0, "sharpe": 0.0, "max_drawdown": 0.0}
+
+    train_bench = _bench_metrics(train_slice)
+    val_bench_return = 0.0
+    if val_slice is not None:
+        val_bench_return = _bench_metrics(val_slice)["total_return"]
+
+    excess = train_result.total_return - train_bench["total_return"]
+    notes: list[str] = [f"Lookahead bias: {precomp.lookahead_bias_level}"]
+    if precomp.lookahead_bias_level == "HIGH":
+        notes.append("WARNING: universe selected by current value_metric — results not predictive")
+
+    return BacktestReport(
+        mode=precomp.mode,
+        universe_selection=precomp.universe_selection,
+        lookahead_bias_level=precomp.lookahead_bias_level,
+        n_symbols=len(precomp.symbols),
+        n_days=train_n,
+        train_result=train_result,
+        validation_result=val_result,
+        benchmark_return=train_bench["total_return"],
+        benchmark_sharpe=train_bench["sharpe"],
+        benchmark_max_drawdown=train_bench["max_drawdown"],
+        excess_return=excess,
+        validation_benchmark_return=val_bench_return,
+        notes=notes,
+    )
+
+
+def print_backtest_report(report: BacktestReport) -> None:
+    """Print a formatted BacktestReport to stdout."""
+    r = report
+    tr = r.train_result
+    print(f"\n{'=' * 64}")
+    print(f"BACKTEST REPORT  [{r.mode}  sel={r.universe_selection}  bias={r.lookahead_bias_level}]")
+    print(f"{'=' * 64}")
+    print(f"  Universe: {r.n_symbols} symbols, {r.n_days} trading days")
+    print(f"\n  TRAIN WINDOW")
+    print(f"    Return:          {tr.total_return:+.2%}")
+    print(f"    Benchmark:       {r.benchmark_return:+.2%}")
+    print(f"    Excess return:   {r.excess_return:+.2%}")
+    print(f"    Sharpe:          {tr.sharpe:+.3f}  (benchmark {r.benchmark_sharpe:+.3f})")
+    print(f"    Calmar:          {tr.calmar:+.3f}")
+    print(f"    Max drawdown:    {tr.max_drawdown:.2%}  (benchmark {r.benchmark_max_drawdown:.2%})")
+    print(f"    Trades:          {tr.trades_made}  sells={tr.sells_made}  skipped={tr.skipped_buys}")
+    print(f"    Cap reductions:  {tr.cap_reductions}")
+    print(f"    Avg positions:   {tr.average_positions:.1f}  max={tr.max_positions}")
+    print(f"    Avg cash %:      {tr.average_cash_pct:.1%}")
+    print(f"    Friction cost:   ${tr.friction_cost:.2f}  turnover={tr.turnover_estimate:.4f}")
+    if r.validation_result:
+        vr = r.validation_result
+        print(f"\n  VALIDATION WINDOW")
+        print(f"    Return:          {vr.total_return:+.2%}")
+        print(f"    Sharpe:          {vr.sharpe:+.3f}")
+        print(f"    Max drawdown:    {vr.max_drawdown:.2%}")
+    if r.notes:
+        print(f"\n  NOTES")
+        for n in r.notes:
+            print(f"    • {n}")
+    print("=" * 64)

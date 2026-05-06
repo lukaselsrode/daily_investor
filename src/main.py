@@ -36,6 +36,7 @@ from util import (
     CONFIDENCE_THRESHOLD,
     DATA_DIRECTORY,
     ETFS,
+    HARVEST_PARAMS,
     INDEX_PCT,
     MAX_ITERATIONS,
     METRIC_KEYS,
@@ -228,30 +229,95 @@ def _is_bear_market_regime() -> bool:
 # Order helpers
 # ---------------------------------------------------------------------------
 
-def _place_buy(symbol: str, allocation: float) -> bool:
-    """Try fractional order, fall back to whole-share market order. Returns True on success."""
-    res = rb.orders.order_buy_fractional_by_price(symbol, allocation)
+def _place_fractional_buy(symbol: str, allocation: float) -> tuple[bool, str]:
+    """Attempt a fractional buy order. Returns (success, detail_message)."""
+    try:
+        res = rb.orders.order_buy_fractional_by_price(symbol, allocation)
+    except Exception as e:
+        return False, str(e)
     if res and res.get("id"):
         logger.info(f"Buy {symbol} ${allocation:.2f}: state={res.get('state')}, id={res['id'][:8]}...")
-        return True
+        return True, "ok"
+    detail = (res.get("detail") or repr(res)) if res else "None response"
+    logger.warning(f"{symbol}: fractional buy rejected — {detail}")
+    return False, detail
 
-    if res:
-        logger.warning(f"{symbol}: fractional buy rejected — {res.get('detail') or res}")
-    else:
-        logger.warning(f"{symbol}: fractional unavailable — retrying as market order (qty=1)")
 
+def _place_whole_share_buy(symbol: str, quantity: int) -> bool:
+    """Attempt a whole-share market buy. Returns True on success."""
     try:
-        res = rb.orders.order_buy_market(symbol, 1)
+        res = rb.orders.order_buy_market(symbol, quantity)
     except Exception as e:
-        logger.error(f"{symbol}: market order fallback failed: {e}")
+        logger.error(f"{symbol}: whole-share market order failed: {e}")
         return False
-
     if res and res.get("id"):
-        logger.info(f"Buy {symbol} market order: state={res.get('state')}, id={res['id'][:8]}...")
+        logger.info(f"Buy {symbol} {quantity} share(s): state={res.get('state')}, id={res['id'][:8]}...")
         return True
-
-    logger.warning(f"{symbol}: both order types failed — {res.get('detail') if res else 'None'}")
+    logger.warning(f"{symbol}: whole-share order rejected — {res.get('detail') if res else 'None'}")
     return False
+
+
+def _update_local_exposures_after_buy(
+    symbol: str,
+    allocation: float,
+    agg_df: "pd.DataFrame | None",
+    sector_exposure: dict[str, float],
+) -> None:
+    """Mutate sector_exposure in-place after a successful buy to keep intra-run risk checks accurate."""
+    if agg_df is None or agg_df.empty or "symbol" not in agg_df.columns:
+        return
+    row = agg_df[agg_df["symbol"] == symbol]
+    if row.empty:
+        return
+    sector = str(row.iloc[0].get("sector") or "Unknown")
+    sector_exposure[sector] = sector_exposure.get(sector, 0.0) + allocation
+
+
+def _process_whole_share_queue(
+    queue: list[tuple[str, float]],
+    agg_df: "pd.DataFrame | None",
+    sector_exposure: dict[str, float],
+    purchased: list[str],
+    failed: list[str],
+    skipped: list[str],
+) -> None:
+    """Execute whole-share fallback orders for symbols where fractional buy failed."""
+    max_ws = RISK_LIMITS["max_whole_share_buys_per_run"]
+    max_ws_mult = RISK_LIMITS["max_whole_share_allocation_multiplier"]
+    ws_count = 0
+
+    for idx, (symbol, alloc) in enumerate(queue):
+        if ws_count >= max_ws:
+            logger.info(f"Whole-share limit ({max_ws}) reached — remaining queue skipped")
+            skipped.extend(sym for sym, _ in queue[idx:])
+            break
+
+        current_price: float | None = None
+        if agg_df is not None and not agg_df.empty and "symbol" in agg_df.columns:
+            row = agg_df[agg_df["symbol"] == symbol]
+            if not row.empty:
+                current_price = safe_float(row.iloc[0].get("current_price"))
+
+        if not current_price or current_price <= 0:
+            logger.warning(f"{symbol}: no price available for whole-share fallback — failing")
+            failed.append(symbol)
+            continue
+
+        max_alloc = alloc * max_ws_mult
+        if current_price > max_alloc:
+            logger.warning(
+                f"{symbol}: price ${current_price:.2f} > {max_ws_mult}× original alloc "
+                f"${max_alloc:.2f} — skipping whole-share fallback"
+            )
+            skipped.append(symbol)
+            continue
+
+        if _place_whole_share_buy(symbol, 1):
+            purchased.append(symbol)
+            ws_count += 1
+            _update_local_exposures_after_buy(symbol, current_price, agg_df, sector_exposure)
+        else:
+            failed.append(symbol)
 
 
 def _place_sell(symbol: str, quantity: float) -> bool:
@@ -467,20 +533,13 @@ def can_buy_symbol(
                 )
                 allocation = room
 
-    # Final minimum check — bump up to min_order if cash covers it
+    # Final minimum check — skip if allocation is below the minimum order threshold
     if allocation < min_order:
-        if available_cash >= min_order:
-            logger.info(
-                f"{symbol}: allocation ${allocation:.2f} below min — bumping to ${min_order:.2f}"
-            )
-            allocation = min_order
-        else:
-            return (
-                False,
-                f"allocation ${allocation:.2f} below min_order_amount ${min_order:.2f} "
-                f"and cash ${available_cash:.2f} insufficient to cover minimum",
-                0.0,
-            )
+        return (
+            False,
+            f"allocation ${allocation:.2f} below min_order_amount ${min_order:.2f}",
+            0.0,
+        )
 
     return True, "ok", allocation
 
@@ -565,8 +624,9 @@ def evaluate_sell_candidate(
         return {
             **base,
             "should_sell": True,
-            "reason":   f"stop loss breached ({percent_change:.1%} ≤ {stop_loss:.1%})",
-            "severity": "hard",
+            "reason":      f"stop loss breached ({percent_change:.1%} ≤ {stop_loss:.1%})",
+            "severity":    "hard",
+            "exit_type":   "failure_exit",
         }
 
     trailing_stop = SELL_RULES["trailing_stop_pct"]
@@ -578,24 +638,27 @@ def evaluate_sell_candidate(
                 return {
                     **base,
                     "should_sell": True,
-                    "reason":   f"trailing stop: {drawdown:.1%} from peak ${peak_price:.2f}",
-                    "severity": "hard",
+                    "reason":      f"trailing stop: {drawdown:.1%} from peak ${peak_price:.2f}",
+                    "severity":    "hard",
+                    "exit_type":   "failure_exit",
                 }
 
     if sell_yt and yield_trap_flag and value_metric is not None and value_metric < sell_weak:
         return {
             **base,
             "should_sell": True,
-            "reason":   f"yield trap with weak value_metric={value_metric:.3f} < {sell_weak}",
-            "severity": "hard",
+            "reason":      f"yield trap with weak value_metric={value_metric:.3f} < {sell_weak}",
+            "severity":    "hard",
+            "exit_type":   "failure_exit",
         }
 
     if quality_score is not None and quality_score < sell_lq:
         return {
             **base,
             "should_sell": True,
-            "reason":   f"quality_score {quality_score:.3f} below floor {sell_lq}",
-            "severity": "hard",
+            "reason":      f"quality_score {quality_score:.3f} below floor {sell_lq}",
+            "severity":    "hard",
+            "exit_type":   "failure_exit",
         }
 
     # ── Soft sells ────────────────────────────────────────────────────────────
@@ -611,8 +674,9 @@ def evaluate_sell_candidate(
             return {
                 **base,
                 "should_sell": True,
-                "reason":   f"take profit triggered ({percent_change:.1%} ≥ {take_profit:.1%})",
-                "severity": "soft",
+                "reason":      f"take profit triggered ({percent_change:.1%} ≥ {take_profit:.1%})",
+                "severity":    "soft",
+                "exit_type":   "harvest_exit",
             }
 
     if value_metric is not None and value_metric < sell_weak:
@@ -621,16 +685,37 @@ def evaluate_sell_candidate(
             return {
                 **base,
                 "should_sell": True,
-                "reason":   f"value_metric={value_metric:.3f} < {sell_weak} (held {days_str})",
-                "severity": "soft",
+                "reason":      f"value_metric={value_metric:.3f} < {sell_weak} (held {days_str})",
+                "severity":    "soft",
+                "exit_type":   "thesis_exit",
             }
 
     return {
         **base,
         "should_sell": False,
-        "reason":   "no sell condition met",
-        "severity": None,
+        "reason":      "no sell condition met",
+        "severity":    None,
+        "exit_type":   None,
     }
+
+
+# ---------------------------------------------------------------------------
+# Harvest routing
+# ---------------------------------------------------------------------------
+
+def allocate_harvest_proceeds_to_etfs(amount: float) -> None:
+    """Reinvest take-profit proceeds into harvest ETFs."""
+    harvest_etfs = HARVEST_PARAMS["harvest_etfs"]
+    if not harvest_etfs:
+        return
+    per_etf = amount / len(harvest_etfs)
+    logger.info(f"=== HARVEST: ${amount:.2f} → {harvest_etfs} (${per_etf:.2f} each) ===")
+    for etf in harvest_etfs:
+        try:
+            res = rb.orders.order_buy_fractional_by_price(etf, per_etf)
+            logger.info(f"Harvest → {etf}: {res.get('state') if res else 'None'}")
+        except Exception as e:
+            logger.error(f"Harvest reinvestment failed for {etf}: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -739,6 +824,7 @@ def make_sales() -> list[str]:
                     )
                     held_on_sentiment.add(sym)
 
+        harvest_proceeds = 0.0
         for symbol, decision in soft_sells.items():
             if symbol in held_on_sentiment:
                 continue
@@ -748,6 +834,11 @@ def make_sales() -> list[str]:
             quantity = float(holdings[symbol].get("quantity", 0))
             if _place_sell(symbol, quantity):
                 sold.append(symbol)
+                if decision.get("exit_type") == "harvest_exit":
+                    harvest_proceeds += safe_float(holdings[symbol].get("equity"), 0.0) or 0.0
+
+        if harvest_proceeds >= HARVEST_PARAMS["min_harvest_amount"]:
+            allocate_harvest_proceeds_to_etfs(harvest_proceeds)
 
     # Remove sold positions from peak price tracking
     if sold:
@@ -782,13 +873,18 @@ def make_buys(df: pd.DataFrame, is_first_iteration: bool = True, bear_market: bo
     # ETF buys — first iteration only
     if is_first_iteration and etf_amount > 0 and (AUTO_APPROVE or confirm(f"Buy ETFs (${etf_amount:,.2f})?")):
         per_etf = etf_amount / max(len(ETFS), 1)
-        for etf in ETFS:
-            try:
-                if AUTO_APPROVE or confirm(f"Buy ${per_etf:,.2f} of {etf}?"):
-                    res = rb.orders.order_buy_fractional_by_price(etf, per_etf)
-                    logger.info(f"ETF {etf}: {res.get('state') if res else 'None'}")
-            except Exception as e:
-                logger.error(f"ETF buy failed for {etf}: {e}")
+        if per_etf < RISK_LIMITS["min_order_amount"]:
+            logger.info(
+                f"Per-ETF amount ${per_etf:.2f} < min_order ${RISK_LIMITS['min_order_amount']:.2f} — skipping ETF buys"
+            )
+        else:
+            for etf in ETFS:
+                try:
+                    if AUTO_APPROVE or confirm(f"Buy ${per_etf:,.2f} of {etf}?"):
+                        res = rb.orders.order_buy_fractional_by_price(etf, per_etf)
+                        logger.info(f"ETF {etf}: {res.get('state') if res else 'None'}")
+                except Exception as e:
+                    logger.error(f"ETF buy failed for {etf}: {e}")
 
     if bear_market:
         logger.info("Bear market regime — skipping individual stock buys (remaining cash swept to ETFs at end)")
@@ -818,6 +914,12 @@ def make_buys(df: pd.DataFrame, is_first_iteration: bool = True, bear_market: bo
         logger.warning(f"No stocks pass value_metric ≥ {METRIC_THRESHOLD}")
         return [], df["symbol"].tolist(), []
 
+    # Cap candidates before sentiment to bound API cost and avoid look-ahead selection
+    max_sc = RISK_LIMITS["max_sentiment_candidates"]
+    if len(candidates) > max_sc:
+        candidates = candidates.sort_values("value_metric", ascending=False).head(max_sc).copy()
+        logger.info(f"Candidates capped to {max_sc} (max_sentiment_candidates)")
+
     # Load portfolio context once before the loop
     holdings        = get_current_positions()
     portfolio_value = get_portfolio_value()
@@ -841,6 +943,8 @@ def make_buys(df: pd.DataFrame, is_first_iteration: bool = True, bear_market: bo
     sector_exposure = get_sector_exposure(holdings, agg_df) if portfolio_value > 0 else {}
 
     purchased, skipped, failed = [], [], []
+    whole_share_queue: list[tuple[str, float]] = []
+    allow_ws_fallback = RISK_LIMITS["allow_whole_share_fallback"]
     total_value = candidates["value_metric"].sum()
 
     for _, row in candidates.iterrows():
@@ -878,14 +982,23 @@ def make_buys(df: pd.DataFrame, is_first_iteration: bool = True, bear_market: bo
             if AUTO_APPROVE or confirm(
                 f"Buy ${adj_alloc:,.2f} of {symbol}? ({row['value_metric']/total_value:.1%} of stock budget)"
             ):
-                if _place_buy(symbol, adj_alloc):
+                ok_frac, detail = _place_fractional_buy(symbol, adj_alloc)
+                if ok_frac:
                     purchased.append(symbol)
+                    _update_local_exposures_after_buy(symbol, adj_alloc, agg_df, sector_exposure)
                     time.sleep(0.5)
+                elif allow_ws_fallback:
+                    logger.warning(f"{symbol}: fractional failed ({detail}) — queued for whole-share fallback")
+                    whole_share_queue.append((symbol, adj_alloc))
                 else:
+                    logger.warning(f"{symbol}: fractional failed ({detail}) — skipping")
                     failed.append(symbol)
         except Exception as e:
             logger.error(f"Order failed for {symbol}: {e}")
             failed.append(symbol)
+
+    if whole_share_queue:
+        _process_whole_share_queue(whole_share_queue, agg_df, sector_exposure, purchased, failed, skipped)
 
     logger.info(
         f"Buy summary: {len(purchased)} bought, {len(skipped)} skipped, {len(failed)} failed"
@@ -985,13 +1098,18 @@ def run_daily_strat() -> None:
     remaining = get_available_cash()
     if remaining > 0 and ETFS:
         per_etf = remaining / len(ETFS)
-        logger.info(f"=== CASH SWEEP: ${remaining:,.2f} → ETFs (${per_etf:.2f} each) ===")
-        for etf in ETFS:
-            try:
-                res = rb.orders.order_buy_fractional_by_price(etf, per_etf)
-                logger.info(f"Sweep {etf}: {res.get('state') if res else 'None'}")
-            except Exception as e:
-                logger.error(f"Sweep failed for {etf}: {e}")
+        if per_etf < RISK_LIMITS["min_order_amount"]:
+            logger.info(
+                f"Sweep per-ETF ${per_etf:.2f} < min_order ${RISK_LIMITS['min_order_amount']:.2f} — skipping sweep"
+            )
+        else:
+            logger.info(f"=== CASH SWEEP: ${remaining:,.2f} → ETFs (${per_etf:.2f} each) ===")
+            for etf in ETFS:
+                try:
+                    res = rb.orders.order_buy_fractional_by_price(etf, per_etf)
+                    logger.info(f"Sweep {etf}: {res.get('state') if res else 'None'}")
+                except Exception as e:
+                    logger.error(f"Sweep failed for {etf}: {e}")
 
     logger.info(
         f"\n{'='*60}\n"
@@ -1020,12 +1138,15 @@ def _run_tuner_cli(n_days: int, objective: str) -> None:
         sys.exit(1)
 
 
-def _run_auto_tune_cli(n_days: int) -> None:
-    from tuner import apply_config_params, run_auto_tune, _diff_table
+def _run_auto_tune_cli(n_days: int, mode: str | None = None, apply: bool = False, force_apply: bool = False) -> None:
+    from tuner import run_auto_tune, _diff_table
     try:
         avg_params, sharpe_result, calmar_result, avg_result = run_auto_tune(
             n_days=n_days,
             starting_capital=10_000.0,
+            mode=mode,
+            apply=apply,
+            force_apply=force_apply,
         )
         _diff_table(
             avg_params,
@@ -1039,7 +1160,6 @@ def _run_auto_tune_cli(n_days: int) -> None:
             f"calmar={avg_result.calmar:+.3f}  "
             f"trades={avg_result.trades_made}"
         )
-        apply_config_params(avg_params)
     except RuntimeError as e:
         logger.error(str(e))
         sys.exit(1)
@@ -1053,11 +1173,14 @@ def main() -> None:
     args = sys.argv[1:]
 
     if "--help" in args or "-h" in args:
-        print("Usage: python main.py [--skip-data] [--tune DAYS] [--auto-tune [DAYS]] [--objective sharpe|calmar] [--help]")
+        print("Usage: python main.py [--skip-data] [--tune DAYS] [--auto-tune [DAYS]] [--objective sharpe|calmar] [--mode MODE] [--apply] [--help]")
         print("  --skip-data          Reuse existing CSV files instead of regenerating")
         print("  --tune DAYS          Back-simulate N days and print suggested config tweaks")
-        print("  --auto-tune [DAYS]   Run Sharpe+Calmar, average results, write config.yaml (default 90d)")
+        print("  --auto-tune [DAYS]   Run Sharpe+Calmar, train/val split, validate, optionally write config (default 90d)")
         print("  --objective METRIC   For --tune only: sharpe (default) or calmar")
+        print("  --mode MODE          Backtest mode: current_universe_stress_test | liquid_universe_sanity_test | walk_forward_price_only_test")
+        print("  --apply              Write config.yaml if validation gates pass")
+        print("  --force-apply        Write config.yaml regardless of validation (use with caution)")
         return
 
     if "--auto-tune" in args:
@@ -1065,7 +1188,14 @@ def main() -> None:
         n_days = 90
         if idx + 1 < len(args) and args[idx + 1].isdigit():
             n_days = int(args[idx + 1])
-        _run_auto_tune_cli(n_days)
+        mode = None
+        if "--mode" in args:
+            mi = args.index("--mode")
+            if mi + 1 < len(args):
+                mode = args[mi + 1]
+        apply = "--apply" in args
+        force_apply = "--force-apply" in args
+        _run_auto_tune_cli(n_days, mode=mode, apply=apply, force_apply=force_apply)
         return
 
     if "--tune" in args:
