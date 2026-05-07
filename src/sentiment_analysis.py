@@ -55,7 +55,8 @@ class SentimentAnalysisState(TypedDict):
     position_info: dict
     fundamental_metrics: dict
     analysis: str
-    recommendation: Literal["YES", "NO", "NEUTRAL"]
+    sentiment_action: Literal["BUY", "HOLD", "SELL"]   # renamed to avoid clash with action field
+    sentiment: Literal["bullish", "neutral", "bearish"]
     confidence: float
     reasoning: str
     skip_analysis: bool  # True → jump to END without calling Claude
@@ -147,20 +148,30 @@ def _valuation_block(symbol: str, f: dict, news_text: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _parse_response(text: str) -> dict:
-    result = {"recommendation": "NEUTRAL", "confidence": 0.0, "reasoning": "Could not parse response"}
+    result = {
+        "action":   "HOLD",
+        "sentiment": "neutral",
+        "confidence": 0.0,
+        "reasoning": "Could not parse response",
+    }
     for line in text.strip().split("\n"):
         u = line.strip().upper()
-        if u.startswith("RECOMMENDATION:"):
-            rec = u.split(":", 1)[1].strip()
-            if rec in ("YES", "NO", "NEUTRAL"):
-                result["recommendation"] = rec
+        raw = line.strip()
+        if u.startswith("ACTION:"):
+            val = u.split(":", 1)[1].strip()
+            if val in ("BUY", "HOLD", "SELL"):
+                result["action"] = val
+        elif u.startswith("SENTIMENT:"):
+            val = raw.split(":", 1)[1].strip().lower()
+            if val in ("bullish", "neutral", "bearish"):
+                result["sentiment"] = val
         elif u.startswith("CONFIDENCE:"):
             try:
                 result["confidence"] = float(u.split(":", 1)[1].strip().replace("%", ""))
             except ValueError:
                 pass
         elif u.startswith("REASONING:"):
-            result["reasoning"] = line.split(":", 1)[1].strip()
+            result["reasoning"] = raw.split(":", 1)[1].strip()
     return result
 
 
@@ -169,14 +180,38 @@ def _parse_response(text: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
+_BUY_SYSTEM = (
+    "You are a financial analyst screening buy candidates. "
+    "For each stock, decide if it is worth buying now.\n"
+    "Reply for EVERY stock in this EXACT format, one block per stock, nothing else:\n\n"
+    "STOCK: <SYMBOL>\n"
+    "ACTION: <BUY|HOLD|SELL>\n"
+    "SENTIMENT: <bullish|neutral|bearish>\n"
+    "CONFIDENCE: <0-100>%\n"
+    "REASONING: <one sentence>\n"
+    "---\n\n"
+    "ACTION meanings: BUY = proceed with purchase, HOLD = skip for now, SELL = avoid/not a buy candidate.\n"
+)
+
+_SELL_SYSTEM = (
+    "You are a financial analyst reviewing positions that have triggered soft sell conditions. "
+    "For each, decide whether the position should be HELD (override the sell) or SOLD (confirm the sell).\n"
+    "Reply for EVERY stock in this EXACT format, one block per stock, nothing else:\n\n"
+    "STOCK: <SYMBOL>\n"
+    "ACTION: <BUY|HOLD|SELL>\n"
+    "SENTIMENT: <bullish|neutral|bearish>\n"
+    "CONFIDENCE: <0-100>%\n"
+    "REASONING: <one sentence>\n"
+    "---\n\n"
+    "ACTION meanings: HOLD = override the sell (you see a clear bullish recovery case), "
+    "SELL = confirm the sell, BUY = rare strong reversal signal.\n"
+    "IMPORTANT: Only return HOLD if SENTIMENT is bullish. "
+    "A bearish or deteriorating thesis must result in SELL.\n"
+)
+
+
 def _build_batch_prompt(batch: list[dict], action: str) -> tuple[str, str]:
-    system = (
-        f"You are a financial sentiment analyst. For each stock, decide whether to {action.upper()} it.\n"
-        "Reply for EVERY stock in this EXACT format, nothing else:\n\n"
-        "STOCK: <SYMBOL>\nRECOMMENDATION: <YES|NO|NEUTRAL>\n"
-        "CONFIDENCE: <0-100>%\nREASONING: <one sentence>\n---\n\n"
-        + _SCORING_GUIDE
-    )
+    system = (_BUY_SYSTEM if action == "buy" else _SELL_SYSTEM) + _SCORING_GUIDE
     blocks = [
         _valuation_block(
             item["symbol"],
@@ -185,7 +220,8 @@ def _build_batch_prompt(batch: list[dict], action: str) -> tuple[str, str]:
         )
         for item in batch
     ]
-    user = f"Analyze these {len(batch)} stocks for {action.upper()}:\n\n" + "\n\n---\n\n".join(blocks)
+    context = "buy candidates" if action == "buy" else "soft sell candidates"
+    user = f"Analyze these {len(batch)} {context}:\n\n" + "\n\n---\n\n".join(blocks)
     return system, user
 
 
@@ -204,8 +240,8 @@ def _parse_batch_response(raw: str, batch: list[dict]) -> dict[str, dict]:
     for item in batch:
         sym = item["symbol"]
         if sym not in results:
-            logger.warning(f"No result parsed for {sym} — defaulting NEUTRAL")
-            results[sym] = {"recommendation": "NEUTRAL", "confidence": 0.0, "reasoning": "Missing from Claude response"}
+            logger.warning(f"No result parsed for {sym} — defaulting HOLD/neutral")
+            results[sym] = {"action": "HOLD", "sentiment": "neutral", "confidence": 0.0, "reasoning": "Missing from Claude response"}
 
     return results
 
@@ -246,7 +282,7 @@ async def _call_batch_async(
                 break
 
     return {
-        item["symbol"]: {"recommendation": "NEUTRAL", "confidence": 0.0, "reasoning": "API error after retries"}
+        item["symbol"]: {"action": "HOLD", "sentiment": "neutral", "confidence": 0.0, "reasoning": "API error after retries"}
         for item in batch
     }
 
@@ -277,10 +313,7 @@ def get_batch_sentiment_recommendations(
     """
     if not _async_client:
         logger.warning("Async client unavailable — falling back to per-stock analysis")
-        return {
-            item["symbol"]: get_sentiment_recommendation(item["symbol"], action)
-            for item in stocks_data
-        }
+        return {item["symbol"]: get_sentiment_recommendation(item["symbol"], action) for item in stocks_data}
 
     return run_async(_run_all_batches(stocks_data, action))
 
@@ -367,7 +400,8 @@ def gather_sentiments(state: SentimentAnalysisState) -> dict:
     if not has_news and not has_meaningful:
         logger.warning(f"No valid data for {symbol} — skipping Claude call")
         return {
-            "recommendation": "NEUTRAL",
+            "sentiment_action": "HOLD",
+            "sentiment": "neutral",
             "confidence": 0.0,
             "reasoning": "No valid news or fundamental data available",
             "skip_analysis": True,
@@ -392,14 +426,13 @@ def analyze_sentiment(state: SentimentAnalysisState) -> dict:
     news_text = _format_news(state["news_sentiment"], symbol)
     block = _valuation_block(symbol, state["fundamental_metrics"], news_text)
 
-    system = (
-        f"You are a financial sentiment analyst. Determine whether to {action.upper()} {symbol}.\n"
-        + _SCORING_GUIDE
-    )
+    system = (_BUY_SYSTEM if action == "buy" else _SELL_SYSTEM) + _SCORING_GUIDE
+    context = "buy candidate" if action == "buy" else "soft sell candidate"
     user = (
-        f"Analyze the following for {symbol} ({action.upper()}):\n\n{block}\n\n"
+        f"Analyze the following {context} — {symbol}:\n\n{block}\n\n"
         "Respond EXACTLY:\n"
-        "RECOMMENDATION: [YES/NO/NEUTRAL]\n"
+        "ACTION: [BUY|HOLD|SELL]\n"
+        "SENTIMENT: [bullish|neutral|bearish]\n"
         "CONFIDENCE: [0-100]%\n"
         "REASONING: [2-3 sentences with specific metric values]"
     )
@@ -410,14 +443,15 @@ def analyze_sentiment(state: SentimentAnalysisState) -> dict:
         result["analysis"] = response.content
         if result["confidence"] < CONFIDENCE_THRESHOLD:
             return {
-                "recommendation": "NEUTRAL",
+                "sentiment_action": "HOLD",
+                "sentiment": "neutral",
                 "confidence": result["confidence"],
                 "reasoning": f"Confidence {result['confidence']}% below threshold {CONFIDENCE_THRESHOLD}%",
             }
-        return result
+        return {"sentiment_action": result["action"], **result}
     except Exception as e:
         logger.error(f"Sentiment analysis failed for {symbol}: {e}")
-        return {"recommendation": "NEUTRAL", "confidence": 0.0, "reasoning": f"Analysis error: {e}"}
+        return {"sentiment_action": "HOLD", "sentiment": "neutral", "confidence": 0.0, "reasoning": f"Analysis error: {e}"}
 
 
 def _route_after_gather(state: SentimentAnalysisState) -> str:
@@ -451,7 +485,8 @@ def get_sentiment_recommendation(symbol: str, action: str) -> dict:
         "position_info": {},
         "fundamental_metrics": {},
         "analysis": "",
-        "recommendation": "NEUTRAL",
+        "sentiment_action": "HOLD",
+        "sentiment": "neutral",
         "confidence": 0.0,
         "reasoning": "",
         "skip_analysis": False,
@@ -459,10 +494,11 @@ def get_sentiment_recommendation(symbol: str, action: str) -> dict:
     try:
         final = _workflow.invoke(initial)
         return {
-            "recommendation": final["recommendation"],
-            "confidence":     final["confidence"],
-            "reasoning":      final["reasoning"],
+            "action":    final.get("sentiment_action", "HOLD"),
+            "sentiment": final.get("sentiment", "neutral"),
+            "confidence": final["confidence"],
+            "reasoning":  final["reasoning"],
         }
     except Exception as e:
         logger.error(f"Workflow error for {symbol}: {e}")
-        return {"recommendation": "NEUTRAL", "confidence": 0.0, "reasoning": f"Workflow error: {e}"}
+        return {"action": "HOLD", "sentiment": "neutral", "confidence": 0.0, "reasoning": f"Workflow error: {e}"}

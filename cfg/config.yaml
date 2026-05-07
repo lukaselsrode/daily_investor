@@ -8,7 +8,7 @@ selloff_threshold: 30
 weekly_investment: 400
 index_pct: 0.65
 
-auto_approve: true
+auto_approve: false
 use_sentiment_analysis: true
 confidence_threshold: 65
 max_iterations: 10

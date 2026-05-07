@@ -385,12 +385,23 @@ def _enrich_with_quotes(symbols: list[str], fundamentals: dict[str, dict]) -> No
 
 def _enrich_with_momentum(symbols: list[str], fundamentals: dict[str, dict]) -> None:
     """Batch-fetch 1-month price returns via yfinance and merge into fundamentals."""
-    batch_size = 100
+    import requests as _requests
+    # Smaller batches + threads=False keeps concurrent connections to 1 per batch,
+    # preventing EMFILE (too many open files) when processing 2500+ symbols.
+    batch_size = 50
     enriched = 0
     for i in range(0, len(symbols), batch_size):
         batch = symbols[i: i + batch_size]
+        session = _requests.Session()
         try:
-            raw = yf.download(batch, period="35d", progress=False, auto_adjust=True)
+            raw = yf.download(
+                batch,
+                period="35d",
+                progress=False,
+                auto_adjust=True,
+                threads=False,   # single-threaded: 1 connection per batch, not 1 per ticker
+                session=session,
+            )
             if raw.empty:
                 continue
             try:
@@ -403,17 +414,29 @@ def _enrich_with_momentum(symbols: list[str], fundamentals: dict[str, dict]) -> 
                 if sym not in closes.columns:
                     continue
                 col = closes[sym].dropna()
-                if len(col) >= 15:  # ~3 weeks of trading days
+                if len(col) >= 15:
                     fundamentals[sym]["return_1m"] = round(float(col.iloc[-1] / col.iloc[0]) - 1.0, 4)
                     enriched += 1
         except Exception as e:
             logger.warning(f"Momentum batch {i // batch_size + 1} failed: {str(e)[:60]}")
+        finally:
+            session.close()
     logger.info(f"Momentum enrichment: {enriched}/{len(symbols)} symbols have return_1m")
 
 
 def _get_robinhood_fundamentals(tickers: list[str], force_refresh: bool) -> pd.DataFrame | None:
     if not force_refresh:
         return read_data_as_pd("robinhood_data")
+
+    # Raise the fd soft limit before bulk yfinance downloads to avoid EMFILE
+    try:
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        target = min(hard, 4096)
+        if soft < target:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+    except Exception:
+        pass
 
     batch_size = 50
     fundamentals: dict[str, dict] = {}

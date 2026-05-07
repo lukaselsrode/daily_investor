@@ -76,11 +76,13 @@ def login() -> None:
     mfa_code = None
     mfa_secret = os.getenv("RB_MFA_SECRET")
     if mfa_secret:
+        # Strip whitespace, hyphens, and spaces — common copy-paste artefacts in TOTP secrets
+        mfa_secret = mfa_secret.strip().replace(" ", "").replace("-", "").upper()
         try:
             mfa_code = pyotp.TOTP(mfa_secret).now()
             logger.info("MFA code generated from RB_MFA_SECRET")
         except Exception as e:
-            logger.error(f"MFA generation failed: {e}")
+            logger.error(f"MFA generation failed: {e} — check RB_MFA_SECRET in .env (must be plain base32)")
 
     try:
         rb.login(username=username, password=password, mfa_code=mfa_code, store_session=True)
@@ -321,6 +323,22 @@ def _process_whole_share_queue(
 
 
 def _place_sell(symbol: str, quantity: float) -> bool:
+    # Re-fetch live position to guard against a stale holdings snapshot.
+    # This matters when AUTO_APPROVE=False and the user takes time to confirm,
+    # or when a pending order from a previous run already closed the position.
+    try:
+        live_positions = rb.get_all_positions()
+        live_pos = next(
+            (p for p in live_positions if p.get("symbol") == symbol), None
+        )
+        live_qty = float(live_pos.get("quantity", 0)) if live_pos else 0.0
+        if live_qty <= 0:
+            logger.warning(f"Skipping sell for {symbol}: position already closed (live qty={live_qty})")
+            return False
+        quantity = live_qty  # use live quantity to avoid partial-fill mismatch
+    except Exception as e:
+        logger.warning(f"Could not verify live position for {symbol}: {e} — using cached quantity")
+
     if not AUTO_APPROVE and not confirm(f"Sell {quantity} shares of {symbol}?"):
         logger.info(f"Sell cancelled for {symbol}")
         return False
@@ -817,12 +835,21 @@ def make_sales() -> list[str]:
                 logger.error("Batch sentiment failed for soft sells — executing all", exc_info=True)
 
             for sym, result in sentiment_results.items():
-                if result["recommendation"] == "YES" and result["confidence"] >= CONFIDENCE_THRESHOLD:
+                if (
+                    result.get("action") == "HOLD"
+                    and result.get("sentiment") == "bullish"
+                    and result["confidence"] >= CONFIDENCE_THRESHOLD
+                ):
                     logger.info(
                         f"HOLD {sym} — sentiment overrides soft sell "
-                        f"({result['confidence']}%): {result['reasoning']}"
+                        f"({result['confidence']}% bullish): {result['reasoning']}"
                     )
                     held_on_sentiment.add(sym)
+                else:
+                    logger.info(
+                        f"SELL confirmed {sym} — action={result.get('action')} "
+                        f"sentiment={result.get('sentiment')} ({result['confidence']}%): {result['reasoning']}"
+                    )
 
         harvest_proceeds = 0.0
         for symbol, decision in soft_sells.items():
@@ -953,13 +980,13 @@ def make_buys(df: pd.DataFrame, is_first_iteration: bool = True, bear_market: bo
         if sentiment_results:
             result = sentiment_results.get(
                 symbol,
-                {"recommendation": "NEUTRAL", "confidence": 0.0, "reasoning": "No result"},
+                {"action": "HOLD", "sentiment": "neutral", "confidence": 0.0, "reasoning": "No result"},
             )
             logger.info(
-                f"{'='*60}\nBUY {symbol} | {result['recommendation']} "
-                f"{result['confidence']:.1f}% | {result['reasoning']}\n{'='*60}"
+                f"{'='*60}\nBUY {symbol} | action={result.get('action')} "
+                f"sentiment={result.get('sentiment')} {result['confidence']:.1f}% | {result['reasoning']}\n{'='*60}"
             )
-            if result["recommendation"] == "NO" or result["confidence"] < CONFIDENCE_THRESHOLD:
+            if result.get("action") != "BUY" or result["confidence"] < CONFIDENCE_THRESHOLD:
                 logger.info(f"Skipping {symbol}")
                 skipped.append(symbol)
                 continue
@@ -1169,7 +1196,21 @@ def _run_auto_tune_cli(n_days: int, mode: str | None = None, apply: bool = False
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _raise_fd_limit() -> None:
+    """Raise the open-file-descriptor soft limit to avoid EMFILE during bulk yfinance downloads."""
+    try:
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        target = min(hard, 4096)
+        if soft < target:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+            logger.debug(f"Raised RLIMIT_NOFILE: {soft} → {target} (hard={hard})")
+    except Exception as e:
+        logger.debug(f"Could not raise fd limit: {e}")
+
+
 def main() -> None:
+    _raise_fd_limit()
     args = sys.argv[1:]
 
     if "--help" in args or "-h" in args:
