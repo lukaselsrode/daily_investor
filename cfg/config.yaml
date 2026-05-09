@@ -8,9 +8,10 @@ selloff_threshold: 30
 weekly_investment: 400
 index_pct: 0.65
 
-auto_approve: false
+auto_approve: true
 use_sentiment_analysis: true
 confidence_threshold: 65
+sell_sentiment_override_confidence: 85
 max_iterations: 10
 
 etfs:

@@ -43,6 +43,7 @@ from util import (
     METRIC_THRESHOLD,
     RISK_LIMITS,
     SELL_RULES,
+    SELL_SENTIMENT_OVERRIDE_CONFIDENCE,
     USE_SENTIMENT_ANALYSIS,
     WEEKLY_INVESTMENT,
     read_data_as_pd,
@@ -172,6 +173,26 @@ def add_funds_to_account() -> None:
 _PEAK_PRICES_CSV = os.path.join(DATA_DIRECTORY, "peak_prices.csv")
 
 
+def _rb_call_with_retry(fn, *args, max_retries: int = 3, **kwargs):
+    """Call a Robinhood API function with exponential back-off on 429 / rate-limit errors."""
+    import random as _rand
+    for attempt in range(max_retries):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:
+            msg = str(exc).lower()
+            if "429" in msg or "too many requests" in msg or "throttle" in msg:
+                wait = (2 ** attempt) * (0.5 + _rand.random())
+                logger.warning(
+                    f"Rate-limited on {fn.__name__} (attempt {attempt+1}/{max_retries}), "
+                    f"sleeping {wait:.1f}s"
+                )
+                time.sleep(wait)
+            else:
+                raise
+    return fn(*args, **kwargs)  # final attempt — let it raise
+
+
 def _load_peak_prices() -> dict[str, float]:
     try:
         df = pd.read_csv(_PEAK_PRICES_CSV)
@@ -234,7 +255,7 @@ def _is_bear_market_regime() -> bool:
 def _place_fractional_buy(symbol: str, allocation: float) -> tuple[bool, str]:
     """Attempt a fractional buy order. Returns (success, detail_message)."""
     try:
-        res = rb.orders.order_buy_fractional_by_price(symbol, allocation)
+        res = _rb_call_with_retry(rb.orders.order_buy_fractional_by_price, symbol, allocation)
     except Exception as e:
         return False, str(e)
     if res and res.get("id"):
@@ -248,7 +269,7 @@ def _place_fractional_buy(symbol: str, allocation: float) -> tuple[bool, str]:
 def _place_whole_share_buy(symbol: str, quantity: int) -> bool:
     """Attempt a whole-share market buy. Returns True on success."""
     try:
-        res = rb.orders.order_buy_market(symbol, quantity)
+        res = _rb_call_with_retry(rb.orders.order_buy_market, symbol, quantity)
     except Exception as e:
         logger.error(f"{symbol}: whole-share market order failed: {e}")
         return False
@@ -282,6 +303,8 @@ def _process_whole_share_queue(
     purchased: list[str],
     failed: list[str],
     skipped: list[str],
+    holdings: dict | None = None,
+    portfolio_value: float = 0.0,
 ) -> None:
     """Execute whole-share fallback orders for symbols where fractional buy failed."""
     max_ws = RISK_LIMITS["max_whole_share_buys_per_run"]
@@ -313,6 +336,18 @@ def _process_whole_share_queue(
             )
             skipped.append(symbol)
             continue
+
+        # Re-run full risk checks — cash and sector exposure may have shifted
+        # since the original buy attempt earlier in the same run.
+        if holdings is not None:
+            available_cash = get_available_cash() * (1 - INDEX_PCT)
+            ok, reason, _ = can_buy_symbol(
+                symbol, current_price, holdings, agg_df, portfolio_value, available_cash, sector_exposure
+            )
+            if not ok:
+                logger.info(f"Whole-share {symbol} blocked by risk re-check: {reason}")
+                skipped.append(symbol)
+                continue
 
         if _place_whole_share_buy(symbol, 1):
             purchased.append(symbol)
@@ -346,9 +381,9 @@ def _place_sell(symbol: str, quantity: float) -> bool:
     is_fractional = quantity != int(quantity)
     try:
         if is_fractional:
-            res = rb.orders.order_sell_fractional_by_quantity(symbol, quantity)
+            res = _rb_call_with_retry(rb.orders.order_sell_fractional_by_quantity, symbol, quantity)
         else:
-            res = rb.order_sell_market(symbol, int(quantity), timeInForce="gfd")
+            res = _rb_call_with_retry(rb.order_sell_market, symbol, int(quantity), timeInForce="gfd")
     except Exception as e:
         logger.error(f"Sell order exception for {symbol}: {e}")
         return False
@@ -727,10 +762,16 @@ def allocate_harvest_proceeds_to_etfs(amount: float) -> None:
     if not harvest_etfs:
         return
     per_etf = amount / len(harvest_etfs)
+    min_order = RISK_LIMITS["min_order_amount"]
+    if per_etf < min_order:
+        logger.info(
+            f"Harvest per-ETF ${per_etf:.2f} < min_order ${min_order:.2f} — skipping harvest reinvestment"
+        )
+        return
     logger.info(f"=== HARVEST: ${amount:.2f} → {harvest_etfs} (${per_etf:.2f} each) ===")
     for etf in harvest_etfs:
         try:
-            res = rb.orders.order_buy_fractional_by_price(etf, per_etf)
+            res = _rb_call_with_retry(rb.orders.order_buy_fractional_by_price, etf, per_etf)
             logger.info(f"Harvest → {etf}: {res.get('state') if res else 'None'}")
         except Exception as e:
             logger.error(f"Harvest reinvestment failed for {etf}: {e}")
@@ -739,6 +780,24 @@ def allocate_harvest_proceeds_to_etfs(amount: float) -> None:
 # ---------------------------------------------------------------------------
 # Sell cycle
 # ---------------------------------------------------------------------------
+
+def get_pending_sell_symbols() -> set[str]:
+    """Return symbols that already have an open sell order so we can skip re-evaluating them."""
+    try:
+        pending: set[str] = set()
+        for order in rb.orders.get_all_open_stock_orders():
+            if order.get("side") != "sell":
+                continue
+            if order.get("state") not in ("confirmed", "queued", "unconfirmed"):
+                continue
+            sym = order.get("symbol")
+            if sym:
+                pending.add(sym)
+        return pending
+    except Exception as exc:
+        logger.warning(f"Could not fetch open sell orders: {exc}")
+        return set()
+
 
 def make_sales() -> list[str]:
     """
@@ -775,6 +834,10 @@ def make_sales() -> list[str]:
                 peaks[symbol] = max(peaks[symbol], current_p)
     _save_peak_prices(peaks)
 
+    pending_sells = get_pending_sell_symbols()
+    if pending_sells:
+        logger.info(f"Skipping {len(pending_sells)} symbol(s) with existing open sell orders: {sorted(pending_sells)}")
+
     scanned    = 0
     hard_sells: dict[str, dict] = {}
     soft_sells: dict[str, dict] = {}
@@ -783,6 +846,8 @@ def make_sales() -> list[str]:
         if symbol in ETFS:
             continue
         if float(data.get("quantity", 0)) <= 0:
+            continue
+        if symbol in pending_sells:
             continue
 
         scanned += 1
@@ -838,7 +903,7 @@ def make_sales() -> list[str]:
                 if (
                     result.get("action") == "HOLD"
                     and result.get("sentiment") == "bullish"
-                    and result["confidence"] >= CONFIDENCE_THRESHOLD
+                    and result["confidence"] >= SELL_SENTIMENT_OVERRIDE_CONFIDENCE
                 ):
                     logger.info(
                         f"HOLD {sym} — sentiment overrides soft sell "
@@ -941,10 +1006,31 @@ def make_buys(df: pd.DataFrame, is_first_iteration: bool = True, bear_market: bo
         logger.warning(f"No stocks pass value_metric ≥ {METRIC_THRESHOLD}")
         return [], df["symbol"].tolist(), []
 
-    # Cap candidates before sentiment to bound API cost and avoid look-ahead selection
+    # Exclude contrarian watchlist — tagged for monitoring only, not auto-buy
+    if "strategy_bucket" in candidates.columns:
+        contrarian_mask = candidates["strategy_bucket"] == "contrarian_watchlist"
+        contrarian_syms = candidates.loc[contrarian_mask, "symbol"].tolist()
+        candidates = candidates[~contrarian_mask].copy()
+        if contrarian_syms:
+            logger.info(f"Contrarian watchlist excluded from buys: {contrarian_syms}")
+
+    if candidates.empty:
+        logger.warning("No candidates remain after contrarian exclusion")
+        return [], df["symbol"].tolist(), []
+
+    # Cap candidates before sentiment to bound API cost and avoid look-ahead selection.
+    # BTR is a tie-breaker within equal value_metric — NaN rows are pushed to the end.
     max_sc = RISK_LIMITS["max_sentiment_candidates"]
     if len(candidates) > max_sc:
-        candidates = candidates.sort_values("value_metric", ascending=False).head(max_sc).copy()
+        sort_cols = ["value_metric"] + (
+            ["buy_to_sell_ratio"] if "buy_to_sell_ratio" in candidates.columns else []
+        )
+        candidates = (
+            candidates
+            .sort_values(sort_cols, ascending=[False] * len(sort_cols), na_position="last")
+            .head(max_sc)
+            .copy()
+        )
         logger.info(f"Candidates capped to {max_sc} (max_sentiment_candidates)")
 
     # Load portfolio context once before the loop
@@ -1025,7 +1111,10 @@ def make_buys(df: pd.DataFrame, is_first_iteration: bool = True, bear_market: bo
             failed.append(symbol)
 
     if whole_share_queue:
-        _process_whole_share_queue(whole_share_queue, agg_df, sector_exposure, purchased, failed, skipped)
+        _process_whole_share_queue(
+            whole_share_queue, agg_df, sector_exposure, purchased, failed, skipped,
+            holdings, portfolio_value,
+        )
 
     logger.info(
         f"Buy summary: {len(purchased)} bought, {len(skipped)} skipped, {len(failed)} failed"

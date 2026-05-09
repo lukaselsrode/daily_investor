@@ -70,7 +70,19 @@ INDEX_PCT:            float = float(_app.get("index_pct", 0.85))
 AUTO_APPROVE:         bool  = _app.get("auto_approve", False)
 USE_SENTIMENT_ANALYSIS: bool = _app.get("use_sentiment_analysis", False)
 CONFIDENCE_THRESHOLD: float = float(_app.get("confidence_threshold", 70))
+SELL_SENTIMENT_OVERRIDE_CONFIDENCE: float = float(_app.get("sell_sentiment_override_confidence", 85))
 ETFS:                 list  = _app.get("etfs", ["SPY", "VOO", "VTI", "QQQ", "SCHD"])
+
+# Instruments that look like stocks in the universe but behave like funds.
+# Excluded from all stock scoring and buy decisions; ETF exposure remains
+# intentional via the explicit ETFS list above.
+EXCLUDED_STOCK_INDUSTRIES: frozenset[str] = frozenset({
+    "Investment Trusts Or Mutual Funds",
+    "Investment Trusts/Mutual Funds",
+})
+EXCLUDED_STOCK_SECTORS: frozenset[str] = frozenset({
+    "Miscellaneous",
+})
 
 # ---------------------------------------------------------------------------
 # Score weights — weights must sum to 1.0; fall back to defaults otherwise
@@ -276,6 +288,8 @@ METRIC_KEYS: list[str] = [
     "yield_trap_flag",
     "value_metric",
     "buy_to_sell_ratio",
+    "missing_value_flag",
+    "strategy_bucket",
 ]
 
 AGG_DATA_COLUMNS: list[str] = ["symbol"] + METRIC_KEYS

@@ -35,6 +35,8 @@ from util import (
     ANALYST_PARAMS,
     DATA_DIRECTORY,
     DIVIDEND_THRESHOLD,
+    EXCLUDED_STOCK_INDUSTRIES,
+    EXCLUDED_STOCK_SECTORS,
     IGNORE_NEGATIVE_PB,
     IGNORE_NEGATIVE_PE,
     MAX_PE_COMPONENT,
@@ -270,6 +272,14 @@ def _evaluate_stock(symbol: str, stock: dict) -> list | None:
     if not stock.get("industry") and not stock.get("sector"):
         return None
 
+    # Exclude investment trusts and mutual funds — they don't score like operating companies
+    # and accounted for 23% of the universe (400 rows) in analysis.
+    # Intentional ETF exposure is handled separately via the explicit ETFS config list.
+    _sector   = stock.get("sector", "") or ""
+    _industry = stock.get("industry", "") or ""
+    if _sector in EXCLUDED_STOCK_SECTORS or _industry in EXCLUDED_STOCK_INDUSTRIES:
+        return None
+
     volume = safe_float(stock.get("volume"), 0)
     if not volume:
         return None
@@ -315,11 +325,19 @@ def _evaluate_stock(symbol: str, stock: dict) -> list | None:
             f"pb_raw={pb_comp_raw:.3f}, pb_capped={pb_comp:.3f}"
         )
 
-    value_score  = round(
-        SCORING_PARAMS["value_pe_weight"] * pe_comp
-        + SCORING_PARAMS["value_pb_weight"] * pb_comp,
-        3,
-    )
+    # Penalise stocks with no valuation evidence at all.  A zero score (the
+    # previous behaviour) treated missing data as neutral; -0.25 makes it a
+    # mild negative so these names can only win on quality + momentum.
+    missing_value_flag = pe_ratio is None and pb_ratio is None
+    if missing_value_flag:
+        value_score = -0.25
+    else:
+        value_score = round(
+            SCORING_PARAMS["value_pe_weight"] * pe_comp
+            + SCORING_PARAMS["value_pb_weight"] * pb_comp,
+            3,
+        )
+
     income_score, yield_trap_flag = _dividend_income_score(dividend_yield)
     quality      = _quality_score(pe_ratio, pb_ratio, volume, dividend_yield)
 
@@ -331,6 +349,13 @@ def _evaluate_stock(symbol: str, stock: dict) -> list | None:
         3,
     )
     buy_to_sell = None  # fetched post-filter for shortlisted candidates only
+
+    # High-quality businesses near their 52w low: tag for monitoring but don't auto-buy.
+    # Criteria: quality>=1.0, negative momentum, position in bottom quarter of 52w range.
+    if quality >= 1.0 and momentum < 0 and pos_52w is not None and pos_52w < 0.25:
+        strategy_bucket = "contrarian_watchlist"
+    else:
+        strategy_bucket = "core_candidate"
 
     return [
         stock.get("industry"),
@@ -353,6 +378,8 @@ def _evaluate_stock(symbol: str, stock: dict) -> list | None:
         yield_trap_flag,
         final_metric,
         buy_to_sell,
+        missing_value_flag,
+        strategy_bucket,
     ]
 
 
@@ -463,6 +490,14 @@ def _get_robinhood_fundamentals(tickers: list[str], force_refresh: bool) -> pd.D
 
     # Enrich with 1-month price returns for directional momentum scoring
     _enrich_with_momentum(list(fundamentals.keys()), fundamentals)
+    r1m_have = sum(1 for d in fundamentals.values() if d.get("return_1m") is not None)
+    r1m_pct  = r1m_have / max(len(fundamentals), 1) * 100
+    logger.info("return_1m coverage: %.1f%% (%d/%d)", r1m_pct, r1m_have, len(fundamentals))
+    if r1m_pct < 50.0:
+        logger.warning(
+            "return_1m coverage is low (%.1f%%) — momentum scoring will rely on position_52w only",
+            r1m_pct,
+        )
 
     rows = []
     for symbol, data in fundamentals.items():
@@ -485,19 +520,8 @@ def _get_robinhood_fundamentals(tickers: list[str], force_refresh: bool) -> pd.D
             for sym in candidates:
                 ratio = _get_buy_to_sell_ratio(sym)
                 df.loc[df["symbol"] == sym, "buy_to_sell_ratio"] = ratio
-                if ratio is not None:
-                    ap = ANALYST_PARAMS
-                    multiplier = (
-                        ap["strong_buy_multiplier"] if ratio >= ap["strong_buy_ratio"]
-                        else ap["net_sell_multiplier"] if ratio < ap["net_sell_ratio"]
-                        else 1.0
-                    )
-                    if multiplier != 1.0:
-                        cur = df.loc[df["symbol"] == sym, "value_metric"]
-                        if not cur.empty and pd.notna(cur.iloc[0]):
-                            df.loc[df["symbol"] == sym, "value_metric"] = round(
-                                float(cur.iloc[0]) * multiplier, 3
-                            )
+                # BTR is stored for tie-breaking in make_buys but does NOT mutate
+                # value_metric — coverage is too sparse (~17%) for a reliable multiplier.
                 time.sleep(0.3)
             store_data_as_csv("robinhood_data", AGG_DATA_COLUMNS, df)
             time.sleep(1)
