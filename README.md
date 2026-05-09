@@ -527,6 +527,62 @@ daily-investor run --op-mode no-sentiment  # no API key needed, pure quantitativ
 5. Batch soft sell candidates through Claude as a hold-check (confidence ≥ 85% bullish = hold)
 6. Aggregate `harvest_exit` proceeds and route to `harvest_etfs`
 
+## Streamlit UI
+
+An interactive control panel for the full CLI feature set. Runs separately from the CLI — does not replace it.
+
+### What the UI can do
+
+| Page | Capability |
+|---|---|
+| Home | System status, config overview, data freshness, log tail |
+| Run Control | Build and execute any CLI command with full options; streams output |
+| Portfolio | Holdings from cached CSV; live broker data on demand (requires credentials) |
+| Order Intents | Dry-run preview of proposed buys/sells/harvests |
+| Scoring Explorer | Filter, sort, and drill into the scored universe |
+| Backtests | Run `BacktestEngine` interactively; view full results |
+| Auto-Tune | Run single-objective or dual-objective tune; view diff and validation status |
+| Stability & Robustness | Run stability scan; view heatmaps and robustness report |
+| Regime & Risk | Inspect effective config under each regime; view all risk limits |
+| Reliability Diagnostics | NaN coverage, score distributions, yield traps, liquidity |
+| Data Explorer | Explore any CSV (agg_data, robinhood_data, news, stability, …) with charts |
+| Logs / Audit | Tail application log, browse order_intents and order_results CSVs |
+| Config Viewer | Parsed config.yaml in readable sections; download button |
+
+### What the UI cannot do
+
+- Place live orders without explicitly enabling `ui.allow_live_execution: true` in config
+- Write `config.yaml` without `ui.allow_config_writes: true`
+- Bypass `RiskManager`, validation gates, or audit logging (all paths go through the same service layer as the CLI)
+
+### Launch
+
+```bash
+# Install UI dependencies
+pip install -e ".[ui]"
+
+# Launch (from project root)
+streamlit run src/ui/streamlit_app.py
+```
+
+### Safety notes
+
+- The UI starts in **read-only mode** by default. The sidebar live-execution toggle is locked unless `ui.allow_live_execution: true` is set in `cfg/config.yaml`.
+- The **Run Control** page executes commands via `python -m cli <subcommand>` — the exact same path as `daily-investor <subcommand>`.
+- Live order placement is intentionally not wired in the UI adapter. The supported live execution path is `daily-investor run --op-mode safe` via Run Control, which streams output and respects all safety gates.
+
+Add to `cfg/config.yaml` to enable controlled live execution from the UI:
+
+```yaml
+ui:
+  allow_live_execution: true    # enables sidebar toggle
+  allow_config_writes: true     # enables --apply in Auto-Tune
+  allow_force_apply: false      # keep false unless debugging
+  require_confirmation_phrase: true
+  confirmation_phrase: EXECUTE
+  intent_ttl_minutes: 5
+```
+
 ## Setup
 
 **Requirements:** Python 3.10+, Robinhood account, Anthropic API key

@@ -46,9 +46,16 @@ dependencies = [
 # Install: pip install "daily-investor[heatmaps]"
 heatmaps = ["matplotlib>=3.5"]
 
+ui = [
+    "streamlit>=1.35",
+    "plotly>=5.0",
+]
+
 dev = [
     "pytest>=7.0",
     "matplotlib>=3.5",
+    "streamlit>=1.35",
+    "plotly>=5.0",
 ]
 
 [project.scripts]
