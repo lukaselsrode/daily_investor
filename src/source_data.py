@@ -47,6 +47,7 @@ from util import (
     METRIC_THRESHOLD,
     MOMENTUM_PARAMS,
     MOMENTUM_V2_PARAMS,
+    RELIABILITY_PARAMS,
     SCORE_WEIGHTS,
     SCORING_PARAMS,
     get_investment_ratios,
@@ -664,6 +665,112 @@ def _apply_cross_sectional_momentum_scores(df: pd.DataFrame) -> None:
     )
 
 
+def _compute_reliability_scores(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compute four component reliability scores (0–1) and combine into reliability_score.
+
+    DATA / SIGNAL QUALITY indicators only — NOT alpha factors.
+    Measures how much we can trust a stock's computed value_metric,
+    not whether the stock will outperform.
+    """
+    import numpy as np
+
+    n = len(df)
+
+    def _num(col: str) -> "pd.Series":
+        return pd.to_numeric(df[col], errors="coerce") if col in df.columns else pd.Series([float("nan")] * n)
+
+    # ── 1. Data Quality Score ─────────────────────────────────────────────────
+    # Rewards presence of clean fundamental inputs; penalizes extreme/suspicious values.
+    dq = np.full(n, 0.40)  # base: partial credit even with thin data
+
+    pe = _num("pe_ratio")
+    pb = _num("pb_ratio")
+    dy = _num("dividend_yield")
+    bsr = _num("buy_to_sell_ratio")
+    pe_c = _num("pe_comp")
+
+    dq += 0.20 * np.where(pe.notna() & (pe > 0), 1.0, 0.0)
+    dq += 0.20 * np.where(pb.notna() & (pb > 0), 1.0, 0.0)
+    dq += 0.10 * np.where(dy.notna(), 1.0, 0.0)
+    dq += 0.10 * np.where(bsr.notna(), 1.0, 0.0)
+    # Penalty for implausible valuation components
+    dq -= 0.15 * np.where(pe_c.notna() & (pe_c <= 0), 1.0, 0.0)
+
+    dq = np.clip(dq, 0.0, 1.0)
+
+    # ── 2. Feature Coverage Score ─────────────────────────────────────────────
+    # Fraction of momentum v2 inputs that are non-NaN. More features → more reliable score.
+    momentum_cols = [
+        "return_1m", "return_3m", "return_6m", "return_5d",
+        "rs_3m", "rs_6m", "realized_vol_3m", "above_50dma", "above_200dma",
+    ]
+    present = [c for c in momentum_cols if c in df.columns]
+    if present:
+        fc = np.mean(
+            [np.where(_num(c).notna(), 1.0, 0.0) for c in present], axis=0
+        )
+    else:
+        fc = np.zeros(n)
+
+    # ── 3. Liquidity Reliability Score ────────────────────────────────────────
+    # Higher volume and lower realized volatility → more reliable pricing.
+    lr = np.full(n, 0.50)  # neutral base
+
+    vol_ser = _num("volume").fillna(0)
+    # Map log volume to [-0.30, +0.30] bonus/penalty around the min_liquidity threshold
+    log_vol = np.log1p(vol_ser.values)
+    log_low  = float(np.log1p(500_000))
+    log_high = float(np.log1p(5_000_000))
+    lr += 0.30 * np.clip(
+        (log_vol - log_low) / max(log_high - log_low, 1e-9) - 0.5, -0.5, 0.5
+    )
+
+    rv = _num("realized_vol_3m")
+    lr -= 0.15 * np.where(rv.notna() & (rv > 0.60), 1.0, 0.0)
+    lr -= 0.10 * np.where(rv.notna() & (rv > 0.40), 1.0, 0.0)
+
+    lr = np.clip(lr, 0.0, 1.0)
+
+    # ── 4. Signal Stability Score ─────────────────────────────────────────────
+    # Measures internal consistency of momentum signals; high agreement → stable signal.
+    ss = np.full(n, 0.50)
+
+    # High realized vol → noisier momentum signal
+    rv_fill = rv.fillna(0.30).values
+    ss -= 0.25 * np.clip(rv_fill / 0.50, 0.0, 1.0)
+
+    # 3m and 6m return direction agreement → signal is trending, not reversing
+    r3 = _num("return_3m").fillna(0)
+    r6 = _num("return_6m").fillna(0)
+    ss += 0.20 * np.where(np.sign(r3) == np.sign(r6), 1.0, 0.0)
+
+    # RS 3m and RS 6m direction agreement → relative strength is persistent
+    rs3 = _num("rs_3m").fillna(0)
+    rs6 = _num("rs_6m").fillna(0)
+    ss += 0.20 * np.where(np.sign(rs3) == np.sign(rs6), 1.0, 0.0)
+
+    ss = np.clip(ss, 0.0, 1.0)
+
+    # ── Composite ─────────────────────────────────────────────────────────────
+    reliability = 0.30 * dq + 0.30 * fc + 0.20 * lr + 0.20 * ss
+
+    df = df.copy()
+    df["data_quality_score"]          = np.round(dq,          3)
+    df["feature_coverage_score"]      = np.round(fc,          3)
+    df["liquidity_reliability_score"] = np.round(lr,          3)
+    df["signal_stability_score"]      = np.round(ss,          3)
+    df["reliability_score"]           = np.round(reliability, 3)
+
+    rel = df["reliability_score"]
+    logger.info(
+        "Reliability scores: mean=%.3f  high(≥0.70): %.0f%%  "
+        "feature_coverage mean=%.2f",
+        rel.mean(), (rel >= 0.70).mean() * 100, float(fc.mean()),
+    )
+    return df
+
+
 def _get_robinhood_fundamentals(tickers: list[str], force_refresh: bool) -> pd.DataFrame | None:
     if not force_refresh:
         return read_data_as_pd("robinhood_data")
@@ -732,6 +839,9 @@ def _get_robinhood_fundamentals(tickers: list[str], force_refresh: bool) -> pd.D
         + SCORE_WEIGHTS["income"]   * df_raw["income_score"]
         + SCORE_WEIGHTS["momentum"] * df_raw["momentum_score"]
     ).round(3)
+
+    # Reliability scoring — data/signal quality, not alpha
+    df_raw = _compute_reliability_scores(df_raw)
 
     # Universe composition diagnostics
     if "sector" in df_raw.columns:

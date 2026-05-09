@@ -43,9 +43,11 @@ from util import (
     METRIC_KEYS,
     METRIC_THRESHOLD,
     REGIME_PARAMS,
+    RELIABILITY_PARAMS,
     RISK_LIMITS,
     SELL_RULES,
     SELL_SENTIMENT_OVERRIDE_CONFIDENCE,
+    STABILITY_PARAMS,
     USE_SENTIMENT_ANALYSIS,
     WEEKLY_INVESTMENT,
     read_data_as_pd,
@@ -1102,6 +1104,23 @@ def make_buys(df: pd.DataFrame, is_first_iteration: bool = True, regime: str = "
         logger.warning("No candidates remain after contrarian exclusion")
         return [], df["symbol"].tolist(), []
 
+    # Optional reliability gate — skip stocks with insufficient data/signal quality.
+    # This is DATA QUALITY filtering, not an alpha signal.
+    if RELIABILITY_PARAMS["enabled"] and "reliability_score" in candidates.columns:
+        min_rel = RELIABILITY_PARAMS["min_reliability_score"]
+        rel_scores = pd.to_numeric(candidates["reliability_score"], errors="coerce").fillna(0.0)
+        low_rel = candidates[rel_scores < min_rel]["symbol"].tolist()
+        candidates = candidates[rel_scores >= min_rel].copy()
+        if low_rel:
+            logger.info(
+                f"Reliability gate ({min_rel:.2f}): excluded {len(low_rel)} "
+                f"low-quality candidates: {low_rel[:10]}"
+            )
+
+    if candidates.empty:
+        logger.warning("No candidates remain after reliability gate")
+        return [], df["symbol"].tolist(), []
+
     # Cap candidates before sentiment to bound API cost and avoid look-ahead selection.
     # BTR is a tie-breaker within equal value_metric — NaN rows are pushed to the end.
     max_sc = RISK_LIMITS["max_sentiment_candidates"]
@@ -1347,6 +1366,23 @@ def _run_tuner_cli(n_days: int, objective: str) -> None:
         sys.exit(1)
 
 
+def _run_stability_scan_cli(
+    windows: "list[int] | None" = None,
+    mode: "str | None" = None,
+    output_dir: "str | None" = None,
+) -> None:
+    """
+    CLI entry point for --stability-scan.
+    RESEARCH / DIAGNOSTIC ONLY — never writes config.yaml.
+    """
+    from tuner import run_stability_scan
+    try:
+        run_stability_scan(windows=windows, mode=mode, output_dir=output_dir)
+    except RuntimeError as e:
+        logger.error(str(e))
+        sys.exit(1)
+
+
 def _run_auto_tune_cli(
     n_days: int,
     mode: str | None = None,
@@ -1436,6 +1472,15 @@ BACKTEST / TUNING OPTIONS
                          current_universe_stress_test  — top stocks by current score       [HIGH bias, not predictive]
                          walk_forward_price_only_test  — volume filter only, momentum-only [LOW bias]
 
+  --stability-scan     Run the optimizer across all configured windows and objectives, then
+                       generate stability heatmaps, CSV summaries, and a human-readable
+                       robustness report. RESEARCH/DIAGNOSTIC ONLY — never writes config.yaml.
+                       Output: reports/stability/ (configurable via stability.output_dir in config)
+                       Optional: --mode MODE, --output-dir PATH
+                       Requires matplotlib for heatmaps: pip install matplotlib
+                       Relevant config keys: stability.windows, stability.objectives,
+                         stability.unstable_cv_threshold, stability.unstable_spread_threshold
+
 CONFIG WRITE OPTIONS (auto-tune only)
   --apply              Write config.yaml if out-of-sample validation gates pass.
   --force-apply        Write config.yaml unconditionally (bypasses validation — use with care).
@@ -1500,6 +1545,20 @@ VALIDATION GATES (auto-tune)
                 print("--objective must be 'sharpe' or 'calmar'")
                 sys.exit(1)
         _run_tuner_cli(n_days, objective)
+        return
+
+    if "--stability-scan" in args:
+        mode = None
+        if "--mode" in args:
+            mi = args.index("--mode")
+            if mi + 1 < len(args):
+                mode = args[mi + 1]
+        out_dir = None
+        if "--output-dir" in args:
+            oi = args.index("--output-dir")
+            if oi + 1 < len(args):
+                out_dir = args[oi + 1]
+        _run_stability_scan_cli(mode=mode, output_dir=out_dir)
         return
 
     # --op-mode: runtime override of auto_approve and use_sentiment_analysis

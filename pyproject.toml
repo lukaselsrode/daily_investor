@@ -1,0 +1,62 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "daily-investor"
+version = "0.1.0"
+description = "Robinhood systematic investment bot with momentum scoring, three-tier regime logic, and anti-lookahead backtesting"
+requires-python = ">=3.10"
+dependencies = [
+    # HTTP / async
+    "aiohttp>=3.9",
+    "requests>=2.28",
+
+    # Robinhood + market data
+    "robin-stocks>=3.0",
+    "yfinance>=0.2.30",
+
+    # Numerics / data
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "scipy>=1.10",
+
+    # Config / env
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
+
+    # Auth
+    "pyotp>=2.8",
+
+    # HTML parsing
+    "beautifulsoup4>=4.12",
+
+    # LLM stack
+    "anthropic>=0.50",
+    "langchain-anthropic>=1.0",
+    "langchain-core>=1.0",
+    "langgraph>=1.0",
+
+    # Typing backport
+    "typing_extensions>=4.0",
+]
+
+[project.optional-dependencies]
+# Needed for stability-scan heatmaps (--stability-scan)
+# Install: pip install "daily-investor[heatmaps]"
+heatmaps = ["matplotlib>=3.5"]
+
+dev = [
+    "pytest>=7.0",
+    "matplotlib>=3.5",
+]
+
+[project.scripts]
+daily-investor = "main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["src"]
+python_files = ["tests.py"]

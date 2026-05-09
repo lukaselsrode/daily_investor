@@ -340,6 +340,33 @@ ETF_RISK_PARAMS: dict = {
 }
 
 # ---------------------------------------------------------------------------
+# Reliability scoring — data/signal quality indicators (NOT alpha)
+# ---------------------------------------------------------------------------
+
+_rel = _app.get("reliability", {})
+RELIABILITY_PARAMS: dict = {
+    "enabled":              bool(_rel.get("enabled",              False)),
+    "min_reliability_score":float(_rel.get("min_reliability_score", 0.70)),
+}
+
+# ---------------------------------------------------------------------------
+# Parameter stability analysis — research/diagnostic only
+# ---------------------------------------------------------------------------
+
+_stab = _app.get("stability", {})
+STABILITY_PARAMS: dict = {
+    "enabled":                   bool(_stab.get("enabled",                   True)),
+    "windows":                   list(_stab.get("windows",                   [30, 60, 90, 180, 365])),
+    "objectives":                list(_stab.get("objectives",                ["sharpe", "calmar"])),
+    "output_dir":                str(_stab.get("output_dir",                 "reports/stability")),
+    "unstable_spread_threshold": float(_stab.get("unstable_spread_threshold",0.15)),
+    "unstable_cv_threshold":     float(_stab.get("unstable_cv_threshold",    0.30)),
+    "max_unstable_params":       int(_stab.get("max_unstable_params",        5)),
+    "scan_maxiter":              int(_stab.get("scan_maxiter",               15)),
+    "scan_popsize":              int(_stab.get("scan_popsize",               6)),
+}
+
+# ---------------------------------------------------------------------------
 # Canonical agg_data schema — single definition used by all modules
 # ---------------------------------------------------------------------------
 
@@ -377,6 +404,12 @@ METRIC_KEYS: list[str] = [
     "risk_adj_momentum_3m",
     "above_50dma",
     "above_200dma",
+    # reliability scores — data/signal quality, NOT alpha (populated by _compute_reliability_scores)
+    "data_quality_score",
+    "feature_coverage_score",
+    "liquidity_reliability_score",
+    "signal_stability_score",
+    "reliability_score",
 ]
 
 AGG_DATA_COLUMNS: list[str] = ["symbol"] + METRIC_KEYS

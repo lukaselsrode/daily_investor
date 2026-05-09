@@ -1,0 +1,82 @@
+================================================================
+ROBUSTNESS REPORT — 2026-05-09
+================================================================
+RESEARCH / DIAGNOSTIC ONLY — not a trading signal.
+Purpose: understand which parameters are stable vs overfit.
+
+----------------------------------------------------------------
+WINDOWS ANALYZED
+----------------------------------------------------------------
+    30d  val_excess=+1.33%  val_sharpe=+10.928  drawdown=-0.81%  trades=23  validation=PASS
+    60d  val_excess=+1.89%  val_sharpe=+8.480  drawdown=-0.78%  trades=40  validation=PASS
+    90d  val_excess=-3.36%  val_sharpe=+9.417  drawdown=-0.91%  trades=31  validation=FAIL
+   180d  val_excess=-2.64%  val_sharpe=+1.813  drawdown=-5.64%  trades=48  validation=FAIL
+   365d  val_excess=-4.42%  val_sharpe=+0.990  drawdown=-7.67%  trades=40  validation=FAIL
+
+----------------------------------------------------------------
+PARAMETER STABILITY SUMMARY
+----------------------------------------------------------------
+ ⚠ metric_threshold                      mean=+1.0982  stddev=0.5218  cv=0.475  spread=0.2362  conv=60%  [UNSTABLE]
+ ⚠ mom_radj                              mean=+0.2720  stddev=0.1318  cv=0.485  spread=0.2160  conv=80%  [UNSTABLE]
+ ⚠ mom_r1m                               mean=+0.2213  stddev=0.1222  cv=0.552  spread=0.1894  conv=80%  [UNSTABLE]
+ ⚠ take_profit_pct                       mean=+0.5859  stddev=0.1734  cv=0.296  spread=0.2934  conv=60%  [UNSTABLE]
+ ⚠ mom_rs6m                              mean=+0.2098  stddev=0.0927  cv=0.442  spread=0.1303  conv=60%  [UNSTABLE]
+ ⚠ sell_weak_below                       mean=+0.4480  stddev=0.1132  cv=0.253  spread=0.2869  conv=40%  [UNSTABLE]
+ ⚠ sw_value                              mean=+0.2974  stddev=0.2192  cv=0.737  spread=0.1058  conv=40%  [UNSTABLE]
+ ⚠ sw_momentum                           mean=+0.2250  stddev=0.1047  cv=0.466  spread=0.0916  conv=40%  [UNSTABLE]
+ ⚠ mom_rs3m                              mean=+0.2506  stddev=0.1136  cv=0.453  spread=0.0886  conv=60%  [UNSTABLE]
+ ⚠ value_pe_weight                       mean=+0.7380  stddev=0.1190  cv=0.161  spread=0.1610  conv=60%  [UNSTABLE]
+ ⚠ mom_trend                             mean=+0.2629  stddev=0.1516  cv=0.577  spread=0.0680  conv=80%  [UNSTABLE]
+ ⚠ sw_income                             mean=+0.1295  stddev=0.0969  cv=0.749  spread=0.0625  conv=40%  [UNSTABLE]
+ ~ sw_quality                            mean=+0.4300  stddev=0.0852  cv=0.198  spread=0.1009  conv=60%  [MODERATELY_STABLE]
+ ⚠ trailing_stop                         mean=-0.0878  stddev=0.0461  cv=0.525  spread=0.0418  conv=80%  [UNSTABLE]
+   index_pct                             mean=+0.7878  stddev=0.1111  cv=0.141  spread=0.0855  conv=40%  [STABLE]
+
+----------------------------------------------------------------
+FINDINGS
+----------------------------------------------------------------
+  ⚠ 13 UNSTABLE parameter(s):
+      • sw_value
+      • sw_income
+      • sw_momentum
+      • metric_threshold
+      • take_profit_pct
+      • sell_weak_below
+      • trailing_stop
+      • value_pe_weight
+      • mom_rs3m
+      • mom_rs6m
+      • mom_radj
+      • mom_trend
+      • mom_r1m
+
+  Unstable parameters have high cross-window variance or large
+  disagreement between Sharpe and Calmar objectives. Their
+  averaged values may not generalize. Consider:
+    - Fixing them to config defaults and not tuning
+    - Using a longer window to reduce overfitting
+    - Investigating whether the signal is genuinely informative
+
+  ~ 1 MODERATELY_STABLE parameter(s) — monitor:
+      • sw_quality
+
+  Validation passed in 2/5 windows.
+
+----------------------------------------------------------------
+INTERPRETATION GUIDE
+----------------------------------------------------------------
+  cv (coefficient of variation) = stddev / |mean| across windows.
+  High cv → parameter value changes substantially with window length.
+
+  sharpe_calmar_spread = mean |sharpe_opt - calmar_opt| per window.
+  High spread → objectives fundamentally disagree on this parameter.
+
+  convergence_frequency = fraction of windows within 1 stddev of mean.
+  Low frequency → optimizer rarely lands in the same region.
+
+  instability_score = composite (0=stable, 1=unstable).
+  Use this to rank parameters by robustness concern.
+
+================================================================
+END OF REPORT
+================================================================

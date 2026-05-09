@@ -258,3 +258,35 @@ backtest:
   # effective_slippage_bps = slippage_bps * (1 + vol_slippage_multiplier * annualized_vol)
   vol_slippage_scaling: true
   vol_slippage_multiplier: 2.0
+
+# ---------------------------------------------------------------------------
+# Reliability scoring — DATA / SIGNAL QUALITY indicators, NOT alpha
+# Measures trustworthiness of a stock's computed score.
+# Set enabled: true to gate live buys on min_reliability_score.
+# ---------------------------------------------------------------------------
+reliability:
+  enabled: false
+  min_reliability_score: 0.70
+
+# ---------------------------------------------------------------------------
+# Parameter stability analysis — RESEARCH / DIAGNOSTIC ONLY
+# Runs the optimizer across multiple windows and objectives to detect
+# unstable or overfit parameters. Never auto-applies results.
+# ---------------------------------------------------------------------------
+stability:
+  enabled: true
+  windows:
+    - 30
+    - 60
+    - 90
+    - 180
+    - 365
+  objectives:
+    - sharpe
+    - calmar
+  output_dir: reports/stability
+  unstable_spread_threshold: 0.15   # |sharpe_opt - calmar_opt| above this → UNSTABLE
+  unstable_cv_threshold: 0.30       # stddev/|mean| across windows above this → UNSTABLE
+  max_unstable_params: 5            # warn if more than N params are unstable
+  scan_maxiter: 15                  # optimizer iterations per window (faster than full tune)
+  scan_popsize: 6                   # population size per window
