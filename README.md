@@ -26,19 +26,73 @@ An automated investment strategy tool that combines fundamental analysis with AI
 ```
 daily_investor/
 ├── cfg/
-│   └── config.yaml            # All tunable parameters (never commit credentials here)
-├── data/                      # CSV cache (dated filenames, newest always used)
+│   └── config.yaml                  # All tunable parameters (never commit credentials here)
+├── data/                            # CSV cache (dated filenames, newest always used)
 ├── src/
-│   ├── main.py                # Entry point: login, buy/sell loops, CLI dispatcher
-│   ├── backtest.py            # Simulation engine: causal features, TWR, regime, reports
-│   ├── tuner.py               # Parameter optimizer: scipy DE, validation gating, LLM review
-│   ├── sentiment_analysis.py  # Batch async + single-stock Claude sentiment
-│   ├── sentiments.py          # News/Reddit data collection
-│   ├── source_data.py         # Universe generation, fundamentals, v2 momentum scoring
-│   ├── util.py                # Config constants, schema, CSV helpers
-│   └── tests.py               # Pure-function unit tests (no API required)
-└── .env                       # Credentials (never commit)
+│   ├── cli/                         # CLI dispatcher — new modular entry point
+│   │   ├── main.py                  # Argument parsing, command dispatch
+│   │   └── commands.py              # Per-command handlers (run, backtest, tune, …)
+│   ├── core/
+│   │   ├── types.py                 # Shared dataclasses: SimResult, TradeRecord, SellDecision, …
+│   │   └── logging.py               # Structured JSON logging, configure_logging()
+│   ├── config/
+│   │   ├── schema.py                # 19 frozen dataclasses for all YAML sections
+│   │   └── manager.py               # Singleton ConfigManager with cached_property sections
+│   ├── data/
+│   │   ├── base.py                  # ABCs: MarketDataProvider, SentimentProvider
+│   │   ├── cache.py                 # CSV read/write helpers
+│   │   ├── sentiment.py             # SentimentProvider wrapping sentiment_analysis.py
+│   │   ├── universe.py              # UniverseBuilder wrapping gen_symbols_list
+│   │   ├── fundamentals.py          # FundamentalsProvider (stub — Phase 2)
+│   │   └── market.py                # MarketDataProvider (stub — Phase 2)
+│   ├── strategy/
+│   │   ├── value.py                 # ValueScorer: P/E + P/B with guardrails
+│   │   ├── quality.py               # QualityScorer: liquidity, earnings, dividend health
+│   │   ├── income.py                # IncomeScorer: yield with trap detection
+│   │   ├── momentum.py              # MomentumEngine: v2 multi-factor + v1 fallback
+│   │   └── composite.py             # CompositeScorer: weighted combination → value_metric
+│   ├── portfolio/
+│   │   ├── risk.py                  # RiskManager.can_buy() — all position/sector/order gates
+│   │   └── sell_engine.py           # SellDecisionEngine.evaluate() — hard/soft sell logic
+│   ├── execution/
+│   │   ├── base.py                  # BrokerAdapter ABC
+│   │   ├── paper.py                 # PaperBroker — in-memory, no API
+│   │   └── robinhood.py             # RobinhoodBroker — live orders with retry backoff
+│   ├── backtesting/
+│   │   ├── engine.py                # BacktestEngine: simulate(), run(), run_walk_forward()
+│   │   ├── validator.py             # WalkForwardValidator: train/val split, gate checks
+│   │   └── results.py               # BacktestResult, ValidationResult typed wrappers
+│   ├── tuning/
+│   │   ├── tuner.py                 # ParameterTuner: tune(), auto_tune(), apply_params()
+│   │   ├── stability.py             # StabilityAnalyzer: multi-window scan()
+│   │   └── results.py               # TuneResult, AutoTuneResult, StabilityReport
+│   ├── reporting/
+│   │   ├── attribution.py           # AttributionReporter: stability classification
+│   │   ├── diagnostics.py           # DiagnosticsReporter: CSV + robustness TXT
+│   │   └── plots.py                 # PlotManager: param/objective/validation heatmaps
+│   ├── main.py                      # Legacy live-trading loop (still the execution engine)
+│   ├── backtest.py                  # Legacy simulation core (still the computation engine)
+│   ├── tuner.py                     # Legacy optimizer core (scipy DE, LLM review)
+│   ├── source_data.py               # Universe + fundamentals + momentum scoring
+│   ├── sentiment_analysis.py        # Batch async + single-stock Claude sentiment
+│   ├── sentiments.py                # News/Reddit data collection
+│   ├── util.py                      # Config constants, schema, CSV helpers
+│   └── tests.py                     # Legacy pure-function unit tests
+├── tests/                           # pytest test suite (271 tests, no API required)
+│   ├── conftest.py
+│   ├── test_config.py
+│   ├── test_scoring.py
+│   ├── test_risk.py
+│   ├── test_sell_engine.py
+│   ├── test_execution.py
+│   ├── test_backtesting.py
+│   ├── test_tuning.py
+│   ├── test_reporting.py
+│   └── test_cli.py
+└── .env                             # Credentials (never commit)
 ```
+
+The new modular layer (`cli/`, `core/`, `config/`, `strategy/`, `portfolio/`, `execution/`, `backtesting/`, `tuning/`, `reporting/`) provides a typed, testable API over the legacy engine modules. The legacy `.py` files remain as the computation backends and are gradually being hollowed out.
 
 ## Scoring Model
 
@@ -284,41 +338,51 @@ When `--llm-review` is passed (or `llm_review_enabled: true` in config), all thr
 
 ## Running the Application
 
+After installation (see **Setup** below), all commands are available as `daily-investor`:
+
 ```bash
 # Full run — refresh data, fetch news, analyze, trade
-python src/main.py
+daily-investor run
 
 # Override operating mode for this run only (does not write config.yaml)
-python src/main.py --op-mode safe          # manual confirmation before every trade
-python src/main.py --op-mode automated     # fully hands-off
-python src/main.py --op-mode no-sentiment  # value_metric weight only, no Claude calls
+daily-investor run --op-mode safe          # manual confirmation before every trade
+daily-investor run --op-mode automated     # fully hands-off
+daily-investor run --op-mode no-sentiment  # value_metric weight only, no Claude calls
 
 # Skip data generation — reuse today's cached CSVs (much faster)
-python src/main.py --skip-data
+daily-investor run --skip-data
+
+# Run a backtest (prints BacktestResult summary)
+daily-investor backtest 90
+daily-investor backtest 365 --mode walk_forward_price_only_test
 
 # Single-objective tune: print suggested config diff (no file changes)
-python src/main.py --tune 90
-python src/main.py --tune 90 --objective calmar
+daily-investor tune 90
+daily-investor tune 90 --objective calmar
 
 # Auto-tune: Sharpe + Calmar, train/val split, validate, print diff
-python src/main.py --auto-tune
-python src/main.py --auto-tune 180
+daily-investor auto-tune
+daily-investor auto-tune 180
 
 # Auto-tune with backtest mode override
-python src/main.py --auto-tune --mode walk_forward_price_only_test
+daily-investor auto-tune --mode walk_forward_price_only_test
 
 # Write config only if validation passes
-python src/main.py --auto-tune --apply
+daily-investor auto-tune --apply
 
 # Write config regardless of validation (debugging only)
-python src/main.py --auto-tune --force-apply
+daily-investor auto-tune --force-apply
 
 # Auto-tune + LLM second-opinion review
-python src/main.py --auto-tune --llm-review
-python src/main.py --auto-tune --llm-review --apply   # apply only if validation + LLM both pass
+daily-investor auto-tune --llm-review
+daily-investor auto-tune --llm-review --apply
 
-# Run pure-function unit tests (no Robinhood or Claude API required)
-python src/tests.py
+# Parameter stability scan across multiple windows (research only, never writes config)
+daily-investor stability-scan
+daily-investor stability-scan --mode walk_forward_price_only_test --output-dir reports/
+
+# Quick diagnostics report
+daily-investor report
 ```
 
 The live strategy runs in a loop (up to `max_iterations` runs, default 10). Stocks that were skipped, failed, or already bought are excluded from subsequent iterations.
@@ -442,8 +506,8 @@ Use `--op-mode` on the CLI to override `auto_approve` and `use_sentiment_analysi
 | No Sentiment | `no-sentiment` | `false` | `false` | Buys by `value_metric` weight only, no Claude API calls |
 
 ```bash
-python src/main.py --op-mode safe          # one-off safe run
-python src/main.py --op-mode no-sentiment  # no API key needed, pure quantitative
+daily-investor run --op-mode safe          # one-off safe run
+daily-investor run --op-mode no-sentiment  # no API key needed, pure quantitative
 ```
 
 ## Sentiment Analysis Architecture
@@ -470,16 +534,33 @@ python src/main.py --op-mode no-sentiment  # no API key needed, pure quantitativ
 ```bash
 git clone https://github.com/yourusername/daily_investor.git
 cd daily_investor
-pip install -r requirements.txt
-pip install scipy   # required for --tune / --auto-tune
+
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+
+pip install -e .                 # installs daily-investor CLI + all dependencies
+pip install -e ".[heatmaps]"     # also install matplotlib for stability-scan heatmaps
 ```
 
-`.env` file:
+`.env` file (at the project root):
 ```
 RB_ACCT=your_robinhood_email
 RB_CREDS=your_robinhood_password
 RB_MFA_SECRET=your_totp_secret        # Optional: skip interactive MFA prompt
 ANTHROPIC_API_KEY=your_anthropic_key  # Required for sentiment analysis and LLM tune review
+```
+
+After installation, `daily-investor` is available on your `PATH`:
+
+```bash
+daily-investor --help
+```
+
+To run the test suite (no Robinhood or Anthropic credentials needed):
+
+```bash
+pytest                           # runs all 271 tests
+pytest tests/test_backtesting.py # single module
 ```
 
 ## Troubleshooting

@@ -170,18 +170,20 @@ def gen_symbols_list(force_refresh: bool = False) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Pure scoring helpers
+# Pure scoring helpers — delegated to strategy layer
 # ---------------------------------------------------------------------------
 
+from strategy.income import compute_income_score as _compute_income_score
+from strategy.quality import compute_quality_score as _compute_quality_score
+from strategy.momentum import (
+    compute_momentum_score_v1 as get_momentum_score,
+    apply_cross_sectional_momentum_v2 as _apply_cross_sectional_momentum_scores,
+    _pct_rank_series,
+)
+
+
 def _dividend_income_score(dividend_yield: float) -> tuple[float, bool]:
-    """Return (income_score, yield_trap_flag)."""
-    if not dividend_yield or dividend_yield <= 0:
-        return 0.0, False
-    if dividend_yield >= SCORING_PARAMS["yield_trap_threshold"]:
-        return 0.0, True
-    if dividend_yield >= DIVIDEND_THRESHOLD:
-        return min(dividend_yield / DIVIDEND_THRESHOLD, SCORING_PARAMS["income_score_cap"]), False
-    return 0.0, False
+    return _compute_income_score(dividend_yield)
 
 
 def _quality_score(
@@ -190,23 +192,7 @@ def _quality_score(
     volume: float,
     dividend_yield: float,
 ) -> float:
-    sp = SCORING_PARAMS
-    score = 0.0
-    if pe_ratio is not None and pe_ratio > 0:
-        score += sp["quality_weight_has_positive_pe"]
-    if pe_ratio is not None and 0 < pe_ratio < sp["distress_pe_max"]:
-        score += sp["quality_weight_distress_pe"]
-    if pb_ratio is not None and pb_ratio > 0:
-        score += sp["quality_weight_has_positive_pb"]
-    if volume >= sp["quality_volume_high"]:
-        score += sp["quality_weight_high_volume"]
-    elif volume < sp["quality_volume_low"]:
-        score += sp["quality_weight_low_volume"]
-    if dividend_yield >= sp["yield_trap_threshold"]:
-        score += sp["quality_weight_yield_trap"]
-    elif sp["quality_dividend_min"] <= dividend_yield <= sp["quality_dividend_max"]:
-        score += sp["quality_weight_healthy_dividend"]
-    return round(score, 3)
+    return _compute_quality_score(pe_ratio, pb_ratio, volume, dividend_yield)
 
 
 def _position_52w(
@@ -222,30 +208,6 @@ def _position_52w(
     raw = (current_price - low_52w) / (high_52w - low_52w)
     return max(0.0, min(1.0, raw))
 
-
-def get_momentum_score(position_52w: float | None, return_1m: float | None = None) -> float:
-    """Map 52-week position and 1-month return to a momentum score."""
-    if position_52w is None:
-        return 0.0
-
-    mp = MOMENTUM_PARAMS
-    bins   = mp["position_bin_boundaries"]
-    scores = mp["position_bin_scores"]
-
-    base = scores[-1]
-    for i, boundary in enumerate(bins):
-        if position_52w < boundary:
-            base = scores[i]
-            break
-
-    cutoff = mp["return_1m_low_position_cutoff"]
-    if return_1m is not None and position_52w < cutoff:
-        if return_1m >= mp["return_1m_recovery_threshold"]:
-            base += mp["return_1m_recovery_bonus"]
-        elif return_1m <= mp["return_1m_falling_knife_threshold"]:
-            base -= mp["return_1m_falling_knife_penalty"]
-
-    return round(base, 3)
 
 
 def _get_buy_to_sell_ratio(symbol: str) -> float | None:
@@ -564,105 +526,8 @@ def _enrich_with_momentum(symbols: list[str], fundamentals: dict[str, dict]) -> 
         logger.log(level, "Momentum feature %-25s  coverage: %5.1f%% (%d/%d)", feat, pct, cnt, n_sym)
 
 
-def _pct_rank_series(s: pd.Series, winsorize_pct: float = 0.05) -> pd.Series:
-    """
-    Cross-sectional percentile rank, winsorized and scaled to [-1, 1].
-    Missing values → 0.0 (neutral mid-rank).
-    This is NOT a lookahead bias: we rank contemporaneous values across stocks.
-    """
-    finite = s.notna()
-    if finite.sum() < 2:
-        return pd.Series(0.0, index=s.index)
-    vals = s[finite].copy()
-    if winsorize_pct > 0:
-        lo = vals.quantile(winsorize_pct)
-        hi = vals.quantile(1.0 - winsorize_pct)
-        vals = vals.clip(lo, hi)
-    ranks = vals.rank(method="average") / (len(vals) + 1)  # (0, 1)
-    result = pd.Series(0.0, index=s.index)
-    result[finite] = ranks * 2 - 1  # scale to (-1, 1)
-    return result
-
-
-def _apply_cross_sectional_momentum_scores(df: pd.DataFrame) -> None:
-    """
-    Replace momentum_score with the v2 continuous cross-sectional formula.
-    Called once after all stocks are evaluated, so ranking is across the full
-    daily universe — no lookahead into future dates.
-    """
-    import numpy as np
-
-    cfg = MOMENTUM_V2_PARAMS
-    wp  = cfg["weights"]
-    pen = cfg["penalties"]
-    wp_total = sum(wp.values())
-    if wp_total < 1e-9:
-        return
-
-    # Normalize weights
-    w_rs3m    = wp["rs_3m"]          / wp_total
-    w_rs6m    = wp["rs_6m"]          / wp_total
-    w_radj    = wp["risk_adj_3m"]    / wp_total
-    w_trend   = wp["trend_structure"] / wp_total
-    w_r1m     = wp["return_1m"]      / wp_total
-    w_r5d     = wp["return_5d"]      / wp_total
-
-    wz = cfg["winsorize_pct"]
-
-    def _col(name: str) -> pd.Series:
-        if name in df.columns:
-            return pd.to_numeric(df[name], errors="coerce")
-        return pd.Series(float("nan"), index=df.index)
-
-    # Percentile-rank each feature across the universe
-    n_rs3m  = _pct_rank_series(_col("rs_3m"),                 wz)
-    n_rs6m  = _pct_rank_series(_col("rs_6m"),                 wz)
-    n_radj  = _pct_rank_series(_col("risk_adj_momentum_3m"),  wz)
-    n_r1m   = _pct_rank_series(_col("return_1m"),             wz)
-    n_r5d   = _pct_rank_series(_col("return_5d"),             wz)
-
-    # Trend structure: deterministic signal, not percentile-ranked
-    above50  = df["above_50dma"].astype(bool)  if "above_50dma"  in df.columns else pd.Series(False, index=df.index)
-    above200 = df["above_200dma"].astype(bool) if "above_200dma" in df.columns else pd.Series(False, index=df.index)
-    trend = pd.Series(np.select(
-        [above50 & above200, above50 & ~above200, ~above50 & above200],
-        [0.5,                 0.1,                 -0.1],
-        default=-0.5,
-    ), index=df.index)
-
-    # Composite score
-    score = (
-        w_rs3m  * n_rs3m  +
-        w_rs6m  * n_rs6m  +
-        w_radj  * n_radj  +
-        w_trend * trend    +
-        w_r1m   * n_r1m   +
-        w_r5d   * n_r5d
-    )
-
-    # Penalties
-    ret3m   = _col("return_3m")
-    vol3m   = _col("realized_vol_3m")
-    pos52   = _col("position_52w")
-
-    falling_knife  = ret3m.fillna(0.0) < pen["falling_knife_3m_threshold"]
-    overextended   = pos52.fillna(0.0) > pen["overextension_52w_threshold"]
-    high_vol       = vol3m.fillna(0.0) > pen["high_vol_annual_threshold"]
-
-    score = score - falling_knife.astype(float) * pen["falling_knife_penalty"]
-    score = score - overextended.astype(float)  * pen["overextension_penalty"]
-    score = score - high_vol.astype(float)       * pen["high_vol_penalty"]
-
-    score = score.clip(cfg["clamp_low"], cfg["clamp_high"]).round(3)
-    df["momentum_score"] = score
-
-    # Log distribution summary
-    logger.info(
-        "Momentum v2 score distribution: min=%.3f p25=%.3f med=%.3f p75=%.3f max=%.3f unique=%d",
-        float(score.min()), float(score.quantile(0.25)),
-        float(score.median()), float(score.quantile(0.75)),
-        float(score.max()), int(score.nunique()),
-    )
+# _pct_rank_series and _apply_cross_sectional_momentum_scores are now in
+# strategy/momentum.py and imported at the top of this file.
 
 
 def _compute_reliability_scores(df: pd.DataFrame) -> pd.DataFrame:

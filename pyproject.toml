@@ -1,6 +1,6 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "daily-investor"
@@ -52,11 +52,15 @@ dev = [
 ]
 
 [project.scripts]
-daily-investor = "main:main"
+daily-investor = "cli.main:main"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src"]
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.pytest.ini_options]
-testpaths = ["src"]
-python_files = ["tests.py"]
+# Primary test suite. Legacy: python3 -m pytest src/tests.py
+testpaths = ["tests"]
+python_files = ["test_*.py"]
