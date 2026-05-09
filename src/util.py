@@ -136,6 +136,7 @@ RISK_LIMITS: dict = {
     "min_liquidity_volume":                 float(_rl.get("min_liquidity_volume",                 500_000)),
     "max_buys_per_rebalance":               int(_rl.get("max_buys_per_rebalance",                 10)),
     "max_sentiment_candidates":             int(_rl.get("max_sentiment_candidates",               20)),
+    "minimum_hold_days":                    int(_rl.get("minimum_hold_days",                      0)),
     "allow_whole_share_fallback":           bool(_rl.get("allow_whole_share_fallback",            False)),
     "max_whole_share_buys_per_run":         int(_rl.get("max_whole_share_buys_per_run",           3)),
     "max_whole_share_allocation_multiplier":float(_rl.get("max_whole_share_allocation_multiplier",1.5)),
@@ -188,6 +189,9 @@ BACKTEST_PARAMS: dict = {
     "cooldown_days_after_stopout":  int(_bt.get("cooldown_days_after_stopout",  7)),
     "vol_slippage_scaling":         bool(_bt.get("vol_slippage_scaling",        True)),
     "vol_slippage_multiplier":      float(_bt.get("vol_slippage_multiplier",    2.0)),
+    "turnover_penalty_enabled":     bool(_bt.get("turnover_penalty_enabled",    True)),
+    "turnover_penalty_trade_count": int(_bt.get("turnover_penalty_trade_count", 80)),
+    "turnover_penalty_weight":      float(_bt.get("turnover_penalty_weight",    1.0)),
 }
 
 # ---------------------------------------------------------------------------
@@ -204,6 +208,7 @@ SELL_RULES: dict = {
     "sell_yield_trap":                     bool(_sr.get("sell_yield_trap",                       True)),
     "sell_low_quality_below":              float(_sr.get("sell_low_quality_below",              -0.25)),
     "min_days_held_before_value_exit":     int(_sr.get("min_days_held_before_value_exit",          7)),
+    "minimum_days_before_take_profit":     int(_sr.get("minimum_days_before_take_profit",         0)),
 }
 
 # ---------------------------------------------------------------------------
@@ -364,6 +369,16 @@ STABILITY_PARAMS: dict = {
     "max_unstable_params":       int(_stab.get("max_unstable_params",        5)),
     "scan_maxiter":              int(_stab.get("scan_maxiter",               15)),
     "scan_popsize":              int(_stab.get("scan_popsize",               6)),
+}
+
+# ---------------------------------------------------------------------------
+# Optimizer tuning controls — frozen params and tighter bounds
+# ---------------------------------------------------------------------------
+
+_tn = _app.get("tuning", {})
+TUNING_PARAMS: dict = {
+    "frozen_parameters": list(_tn.get("frozen_parameters", [])),
+    "parameter_bounds":  dict(_tn.get("parameter_bounds", {})),
 }
 
 # ---------------------------------------------------------------------------

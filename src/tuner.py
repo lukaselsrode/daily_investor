@@ -37,6 +37,7 @@ from util import (
     SCORING_PARAMS,
     SELL_RULES,
     STABILITY_PARAMS,
+    TUNING_PARAMS,
 )
 
 logger = logging.getLogger(__name__)
@@ -88,6 +89,57 @@ BOUNDS: list[tuple[float, float]] = [
     (0.00, 0.60),   # mom_trend
     (0.00, 0.60),   # mom_r1m
 ]
+
+
+# Map from config.yaml dotted path → index in PARAM_NAMES / BOUNDS
+_CONFIG_PATH_TO_PARAM_IDX: dict[str, int] = {
+    "score_weights.value":                 0,
+    "score_weights.quality":               1,
+    "score_weights.income":                2,
+    "score_weights.momentum":              3,
+    "index_pct":                           4,
+    "metric_threshold":                    5,
+    "sell_rules.take_profit_pct":          6,
+    "sell_rules.sell_weak_value_below":    7,
+    "sell_rules.trailing_stop_pct":        8,
+    "scoring.value_pe_weight":             9,
+    "momentum_v2.weights.rs_3m":           10,
+    "momentum_v2.weights.rs_6m":           11,
+    "momentum_v2.weights.risk_adj_3m":     12,
+    "momentum_v2.weights.trend_structure": 13,
+    "momentum_v2.weights.return_1m":       14,
+}
+
+
+def _effective_bounds() -> list[tuple[float, float]]:
+    """Return BOUNDS with any tuning.parameter_bounds overrides applied."""
+    bounds = list(BOUNDS)
+    for path, rng in TUNING_PARAMS.get("parameter_bounds", {}).items():
+        idx = _CONFIG_PATH_TO_PARAM_IDX.get(path)
+        if idx is None:
+            continue
+        lo = float(rng.get("min", bounds[idx][0]))
+        hi = float(rng.get("max", bounds[idx][1]))
+        bounds[idx] = (lo, min(hi, bounds[idx][1]))
+    return bounds
+
+
+def _get_active_indices() -> list[int]:
+    """Return param indices that are NOT in tuning.frozen_parameters."""
+    frozen = {
+        _CONFIG_PATH_TO_PARAM_IDX[p]
+        for p in TUNING_PARAMS.get("frozen_parameters", [])
+        if p in _CONFIG_PATH_TO_PARAM_IDX
+    }
+    return [i for i in range(len(PARAM_NAMES)) if i not in frozen]
+
+
+def _expand_params(reduced: np.ndarray, active: list[int], frozen_vals: np.ndarray) -> np.ndarray:
+    """Expand a reduced (non-frozen) vector back to full PARAM_NAMES length."""
+    full = frozen_vals.copy()
+    for j, i in enumerate(active):
+        full[i] = reduced[j]
+    return full
 
 
 def _current_params() -> np.ndarray:
@@ -155,8 +207,10 @@ def make_objective(
             shortfall = _MIN_TRADES_SOFT - result.trades_made
             penalty = shortfall / _MIN_TRADES_SOFT * 2.0
 
-        # Penalize aggressive churn: >80 new positions in the window is excessive
-        turnover_penalty = max(0.0, result.trades_made - 80) / 80.0
+        bp = BACKTEST_PARAMS
+        tp_threshold = bp.get("turnover_penalty_trade_count", 80)
+        tp_weight = bp.get("turnover_penalty_weight", 1.0) if bp.get("turnover_penalty_enabled", True) else 0.0
+        turnover_penalty = max(0.0, result.trades_made - tp_threshold) / max(tp_threshold, 1) * tp_weight
 
         # Penalize sector / position concentration: fewer than 5 average open positions
         # is a signal the optimizer found a few lucky stocks and over-fitted them
@@ -187,16 +241,36 @@ def _run_single(
     from scipy.optimize import differential_evolution
 
     bp = BACKTEST_PARAMS
-    obj_fn = make_objective(
+    active = _get_active_indices()
+    frozen_vals = _current_params()
+    eff_bounds = _effective_bounds()
+    active_bounds = [eff_bounds[i] for i in active]
+
+    obj_fn_full = make_objective(
         precomp, objective, starting_capital,
         slippage_bps=bp["slippage_bps"],
         commission_per_trade=bp["commission_per_trade"],
         weekly_contribution=bp["weekly_contribution"],
         rebalance_frequency_days=bp["rebalance_frequency_days"],
     )
+
+    def _obj(reduced: np.ndarray) -> float:
+        return obj_fn_full(_expand_params(reduced, active, frozen_vals))
+
+    n_active = len(active)
+    if n_active == 0:
+        best_result = run_simulation(
+            precomp, frozen_vals, starting_capital,
+            slippage_bps=bp["slippage_bps"],
+            commission_per_trade=bp["commission_per_trade"],
+            weekly_contribution=bp["weekly_contribution"],
+            rebalance_frequency_days=bp["rebalance_frequency_days"],
+        )
+        return frozen_vals, best_result
+
     result = differential_evolution(
-        obj_fn,
-        bounds=BOUNDS,
+        _obj,
+        bounds=active_bounds,
         maxiter=maxiter,
         popsize=popsize,
         tol=0.02,
@@ -205,14 +279,15 @@ def _run_single(
         disp=False,
         polish=True,
     )
+    best_full = _expand_params(result.x, active, frozen_vals)
     best_result = run_simulation(
-        precomp, result.x, starting_capital,
+        precomp, best_full, starting_capital,
         slippage_bps=bp["slippage_bps"],
         commission_per_trade=bp["commission_per_trade"],
         weekly_contribution=bp["weekly_contribution"],
         rebalance_frequency_days=bp["rebalance_frequency_days"],
     )
-    return result.x, best_result
+    return best_full, best_result
 
 
 # ---------------------------------------------------------------------------

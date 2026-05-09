@@ -6,7 +6,7 @@ metric_threshold: 0.75
 selloff_threshold: 30
 
 weekly_investment: 400
-index_pct: 0.65
+index_pct: 0.70
 
 auto_approve: true
 use_sentiment_analysis: true
@@ -27,10 +27,10 @@ etfs:
   - IWM
 
 score_weights:
-  value: 0.10
-  quality: 0.45
-  income: 0.10
-  momentum: 0.35
+  value: 0.08
+  quality: 0.50
+  income: 0.08
+  momentum: 0.34
 
 valuation_guardrails:
   max_pe_component: 5.0
@@ -45,8 +45,10 @@ risk:
   min_order_amount: 5.0
   min_liquidity_volume: 500000
 
-  max_buys_per_rebalance: 10
+  max_buys_per_rebalance: 7
   max_sentiment_candidates: 20
+
+  minimum_hold_days: 5
 
   allow_whole_share_fallback: false
   max_whole_share_buys_per_run: 2
@@ -67,6 +69,8 @@ sell_rules:
 
   # weak thesis exit threshold
   sell_weak_value_below: 0.45
+
+  minimum_days_before_take_profit: 10
 
   sell_yield_trap: true
   sell_low_quality_below: -0.25
@@ -240,8 +244,8 @@ backtest:
 
   # optimizer realism
   turnover_penalty_enabled: true
-  turnover_penalty_trade_count: 100
-  turnover_penalty_weight: 0.15
+  turnover_penalty_trade_count: 50
+  turnover_penalty_weight: 0.35
 
   # optional LLM review layer
   llm_review_enabled: false
@@ -258,6 +262,50 @@ backtest:
   # effective_slippage_bps = slippage_bps * (1 + vol_slippage_multiplier * annualized_vol)
   vol_slippage_scaling: true
   vol_slippage_multiplier: 2.0
+
+# ---------------------------------------------------------------------------
+# Optimizer control — prevents overfitting
+# frozen_parameters: parameters held at current config values during optimization
+# parameter_bounds:  override default search bounds (min/max per parameter)
+# ---------------------------------------------------------------------------
+tuning:
+  frozen_parameters:
+    - score_weights.value
+    - score_weights.income
+    - metric_threshold
+    - sell_rules.take_profit_pct
+    - sell_rules.sell_weak_value_below
+    - sell_rules.trailing_stop_pct
+    - scoring.value_pe_weight
+    - momentum_v2.weights.rs_3m
+    - momentum_v2.weights.rs_6m
+    - momentum_v2.weights.risk_adj_3m
+    - momentum_v2.weights.trend_structure
+    - momentum_v2.weights.return_1m
+    - momentum_v2.weights.return_5d
+
+  parameter_bounds:
+    score_weights.value:
+      min: 0.05
+      max: 0.25
+    score_weights.quality:
+      min: 0.35
+      max: 0.60
+    score_weights.momentum:
+      min: 0.20
+      max: 0.40
+    score_weights.income:
+      min: 0.05
+      max: 0.15
+    metric_threshold:
+      min: 0.60
+      max: 1.10
+    index_pct:
+      min: 0.60
+      max: 0.85
+    sell_rules.trailing_stop_pct:
+      min: -0.12
+      max: -0.05
 
 # ---------------------------------------------------------------------------
 # Reliability scoring — DATA / SIGNAL QUALITY indicators, NOT alpha

@@ -25,14 +25,17 @@ from util import (
     RISK_LIMITS,
     SCORE_WEIGHTS,
     SCORING_PARAMS,
+    SELL_RULES,
     read_data_as_pd,
 )
 
 logger = logging.getLogger(__name__)
 
 _TAKE_PROFIT_FLOOR_MULTIPLIER = 1.2
-_MIN_DAYS_HELD_BEFORE_VALUE_EXIT = 21
 _STOP_LOSS_PCT = -0.20  # hard-coded; not a tuned param
+_MIN_DAYS_HELD_BEFORE_VALUE_EXIT = SELL_RULES.get("min_days_held_before_value_exit", 21)
+_MIN_HOLD_DAYS = RISK_LIMITS.get("minimum_hold_days", 0)
+_MIN_DAYS_BEFORE_TAKE_PROFIT = SELL_RULES.get("minimum_days_before_take_profit", 0)
 
 
 class PrecomputedData(NamedTuple):
@@ -647,8 +650,8 @@ def run_simulation(
         take_profit_ok = current_scores < metric_threshold * _TAKE_PROFIT_FLOOR_MULTIPLIER
 
         stop_loss_mask  = held & (pct_from_avg  <= _STOP_LOSS_PCT)
-        trail_mask      = held & (pct_from_peak <= trailing_stop)
-        tp_mask         = held & (pct_from_avg  >= take_profit_pct) & take_profit_ok
+        trail_mask      = held & (pct_from_peak <= trailing_stop) & (days_held >= _MIN_HOLD_DAYS)
+        tp_mask         = held & (pct_from_avg  >= take_profit_pct) & take_profit_ok & (days_held >= _MIN_DAYS_BEFORE_TAKE_PROFIT)
         weak_val_mask   = held & (current_scores < sell_weak_below) & (days_held >= _MIN_DAYS_HELD_BEFORE_VALUE_EXIT)
         sell_mask       = stop_loss_mask | trail_mask | tp_mask | weak_val_mask
 

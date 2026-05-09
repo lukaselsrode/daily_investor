@@ -7,58 +7,38 @@ Purpose: understand which parameters are stable vs overfit.
 ----------------------------------------------------------------
 WINDOWS ANALYZED
 ----------------------------------------------------------------
-    30d  val_excess=+1.33%  val_sharpe=+10.928  drawdown=-0.81%  trades=23  validation=PASS
-    60d  val_excess=+1.89%  val_sharpe=+8.480  drawdown=-0.78%  trades=40  validation=PASS
-    90d  val_excess=-3.36%  val_sharpe=+9.417  drawdown=-0.91%  trades=31  validation=FAIL
-   180d  val_excess=-2.64%  val_sharpe=+1.813  drawdown=-5.64%  trades=48  validation=FAIL
-   365d  val_excess=-4.42%  val_sharpe=+0.990  drawdown=-7.67%  trades=40  validation=FAIL
+    30d  val_excess=+1.11%  val_sharpe=+11.688  drawdown=-0.56%  trades=14  validation=PASS
+    60d  val_excess=+1.40%  val_sharpe=+8.310  drawdown=-0.75%  trades=20  validation=PASS
+    90d  val_excess=-4.11%  val_sharpe=+9.548  drawdown=-0.85%  trades=24  validation=FAIL
+   180d  val_excess=-5.36%  val_sharpe=+0.995  drawdown=-4.88%  trades=40  validation=FAIL
+   365d  val_excess=-1.17%  val_sharpe=+2.187  drawdown=-3.54%  trades=81  validation=FAIL
 
 ----------------------------------------------------------------
 PARAMETER STABILITY SUMMARY
 ----------------------------------------------------------------
- ⚠ metric_threshold                      mean=+1.0982  stddev=0.5218  cv=0.475  spread=0.2362  conv=60%  [UNSTABLE]
- ⚠ mom_radj                              mean=+0.2720  stddev=0.1318  cv=0.485  spread=0.2160  conv=80%  [UNSTABLE]
- ⚠ mom_r1m                               mean=+0.2213  stddev=0.1222  cv=0.552  spread=0.1894  conv=80%  [UNSTABLE]
- ⚠ take_profit_pct                       mean=+0.5859  stddev=0.1734  cv=0.296  spread=0.2934  conv=60%  [UNSTABLE]
- ⚠ mom_rs6m                              mean=+0.2098  stddev=0.0927  cv=0.442  spread=0.1303  conv=60%  [UNSTABLE]
- ⚠ sell_weak_below                       mean=+0.4480  stddev=0.1132  cv=0.253  spread=0.2869  conv=40%  [UNSTABLE]
- ⚠ sw_value                              mean=+0.2974  stddev=0.2192  cv=0.737  spread=0.1058  conv=40%  [UNSTABLE]
- ⚠ sw_momentum                           mean=+0.2250  stddev=0.1047  cv=0.466  spread=0.0916  conv=40%  [UNSTABLE]
- ⚠ mom_rs3m                              mean=+0.2506  stddev=0.1136  cv=0.453  spread=0.0886  conv=60%  [UNSTABLE]
- ⚠ value_pe_weight                       mean=+0.7380  stddev=0.1190  cv=0.161  spread=0.1610  conv=60%  [UNSTABLE]
- ⚠ mom_trend                             mean=+0.2629  stddev=0.1516  cv=0.577  spread=0.0680  conv=80%  [UNSTABLE]
- ⚠ sw_income                             mean=+0.1295  stddev=0.0969  cv=0.749  spread=0.0625  conv=40%  [UNSTABLE]
- ~ sw_quality                            mean=+0.4300  stddev=0.0852  cv=0.198  spread=0.1009  conv=60%  [MODERATELY_STABLE]
- ⚠ trailing_stop                         mean=-0.0878  stddev=0.0461  cv=0.525  spread=0.0418  conv=80%  [UNSTABLE]
-   index_pct                             mean=+0.7878  stddev=0.1111  cv=0.141  spread=0.0855  conv=40%  [STABLE]
+ ~ sw_momentum                           mean=+0.3309  stddev=0.0667  cv=0.202  spread=0.0168  conv=80%  [MODERATELY_STABLE]
+   sw_quality                            mean=+0.4553  stddev=0.0346  cv=0.076  spread=0.0686  conv=80%  [STABLE]
+   index_pct                             mean=+0.7388  stddev=0.1075  cv=0.145  spread=0.0165  conv=40%  [STABLE]
+   sw_value                              mean=+0.0800  stddev=0.0000  cv=0.000  spread=0.0000  conv=100%  [STABLE]
+   sw_income                             mean=+0.0800  stddev=0.0000  cv=0.000  spread=0.0000  conv=100%  [STABLE]
+   metric_threshold                      mean=+0.7500  stddev=0.0000  cv=0.000  spread=0.0000  conv=100%  [STABLE]
+   take_profit_pct                       mean=+0.6000  stddev=0.0000  cv=0.000  spread=0.0000  conv=100%  [STABLE]
+   sell_weak_below                       mean=+0.4500  stddev=0.0000  cv=0.000  spread=0.0000  conv=100%  [STABLE]
+   trailing_stop                         mean=-0.0800  stddev=0.0000  cv=0.000  spread=0.0000  conv=100%  [STABLE]
+   value_pe_weight                       mean=+0.6000  stddev=0.0000  cv=0.000  spread=0.0000  conv=100%  [STABLE]
+   mom_rs3m                              mean=+0.2500  stddev=0.0000  cv=0.000  spread=0.0000  conv=100%  [STABLE]
+   mom_rs6m                              mean=+0.2500  stddev=0.0000  cv=0.000  spread=0.0000  conv=100%  [STABLE]
+   mom_radj                              mean=+0.2000  stddev=0.0000  cv=0.000  spread=0.0000  conv=100%  [STABLE]
+   mom_trend                             mean=+0.1500  stddev=0.0000  cv=0.000  spread=0.0000  conv=100%  [STABLE]
+   mom_r1m                               mean=+0.1000  stddev=0.0000  cv=0.000  spread=0.0000  conv=100%  [STABLE]
 
 ----------------------------------------------------------------
 FINDINGS
 ----------------------------------------------------------------
-  ⚠ 13 UNSTABLE parameter(s):
-      • sw_value
-      • sw_income
-      • sw_momentum
-      • metric_threshold
-      • take_profit_pct
-      • sell_weak_below
-      • trailing_stop
-      • value_pe_weight
-      • mom_rs3m
-      • mom_rs6m
-      • mom_radj
-      • mom_trend
-      • mom_r1m
-
-  Unstable parameters have high cross-window variance or large
-  disagreement between Sharpe and Calmar objectives. Their
-  averaged values may not generalize. Consider:
-    - Fixing them to config defaults and not tuning
-    - Using a longer window to reduce overfitting
-    - Investigating whether the signal is genuinely informative
+  ✓ No UNSTABLE parameters detected.
 
   ~ 1 MODERATELY_STABLE parameter(s) — monitor:
-      • sw_quality
+      • sw_momentum
 
   Validation passed in 2/5 windows.
 
