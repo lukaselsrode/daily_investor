@@ -297,11 +297,16 @@ def run_auto_tune(
     mode: str | None = None,
     apply: bool = False,
     force_apply: bool = False,
+    llm_review: bool = False,
 ) -> "tuple[np.ndarray, SimResult, SimResult, SimResult, np.ndarray, np.ndarray]":
     """
     Run Sharpe + Calmar optimizations, average the results.
     Validates on held-out window and only writes config.yaml when gates pass
     and apply=True or auto_apply_if_valid=True.
+
+    llm_review: if True (or backtest.llm_review_enabled in config), sends the top
+    candidates to Claude for a second-opinion review before writing config.
+
     Returns (avg_params, sharpe_result, calmar_result, avg_result, sharpe_params, calmar_params).
     """
     try:
@@ -375,8 +380,120 @@ def run_auto_tune(
     else:
         print("\n✓  Validation gates passed.")
 
+    # ── Optional LLM review ───────────────────────────────────────────────────
+    use_llm = llm_review or bp.get("llm_review_enabled", False)
+    llm_apply = bp.get("llm_review_apply", False)
+    final_params = avg_params
+
+    if use_llm:
+        print(f"\n[LLM review] Sending candidates to {bp.get('llm_review_model', 'claude-sonnet-4-6')} …")
+        try:
+            tr  = train_report.train_result
+            vr  = train_report.validation_result
+            candidates = [
+                {
+                    "candidate_id": "sharpe_opt",
+                    "alpha_params": dict(zip(PARAM_NAMES, sharpe_params.tolist())),
+                    "train_return": sharpe_result.total_return,
+                    "train_sharpe": sharpe_result.sharpe,
+                    "train_calmar": sharpe_result.calmar,
+                    "train_max_drawdown": sharpe_result.max_drawdown,
+                    "train_trades": sharpe_result.trades_made,
+                    "train_avg_positions": sharpe_result.average_positions,
+                    "train_max_positions": sharpe_result.max_positions,
+                    "train_avg_cash_pct": sharpe_result.average_cash_pct,
+                    "train_turnover": sharpe_result.turnover_estimate,
+                    "train_friction_cost": sharpe_result.friction_cost,
+                    "val_return": vr.total_return if vr else None,
+                    "val_sharpe": vr.sharpe if vr else None,
+                    "val_max_drawdown": vr.max_drawdown if vr else None,
+                    "bench_return": train_report.benchmark_return,
+                    "bench_sharpe": train_report.benchmark_sharpe,
+                    "bench_max_drawdown": train_report.benchmark_max_drawdown,
+                    "excess_return": train_report.excess_return,
+                    "lookahead_bias_level": precomp.lookahead_bias_level,
+                    "notes": train_report.notes,
+                },
+                {
+                    "candidate_id": "calmar_opt",
+                    "alpha_params": dict(zip(PARAM_NAMES, calmar_params.tolist())),
+                    "train_return": calmar_result.total_return,
+                    "train_sharpe": calmar_result.sharpe,
+                    "train_calmar": calmar_result.calmar,
+                    "train_max_drawdown": calmar_result.max_drawdown,
+                    "train_trades": calmar_result.trades_made,
+                    "train_avg_positions": calmar_result.average_positions,
+                    "train_max_positions": calmar_result.max_positions,
+                    "train_avg_cash_pct": calmar_result.average_cash_pct,
+                    "train_turnover": calmar_result.turnover_estimate,
+                    "train_friction_cost": calmar_result.friction_cost,
+                    "val_return": vr.total_return if vr else None,
+                    "val_sharpe": vr.sharpe if vr else None,
+                    "val_max_drawdown": vr.max_drawdown if vr else None,
+                    "bench_return": train_report.benchmark_return,
+                    "bench_sharpe": train_report.benchmark_sharpe,
+                    "bench_max_drawdown": train_report.benchmark_max_drawdown,
+                    "excess_return": train_report.excess_return,
+                    "lookahead_bias_level": precomp.lookahead_bias_level,
+                    "notes": train_report.notes,
+                },
+                {
+                    "candidate_id": "avg",
+                    "alpha_params": dict(zip(PARAM_NAMES, avg_params.tolist())),
+                    "train_return": tr.total_return,
+                    "train_sharpe": tr.sharpe,
+                    "train_calmar": tr.calmar,
+                    "train_max_drawdown": tr.max_drawdown,
+                    "train_trades": tr.trades_made,
+                    "train_avg_positions": tr.average_positions,
+                    "train_max_positions": tr.max_positions,
+                    "train_avg_cash_pct": tr.average_cash_pct,
+                    "train_turnover": tr.turnover_estimate,
+                    "train_friction_cost": tr.friction_cost,
+                    "val_return": vr.total_return if vr else None,
+                    "val_sharpe": vr.sharpe if vr else None,
+                    "val_max_drawdown": vr.max_drawdown if vr else None,
+                    "bench_return": train_report.benchmark_return,
+                    "bench_sharpe": train_report.benchmark_sharpe,
+                    "bench_max_drawdown": train_report.benchmark_max_drawdown,
+                    "excess_return": train_report.excess_return,
+                    "lookahead_bias_level": precomp.lookahead_bias_level,
+                    "notes": train_report.notes,
+                },
+            ]
+            payload = build_llm_review_payload(
+                candidates,
+                mode=precomp.mode,
+                universe_selection=precomp.universe_selection,
+                benchmark_symbol=precomp.benchmark_symbol,
+                validation_cfg=bp,
+            )
+            response = request_llm_tune_review(payload)
+            valid, errors = validate_llm_review_response(response, candidates)
+            if not valid:
+                print(f"[LLM review] Response invalid — ignoring: {errors}")
+            else:
+                print(
+                    f"[LLM review] Recommended: {response['recommended_candidate_id']}  "
+                    f"confidence={response.get('confidence', '?'):.0%}\n"
+                    f"  Rationale: {response.get('rationale', '')}\n"
+                )
+                if response.get("risk_warnings"):
+                    for w in response["risk_warnings"]:
+                        print(f"  ⚠ {w}")
+                if llm_apply and response.get("apply_candidate_as_is") and response.get("proposed_adjustments"):
+                    import yaml as _yaml
+                    with open(CONFIG_FILE) as f:
+                        cfg = _yaml.safe_load(f)
+                    merged = merge_llm_recommendation_with_config(cfg, response)
+                    with open(CONFIG_FILE, "w") as f:
+                        _yaml.dump(merged, f, default_flow_style=False, sort_keys=False)
+                    print("[LLM review] Adjustments applied to config.yaml")
+        except Exception as e:
+            print(f"[LLM review] Failed ({e}) — continuing without LLM input")
+
     if should_apply_tuned_config(apply, validation_passed, bp, force_apply=force_apply):
-        apply_config_params(avg_params)
+        apply_config_params(final_params)
     elif force_apply:
         pass  # should_apply returned True already
     elif apply and not validation_passed:

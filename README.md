@@ -1,22 +1,25 @@
 # Daily Investor
 
-An automated investment strategy tool that combines fundamental analysis with AI-powered sentiment analysis to make informed investment decisions. The system evaluates stocks based on financial metrics, momentum, market sentiment, and news analysis, then executes trades via Robinhood.
+An automated investment strategy tool that combines fundamental analysis with AI-powered sentiment analysis to make informed investment decisions. The system evaluates stocks based on financial metrics, multi-factor momentum, market regime, and news analysis, then executes trades via Robinhood.
 
 ## Key Features
 
-- **Factor-Based Scoring**: Combines value (P/E, P/B), income (dividend yield), quality, and 52-week momentum into a single `value_metric`
+- **Multi-Factor Momentum (v2)**: Relative strength vs SPY (3m/6m), risk-adjusted momentum (return/vol), trend structure (50/200 DMA), 5d/1m returns — all cross-sectionally ranked per day, no lookahead
+- **Factor-Based Scoring**: Combines value (P/E, P/B), income (dividend yield), quality, and momentum into a single `value_metric`
 - **Valuation Guardrails**: Caps P/E and P/B components to prevent extreme scores from thin or stale fundamental data
 - **Portfolio Risk Controls**: Per-position cap, per-sector cap, and per-order size cap enforced before every buy
 - **Disciplined Sell Engine**: Separates hard sells (stop-loss, yield trap, quality floor) from soft sells (take-profit, weak value) with sentiment override only on soft sells
-- **Bear Market Regime Detection**: Suspends new buys and tightens sector exposure when SPY is below its 200-day MA or VIX is elevated
+- **Three-Tier Market Regime**: Bullish / Neutral / Defensive classification using SPY 200DMA + VIX. Defensive regime raises ETF allocation, limits active buys, tightens stops, and activates ETF MA filter
+- **ETF Core Protection**: ETF positions are exempt from stock stop-loss logic. The optional ETF MA filter only activates in defensive regime
 - **Profit Harvesting**: Take-profit proceeds are automatically reinvested into core ETFs rather than sitting as idle cash
-- **Backtest Engine**: Simulate the strategy over historical price data with realistic slippage, weekly contributions, and time-weighted returns
+- **Anti-Lookahead Backtest**: All rolling features computed causally — only price data up to day D used on day D. Contribution-adjusted TWR (chain-link) for both portfolio and benchmark
+- **Backtest Realism**: Per-trade cooldown after sells/stopouts, weekly trade budget, volatility-scaled slippage, regime tracking, stopout attribution
 - **Validation-Aware Auto-Tune**: Optimizes score weights and sell thresholds via `scipy.differential_evolution`; tuned parameters are only written to config if they pass held-out validation gates
-- **Optional LLM Tune Review**: Routes top optimizer candidates through the Claude API for a second-opinion review before applying
+- **Parameter Stability Reporting**: Shows spread between Sharpe-optimized and Calmar-optimized parameter sets to flag unstable dimensions
+- **Optional LLM Tune Review**: Routes optimizer candidates through Claude for a second-opinion review before applying
 - **Batch AI Sentiment Analysis**: Analyzes multiple stocks per Claude API call using async concurrency
-- **ETF Dollar-Cost Averaging**: Periodic allocation to a configurable set of ETFs (default: SPY, VOO, VTI, QQQ, SCHD, SMH, VXUS, VNQ, IWM)
-- **Async + Exponential Backoff**: Concurrent Claude calls with automatic retry on rate limits
-- **Fractional + Whole Share Fallback**: Attempts fractional orders first; falls back to a whole-share market order
+- **Fractional + Whole Share Fallback**: Attempts fractional orders first; falls back to whole-share market order with a final risk re-check
+- **Centralized Rate-Limit Backoff**: All Robinhood API calls retry with exponential backoff on 429 / throttle errors
 
 ## Project Structure
 
@@ -27,11 +30,11 @@ daily_investor/
 ├── data/                      # CSV cache (dated filenames, newest always used)
 ├── src/
 │   ├── main.py                # Entry point: login, buy/sell loops, CLI dispatcher
-│   ├── backtest.py            # Simulation engine: price history, TWR metrics, reports
+│   ├── backtest.py            # Simulation engine: causal features, TWR, regime, reports
 │   ├── tuner.py               # Parameter optimizer: scipy DE, validation gating, LLM review
 │   ├── sentiment_analysis.py  # Batch async + single-stock Claude sentiment
 │   ├── sentiments.py          # News/Reddit data collection
-│   ├── source_data.py         # Universe generation, fundamentals, scoring
+│   ├── source_data.py         # Universe generation, fundamentals, v2 momentum scoring
 │   ├── util.py                # Config constants, schema, CSV helpers
 │   └── tests.py               # Pure-function unit tests (no API required)
 └── .env                       # Credentials (never commit)
@@ -46,22 +49,41 @@ daily_investor/
 | `value_score` | P/E and P/B cheapness relative to sector thresholds |
 | `income_score` | Dividend yield quality (capped at 1.5×; 0 if no yield or yield trap) |
 | `quality_score` | Liquidity, earnings existence, dividend health signal |
-| `momentum_score` | 52-week price-location bin + 1-month return recovery/falling-knife adjustments |
+| `momentum_score` | Multi-factor v2: relative strength, risk-adjusted return, trend structure, short-term momentum |
 
-### Momentum Score — 52-Week Position Bins
+### Momentum Score v2 — Multi-Factor Continuous Model
 
-`position_52w = (current_price − 52w_low) / (52w_high − 52w_low)`, clamped to [0, 1].
+All sub-scores are **cross-sectionally percentile-ranked** across the live universe on each day. This is causal (ranking across stocks at one point in time, not across time) and removes the need for asset-specific normalization.
 
-| position_52w | Default bin score | Signal |
+| Sub-factor | Default weight | What it captures |
 |---|---|---|
-| < 0.15 | −0.35 | Possible falling knife |
-| 0.15 – 0.35 | −0.10 | Beaten down, not dead |
-| 0.35 – 0.75 | +0.55 | Healthy mid/upper range |
-| 0.75 – 0.95 | +0.85 | Strong momentum |
-| > 0.95 | +0.45 | Near 52w high, possible extension |
-| missing data | 0.00 | No signal |
+| `rs_3m` | 0.25 | Return_3m − SPY_3m (relative strength, 3-month) |
+| `rs_6m` | 0.25 | Return_6m − SPY_6m (relative strength, 6-month) |
+| `risk_adj_3m` | 0.20 | return_3m / realized_vol_3m (Sharpe-like, 63-day) |
+| `trend_structure` | 0.15 | Price vs 50 DMA and 200 DMA (deterministic signal, not ranked) |
+| `return_1m` | 0.10 | Raw 21-day return, percentile-ranked |
+| `return_5d` | 0.05 | 5-day short-term check (fixed, not optimizer-tunable) |
 
-A 1-month return recovery bonus (+0.15) applies when the stock is in the bottom quartile but rebounding. A falling-knife penalty (−0.20) applies when it is in the bottom quartile and still declining. Bin boundaries and scores are optimizer-tunable parameters.
+**Penalties applied after weighting:**
+
+| Penalty | Trigger |
+|---|---|
+| Falling-knife | 3m return < −15% |
+| Overextension | 52-week position > 97% |
+| High volatility | Annualized realized vol > 50% |
+
+**Trend structure scoring** (not ranked — deterministic):
+
+| Signal | Score |
+|---|---|
+| Above 50 DMA and 200 DMA | +0.50 |
+| Above 50 DMA only | +0.10 |
+| Above 200 DMA only | −0.10 |
+| Below both | −0.50 |
+
+Final momentum score is clamped to [−1.0, 1.5]. All weights are optimizer-tunable under `momentum_v2.weights` in `config.yaml`.
+
+> **Backward compatibility**: The original 5-bin bucket system (`momentum.position_bin_scores`) is retained in config and unit tests. The backtest engine automatically routes to v2 when multi-factor price arrays are available, and falls back to v1 for legacy test fixtures.
 
 ### Final Metric Formula
 
@@ -74,18 +96,17 @@ value_metric = sw_value    × value_score
 
 Default weights (from `cfg/config.yaml`):
 
-```
-value:    0.10
-quality:  0.45
-income:   0.10
-momentum: 0.35
+```yaml
+score_weights:
+  value:    0.10
+  quality:  0.45
+  income:   0.10
+  momentum: 0.35
 ```
 
-Weights are YAML-configurable under `score_weights`. The optimizer normalizes them internally so they do not need to sum to 1.0 in config, but they are written normalized after a tune run.
+Weights are YAML-configurable. The optimizer normalizes them internally so they do not need to sum to 1.0 in config, but they are written normalized after a tune run.
 
 ### Valuation Guardrails
-
-Before computing `value_score`, each component is gated and capped:
 
 ```
 pe_comp = sector_PE / pe_ratio   (only if min_pe_ratio ≤ pe_ratio < sector_PE)
@@ -96,21 +117,6 @@ pb_comp = min(pb_comp, max_pb_component)   # default 5.0
 
 value_score = value_pe_weight × pe_comp + (1 − value_pe_weight) × pb_comp
               (default: 0.60 × pe_comp + 0.40 × pb_comp)
-```
-
-This prevents extreme `value_metric` values from thin or suspicious fundamentals (e.g. PE=0.05 would otherwise produce scores in the hundreds).
-
-### Agg Data Schema
-
-Every scored stock row contains:
-
-```
-symbol, industry, sector, volume,
-pe_ratio, pb_ratio, dividend_yield,
-current_price, low_52w, high_52w, position_52w, return_1m,
-pe_comp, pb_comp,
-value_score, income_score, quality_score, momentum_score,
-yield_trap_flag, value_metric, buy_to_sell_ratio
 ```
 
 ## Portfolio Risk Controls
@@ -126,11 +132,11 @@ Applied to every buy before an order is placed:
 | Minimum order | `min_order_amount` | $5.00 | Skip if reduced amount falls below this |
 | ETF floor | `min_index_pct` | 60% | ETF allocation floor; optimizer cannot reduce below this |
 
-When a cap is hit, the allocation is **reduced** to the maximum allowed rather than skipped outright. Only if the reduced amount falls below `min_order_amount` is the buy skipped. Every cap decision is logged.
+When a cap is hit the allocation is **reduced** to the maximum allowed rather than skipped outright. Only if the reduced amount falls below `min_order_amount` is the buy skipped.
 
 ## Sell Decision Engine
 
-Each non-ETF holding is evaluated by `evaluate_sell_candidate()` which classifies sells as **hard** or **soft**:
+Each non-ETF holding is evaluated by `evaluate_sell_candidate()` which classifies sells as **hard** or **soft**. ETF positions are explicitly excluded from stock stop-loss logic.
 
 ### Hard Sells — execute immediately, sentiment cannot override
 
@@ -148,47 +154,87 @@ Each non-ETF holding is evaluated by `evaluate_sell_candidate()` which classifie
 | Take profit | `percent_change ≥ take_profit_pct` (default +60%) and `value_metric` below floor |
 | Weak value | `value_metric < sell_weak_value_below` (default 0.45) and held ≥ `min_days_held_before_value_exit` days |
 
-If sentiment returns `YES` with confidence ≥ `confidence_threshold`, a soft sell is held. Hard sells always execute regardless of sentiment.
+Soft sells are sent to Claude. A `HOLD` response with confidence ≥ `sell_sentiment_override_confidence` (default 85%, separate from the buy confidence threshold of 65%) keeps the position. Hard sells always execute regardless of sentiment.
+
+### Pending Order Awareness
+
+Before the sell scan, all open sell orders on Robinhood are fetched. Symbols with an existing open sell order are skipped entirely — no double-sell risk.
 
 ### Profit Harvesting
 
-When a take-profit sell is executed, proceeds are classified as a `harvest_exit`. If the total harvest amount for the run exceeds `min_harvest_amount` ($25), the proceeds are routed to `harvest_etfs` (default: SPY, VTI) rather than sitting as idle cash. The split is controlled by `harvest_to_etfs_pct` (default 80%) with the remainder recycled for continued stock exposure.
+Take-profit proceeds are classified as `harvest_exit`. If the run total exceeds `min_harvest_amount` ($25), proceeds are routed to `harvest_etfs` (default: SPY, VTI) rather than sitting as idle cash. Split: `harvest_to_etfs_pct` (80%) to ETFs, remainder recycled for continued stock exposure.
 
-## Bear Market Regime
+### ETF MA Filter (defensive regime only)
 
-On each run, `_is_bear_market_regime()` checks:
-1. SPY closing price vs its 200-day moving average
-2. VIX spot level vs `vix_threshold` (default 25.0)
+In defensive regime, ETF positions below their MA are also exited (`etf_risk.use_ma_filter: true`, `ma_period: 200`). This is the only mechanism by which ETF positions are sold — they are never touched by the stock stop-loss or trailing-stop logic.
 
-If either condition triggers, the buy loop uses a reduced candidate pool and tighter sector limits. No new stock buys are made in a confirmed bear regime; only ETF contributions continue.
+## Market Regime
+
+On each run, `get_market_regime()` classifies the environment into one of three tiers:
+
+| Regime | SPY vs 200 DMA | VIX | Effect |
+|--------|---------------|-----|--------|
+| **Bullish** | Above | < 20 | Normal operation |
+| **Neutral** | Below or VIX ≥ 20 | 20–30 | Base config (no override) |
+| **Defensive** | Below | ≥ 30 | ETF allocation raised to 85%, max stock buys = 3, stop-loss tightened by 0.05, ETF MA filter active |
+
+All thresholds are configurable under `regime:` in `config.yaml`.
 
 ## Backtest Engine
 
-`backtest.py` simulates the full strategy over historical price data downloaded via `yfinance`. Key design choices:
+`backtest.py` simulates the full strategy over historical price data from `yfinance`. Key design choices:
 
-- **Time-Weighted Return (TWR)**: Metrics are computed on a contribution-adjusted daily value series that strips external cash flows. This means reported returns reflect market performance, not the raw growth of deposited capital.
-- **Dynamic per-rebalance scoring**: 52-week position and 1-month return features are precomputed as `(n_days, n_stocks)` rolling arrays. Scores are refreshed at every rebalance using only price history available up to that day — no lookahead bias from fundamentals.
-- **Realistic friction**: Configurable slippage in basis points and per-trade commission are applied on every buy and sell.
-- **Train / validation split**: The price window is split 70/30 (configurable). The optimizer sees only the train window; tuned parameters are evaluated on the held-out validation window before any config changes are written.
+### Anti-Lookahead Causal Features
+
+All rolling features are computed strictly causally — only price data up to day D is used on day D:
+
+| Feature | Lookback | Notes |
+|---------|---------|-------|
+| `position_52w` | 252 bars | 52-week high/low range position |
+| `return_1m` | 21 bars | 1-month price return |
+| `return_5d` | 5 bars | 5-day price return |
+| `return_3m` | 63 bars | 3-month price return |
+| `return_6m` | 126 bars | 6-month price return |
+| `realized_vol_3m` | 63 bar daily returns | Annualized std dev |
+| `rs_3m`, `rs_6m` | 63 / 126 bars | Return minus benchmark return |
+| `above_50dma` | 50 bars | Price vs 50-bar rolling mean |
+| `above_200dma` | 200 bars | Price vs 200-bar rolling mean |
+
+Cross-sectional percentile ranking across stocks on a single day is **not** a lookahead bias (it ranks contemporaneous values, not future ones).
+
+### Contribution-Adjusted TWR
+
+Both portfolio and benchmark returns use chain-link time-weighted return methodology. External cash flows (weekly contributions) are stripped from the return computation so reported figures reflect market performance only, not capital growth from deposits. The benchmark invests each weekly contribution into SPY on the same schedule.
+
+### Backtest Realism Controls
+
+| Feature | Config key | Default |
+|---------|-----------|---------|
+| Volatility-scaled slippage | `vol_slippage_scaling` | `true` — effective_bps = base × (1 + 2.0 × annualized_vol) |
+| Max trades per week | `max_trades_per_week` | 10 |
+| Post-sell cooldown | `cooldown_days_after_sell` | 3 days |
+| Post-stopout cooldown | `cooldown_days_after_stopout` | 7 days |
+| Regime classification | uses `benchmark_prices` vs 200 DMA + threshold | tracked daily |
 
 ### Backtest Modes
 
 | Mode | Lookahead bias | Universe |
 |------|---------------|----------|
-| `liquid_universe_sanity_test` | MEDIUM | Random sample from liquid stocks |
-| `current_universe_stress_test` | HIGH | Top-N by current `value_metric` (not predictive) |
+| `liquid_universe_sanity_test` | MEDIUM | Random sample from liquid stocks (default) |
+| `current_universe_stress_test` | HIGH | Top-N by current `value_metric` — **not predictive** |
 | `walk_forward_price_only_test` | LOW | Liquid sample; fundamental arrays zeroed, momentum only |
 
 ### Backtest Report Fields
 
 ```
-Return (TWR):   time-weighted return (excludes contributions)
-Benchmark:      SPY buy-and-hold over the same window
-Excess return:  strategy TWR − benchmark return
+Return (TWR):       contribution-adjusted time-weighted return
+Bench TWR:          same methodology applied to benchmark (SPY buy-and-hold + contributions)
+Benchmark (buy-hold): simple price return over the window
+Excess return:      strategy TWR − benchmark price return
 Sharpe / Calmar / Max drawdown: from TWR daily series
-Final value:    total portfolio value (includes all contributions)
-net_contributions: starting_capital + all weekly deposits
-profit:         final_value − net_contributions
+Stopouts:           hard stop-loss or trailing-stop exits
+Cooldown skips:     buys blocked by post-sell cooldown
+Regime days:        breakdown of bullish / neutral / defensive days
 ```
 
 ## Parameter Tuner
@@ -197,20 +243,32 @@ profit:         final_value − net_contributions
 
 ```
 score_weights (value, quality, income, momentum)
-index_pct              — ETF allocation fraction (floor: min_index_pct)
-metric_threshold       — minimum score to qualify as a buy candidate
-take_profit_pct        — when to harvest gains
-sell_weak_value_below  — when to exit on thesis degradation
-trailing_stop_pct      — trailing stop distance from peak
-value_pe_weight        — PE vs PB split within value score
-momentum bin scores[0..4]
+index_pct                   — ETF allocation fraction (floor: min_index_pct)
+metric_threshold            — minimum score to qualify as a buy candidate
+take_profit_pct             — when to harvest gains
+sell_weak_value_below       — when to exit on thesis degradation
+trailing_stop_pct           — trailing stop distance from peak
+value_pe_weight             — PE vs PB split within value score
+momentum_v2 sub-weights:
+  rs_3m, rs_6m              — relative strength weight (3m, 6m)
+  risk_adj_3m               — risk-adjusted momentum weight
+  trend_structure           — DMA signal weight
+  return_1m                 — raw 1m return weight
 ```
 
 Safety parameters (stop_loss_pct, position caps, order caps) are never touched by the optimizer.
 
+### Diversification Penalty
+
+The optimizer applies a graduated penalty when `average_positions < 5`, discouraging parameter sets that cherry-pick 1–2 lucky stocks. Combined with the hard trade floor (`_MIN_TRADES_HARD = 20`), this pushes toward genuinely diversified strategies.
+
+### Parameter Stability Reporting
+
+After averaging Sharpe and Calmar runs, the diff table flags any parameter dimension where `|sharpe_opt − calmar_opt| > 0.05`. Unstable dimensions are marked `⚠ unstable` — if a parameter swings wildly between objective functions, the averaged value may be unreliable.
+
 ### Validation Gates
 
-Before writing any changes to `config.yaml`, the optimizer checks the held-out validation window:
+Before writing any changes to `config.yaml`:
 
 | Gate | Config key | Default |
 |------|-----------|---------|
@@ -220,19 +278,20 @@ Before writing any changes to `config.yaml`, the optimizer checks the held-out v
 
 All gates must pass. `--apply` with a failed validation prints a warning and does not write config. `--force-apply` bypasses validation for debugging.
 
-### Turnover Penalty
-
-The optimizer penalizes parameter sets that produce more than 80 new position entries per window: `penalty = max(0, trades − 80) / 80`. This discourages aggressive churn strategies that would not survive realistic transaction costs.
-
 ### LLM Review (optional)
 
-When `llm_review_enabled: true`, the top-N tuning candidates are sent to the Claude API for a second-opinion review. The LLM may recommend one candidate as-is or propose minor adjustments to alpha parameters. Safety parameters are explicitly excluded from the allowed adjustment set and are validated before any merge.
+When `--llm-review` is passed (or `llm_review_enabled: true` in config), all three candidates — Sharpe-optimized, Calmar-optimized, and averaged — are sent to Claude for a second-opinion review. The model returns a recommendation, rationale, and optional alpha-parameter adjustments. Safety parameters are explicitly excluded from the adjustable set. If `llm_review_apply: true`, Claude's adjustments are merged into `config.yaml`.
 
 ## Running the Application
 
 ```bash
 # Full run — refresh data, fetch news, analyze, trade
 python src/main.py
+
+# Override operating mode for this run only (does not write config.yaml)
+python src/main.py --op-mode safe          # manual confirmation before every trade
+python src/main.py --op-mode automated     # fully hands-off
+python src/main.py --op-mode no-sentiment  # value_metric weight only, no Claude calls
 
 # Skip data generation — reuse today's cached CSVs (much faster)
 python src/main.py --skip-data
@@ -253,6 +312,10 @@ python src/main.py --auto-tune --apply
 
 # Write config regardless of validation (debugging only)
 python src/main.py --auto-tune --force-apply
+
+# Auto-tune + LLM second-opinion review
+python src/main.py --auto-tune --llm-review
+python src/main.py --auto-tune --llm-review --apply   # apply only if validation + LLM both pass
 
 # Run pure-function unit tests (no Robinhood or Claude API required)
 python src/tests.py
@@ -276,7 +339,8 @@ weekly_investment: 400
 index_pct: 0.65                # Fraction of investable cash allocated to ETFs
 auto_approve: true
 use_sentiment_analysis: true
-confidence_threshold: 65       # Minimum Claude confidence (0–100) to hold a soft sell
+confidence_threshold: 65       # Buy sentiment: minimum Claude confidence (0–100)
+sell_sentiment_override_confidence: 85  # Sell override: higher bar to hold vs. sell
 
 # Factor weights
 score_weights:
@@ -285,6 +349,45 @@ score_weights:
   income:   0.10
   momentum: 0.35
 
+# Momentum v2 sub-weights (raw, normalized internally by scorer)
+momentum_v2:
+  weights:
+    rs_3m: 0.25
+    rs_6m: 0.25
+    risk_adj_3m: 0.20
+    trend_structure: 0.15
+    return_1m: 0.10
+    return_5d: 0.05          # fixed — not optimizer-tunable
+  penalties:
+    falling_knife_3m_threshold: -0.15
+    falling_knife_penalty: 0.25
+    overextension_52w_threshold: 0.97
+    overextension_penalty: 0.20
+    high_vol_annual_threshold: 0.50
+    high_vol_penalty: 0.15
+  clamp_low: -1.0
+  clamp_high: 1.5
+
+# Three-tier market regime
+regime:
+  spy_ma_period: 200
+  vix_defensive_threshold: 30.0   # VIX ≥ this → defensive
+  vix_neutral_threshold: 20.0     # VIX ≥ this (but < defensive) → neutral
+  defensive:
+    index_pct_override: 0.85      # raise ETF allocation
+    max_buys_override: 3          # limit active sleeve buys
+    stop_loss_tighten: 0.05       # tighten stop_loss by this amount
+  neutral:
+    index_pct_override: null      # use base config
+    max_buys_override: null
+
+# ETF core protection
+etf_risk:
+  enabled: true
+  use_ma_filter: true
+  ma_period: 200                  # exit ETF position if price < MA (defensive only)
+  defensive_etf_pct: 0.85
+
 # Portfolio risk limits
 risk:
   max_single_position_pct: 0.05
@@ -292,7 +395,8 @@ risk:
   max_order_pct_of_cash: 0.10
   min_order_amount: 5.0
   min_liquidity_volume: 500000
-  min_index_pct: 0.60           # Optimizer floor for ETF allocation
+  min_index_pct: 0.60             # optimizer floor for ETF allocation
+  max_buys_per_rebalance: 10
 
 # Sell rules (all percentages as decimals)
 sell_rules:
@@ -316,33 +420,47 @@ backtest:
   min_validation_excess_return: 0.0
   max_validation_drawdown: -0.20
   min_validation_sharpe: 0.25
-  llm_review_enabled: false
+  use_time_weighted_returns: true
+  max_trades_per_week: 10
+  cooldown_days_after_sell: 3
+  cooldown_days_after_stopout: 7
+  vol_slippage_scaling: true
+  vol_slippage_multiplier: 2.0
+  llm_review_enabled: false      # set true to always run LLM review after auto-tune
+  llm_review_apply: false        # set true to let Claude's adjustments write to config
   llm_review_model: claude-sonnet-4-6
 ```
 
 ### Operating Modes
 
-| Mode | `auto_approve` | `use_sentiment_analysis` | Notes |
-|------|---------------|--------------------------|-------|
-| Safe | `false` | `true` | Manual confirmation before each trade |
-| Automated | `true` | `true` | Executes high-confidence trades automatically |
-| No Sentiment | `false` | `false` | Buys by `value_metric` weight only |
+Use `--op-mode` on the CLI to override `auto_approve` and `use_sentiment_analysis` for a single run without touching `config.yaml`. Alternatively, set the values directly in config for a permanent change.
+
+| Mode | `--op-mode` arg | `auto_approve` | `use_sentiment_analysis` | Notes |
+|------|-----------------|---------------|--------------------------|-------|
+| Safe | `safe` | `false` | `true` | Manual confirmation before each trade |
+| Automated | `automated` | `true` | `true` | Executes high-confidence trades automatically |
+| No Sentiment | `no-sentiment` | `false` | `false` | Buys by `value_metric` weight only, no Claude API calls |
+
+```bash
+python src/main.py --op-mode safe          # one-off safe run
+python src/main.py --op-mode no-sentiment  # no API key needed, pure quantitative
+```
 
 ## Sentiment Analysis Architecture
 
 ### Buy Path — Batch Async
 1. Pre-filter candidates by `metric_threshold`
-2. Build batches of stocks from cached CSV data
+2. Cap to `max_sentiment_candidates` (score + buy-to-sell ratio ranked)
 3. Dispatch all batches concurrently via `asyncio.gather()` with `Semaphore(MAX_CONCURRENT=5)`
 4. Exponential backoff (`2^attempt × (1 + jitter)`) on 429s and transient errors
 5. Parse per-symbol results and run through risk controls before placing orders
 
 ### Sell Path — Hard/Soft Engine
-1. Load all holdings and `agg_data` once
+1. Load all holdings and `agg_data` once; fetch open sell orders (skip symbols with pending sells)
 2. Call `evaluate_sell_candidate()` for each non-ETF holding
 3. Execute hard sells immediately (no sentiment check)
-4. Batch soft sell candidates through Claude as a hold-check
-5. Sentiment `YES` with sufficient confidence holds the position; otherwise sell executes
+4. Run ETF MA filter (defensive regime only)
+5. Batch soft sell candidates through Claude as a hold-check (confidence ≥ 85% bullish = hold)
 6. Aggregate `harvest_exit` proceeds and route to `harvest_etfs`
 
 ## Setup
@@ -353,6 +471,7 @@ backtest:
 git clone https://github.com/yourusername/daily_investor.git
 cd daily_investor
 pip install -r requirements.txt
+pip install scipy   # required for --tune / --auto-tune
 ```
 
 `.env` file:
@@ -363,21 +482,16 @@ RB_MFA_SECRET=your_totp_secret        # Optional: skip interactive MFA prompt
 ANTHROPIC_API_KEY=your_anthropic_key  # Required for sentiment analysis and LLM tune review
 ```
 
-**Additional dependency for the optimizer:**
-```bash
-pip install scipy
-```
-
 ## Troubleshooting
 
 **Inflated value_metrics from old cached CSVs**
 The bot always loads the most-recently dated CSV for each dataset. Delete stale files from `data/` or run without `--skip-data` to regenerate.
 
 **"All stocks show NEUTRAL"**
-Batch Claude call failed. Check `investment_bot.log` for the stack trace. Common causes: missing `ANTHROPIC_API_KEY`, network issue, or Python < 3.10 event loop incompatibility.
+Batch Claude call failed. Check `investment_bot.log` for the stack trace. Common causes: missing `ANTHROPIC_API_KEY`, network issue, or Python < 3.10 event loop incompatibility. Use `--op-mode no-sentiment` to bypass sentiment entirely.
 
 **"Fractional order unavailable, retrying as market order"**
-Some tickers (foreign ADRs, low-liquidity stocks) don't support fractional shares on Robinhood. The bot retries with `order_buy_market(symbol, 1)` automatically.
+Some tickers (foreign ADRs, low-liquidity stocks) don't support fractional shares on Robinhood. The bot retries with `order_buy_market(symbol, 1)` automatically, with a final risk re-check before placing.
 
 **"Skipping SYMBOL: position cap reached"**
 The stock already fills its allowed slice of the portfolio (default 5%). Adjust `max_single_position_pct` in `cfg/config.yaml` if needed.
@@ -386,10 +500,13 @@ The stock already fills its allowed slice of the portfolio (default 5%). Adjust 
 A single sector would exceed 25% of portfolio value. Adjust `max_sector_pct` to change the limit.
 
 **Auto-tune returns impossibly high Sharpe**
-Check that `use_time_weighted_returns: true` is set in the `backtest` section and that the mode is `walk_forward_price_only_test` for the most conservative (lowest lookahead bias) evaluation. The `current_universe_stress_test` mode uses current fundamental scores throughout history (HIGH lookahead bias) and is not predictive.
+Check that `use_time_weighted_returns: true` is set in the `backtest` section. The `current_universe_stress_test` mode uses current fundamental scores throughout history (HIGH lookahead bias) and is not predictive — prefer `walk_forward_price_only_test` for the most conservative evaluation.
 
 **"Config NOT written: validation gates failed"**
 The tuned parameters did not outperform SPY on the held-out validation window, exceed the Sharpe floor, or stay within the drawdown limit. Use `--force-apply` to override for manual inspection.
+
+**"⚠ unstable" in the diff table**
+A parameter's Sharpe-optimized and Calmar-optimized values differ by more than 5%. The averaged value may not be robust. Consider re-running with a longer window or reviewing the flagged parameter manually before applying.
 
 ## Security
 
@@ -397,6 +514,7 @@ The tuned parameters did not outperform SPY on the held-out validation window, e
 - All sensitive values are read from environment variables at runtime
 - The LLM review payload is sanitized: it never contains account IDs, balances, credentials, or PII — only performance metrics and alpha parameter candidates
 - Safety parameters (stop-loss, position caps, order caps) are excluded from the LLM-adjustable parameter set
+- `--op-mode` only affects the current process — it never writes to `config.yaml`
 
 ## Disclaimer
 

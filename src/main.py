@@ -1347,7 +1347,13 @@ def _run_tuner_cli(n_days: int, objective: str) -> None:
         sys.exit(1)
 
 
-def _run_auto_tune_cli(n_days: int, mode: str | None = None, apply: bool = False, force_apply: bool = False) -> None:
+def _run_auto_tune_cli(
+    n_days: int,
+    mode: str | None = None,
+    apply: bool = False,
+    force_apply: bool = False,
+    llm_review: bool = False,
+) -> None:
     from tuner import run_auto_tune, _diff_table
     try:
         avg_params, sharpe_result, calmar_result, avg_result, sharpe_params, calmar_params = run_auto_tune(
@@ -1356,6 +1362,7 @@ def _run_auto_tune_cli(n_days: int, mode: str | None = None, apply: bool = False
             mode=mode,
             apply=apply,
             force_apply=force_apply,
+            llm_review=llm_review,
         )
         _diff_table(
             avg_params,
@@ -1398,14 +1405,65 @@ def main() -> None:
     args = sys.argv[1:]
 
     if "--help" in args or "-h" in args:
-        print("Usage: python main.py [--skip-data] [--tune DAYS] [--auto-tune [DAYS]] [--objective sharpe|calmar] [--mode MODE] [--apply] [--help]")
-        print("  --skip-data          Reuse existing CSV files instead of regenerating")
-        print("  --tune DAYS          Back-simulate N days and print suggested config tweaks")
-        print("  --auto-tune [DAYS]   Run Sharpe+Calmar, train/val split, validate, optionally write config (default 90d)")
-        print("  --objective METRIC   For --tune only: sharpe (default) or calmar")
-        print("  --mode MODE          Backtest mode: current_universe_stress_test | liquid_universe_sanity_test | walk_forward_price_only_test")
-        print("  --apply              Write config.yaml if validation gates pass")
-        print("  --force-apply        Write config.yaml regardless of validation (use with caution)")
+        print("""
+daily_investor — Robinhood systematic investment bot
+  Default (no flags): login and run the live trading strategy.
+
+USAGE
+  python main.py [OPTIONS]
+
+DATA OPTIONS
+  --skip-data          Reuse existing agg_data.csv instead of fetching fresh fundamentals.
+                       Useful for repeated tuning runs without re-downloading data.
+
+BACKTEST / TUNING OPTIONS
+  --tune DAYS          Single-objective back-simulation over DAYS trading days.
+                       Prints a suggested config diff — does NOT write config.yaml.
+                       Requires --objective (default: sharpe).
+                       Example: python main.py --tune 120 --objective calmar
+
+  --auto-tune [DAYS]   Dual-objective run (Sharpe + Calmar averaged), with a 70/30
+                       train/validation split and out-of-sample validation gates.
+                       Writes config.yaml only if --apply or --force-apply is passed
+                       AND validation gates pass.
+                       Default: 90 trading days.
+                       Example: python main.py --auto-tune 180 --apply
+
+  --objective METRIC   Optimization target for --tune: sharpe (default) or calmar.
+
+  --mode MODE          Backtest universe selection. Controls lookahead-bias level:
+                         liquid_universe_sanity_test   — random sample from liquid stocks  [MEDIUM bias, default]
+                         current_universe_stress_test  — top stocks by current score       [HIGH bias, not predictive]
+                         walk_forward_price_only_test  — volume filter only, momentum-only [LOW bias]
+
+CONFIG WRITE OPTIONS (auto-tune only)
+  --apply              Write config.yaml if out-of-sample validation gates pass.
+  --force-apply        Write config.yaml unconditionally (bypasses validation — use with care).
+  --llm-review         After optimization, send all three candidates (sharpe-opt, calmar-opt,
+                       averaged) to Claude for a second-opinion review. The model, whether its
+                       adjustments are applied, and the top-N reviewed are set in config.yaml:
+                         backtest.llm_review_model   (default: claude-sonnet-4-6)
+                         backtest.llm_review_apply   (default: false — review is advisory only)
+                         backtest.llm_review_enabled (default: false — set true to always review)
+                       Requires ANTHROPIC_API_KEY env var.
+
+LIVE TRADING OPTIONS
+  --op-mode MODE       Override auto_approve and use_sentiment_analysis for this run only.
+                       Does NOT write config.yaml — takes effect immediately, resets on next run.
+                         safe          auto_approve=false  use_sentiment=true   (manual confirm every trade)
+                         automated     auto_approve=true   use_sentiment=true   (fully hands-off)
+                         no-sentiment  auto_approve=false  use_sentiment=false  (value_metric only, no Claude)
+                       Example: python main.py --op-mode safe
+
+OTHER
+  -h, --help           Show this message and exit.
+
+VALIDATION GATES (auto-tune)
+  Tuned params are only written if the validation window (held-out 30%) satisfies:
+    • excess return  ≥ min_validation_excess_return   (cfg: backtest.min_validation_excess_return)
+    • max drawdown   ≥ max_validation_drawdown         (cfg: backtest.max_validation_drawdown)
+    • Sharpe ratio   ≥ min_validation_sharpe           (cfg: backtest.min_validation_sharpe)
+""")
         return
 
     if "--auto-tune" in args:
@@ -1420,7 +1478,8 @@ def main() -> None:
                 mode = args[mi + 1]
         apply = "--apply" in args
         force_apply = "--force-apply" in args
-        _run_auto_tune_cli(n_days, mode=mode, apply=apply, force_apply=force_apply)
+        llm_review = "--llm-review" in args
+        _run_auto_tune_cli(n_days, mode=mode, apply=apply, force_apply=force_apply, llm_review=llm_review)
         return
 
     if "--tune" in args:
@@ -1443,8 +1502,39 @@ def main() -> None:
         _run_tuner_cli(n_days, objective)
         return
 
+    # --op-mode: runtime override of auto_approve and use_sentiment_analysis
+    # Does NOT write config.yaml — affects only the current run.
+    if "--op-mode" in args:
+        oi = args.index("--op-mode")
+        if oi + 1 >= len(args):
+            print("--op-mode requires an argument: safe | automated | no-sentiment")
+            sys.exit(1)
+        _apply_op_mode(args[oi + 1])
+
     login()
     run_daily_strat()
+
+
+_OP_MODES = {
+    "safe":         {"auto_approve": False, "use_sentiment_analysis": True},
+    "automated":    {"auto_approve": True,  "use_sentiment_analysis": True},
+    "no-sentiment": {"auto_approve": False, "use_sentiment_analysis": False},
+}
+
+
+def _apply_op_mode(mode: str) -> None:
+    """Override AUTO_APPROVE / USE_SENTIMENT_ANALYSIS for this run only."""
+    global AUTO_APPROVE, USE_SENTIMENT_ANALYSIS
+    if mode not in _OP_MODES:
+        print(f"Unknown --op-mode '{mode}'. Valid options: {', '.join(_OP_MODES)}")
+        sys.exit(1)
+    settings = _OP_MODES[mode]
+    AUTO_APPROVE          = settings["auto_approve"]
+    USE_SENTIMENT_ANALYSIS= settings["use_sentiment_analysis"]
+    logger.info(
+        f"Op-mode '{mode}': auto_approve={AUTO_APPROVE}  "
+        f"use_sentiment_analysis={USE_SENTIMENT_ANALYSIS}"
+    )
 
 
 if __name__ == "__main__":
