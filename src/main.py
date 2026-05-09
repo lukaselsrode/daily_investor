@@ -35,12 +35,14 @@ from util import (
     BEAR_MARKET_PARAMS,
     CONFIDENCE_THRESHOLD,
     DATA_DIRECTORY,
+    ETF_RISK_PARAMS,
     ETFS,
     HARVEST_PARAMS,
     INDEX_PCT,
     MAX_ITERATIONS,
     METRIC_KEYS,
     METRIC_THRESHOLD,
+    REGIME_PARAMS,
     RISK_LIMITS,
     SELL_RULES,
     SELL_SENTIMENT_OVERRIDE_CONFIDENCE,
@@ -227,25 +229,38 @@ def wipe_data() -> None:
     logger.info("Data directory cleared")
 
 
-def _is_bear_market_regime() -> bool:
-    """Return True when SPY is below its 200-day MA and VIX > 25 (risk-off regime)."""
+def get_market_regime() -> str:
+    """
+    Return the current market regime: "bullish", "neutral", or "defensive".
+
+    Defensive:  SPY below 200DMA and VIX >= vix_defensive_threshold
+    Neutral:    SPY below 200DMA or VIX >= vix_neutral_threshold (but not defensive)
+    Bullish:    everything else
+    """
     try:
-        ma_period = BEAR_MARKET_PARAMS["spy_ma_period"]
+        rp = REGIME_PARAMS
+        ma_period = rp["spy_ma_period"]
         spy = yf.Ticker("SPY").history(period="1y")["Close"]
         if len(spy) < ma_period:
-            return False
-        spy_price = float(spy.iloc[-1])
-        spy_200ma = float(spy.rolling(ma_period).mean().iloc[-1])
-        vix = float(yf.Ticker("^VIX").history(period="5d")["Close"].iloc[-1])
-        regime = spy_price < spy_200ma and vix > BEAR_MARKET_PARAMS["vix_threshold"]
+            return "bullish"
+        spy_price  = float(spy.iloc[-1])
+        spy_200ma  = float(spy.rolling(ma_period).mean().iloc[-1])
+        vix        = float(yf.Ticker("^VIX").history(period="5d")["Close"].iloc[-1])
+        below_ma   = spy_price < spy_200ma
+        if below_ma and vix >= rp["vix_defensive_threshold"]:
+            regime = "defensive"
+        elif below_ma or vix >= rp["vix_neutral_threshold"]:
+            regime = "neutral"
+        else:
+            regime = "bullish"
         logger.info(
-            f"Market regime: {'BEAR — stock buys suspended' if regime else 'normal'} "
+            f"Market regime: {regime.upper()}  "
             f"(SPY=${spy_price:.2f} vs 200MA=${spy_200ma:.2f}, VIX={vix:.1f})"
         )
         return regime
     except Exception as e:
-        logger.warning(f"Regime check failed ({e}) — assuming normal market")
-        return False
+        logger.warning(f"Regime check failed ({e}) — assuming bullish")
+        return "bullish"
 
 
 # ---------------------------------------------------------------------------
@@ -799,13 +814,54 @@ def get_pending_sell_symbols() -> set[str]:
         return set()
 
 
+def _etf_ma_sell_check(holdings: dict, sold: list[str]) -> None:
+    """
+    In defensive regime only: exit ETF positions that are trading below their MA.
+    ETF core is otherwise fully protected from the stock sell logic.
+    """
+    etf_risk = ETF_RISK_PARAMS
+    if not etf_risk.get("enabled") or not etf_risk.get("use_ma_filter"):
+        return
+
+    # Only activate in defensive regime to protect ETF core during normal markets
+    regime = get_market_regime()
+    if regime != "defensive":
+        return
+
+    ma_period = etf_risk.get("ma_period", 200)
+    try:
+        import yfinance as _yf
+        for symbol, data in holdings.items():
+            if symbol not in ETFS:
+                continue
+            qty = float(data.get("quantity", 0))
+            if qty <= 0:
+                continue
+            hist = _yf.Ticker(symbol).history(period="1y")["Close"]
+            if len(hist) < ma_period:
+                continue
+            price = float(hist.iloc[-1])
+            ma    = float(hist.rolling(ma_period).mean().iloc[-1])
+            if price < ma:
+                logger.info(
+                    f"ETF MA filter: {symbol} ${price:.2f} < {ma_period}d MA ${ma:.2f} "
+                    f"(defensive regime) — selling"
+                )
+                if _place_sell(symbol, qty):
+                    sold.append(symbol)
+    except Exception as e:
+        logger.warning(f"ETF MA filter check failed: {e}")
+
+
 def make_sales() -> list[str]:
     """
-    Evaluate all non-ETF holdings for sell conditions.
+    Evaluate all holdings for sell conditions.
 
     Hard sells (stop-loss, yield-trap, quality floor) execute immediately.
     Soft sells (take-profit, weak value) are optionally held by sentiment.
     Sentiment can only override soft sells — never hard sells.
+    ETF positions are protected from stock stop-loss logic; they are only
+    exited by the ETF MA filter (defensive regime only).
     """
     sold: list[str] = []
 
@@ -873,6 +929,9 @@ def make_sales() -> list[str]:
         f"{len(hard_sells)} hard | {len(soft_sells)} soft | "
         f"{scanned - len(hard_sells) - len(soft_sells)} no-action"
     )
+
+    # ── ETF MA filter (defensive regime only — ETFs are otherwise protected) ───
+    _etf_ma_sell_check(holdings, sold)
 
     # ── Execute hard sells ────────────────────────────────────────────────────
     for symbol, decision in hard_sells.items():
@@ -952,15 +1011,40 @@ def make_sales() -> list[str]:
 # Buy cycle
 # ---------------------------------------------------------------------------
 
-def make_buys(df: pd.DataFrame, is_first_iteration: bool = True, bear_market: bool = False) -> tuple[list, list, list]:
+def make_buys(df: pd.DataFrame, is_first_iteration: bool = True, regime: str = "bullish") -> tuple[list, list, list]:
     """
     Execute buy orders.
     Returns (purchased, skipped, failed).
+
+    regime: "bullish" | "neutral" | "defensive" — controls index_pct and max_buys overrides.
     """
+    rp = REGIME_PARAMS
+
+    # Apply regime overrides to index_pct and max_buys
+    effective_index_pct = INDEX_PCT
+    effective_max_buys  = RISK_LIMITS["max_buys_per_rebalance"]
+
+    if regime == "defensive":
+        ovr = rp.get("defensive", {})
+        if ovr.get("index_pct_override") is not None:
+            effective_index_pct = float(ovr["index_pct_override"])
+        if ovr.get("max_buys_override") is not None:
+            effective_max_buys = int(ovr["max_buys_override"])
+        logger.info(
+            f"DEFENSIVE regime: index_pct={effective_index_pct:.0%}  max_buys={effective_max_buys}"
+        )
+    elif regime == "neutral":
+        ovr = rp.get("neutral", {})
+        if ovr.get("index_pct_override") is not None:
+            effective_index_pct = float(ovr["index_pct_override"])
+        if ovr.get("max_buys_override") is not None:
+            effective_max_buys = int(ovr["max_buys_override"])
+        logger.info(f"NEUTRAL regime: index_pct={effective_index_pct:.0%}")
+
     total_cash   = get_available_cash()
-    etf_amount   = total_cash * INDEX_PCT
+    etf_amount   = total_cash * effective_index_pct
     stock_amount = total_cash - etf_amount
-    logger.info(f"Allocating ${etf_amount:.2f} to ETFs, ${stock_amount:.2f} to stocks")
+    logger.info(f"Allocating ${etf_amount:.2f} to ETFs, ${stock_amount:.2f} to stocks (regime={regime})")
 
     # ETF buys — first iteration only
     if is_first_iteration and etf_amount > 0 and (AUTO_APPROVE or confirm(f"Buy ETFs (${etf_amount:,.2f})?")):
@@ -978,8 +1062,8 @@ def make_buys(df: pd.DataFrame, is_first_iteration: bool = True, bear_market: bo
                 except Exception as e:
                     logger.error(f"ETF buy failed for {etf}: {e}")
 
-    if bear_market:
-        logger.info("Bear market regime — skipping individual stock buys (remaining cash swept to ETFs at end)")
+    if regime == "defensive":
+        logger.info("Defensive regime — skipping individual stock buys (remaining cash swept to ETFs at end)")
         return [], [], []
 
     if df.empty or stock_amount <= 0:
@@ -1059,8 +1143,16 @@ def make_buys(df: pd.DataFrame, is_first_iteration: bool = True, bear_market: bo
     whole_share_queue: list[tuple[str, float]] = []
     allow_ws_fallback = RISK_LIMITS["allow_whole_share_fallback"]
     total_value = candidates["value_metric"].sum()
+    buys_made = 0
 
     for _, row in candidates.iterrows():
+        if buys_made >= effective_max_buys:
+            logger.info(f"Reached max_buys limit ({effective_max_buys}) for regime={regime} — stopping")
+            remaining_syms = [r["symbol"] for _, r in candidates.iterrows()
+                              if r["symbol"] not in purchased + skipped + failed]
+            skipped.extend(remaining_syms)
+            break
+
         symbol = row["symbol"]
 
         if sentiment_results:
@@ -1077,7 +1169,7 @@ def make_buys(df: pd.DataFrame, is_first_iteration: bool = True, bear_market: bo
                 skipped.append(symbol)
                 continue
 
-        cash = get_available_cash() * (1 - INDEX_PCT)
+        cash = get_available_cash() * (1 - effective_index_pct)
         if cash < RISK_LIMITS["min_order_amount"]:
             logger.info(f"Cash ${cash:.2f} below min order ${RISK_LIMITS['min_order_amount']:.2f} — exiting buy loop")
             break
@@ -1098,6 +1190,7 @@ def make_buys(df: pd.DataFrame, is_first_iteration: bool = True, bear_market: bo
                 ok_frac, detail = _place_fractional_buy(symbol, adj_alloc)
                 if ok_frac:
                     purchased.append(symbol)
+                    buys_made += 1
                     _update_local_exposures_after_buy(symbol, adj_alloc, agg_df, sector_exposure)
                     time.sleep(0.5)
                 elif allow_ws_fallback:
@@ -1163,7 +1256,7 @@ def run_daily_strat() -> None:
     if cash < WEEKLY_INVESTMENT:
         logger.info(f"Proceeding with ${cash:,.2f} available (below ${WEEKLY_INVESTMENT:,.2f} weekly target)")
 
-    bear_market = _is_bear_market_regime()
+    regime = get_market_regime()
 
     permanently_skipped: set[str] = set()
 
@@ -1198,7 +1291,7 @@ def run_daily_strat() -> None:
 
         try:
             logger.info("=== BUY PHASE ===")
-            purchased, skipped, failed = make_buys(df, is_first_iteration=(iteration == 1), bear_market=bear_market)
+            purchased, skipped, failed = make_buys(df, is_first_iteration=(iteration == 1), regime=regime)
             if purchased:
                 made_buys = True
             permanently_skipped.update(skipped)
@@ -1257,7 +1350,7 @@ def _run_tuner_cli(n_days: int, objective: str) -> None:
 def _run_auto_tune_cli(n_days: int, mode: str | None = None, apply: bool = False, force_apply: bool = False) -> None:
     from tuner import run_auto_tune, _diff_table
     try:
-        avg_params, sharpe_result, calmar_result, avg_result = run_auto_tune(
+        avg_params, sharpe_result, calmar_result, avg_result, sharpe_params, calmar_params = run_auto_tune(
             n_days=n_days,
             starting_capital=10_000.0,
             mode=mode,
@@ -1269,6 +1362,8 @@ def _run_auto_tune_cli(n_days: int, mode: str | None = None, apply: bool = False
             label=f"mean of Sharpe + Calmar over {n_days}d",
             sharpe_ref=sharpe_result,
             calmar_ref=calmar_result,
+            sharpe_params=sharpe_params,
+            calmar_params=calmar_params,
         )
         print(
             f"\nAveraged result:  ret={avg_result.total_return:+.1%}  "

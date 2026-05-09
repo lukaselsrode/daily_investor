@@ -77,6 +77,28 @@ bear_market:
   spy_ma_period: 200
   vix_threshold: 25.0
 
+# Three-tier market regime — replaces binary bear_market flag
+regime:
+  spy_ma_period: 200
+  vix_defensive_threshold: 30.0   # VIX above this → defensive
+  vix_neutral_threshold: 20.0     # VIX between neutral and defensive thresholds → neutral
+
+  defensive:
+    index_pct_override: 0.85      # raise ETF allocation
+    max_buys_override: 3          # limit active sleeve buys
+    stop_loss_tighten: 0.05       # tighten stop_loss by this amount
+
+  neutral:
+    index_pct_override: null      # use base config
+    max_buys_override: null
+
+etf_risk:
+  enabled: true
+  use_ma_filter: true
+  ma_period: 200                  # exit ETF position if price < N-day MA (defensive only)
+  defensive_etf_pct: 0.85        # ETF allocation during defensive regime
+  defensive_cash_pct: 0.10       # hold this fraction as cash when defensive
+
 scoring:
   # keep PE slightly favored over PB
   value_pe_weight: 0.60
@@ -122,6 +144,31 @@ momentum:
 
   return_1m_recovery_bonus: 0.15
   return_1m_falling_knife_penalty: 0.20
+
+# Multi-factor continuous momentum scoring (v2)
+# Replaces bin-based system in live scoring and backtest engine.
+# Backward-compat: momentum.position_bin_* retained for tests.
+momentum_v2:
+  # Sub-weights — normalized internally so values are relative, not absolute
+  weights:
+    rs_3m: 0.25            # relative strength vs SPY, 3-month
+    rs_6m: 0.25            # relative strength vs SPY, 6-month
+    risk_adj_3m: 0.20      # return_3m / realized_vol_3m (Sharpe-like)
+    trend_structure: 0.15  # price vs 50/200 DMA
+    return_1m: 0.10        # raw 1-month return
+    return_5d: 0.05        # short-term momentum check
+
+  penalties:
+    falling_knife_3m_threshold: -0.15    # 3m return below this → penalty
+    falling_knife_penalty: 0.25
+    overextension_52w_threshold: 0.97    # position_52w above this → penalty
+    overextension_penalty: 0.20
+    high_vol_annual_threshold: 0.50      # annualized realized vol above this → penalty
+    high_vol_penalty: 0.15
+
+  clamp_low: -1.0
+  clamp_high: 1.5
+  winsorize_pct: 0.05  # clip top/bottom N% of cross-section before percentile ranking
 
 analyst_ratings:
   strong_buy_ratio: 5.0
@@ -201,3 +248,13 @@ backtest:
   llm_review_top_n: 5
   llm_review_apply: false
   llm_review_model: claude-sonnet-4-6
+
+  # trade frequency / cooldown controls
+  max_trades_per_week: 10
+  cooldown_days_after_sell: 3
+  cooldown_days_after_stopout: 7
+
+  # volatility-scaled slippage:
+  # effective_slippage_bps = slippage_bps * (1 + vol_slippage_multiplier * annualized_vol)
+  vol_slippage_scaling: true
+  vol_slippage_multiplier: 2.0

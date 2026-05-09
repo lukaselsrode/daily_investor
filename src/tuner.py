@@ -31,6 +31,7 @@ from util import (
     INDEX_PCT,
     METRIC_THRESHOLD,
     MOMENTUM_PARAMS,
+    MOMENTUM_V2_PARAMS,
     RISK_LIMITS,
     SCORE_WEIGHTS,
     SCORING_PARAMS,
@@ -60,13 +61,15 @@ PARAM_NAMES = [
     "sell_weak_below",   # sell_rules.sell_weak_value_below
     "trailing_stop",     # sell_rules.trailing_stop_pct
     "value_pe_weight",   # scoring.value_pe_weight
-    "mbin_0",            # momentum.position_bin_scores[0]
-    "mbin_1",            # momentum.position_bin_scores[1]
-    "mbin_2",            # momentum.position_bin_scores[2]
-    "mbin_3",            # momentum.position_bin_scores[3]
-    "mbin_4",            # momentum.position_bin_scores[4]
+    "mom_rs3m",          # momentum_v2.weights.rs_3m   (raw, normalized with peers)
+    "mom_rs6m",          # momentum_v2.weights.rs_6m
+    "mom_radj",          # momentum_v2.weights.risk_adj_3m
+    "mom_trend",         # momentum_v2.weights.trend_structure
+    "mom_r1m",           # momentum_v2.weights.return_1m
 ]
 
+# momentum v2 sub-weights are raw (normalized in scoring); keep each in [0, 0.60]
+# so no single factor can dominate after normalization (return_5d is fixed from YAML)
 BOUNDS: list[tuple[float, float]] = [
     (0.05, 0.80),   # sw_value
     (0.05, 0.60),   # sw_quality
@@ -78,19 +81,24 @@ BOUNDS: list[tuple[float, float]] = [
     (0.10, 0.90),   # sell_weak_below
     (-0.30, -0.05), # trailing_stop
     (0.30, 0.90),   # value_pe_weight
-    (-1.0,  0.5),   # mbin_0
-    (-0.5,  0.8),   # mbin_1
-    (-0.2,  1.0),   # mbin_2
-    ( 0.0,  1.2),   # mbin_3
-    (-0.5,  0.8),   # mbin_4
+    (0.00, 0.60),   # mom_rs3m
+    (0.00, 0.60),   # mom_rs6m
+    (0.00, 0.60),   # mom_radj
+    (0.00, 0.60),   # mom_trend
+    (0.00, 0.60),   # mom_r1m
 ]
 
 
 def _current_params() -> np.ndarray:
-    mbin = list(MOMENTUM_PARAMS["position_bin_scores"])
-    while len(mbin) < 5:
-        mbin.append(0.0)
     sw = SCORE_WEIGHTS
+    v2w = MOMENTUM_V2_PARAMS.get("weights", {})
+    mom_sub = [
+        v2w.get("rs_3m",           0.25),
+        v2w.get("rs_6m",           0.25),
+        v2w.get("risk_adj_3m",     0.20),
+        v2w.get("trend_structure", 0.15),
+        v2w.get("return_1m",       0.10),
+    ]
     return np.array([
         sw["value"], sw["quality"], sw["income"], sw["momentum"],
         INDEX_PCT,
@@ -99,7 +107,7 @@ def _current_params() -> np.ndarray:
         SELL_RULES["sell_weak_value_below"],
         SELL_RULES["trailing_stop_pct"],
         SCORING_PARAMS["value_pe_weight"],
-        *mbin[:5],
+        *mom_sub,
     ])
 
 
@@ -149,12 +157,17 @@ def make_objective(
         # Penalize aggressive churn: >80 new positions in the window is excessive
         turnover_penalty = max(0.0, result.trades_made - 80) / 80.0
 
+        # Penalize sector / position concentration: fewer than 5 average open positions
+        # is a signal the optimizer found a few lucky stocks and over-fitted them
+        diversity_penalty = max(0.0, 5.0 - result.average_positions) * 0.4
+
         if call_count[0] % 50 == 0:
             print(
                 f"  [{call_count[0]} evals] {objective}={score:.3f} "
-                f"ret={result.total_return:.1%} trades={result.trades_made}"
+                f"ret={result.total_return:.1%} trades={result.trades_made} "
+                f"avg_pos={result.average_positions:.1f}"
             )
-        return -score + penalty + turnover_penalty
+        return -score + penalty + turnover_penalty + diversity_penalty
 
     return _obj
 
@@ -284,12 +297,12 @@ def run_auto_tune(
     mode: str | None = None,
     apply: bool = False,
     force_apply: bool = False,
-) -> tuple[np.ndarray, SimResult, SimResult, SimResult]:
+) -> "tuple[np.ndarray, SimResult, SimResult, SimResult, np.ndarray, np.ndarray]":
     """
     Run Sharpe + Calmar optimizations, average the results.
     Validates on held-out window and only writes config.yaml when gates pass
     and apply=True or auto_apply_if_valid=True.
-    Returns (avg_params, sharpe_result, calmar_result, avg_result).
+    Returns (avg_params, sharpe_result, calmar_result, avg_result, sharpe_params, calmar_params).
     """
     try:
         from scipy.optimize import differential_evolution  # noqa: F401
@@ -304,6 +317,10 @@ def run_auto_tune(
 
     # Split window for tune (train) / validate
     train_sl, val_sl = split_price_window(n_days, train_pct)
+
+    def _opt_sl(arr):
+        return arr[train_sl] if arr is not None else None
+
     tune_precomp = precomp._replace(
         prices=precomp.prices[train_sl],
         etf_prices=precomp.etf_prices[train_sl],
@@ -312,6 +329,14 @@ def run_auto_tune(
         return_1m_daily=precomp.return_1m_daily[train_sl],
         bin_indices_daily=precomp.bin_indices_daily[train_sl],
         has_position_52w_daily=precomp.has_position_52w_daily[train_sl],
+        ret_5d_daily=_opt_sl(precomp.ret_5d_daily),
+        ret_3m_daily=_opt_sl(precomp.ret_3m_daily),
+        ret_6m_daily=_opt_sl(precomp.ret_6m_daily),
+        rs_3m_daily=_opt_sl(precomp.rs_3m_daily),
+        rs_6m_daily=_opt_sl(precomp.rs_6m_daily),
+        vol_3m_daily=_opt_sl(precomp.vol_3m_daily),
+        above_50dma_daily=_opt_sl(precomp.above_50dma_daily),
+        above_200dma_daily=_opt_sl(precomp.above_200dma_daily),
     )
     train_days = tune_precomp.prices.shape[0]
 
@@ -359,7 +384,7 @@ def run_auto_tune(
     else:
         print("Config NOT written (--apply requires validation to pass; use --force-apply to override).")
 
-    return avg_params, sharpe_result, calmar_result, avg_result
+    return avg_params, sharpe_result, calmar_result, avg_result, sharpe_params, calmar_params
 
 
 # ---------------------------------------------------------------------------
@@ -393,8 +418,14 @@ def apply_config_params(params: np.ndarray) -> None:
     cfg["scoring"]["value_pe_weight"] = round(float(params[9]), 4)
     cfg["scoring"]["value_pb_weight"] = round(float(1.0 - params[9]), 4)
 
-    cfg.setdefault("momentum", {})
-    cfg["momentum"]["position_bin_scores"] = [round(float(v), 4) for v in params[10:15]]
+    # Momentum v2: normalize raw sub-weights and write back to momentum_v2.weights
+    v2_raw = np.abs(params[10:15])
+    v2_total = max(float(v2_raw.sum()), 1e-9)
+    v2_norm = v2_raw / v2_total
+    v2_keys = ["rs_3m", "rs_6m", "risk_adj_3m", "trend_structure", "return_1m"]
+    cfg.setdefault("momentum_v2", {}).setdefault("weights", {})
+    for k, v in zip(v2_keys, v2_norm):
+        cfg["momentum_v2"]["weights"][k] = round(float(v), 4)
 
     with open(CONFIG_FILE, "w") as f:
         yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
@@ -411,11 +442,19 @@ def _diff_table(
     label: str = "",
     sharpe_ref: SimResult | None = None,
     calmar_ref: SimResult | None = None,
+    sharpe_params: "np.ndarray | None" = None,
+    calmar_params: "np.ndarray | None" = None,
 ) -> None:
     cur = _current_params()
     raw_sw = best_params[:4]
     norm_sw = raw_sw / max(raw_sw.sum(), 1e-9)
     cur_sw_norm = cur[:4] / max(cur[:4].sum(), 1e-9)
+
+    # Normalize current v2 sub-weights for display
+    cur_v2_raw = np.abs(cur[10:15])
+    cur_v2_norm = cur_v2_raw / max(cur_v2_raw.sum(), 1e-9)
+    v2_raw = np.abs(best_params[10:15])
+    v2_norm = v2_raw / max(v2_raw.sum(), 1e-9)
 
     header = f"AVERAGED CONFIG ({label})" if label else "SUGGESTED CONFIG"
     print(f"\n{'=' * 64}")
@@ -434,22 +473,23 @@ def _diff_table(
         )
     print()
 
+    v2_keys = ["rs_3m", "rs_6m", "risk_adj_3m", "trend_structure", "return_1m"]
     rows = [
-        ("score_weights.value",       cur_sw_norm[0], norm_sw[0]),
-        ("score_weights.quality",     cur_sw_norm[1], norm_sw[1]),
-        ("score_weights.income",      cur_sw_norm[2], norm_sw[2]),
-        ("score_weights.momentum",    cur_sw_norm[3], norm_sw[3]),
-        ("index_pct",                 cur[4],          best_params[4]),
-        ("metric_threshold",          cur[5],          best_params[5]),
-        ("sell_rules.take_profit",    cur[6],          best_params[6]),
-        ("sell_rules.sell_weak",      cur[7],          best_params[7]),
-        ("sell_rules.trailing_stop",  cur[8],          best_params[8]),
-        ("scoring.value_pe_weight",   cur[9],          best_params[9]),
-        ("momentum.bin_scores[0]",    cur[10],         best_params[10]),
-        ("momentum.bin_scores[1]",    cur[11],         best_params[11]),
-        ("momentum.bin_scores[2]",    cur[12],         best_params[12]),
-        ("momentum.bin_scores[3]",    cur[13],         best_params[13]),
-        ("momentum.bin_scores[4]",    cur[14],         best_params[14]),
+        ("score_weights.value",              cur_sw_norm[0],  norm_sw[0]),
+        ("score_weights.quality",            cur_sw_norm[1],  norm_sw[1]),
+        ("score_weights.income",             cur_sw_norm[2],  norm_sw[2]),
+        ("score_weights.momentum",           cur_sw_norm[3],  norm_sw[3]),
+        ("index_pct",                        cur[4],           best_params[4]),
+        ("metric_threshold",                 cur[5],           best_params[5]),
+        ("sell_rules.take_profit",           cur[6],           best_params[6]),
+        ("sell_rules.sell_weak",             cur[7],           best_params[7]),
+        ("sell_rules.trailing_stop",         cur[8],           best_params[8]),
+        ("scoring.value_pe_weight",          cur[9],           best_params[9]),
+        ("momentum_v2.weights.rs_3m",        cur_v2_norm[0],   v2_norm[0]),
+        ("momentum_v2.weights.rs_6m",        cur_v2_norm[1],   v2_norm[1]),
+        ("momentum_v2.weights.risk_adj_3m",  cur_v2_norm[2],   v2_norm[2]),
+        ("momentum_v2.weights.trend",        cur_v2_norm[3],   v2_norm[3]),
+        ("momentum_v2.weights.return_1m",    cur_v2_norm[4],   v2_norm[4]),
     ]
 
     print("CHANGES  (> 1% relative)")
@@ -459,10 +499,20 @@ def _diff_table(
         rel = abs(new - old) / max(abs(old), 1e-9)
         if rel > 0.01:
             arrow = "▲" if new > old else "▼"
-            print(f"  {lbl:<36}  {old:+.4f}  →  {new:+.4f}  {arrow}")
+            print(f"  {lbl:<42}  {old:+.4f}  →  {new:+.4f}  {arrow}")
             any_change = True
     if not any_change:
         print("  (no meaningful changes)")
+
+    # Parameter stability: show spread between Sharpe and Calmar optimized runs
+    if sharpe_params is not None and calmar_params is not None:
+        print("\nPARAMETER STABILITY  (|sharpe_opt - calmar_opt|)")
+        print("-" * 64)
+        names = PARAM_NAMES
+        for i, name in enumerate(names):
+            spread = abs(float(sharpe_params[i]) - float(calmar_params[i]))
+            if spread > 0.05:
+                print(f"  {name:<36}  spread={spread:.4f}  ⚠ unstable")
 
     print("\nconfig.yaml SNIPPET")
     print("-" * 64)
@@ -478,8 +528,10 @@ def _diff_table(
     print("scoring:")
     print(f"  value_pe_weight: {best_params[9]:.4f}")
     print(f"  value_pb_weight: {1.0 - best_params[9]:.4f}")
-    print("momentum:")
-    print(f"  position_bin_scores: {[round(float(v), 4) for v in best_params[10:15]]}")
+    print("momentum_v2:")
+    print("  weights:")
+    for k, v in zip(v2_keys, v2_norm):
+        print(f"    {k}: {v:.4f}")
     print("=" * 64)
 
 
@@ -506,7 +558,7 @@ def print_config_diff(best_params: np.ndarray, best_result: SimResult) -> None:
 _LLM_ALLOWED_PARAMS = frozenset([
     "score_weights", "metric_threshold", "index_pct",
     "take_profit_pct", "trailing_stop_pct", "sell_weak_value_below",
-    "value_pe_weight", "position_bin_scores",
+    "value_pe_weight", "momentum_v2_weights",
 ])
 _LLM_FORBIDDEN_PARAMS = frozenset([
     "max_single_position_pct", "max_sector_pct", "max_order_pct_of_cash",
@@ -703,10 +755,10 @@ def merge_llm_recommendation_with_config(
             cfg.setdefault("score_weights", {}).update(
                 {k: round(float(v), 4) for k, v in value.items()}
             )
-        elif key == "position_bin_scores" and isinstance(value, list):
-            cfg.setdefault("momentum", {})["position_bin_scores"] = [
-                round(float(v), 4) for v in value
-            ]
+        elif key == "momentum_v2_weights" and isinstance(value, dict):
+            cfg.setdefault("momentum_v2", {}).setdefault("weights", {}).update(
+                {k: round(float(v), 4) for k, v in value.items()}
+            )
         elif key == "value_pe_weight":
             cfg.setdefault("scoring", {})["value_pe_weight"] = round(float(value), 4)
             cfg["scoring"]["value_pb_weight"] = round(1.0 - float(value), 4)

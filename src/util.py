@@ -182,6 +182,12 @@ BACKTEST_PARAMS: dict = {
     "llm_review_top_n":             int(_bt.get("llm_review_top_n",             5)),
     "llm_review_apply":             bool(_bt.get("llm_review_apply",            False)),
     "llm_review_model":             str(_bt.get("llm_review_model",             "claude-sonnet-4-6")),
+    # trade frequency / realism
+    "max_trades_per_week":          int(_bt.get("max_trades_per_week",          10)),
+    "cooldown_days_after_sell":     int(_bt.get("cooldown_days_after_sell",     3)),
+    "cooldown_days_after_stopout":  int(_bt.get("cooldown_days_after_stopout",  7)),
+    "vol_slippage_scaling":         bool(_bt.get("vol_slippage_scaling",        True)),
+    "vol_slippage_multiplier":      float(_bt.get("vol_slippage_multiplier",    2.0)),
 }
 
 # ---------------------------------------------------------------------------
@@ -264,6 +270,76 @@ ANALYST_PARAMS: dict = {
 MAX_ITERATIONS: int = int(_app.get("max_iterations", 10))
 
 # ---------------------------------------------------------------------------
+# Momentum v2 parameters
+# ---------------------------------------------------------------------------
+
+_mv2 = _app.get("momentum_v2", {})
+_mv2_w = _mv2.get("weights", {})
+_mv2_p = _mv2.get("penalties", {})
+MOMENTUM_V2_PARAMS: dict = {
+    "weights": {
+        "rs_3m":          float(_mv2_w.get("rs_3m",          0.25)),
+        "rs_6m":          float(_mv2_w.get("rs_6m",          0.25)),
+        "risk_adj_3m":    float(_mv2_w.get("risk_adj_3m",    0.20)),
+        "trend_structure":float(_mv2_w.get("trend_structure", 0.15)),
+        "return_1m":      float(_mv2_w.get("return_1m",      0.10)),
+        "return_5d":      float(_mv2_w.get("return_5d",      0.05)),
+    },
+    "penalties": {
+        "falling_knife_3m_threshold": float(_mv2_p.get("falling_knife_3m_threshold", -0.15)),
+        "falling_knife_penalty":      float(_mv2_p.get("falling_knife_penalty",       0.25)),
+        "overextension_52w_threshold":float(_mv2_p.get("overextension_52w_threshold", 0.97)),
+        "overextension_penalty":      float(_mv2_p.get("overextension_penalty",       0.20)),
+        "high_vol_annual_threshold":  float(_mv2_p.get("high_vol_annual_threshold",   0.50)),
+        "high_vol_penalty":           float(_mv2_p.get("high_vol_penalty",            0.15)),
+    },
+    "clamp_low":     float(_mv2.get("clamp_low",     -1.0)),
+    "clamp_high":    float(_mv2.get("clamp_high",     1.5)),
+    "winsorize_pct": float(_mv2.get("winsorize_pct",  0.05)),
+}
+
+# ---------------------------------------------------------------------------
+# Three-tier regime parameters
+# ---------------------------------------------------------------------------
+
+_rg = _app.get("regime", {})
+_rg_def = _rg.get("defensive", {})
+_rg_neu = _rg.get("neutral", {})
+REGIME_PARAMS: dict = {
+    "spy_ma_period":          int(_rg.get("spy_ma_period", 200)),
+    "vix_defensive_threshold":float(_rg.get("vix_defensive_threshold", 30.0)),
+    "vix_neutral_threshold":  float(_rg.get("vix_neutral_threshold",   20.0)),
+    "defensive": {
+        "index_pct_override": (
+            float(_rg_def["index_pct_override"])
+            if _rg_def.get("index_pct_override") is not None else None
+        ),
+        "max_buys_override": (
+            int(_rg_def["max_buys_override"])
+            if _rg_def.get("max_buys_override") is not None else None
+        ),
+        "stop_loss_tighten": float(_rg_def.get("stop_loss_tighten", 0.05)),
+    },
+    "neutral": {
+        "index_pct_override": None,
+        "max_buys_override":  None,
+    },
+}
+
+# ---------------------------------------------------------------------------
+# ETF core protection parameters
+# ---------------------------------------------------------------------------
+
+_er = _app.get("etf_risk", {})
+ETF_RISK_PARAMS: dict = {
+    "enabled":           bool(_er.get("enabled",           True)),
+    "use_ma_filter":     bool(_er.get("use_ma_filter",     True)),
+    "ma_period":         int(_er.get("ma_period",          200)),
+    "defensive_etf_pct": float(_er.get("defensive_etf_pct", 0.85)),
+    "defensive_cash_pct":float(_er.get("defensive_cash_pct", 0.10)),
+}
+
+# ---------------------------------------------------------------------------
 # Canonical agg_data schema — single definition used by all modules
 # ---------------------------------------------------------------------------
 
@@ -290,6 +366,17 @@ METRIC_KEYS: list[str] = [
     "buy_to_sell_ratio",
     "missing_value_flag",
     "strategy_bucket",
+    # momentum v2 raw features (populated by _enrich_with_momentum)
+    "return_5d",
+    "return_3m",
+    "return_6m",
+    "rs_1m",
+    "rs_3m",
+    "rs_6m",
+    "realized_vol_3m",
+    "risk_adj_momentum_3m",
+    "above_50dma",
+    "above_200dma",
 ]
 
 AGG_DATA_COLUMNS: list[str] = ["symbol"] + METRIC_KEYS

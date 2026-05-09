@@ -46,6 +46,7 @@ from util import (
     METRIC_KEYS,
     METRIC_THRESHOLD,
     MOMENTUM_PARAMS,
+    MOMENTUM_V2_PARAMS,
     SCORE_WEIGHTS,
     SCORING_PARAMS,
     get_investment_ratios,
@@ -374,12 +375,23 @@ def _evaluate_stock(symbol: str, stock: dict) -> list | None:
         value_score,
         income_score,
         quality,
-        momentum,
+        momentum,   # placeholder — overwritten by _apply_cross_sectional_momentum_scores
         yield_trap_flag,
         final_metric,
         buy_to_sell,
         missing_value_flag,
         strategy_bucket,
+        # momentum v2 raw features (populated by _enrich_with_momentum)
+        stock.get("return_5d"),
+        stock.get("return_3m"),
+        stock.get("return_6m"),
+        stock.get("rs_1m"),
+        stock.get("rs_3m"),
+        stock.get("rs_6m"),
+        stock.get("realized_vol_3m"),
+        stock.get("risk_adj_momentum_3m"),
+        stock.get("above_50dma"),
+        stock.get("above_200dma"),
     ]
 
 
@@ -411,44 +423,245 @@ def _enrich_with_quotes(symbols: list[str], fundamentals: dict[str, dict]) -> No
 
 
 def _enrich_with_momentum(symbols: list[str], fundamentals: dict[str, dict]) -> None:
-    """Batch-fetch 1-month price returns via yfinance and merge into fundamentals."""
+    """
+    Batch-fetch multi-timeframe returns and momentum features via yfinance.
+
+    Computes for each stock (if data available):
+      return_5d, return_1m, return_3m, return_6m
+      realized_vol_3m (annualized from 63-day daily stddev)
+      above_50dma, above_200dma
+      rs_1m, rs_3m, rs_6m (vs SPY)
+      risk_adj_momentum_3m = return_3m / realized_vol_3m
+
+    Threads=False + small batches prevents EMFILE on 2500+ symbol universes.
+    Period=220d covers: 5d, 21d, 63d, 126d lookbacks + 200dma buffer.
+    """
     import requests as _requests
-    # Smaller batches + threads=False keeps concurrent connections to 1 per batch,
-    # preventing EMFILE (too many open files) when processing 2500+ symbols.
+
+    # Fetch SPY reference returns once — used for relative-strength computation
+    spy_returns: dict[str, float | None] = {"5d": None, "1m": None, "3m": None, "6m": None}
+    try:
+        spy_raw = yf.download("SPY", period="230d", progress=False, auto_adjust=True, threads=False)
+        if not spy_raw.empty:
+            spy_closes = spy_raw["Close"].squeeze().dropna()
+            n = len(spy_closes)
+            if n >= 5:
+                spy_returns["5d"] = round(float(spy_closes.iloc[-1] / spy_closes.iloc[-5]) - 1.0, 4)
+            if n >= 21:
+                spy_returns["1m"] = round(float(spy_closes.iloc[-1] / spy_closes.iloc[-21]) - 1.0, 4)
+            if n >= 63:
+                spy_returns["3m"] = round(float(spy_closes.iloc[-1] / spy_closes.iloc[-63]) - 1.0, 4)
+            if n >= 126:
+                spy_returns["6m"] = round(float(spy_closes.iloc[-1] / spy_closes.iloc[-126]) - 1.0, 4)
+    except Exception as e:
+        logger.warning(f"SPY reference fetch failed: {e}")
+
+    logger.info(
+        "SPY reference returns: 5d=%s 1m=%s 3m=%s 6m=%s",
+        spy_returns["5d"], spy_returns["1m"], spy_returns["3m"], spy_returns["6m"],
+    )
+
     batch_size = 50
-    enriched = 0
-    for i in range(0, len(symbols), batch_size):
+    coverage: dict[str, int] = {k: 0 for k in ["return_5d", "return_1m", "return_3m", "return_6m",
+                                                  "realized_vol_3m", "above_50dma", "above_200dma",
+                                                  "rs_1m", "rs_3m", "rs_6m", "risk_adj_momentum_3m"]}
+    n_sym = len(symbols)
+
+    for i in range(0, n_sym, batch_size):
         batch = symbols[i: i + batch_size]
         session = _requests.Session()
         try:
             raw = yf.download(
                 batch,
-                period="35d",
+                period="230d",
                 progress=False,
                 auto_adjust=True,
-                threads=False,   # single-threaded: 1 connection per batch, not 1 per ticker
+                threads=False,
                 session=session,
             )
             if raw.empty:
                 continue
-            try:
-                closes = raw["Close"]
-                if isinstance(closes, pd.Series):
-                    closes = closes.to_frame(name=batch[0])
-            except KeyError:
-                continue
-            for sym in batch:
-                if sym not in closes.columns:
+            if isinstance(raw.columns, pd.MultiIndex):
+                try:
+                    closes_df = raw["Close"]
+                except KeyError:
                     continue
-                col = closes[sym].dropna()
-                if len(col) >= 15:
-                    fundamentals[sym]["return_1m"] = round(float(col.iloc[-1] / col.iloc[0]) - 1.0, 4)
-                    enriched += 1
+            else:
+                closes_df = raw[["Close"]].rename(columns={"Close": batch[0]})
+            if isinstance(closes_df, pd.Series):
+                closes_df = closes_df.to_frame(name=batch[0])
+
+            for sym in batch:
+                if sym not in closes_df.columns:
+                    continue
+                col = closes_df[sym].dropna()
+                n = len(col)
+                if n < 5:
+                    continue
+
+                last = float(col.iloc[-1])
+
+                # Multi-timeframe returns
+                def _ret(lookback: int) -> float | None:
+                    if n >= lookback:
+                        prev = float(col.iloc[-lookback])
+                        return round(last / prev - 1.0, 4) if prev > 0 else None
+                    return None
+
+                r5d  = _ret(5)
+                r1m  = _ret(21)
+                r3m  = _ret(63)
+                r6m  = _ret(126)
+
+                if r5d  is not None: fundamentals[sym]["return_5d"]  = r5d;  coverage["return_5d"]  += 1
+                if r1m  is not None: fundamentals[sym]["return_1m"]  = r1m;  coverage["return_1m"]  += 1
+                if r3m  is not None: fundamentals[sym]["return_3m"]  = r3m;  coverage["return_3m"]  += 1
+                if r6m  is not None: fundamentals[sym]["return_6m"]  = r6m;  coverage["return_6m"]  += 1
+
+                # Realized volatility (3-month window, annualized)
+                if n >= 63:
+                    daily_rets = col.pct_change().dropna()
+                    if len(daily_rets) >= 20:
+                        vol_3m = round(float(daily_rets.iloc[-63:].std() * (252 ** 0.5)), 4)
+                        fundamentals[sym]["realized_vol_3m"] = vol_3m
+                        coverage["realized_vol_3m"] += 1
+
+                        # Risk-adjusted 3m momentum
+                        if r3m is not None and vol_3m > 0:
+                            fundamentals[sym]["risk_adj_momentum_3m"] = round(r3m / vol_3m, 4)
+                            coverage["risk_adj_momentum_3m"] += 1
+
+                # 50/200 DMA signals
+                if n >= 50:
+                    ma50 = float(col.iloc[-50:].mean())
+                    fundamentals[sym]["above_50dma"] = last > ma50
+                    coverage["above_50dma"] += 1
+                if n >= 200:
+                    ma200 = float(col.iloc[-200:].mean())
+                    fundamentals[sym]["above_200dma"] = last > ma200
+                    coverage["above_200dma"] += 1
+
+                # Relative strength vs SPY
+                if r1m is not None and spy_returns["1m"] is not None:
+                    fundamentals[sym]["rs_1m"] = round(r1m - spy_returns["1m"], 4)
+                    coverage["rs_1m"] += 1
+                if r3m is not None and spy_returns["3m"] is not None:
+                    fundamentals[sym]["rs_3m"] = round(r3m - spy_returns["3m"], 4)
+                    coverage["rs_3m"] += 1
+                if r6m is not None and spy_returns["6m"] is not None:
+                    fundamentals[sym]["rs_6m"] = round(r6m - spy_returns["6m"], 4)
+                    coverage["rs_6m"] += 1
+
         except Exception as e:
-            logger.warning(f"Momentum batch {i // batch_size + 1} failed: {str(e)[:60]}")
+            logger.warning(f"Momentum batch {i // batch_size + 1} failed: {str(e)[:80]}")
         finally:
             session.close()
-    logger.info(f"Momentum enrichment: {enriched}/{len(symbols)} symbols have return_1m")
+
+    for feat, cnt in coverage.items():
+        pct = cnt / max(n_sym, 1) * 100
+        level = logging.WARNING if pct < 50.0 else logging.INFO
+        logger.log(level, "Momentum feature %-25s  coverage: %5.1f%% (%d/%d)", feat, pct, cnt, n_sym)
+
+
+def _pct_rank_series(s: pd.Series, winsorize_pct: float = 0.05) -> pd.Series:
+    """
+    Cross-sectional percentile rank, winsorized and scaled to [-1, 1].
+    Missing values → 0.0 (neutral mid-rank).
+    This is NOT a lookahead bias: we rank contemporaneous values across stocks.
+    """
+    finite = s.notna()
+    if finite.sum() < 2:
+        return pd.Series(0.0, index=s.index)
+    vals = s[finite].copy()
+    if winsorize_pct > 0:
+        lo = vals.quantile(winsorize_pct)
+        hi = vals.quantile(1.0 - winsorize_pct)
+        vals = vals.clip(lo, hi)
+    ranks = vals.rank(method="average") / (len(vals) + 1)  # (0, 1)
+    result = pd.Series(0.0, index=s.index)
+    result[finite] = ranks * 2 - 1  # scale to (-1, 1)
+    return result
+
+
+def _apply_cross_sectional_momentum_scores(df: pd.DataFrame) -> None:
+    """
+    Replace momentum_score with the v2 continuous cross-sectional formula.
+    Called once after all stocks are evaluated, so ranking is across the full
+    daily universe — no lookahead into future dates.
+    """
+    import numpy as np
+
+    cfg = MOMENTUM_V2_PARAMS
+    wp  = cfg["weights"]
+    pen = cfg["penalties"]
+    wp_total = sum(wp.values())
+    if wp_total < 1e-9:
+        return
+
+    # Normalize weights
+    w_rs3m    = wp["rs_3m"]          / wp_total
+    w_rs6m    = wp["rs_6m"]          / wp_total
+    w_radj    = wp["risk_adj_3m"]    / wp_total
+    w_trend   = wp["trend_structure"] / wp_total
+    w_r1m     = wp["return_1m"]      / wp_total
+    w_r5d     = wp["return_5d"]      / wp_total
+
+    wz = cfg["winsorize_pct"]
+
+    def _col(name: str) -> pd.Series:
+        if name in df.columns:
+            return pd.to_numeric(df[name], errors="coerce")
+        return pd.Series(float("nan"), index=df.index)
+
+    # Percentile-rank each feature across the universe
+    n_rs3m  = _pct_rank_series(_col("rs_3m"),                 wz)
+    n_rs6m  = _pct_rank_series(_col("rs_6m"),                 wz)
+    n_radj  = _pct_rank_series(_col("risk_adj_momentum_3m"),  wz)
+    n_r1m   = _pct_rank_series(_col("return_1m"),             wz)
+    n_r5d   = _pct_rank_series(_col("return_5d"),             wz)
+
+    # Trend structure: deterministic signal, not percentile-ranked
+    above50  = df["above_50dma"].astype(bool)  if "above_50dma"  in df.columns else pd.Series(False, index=df.index)
+    above200 = df["above_200dma"].astype(bool) if "above_200dma" in df.columns else pd.Series(False, index=df.index)
+    trend = pd.Series(np.select(
+        [above50 & above200, above50 & ~above200, ~above50 & above200],
+        [0.5,                 0.1,                 -0.1],
+        default=-0.5,
+    ), index=df.index)
+
+    # Composite score
+    score = (
+        w_rs3m  * n_rs3m  +
+        w_rs6m  * n_rs6m  +
+        w_radj  * n_radj  +
+        w_trend * trend    +
+        w_r1m   * n_r1m   +
+        w_r5d   * n_r5d
+    )
+
+    # Penalties
+    ret3m   = _col("return_3m")
+    vol3m   = _col("realized_vol_3m")
+    pos52   = _col("position_52w")
+
+    falling_knife  = ret3m.fillna(0.0) < pen["falling_knife_3m_threshold"]
+    overextended   = pos52.fillna(0.0) > pen["overextension_52w_threshold"]
+    high_vol       = vol3m.fillna(0.0) > pen["high_vol_annual_threshold"]
+
+    score = score - falling_knife.astype(float) * pen["falling_knife_penalty"]
+    score = score - overextended.astype(float)  * pen["overextension_penalty"]
+    score = score - high_vol.astype(float)       * pen["high_vol_penalty"]
+
+    score = score.clip(cfg["clamp_low"], cfg["clamp_high"]).round(3)
+    df["momentum_score"] = score
+
+    # Log distribution summary
+    logger.info(
+        "Momentum v2 score distribution: min=%.3f p25=%.3f med=%.3f p75=%.3f max=%.3f unique=%d",
+        float(score.min()), float(score.quantile(0.25)),
+        float(score.median()), float(score.quantile(0.75)),
+        float(score.max()), int(score.nunique()),
+    )
 
 
 def _get_robinhood_fundamentals(tickers: list[str], force_refresh: bool) -> pd.DataFrame | None:
@@ -505,7 +718,33 @@ def _get_robinhood_fundamentals(tickers: list[str], force_refresh: bool) -> pd.D
         if metrics:
             rows.append([symbol] + metrics)
 
-    store_data_as_csv("robinhood_data", AGG_DATA_COLUMNS, rows)
+    df_raw = pd.DataFrame(rows, columns=AGG_DATA_COLUMNS)
+
+    # Cross-sectional momentum v2 normalization — must run before saving
+    _apply_cross_sectional_momentum_scores(df_raw)
+
+    # Recompute value_metric with updated momentum_score
+    for col in ["value_score", "income_score", "quality_score", "momentum_score"]:
+        df_raw[col] = pd.to_numeric(df_raw[col], errors="coerce").fillna(0.0)
+    df_raw["value_metric"] = (
+        SCORE_WEIGHTS["value"]    * df_raw["value_score"]
+        + SCORE_WEIGHTS["quality"]  * df_raw["quality_score"]
+        + SCORE_WEIGHTS["income"]   * df_raw["income_score"]
+        + SCORE_WEIGHTS["momentum"] * df_raw["momentum_score"]
+    ).round(3)
+
+    # Universe composition diagnostics
+    if "sector" in df_raw.columns:
+        sector_counts = df_raw["sector"].value_counts()
+        logger.info("Universe composition by sector:\n%s", sector_counts.to_string())
+    nan_rates = {
+        c: round(df_raw[c].isna().mean() * 100, 1)
+        for c in ["pe_ratio", "pb_ratio", "return_1m", "return_3m", "rs_3m", "realized_vol_3m"]
+        if c in df_raw.columns
+    }
+    logger.info("NaN rates %%: %s", nan_rates)
+
+    store_data_as_csv("robinhood_data", AGG_DATA_COLUMNS, df_raw)
     time.sleep(1)
     df = read_data_as_pd("robinhood_data")
 
