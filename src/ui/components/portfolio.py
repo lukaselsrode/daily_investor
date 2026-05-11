@@ -1,7 +1,12 @@
 """
-ui/components/portfolio.py — Portfolio holdings and allocation viewer.
-Loads from robinhood_data CSV (always available without credentials).
-Live broker data requires login and is fetched on demand.
+ui/components/portfolio.py — Actual Robinhood holdings viewer.
+
+Primary source: holdings_YYYY_MM_DD.csv written by save_holdings_csv()
+  (columns: symbol, name, quantity, average_buy_price, equity,
+            percent_change, equity_change, percentage, current_price, type, pe_ratio, id)
+
+Sector / score enrichment: cross-referenced from latest agg_data CSV.
+Live fetch: available when live execution is enabled.
 """
 
 from __future__ import annotations
@@ -9,62 +14,154 @@ from __future__ import annotations
 import streamlit as st
 import pandas as pd
 
-from ui.utils import data_date, load_config_raw, load_latest_csv, no_data_msg
+from ui.utils import DATA_DIR, data_date, load_config_raw, load_latest_csv, no_data_msg
+
+
+_FLOAT_COLS = [
+    "quantity", "average_buy_price", "equity",
+    "percent_change", "equity_change", "percentage", "current_price", "pe_ratio",
+]
+
+
+def _coerce_floats(df: pd.DataFrame) -> pd.DataFrame:
+    for col in _FLOAT_COLS:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
 
 
 def render() -> None:
     st.title("💼 Portfolio")
-    st.caption("Holdings and allocation. Loaded from cached robinhood_data CSV by default.")
+    st.caption("Your actual Robinhood holdings. Refreshed each time the bot runs.")
 
     cfg = load_config_raw()
     etfs = cfg.get("etfs", ["SPY", "VOO", "VTI", "QQQ", "SCHD"])
-    index_pct = cfg.get("index_pct", 0.65)
 
-    df = load_latest_csv("robinhood_data")
+    df = load_latest_csv("holdings")
     if df is None:
-        st.warning(no_data_msg("robinhood_data"))
+        st.warning(
+            no_data_msg("holdings")
+            + "  \nHoldings are saved automatically when the bot runs (`daily-investor run`)."
+        )
+        _live_section(etfs)
         return
 
-    st.caption(f"Source: robinhood_data {data_date('robinhood_data')} | {len(df)} positions")
+    df = _coerce_floats(df)
 
-    # ---- Sleeve classification --------------------------------------------
+    # ---- Sleeve tag ----------------------------------------------------------
     if "symbol" in df.columns:
         df["sleeve"] = df["symbol"].apply(lambda s: "ETF/core" if s in etfs else "active")
-    else:
-        df["sleeve"] = "unknown"
 
-    # ---- Summary cards ----------------------------------------------------
-    c1, c2, c3, c4 = st.columns(4)
-    if "value_metric" in df.columns:
-        c1.metric("Universe rows", len(df))
-    if "sector" in df.columns:
-        c2.metric("Sectors", df["sector"].nunique())
-    etf_rows   = df[df["sleeve"] == "ETF/core"] if "sleeve" in df.columns else df.head(0)
-    active_rows = df[df["sleeve"] == "active"]  if "sleeve" in df.columns else df.head(0)
-    c3.metric("ETF sleeve rows", len(etf_rows))
-    c4.metric("Active sleeve rows", len(active_rows))
-
-    # ---- Sector exposure (from agg_data if available) ---------------------
+    # ---- Sector enrichment from agg_data ------------------------------------
     agg = load_latest_csv("agg_data")
-    if agg is not None and "sector" in agg.columns and "value_metric" in agg.columns:
-        st.subheader("Sector distribution (scored universe)")
-        sector_counts = agg.groupby("sector")["value_metric"].agg(["count", "mean"]).reset_index()
-        sector_counts.columns = ["sector", "count", "avg_value_metric"]
-        sector_counts = sector_counts.sort_values("count", ascending=False)
-        st.bar_chart(sector_counts.set_index("sector")["count"])
-        with st.expander("Sector detail table"):
-            st.dataframe(sector_counts, use_container_width=True)
+    if agg is not None and "symbol" in agg.columns and "sector" in agg.columns:
+        sector_map = agg.set_index("symbol")["sector"].to_dict()
+        df["sector"] = df["symbol"].map(sector_map)
 
-    # ---- Holdings table ---------------------------------------------------
-    st.subheader("Holdings (from robinhood_data CSV)")
+    st.caption(f"Source: holdings {data_date('holdings')} | {len(df)} positions")
+
+    # ---- Summary metrics -----------------------------------------------------
+    total_equity   = df["equity"].sum()       if "equity"      in df.columns else None
+    total_pct_port = df["percentage"].sum()   if "percentage"  in df.columns else None
+    n_etf          = (df["sleeve"] == "ETF/core").sum() if "sleeve" in df.columns else 0
+    n_active       = (df["sleeve"] == "active").sum()   if "sleeve" in df.columns else 0
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Positions",        len(df))
+    c2.metric("Total equity",     f"${total_equity:,.2f}"  if total_equity is not None else "—")
+    c3.metric("ETF / core",       n_etf)
+    c4.metric("Active positions", n_active)
+
+    # ---- P&L overview --------------------------------------------------------
+    if "percent_change" in df.columns:
+        winners = (df["percent_change"] > 0).sum()
+        losers  = (df["percent_change"] < 0).sum()
+        med_chg = df["percent_change"].median()
+        st.divider()
+        pc1, pc2, pc3 = st.columns(3)
+        pc1.metric("Winners / losers", f"{winners} / {losers}")
+        pc2.metric("Median % change", f"{med_chg:+.2f}%")
+        if "equity_change" in df.columns:
+            total_gain = df["equity_change"].sum()
+            pc3.metric("Total unrealised P&L", f"${total_gain:+,.2f}")
+
+    # ---- Holdings table ------------------------------------------------------
+    st.divider()
+    st.subheader("Holdings detail")
     display_cols = [c for c in [
-        "symbol", "sleeve", "sector", "industry", "current_price",
-        "value_metric", "quality_score", "momentum_score", "volume",
+        "symbol", "name", "sleeve", "sector",
+        "quantity", "current_price", "average_buy_price",
+        "equity", "percent_change", "equity_change", "percentage",
     ] if c in df.columns]
-    sort_col = st.selectbox("Sort by", display_cols, index=0)
-    st.dataframe(df[display_cols].sort_values(sort_col, ascending=False), use_container_width=True, height=400)
 
-    # ---- Live data (optional) ---------------------------------------------
+    sort_col = st.selectbox("Sort by", display_cols, index=display_cols.index("equity") if "equity" in display_cols else 0)
+    ascending = st.checkbox("Ascending", value=False)
+
+    view = df[display_cols].sort_values(sort_col, ascending=ascending)
+
+    # Colour percent_change column
+    def _colour_pct(val):
+        if pd.isna(val):
+            return ""
+        return "color: green" if val > 0 else ("color: red" if val < 0 else "")
+
+    fmt = {}
+    for col in ["current_price", "average_buy_price", "equity", "equity_change"]:
+        if col in view.columns:
+            fmt[col] = "${:,.2f}"
+    for col in ["percent_change", "percentage"]:
+        if col in view.columns:
+            fmt[col] = "{:.2f}%"
+    if "quantity" in view.columns:
+        fmt["quantity"] = "{:.4f}"
+
+    styled = view.style.format(fmt)
+    if "percent_change" in view.columns:
+        styled = styled.applymap(_colour_pct, subset=["percent_change"])
+
+    st.dataframe(styled, use_container_width=True, height=420)
+    st.download_button(
+        "⬇ Download holdings CSV",
+        data=view.to_csv(index=False),
+        file_name="holdings_export.csv",
+        mime="text/csv",
+    )
+
+    # ---- Sector allocation (from holdings) -----------------------------------
+    if "sector" in df.columns and "equity" in df.columns:
+        st.divider()
+        st.subheader("Sector allocation")
+        sector_equity = (
+            df.dropna(subset=["sector"])
+            .groupby("sector")["equity"]
+            .sum()
+            .sort_values(ascending=False)
+        )
+        if not sector_equity.empty:
+            try:
+                import plotly.express as px
+                fig = px.pie(
+                    sector_equity.reset_index(),
+                    names="sector", values="equity",
+                    title="Holdings by sector (equity $)",
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            except ImportError:
+                st.bar_chart(sector_equity)
+
+    # ---- Sleeve split --------------------------------------------------------
+    if "sleeve" in df.columns and "equity" in df.columns:
+        st.divider()
+        st.subheader("ETF vs active split")
+        sleeve_equity = df.groupby("sleeve")["equity"].sum()
+        sc1, sc2 = st.columns(2)
+        for i, (sleeve, val) in enumerate(sleeve_equity.items()):
+            [sc1, sc2][i % 2].metric(sleeve, f"${val:,.2f}")
+
+    _live_section(etfs)
+
+
+def _live_section(etfs: list[str]) -> None:
     st.divider()
     st.subheader("Live broker data")
     live = st.session_state.get("live_enabled", False)
@@ -75,28 +172,35 @@ def render() -> None:
     if st.button("Fetch live holdings from Robinhood"):
         with st.spinner("Connecting to Robinhood…"):
             try:
-                from main import login, get_current_positions, get_available_cash, get_portfolio_value
+                from main import login, get_current_positions, get_available_cash, get_portfolio_value, save_holdings_csv
                 login()
-                positions = get_current_positions()
-                cash = get_available_cash()
-                port_val = get_portfolio_value()
-                st.session_state["live_positions"] = positions
-                st.session_state["live_cash"] = cash
-                st.session_state["live_port_val"] = port_val
-                st.success("✅ Live data fetched.")
+                holdings = get_current_positions()
+                save_holdings_csv(holdings)
+                cash      = get_available_cash()
+                port_val  = get_portfolio_value()
+                st.session_state["live_holdings"]  = holdings
+                st.session_state["live_cash"]      = cash
+                st.session_state["live_port_val"]  = port_val
+                st.success("✅ Live data fetched and saved to holdings CSV.")
+                st.rerun()
             except Exception as exc:
                 st.error(f"Failed to fetch live data: {exc}")
 
-    if "live_positions" in st.session_state:
-        pos = st.session_state["live_positions"]
-        cash = st.session_state["live_cash"]
+    if "live_holdings" in st.session_state:
+        holdings = st.session_state["live_holdings"]
+        cash     = st.session_state["live_cash"]
         port_val = st.session_state["live_port_val"]
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Portfolio value", f"${port_val:,.2f}")
-        c2.metric("Available cash", f"${cash:,.2f}")
-        c3.metric("Positions", len(pos))
-        if pos:
+        lc1, lc2, lc3 = st.columns(3)
+        lc1.metric("Portfolio value",  f"${port_val:,.2f}")
+        lc2.metric("Available cash",   f"${cash:,.2f}")
+        lc3.metric("Positions (live)", len(holdings))
+        if holdings:
             pos_df = pd.DataFrame([
-                {"symbol": sym, **data} for sym, data in pos.items()
-            ] if isinstance(pos, dict) else pos)
+                {"symbol": sym, **{k: v for k, v in data.items()}}
+                for sym, data in holdings.items()
+            ])
+            pos_df = _coerce_floats(pos_df)
+            etfs_list = etfs
+            if "symbol" in pos_df.columns:
+                pos_df["sleeve"] = pos_df["symbol"].apply(lambda s: "ETF/core" if s in etfs_list else "active")
             st.dataframe(pos_df, use_container_width=True)

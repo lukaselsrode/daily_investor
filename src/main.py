@@ -53,6 +53,7 @@ from util import (
     read_data_as_pd,
     safe_float,
     update_industry_valuations,
+    store_data_as_csv,
 )
 
 load_dotenv()
@@ -503,6 +504,27 @@ def get_current_positions() -> dict:
         return {}
 
 
+_HOLDINGS_SCHEMA = [
+    "symbol", "name", "quantity", "average_buy_price", "equity",
+    "percent_change", "equity_change", "percentage", "current_price",
+    "type", "pe_ratio", "id",
+]
+
+
+def save_holdings_csv(holdings: dict) -> None:
+    """Persist rb.build_holdings() dict as a dated CSV in data/."""
+    if not holdings:
+        return
+    rows = []
+    for symbol, d in holdings.items():
+        rows.append([symbol] + [d.get(k, "") for k in _HOLDINGS_SCHEMA[1:]])
+    try:
+        store_data_as_csv("holdings", _HOLDINGS_SCHEMA, rows)
+        logger.info(f"Saved holdings CSV: {len(rows)} positions")
+    except Exception as e:
+        logger.warning(f"Could not save holdings CSV: {e}")
+
+
 def get_position_value(symbol: str, holdings: dict) -> float:
     """Return current dollar value of a position."""
     try:
@@ -869,6 +891,7 @@ def make_sales() -> list[str]:
 
     try:
         holdings = rb.build_holdings()
+        save_holdings_csv(holdings)
     except Exception as e:
         logger.error(f"Could not fetch holdings: {e}")
         return sold
@@ -1138,6 +1161,7 @@ def make_buys(df: pd.DataFrame, is_first_iteration: bool = True, regime: str = "
 
     # Load portfolio context once before the loop
     holdings        = get_current_positions()
+    save_holdings_csv(holdings)
     portfolio_value = get_portfolio_value()
     try:
         agg_df = read_data_as_pd("agg_data")
