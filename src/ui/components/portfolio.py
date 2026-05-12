@@ -117,7 +117,7 @@ def render() -> None:
 
     styled = view.style.format(fmt)
     if "percent_change" in view.columns:
-        styled = styled.applymap(_colour_pct, subset=["percent_change"])
+        styled = styled.map(_colour_pct, subset=["percent_change"])
 
     st.dataframe(styled, use_container_width=True, height=420)
     st.download_button(

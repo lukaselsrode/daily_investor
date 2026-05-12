@@ -146,6 +146,16 @@ RISK_LIMITS: dict = {
 # ---------------------------------------------------------------------------
 # Harvest parameters
 # ---------------------------------------------------------------------------
+# Candidate rotation
+# ---------------------------------------------------------------------------
+
+_cr = _app.get("candidate_rotation", {})
+CANDIDATE_ROTATION_PARAMS: dict = {
+    "buy_cooldown_days": int(_cr.get("buy_cooldown_days", 30)),
+    "score_jitter_pct":  float(_cr.get("score_jitter_pct", 0.08)),
+}
+
+# ---------------------------------------------------------------------------
 
 _hv = _app.get("harvest", {})
 HARVEST_PARAMS: dict = {

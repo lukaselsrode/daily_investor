@@ -119,3 +119,15 @@ LOOKAHEAD_LABELS = {
     "walk_forward_price_only_test":  "LOW — price-only momentum, most conservative",
     "current_universe_stress_test":  "HIGH — forward-looking selection bias, not predictive",
 }
+
+
+def fmt_bin_index(counts: "pd.Series") -> "pd.Series":
+    """Replace pd.IntervalIndex labels with 'left–right' strings for st.bar_chart."""
+    import pandas as pd
+    if isinstance(counts.index, pd.IntervalIndex):
+        mag = max(abs(counts.index.left.max()), abs(counts.index.right.max()))
+        dec = 0 if mag >= 100 else (1 if mag >= 10 else 2)
+        fmt = f"{{:.{dec}f}}"
+        counts = counts.copy()
+        counts.index = [f"{fmt.format(i.left)}–{fmt.format(i.right)}" for i in counts.index]
+    return counts

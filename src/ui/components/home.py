@@ -64,7 +64,7 @@ def render() -> None:
 
     # ----- Data freshness --------------------------------------------------
     st.subheader("Data freshness")
-    prefixes = ["agg_data", "robinhood_data", "news"]
+    prefixes = ["holdings", "agg_data", "robinhood_data", "news"]
     cols = st.columns(len(prefixes))
     for col, prefix in zip(cols, prefixes):
         latest = sorted(DATA_DIR.glob(f"{prefix}_*.csv"))
@@ -116,6 +116,36 @@ def render() -> None:
             c4.metric("Avg value_metric", f"{df['value_metric'].mean():.3f}")
 
         st.caption(f"Source: {data_date('agg_data')}")
+
+    st.divider()
+
+    # ----- Holdings snapshot -----------------------------------------------
+    st.subheader("Current holdings snapshot")
+    hdf = load_latest_csv("holdings")
+    if hdf is None:
+        st.info("No holdings data yet. Run `daily-investor run` to populate.")
+    else:
+        import pandas as pd
+        for col in ["equity", "percent_change", "equity_change"]:
+            if col in hdf.columns:
+                hdf[col] = pd.to_numeric(hdf[col], errors="coerce")
+        etfs = cfg.get("etfs", ["SPY", "VOO", "VTI", "QQQ", "SCHD"])
+        hdf["sleeve"] = hdf["symbol"].apply(lambda s: "ETF/core" if s in etfs else "active") if "symbol" in hdf.columns else "unknown"
+        hc1, hc2, hc3, hc4 = st.columns(4)
+        hc1.metric("Positions", len(hdf))
+        hc2.metric("Total equity", f"${hdf['equity'].sum():,.0f}" if "equity" in hdf.columns else "—")
+        hc3.metric("Active / ETF", f"{(hdf['sleeve']=='active').sum()} / {(hdf['sleeve']=='ETF/core').sum()}")
+        if "equity_change" in hdf.columns:
+            gain = hdf["equity_change"].sum()
+            hc4.metric("Unrealised P&L", f"${gain:+,.0f}")
+        st.caption(f"Source: holdings {data_date('holdings')}")
+
+        if "equity" in hdf.columns and "symbol" in hdf.columns:
+            top5 = hdf.nlargest(5, "equity")[["symbol", "equity", "percent_change"]].copy()
+            top5["equity"] = top5["equity"].map("${:,.2f}".format)
+            top5["percent_change"] = top5["percent_change"].map("{:+.2f}%".format) if "percent_change" in top5.columns else "—"
+            st.caption("Top 5 positions by equity")
+            st.dataframe(top5.set_index("symbol"), use_container_width=True)
 
     st.divider()
 

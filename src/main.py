@@ -54,6 +54,7 @@ from util import (
     safe_float,
     update_industry_valuations,
     store_data_as_csv,
+    CANDIDATE_ROTATION_PARAMS,
 )
 
 load_dotenv()
@@ -175,27 +176,70 @@ def add_funds_to_account() -> None:
         logger.error(f"Deposit failed: {e}")
 
 
-_PEAK_PRICES_CSV = os.path.join(DATA_DIRECTORY, "peak_prices.csv")
+_PEAK_PRICES_CSV   = os.path.join(DATA_DIRECTORY, "peak_prices.csv")
+_BUY_HISTORY_CSV   = os.path.join(DATA_DIRECTORY, "buy_history.csv")
 
 
-def _rb_call_with_retry(fn, *args, max_retries: int = 3, **kwargs):
-    """Call a Robinhood API function with exponential back-off on 429 / rate-limit errors."""
+def _load_buy_history() -> dict[str, datetime.date]:
+    """Return {symbol: last_bought_date} from buy_history.csv."""
+    try:
+        df = pd.read_csv(_BUY_HISTORY_CSV, parse_dates=["bought_date"])
+        if "symbol" in df.columns and "bought_date" in df.columns:
+            # Keep only most recent purchase per symbol
+            latest = df.sort_values("bought_date").groupby("symbol").last().reset_index()
+            return {row["symbol"]: row["bought_date"].date() for _, row in latest.iterrows()}
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        logger.warning(f"Could not load buy history: {e}")
+    return {}
+
+
+def _record_buy(symbol: str) -> None:
+    """Append a buy event to buy_history.csv."""
+    today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+    row = pd.DataFrame([{"symbol": symbol, "bought_date": today}])
+    try:
+        if os.path.exists(_BUY_HISTORY_CSV):
+            row.to_csv(_BUY_HISTORY_CSV, mode="a", header=False, index=False)
+        else:
+            row.to_csv(_BUY_HISTORY_CSV, index=False)
+    except Exception as e:
+        logger.warning(f"Could not record buy history for {symbol}: {e}")
+
+
+def _rb_call_with_retry(fn, *args, max_retries: int = 4, retry_on_none: bool = False, **kwargs):
+    """Call a Robinhood API function with exponential back-off on 429 / rate-limit errors.
+
+    robin_stocks sometimes swallows 429s and returns None instead of raising — set
+    retry_on_none=True for order-placement calls to handle that path.
+    """
     import random as _rand
     for attempt in range(max_retries):
         try:
-            return fn(*args, **kwargs)
+            result = fn(*args, **kwargs)
         except Exception as exc:
             msg = str(exc).lower()
             if "429" in msg or "too many requests" in msg or "throttle" in msg:
-                wait = (2 ** attempt) * (0.5 + _rand.random())
+                wait = (2 ** attempt) * (1.0 + _rand.random())
                 logger.warning(
                     f"Rate-limited on {fn.__name__} (attempt {attempt+1}/{max_retries}), "
                     f"sleeping {wait:.1f}s"
                 )
                 time.sleep(wait)
-            else:
-                raise
-    return fn(*args, **kwargs)  # final attempt — let it raise
+                continue
+            raise
+        if result is None and retry_on_none and attempt < max_retries - 1:
+            wait = (2 ** attempt) * (1.0 + _rand.random())
+            logger.warning(
+                f"{fn.__name__} returned None (possible 429) — "
+                f"attempt {attempt+1}/{max_retries}, sleeping {wait:.1f}s"
+            )
+            time.sleep(wait)
+            continue
+        return result
+    # Final attempt — return whatever comes back
+    return fn(*args, **kwargs)
 
 
 def _load_peak_prices() -> dict[str, float]:
@@ -273,9 +317,13 @@ def get_market_regime() -> str:
 def _place_fractional_buy(symbol: str, allocation: float) -> tuple[bool, str]:
     """Attempt a fractional buy order. Returns (success, detail_message)."""
     try:
-        res = _rb_call_with_retry(rb.orders.order_buy_fractional_by_price, symbol, allocation)
+        res = _rb_call_with_retry(
+            rb.orders.order_buy_fractional_by_price, symbol, allocation,
+            retry_on_none=True,
+        )
     except Exception as e:
         return False, str(e)
+    time.sleep(1.5)
     if res and res.get("id"):
         logger.info(f"Buy {symbol} ${allocation:.2f}: state={res.get('state')}, id={res['id'][:8]}...")
         return True, "ok"
@@ -287,10 +335,14 @@ def _place_fractional_buy(symbol: str, allocation: float) -> tuple[bool, str]:
 def _place_whole_share_buy(symbol: str, quantity: int) -> bool:
     """Attempt a whole-share market buy. Returns True on success."""
     try:
-        res = _rb_call_with_retry(rb.orders.order_buy_market, symbol, quantity)
+        res = _rb_call_with_retry(
+            rb.orders.order_buy_market, symbol, quantity,
+            retry_on_none=True,
+        )
     except Exception as e:
         logger.error(f"{symbol}: whole-share market order failed: {e}")
         return False
+    time.sleep(1.5)
     if res and res.get("id"):
         logger.info(f"Buy {symbol} {quantity} share(s): state={res.get('state')}, id={res['id'][:8]}...")
         return True
@@ -370,6 +422,7 @@ def _process_whole_share_queue(
         if _place_whole_share_buy(symbol, 1):
             purchased.append(symbol)
             ws_count += 1
+            _record_buy(symbol)
             _update_local_exposures_after_buy(symbol, current_price, agg_df, sector_exposure)
         else:
             failed.append(symbol)
@@ -399,15 +452,24 @@ def _place_sell(symbol: str, quantity: float) -> bool:
     is_fractional = quantity != int(quantity)
     try:
         if is_fractional:
-            res = _rb_call_with_retry(rb.orders.order_sell_fractional_by_quantity, symbol, quantity)
+            res = _rb_call_with_retry(
+                rb.orders.order_sell_fractional_by_quantity, symbol, quantity,
+                retry_on_none=True,
+            )
         else:
-            res = _rb_call_with_retry(rb.order_sell_market, symbol, int(quantity), timeInForce="gfd")
+            res = _rb_call_with_retry(
+                rb.order_sell_market, symbol, int(quantity), timeInForce="gfd",
+                retry_on_none=True,
+            )
     except Exception as e:
         logger.error(f"Sell order exception for {symbol}: {e}")
         return False
 
+    # Throttle between orders — Robinhood enforces ~3 req/s on order endpoints
+    time.sleep(1.5)
+
     if not res:
-        logger.warning(f"Sell order returned None for {symbol}")
+        logger.warning(f"Sell order returned None for {symbol} after retries")
         return False
 
     # A valid Robinhood order always carries an 'id'; a missing id means the response
@@ -502,6 +564,30 @@ def get_current_positions() -> dict:
     except Exception as e:
         logger.warning(f"Could not fetch holdings: {e}")
         return {}
+
+
+def _enrich_holdings_with_created_at(holdings: dict) -> None:
+    """Add 'created_at' to each holdings entry from get_open_stock_positions().
+
+    build_holdings() omits created_at; get_open_stock_positions() has it but
+    uses instrument URLs instead of symbols — resolve them via get_symbol_by_url.
+    Mutates holdings in place; non-fatal on any failure.
+    """
+    try:
+        positions = rb.get_open_stock_positions() or []
+        for pos in positions:
+            instrument_url = pos.get("instrument") or pos.get("instrument_id")
+            created_at = pos.get("created_at")
+            if not instrument_url or not created_at:
+                continue
+            try:
+                symbol = rb.get_symbol_by_url(instrument_url)
+            except Exception:
+                continue
+            if symbol and symbol in holdings:
+                holdings[symbol]["created_at"] = created_at
+    except Exception as e:
+        logger.warning(f"Could not enrich holdings with created_at: {e}")
 
 
 _HOLDINGS_SCHEMA = [
@@ -810,7 +896,8 @@ def allocate_harvest_proceeds_to_etfs(amount: float) -> None:
     logger.info(f"=== HARVEST: ${amount:.2f} → {harvest_etfs} (${per_etf:.2f} each) ===")
     for etf in harvest_etfs:
         try:
-            res = _rb_call_with_retry(rb.orders.order_buy_fractional_by_price, etf, per_etf)
+            res = _rb_call_with_retry(rb.orders.order_buy_fractional_by_price, etf, per_etf, retry_on_none=True)
+            time.sleep(1.5)
             logger.info(f"Harvest → {etf}: {res.get('state') if res else 'None'}")
         except Exception as e:
             logger.error(f"Harvest reinvestment failed for {etf}: {e}")
@@ -891,6 +978,7 @@ def make_sales() -> list[str]:
 
     try:
         holdings = rb.build_holdings()
+        _enrich_holdings_with_created_at(holdings)
         save_holdings_csv(holdings)
     except Exception as e:
         logger.error(f"Could not fetch holdings: {e}")
@@ -1144,20 +1232,63 @@ def make_buys(df: pd.DataFrame, is_first_iteration: bool = True, regime: str = "
         logger.warning("No candidates remain after reliability gate")
         return [], df["symbol"].tolist(), []
 
+    # ── Buy cooldown — exclude symbols purchased recently ─────────────────────
+    cooldown_days = CANDIDATE_ROTATION_PARAMS["buy_cooldown_days"]
+    if cooldown_days > 0 and "symbol" in candidates.columns:
+        buy_history = _load_buy_history()
+        today = datetime.date.today()
+        cooled_out = [
+            sym for sym in candidates["symbol"]
+            if sym in buy_history and (today - buy_history[sym]).days < cooldown_days
+        ]
+        if cooled_out:
+            candidates = candidates[~candidates["symbol"].isin(cooled_out)].copy()
+            logger.info(
+                f"Buy cooldown ({cooldown_days}d): excluded {len(cooled_out)} recently-purchased "
+                f"symbols: {cooled_out[:10]}"
+            )
+
+    if candidates.empty:
+        logger.warning("No candidates remain after buy cooldown filter")
+        return [], df["symbol"].tolist(), []
+
+    # ── Score jitter — adds small noise so candidate order varies each run ───
+    # Widens the effective pool without ever buying a stock with a bad score.
+    # Only applied before the sentiment cap; actual buy decisions still use value_metric.
+    jitter_pct = CANDIDATE_ROTATION_PARAMS["score_jitter_pct"]
+    if jitter_pct > 0 and "value_metric" in candidates.columns:
+        import numpy as _np
+        score_range = candidates["value_metric"].max() - candidates["value_metric"].min()
+        if score_range > 0:
+            noise = _np.random.uniform(-jitter_pct * score_range, jitter_pct * score_range,
+                                       len(candidates))
+            candidates = candidates.copy()
+            candidates["_jittered"] = candidates["value_metric"] + noise
+        else:
+            candidates["_jittered"] = candidates["value_metric"]
+    else:
+        candidates["_jittered"] = candidates["value_metric"]
+
     # Cap candidates before sentiment to bound API cost and avoid look-ahead selection.
     # BTR is a tie-breaker within equal value_metric — NaN rows are pushed to the end.
     max_sc = RISK_LIMITS["max_sentiment_candidates"]
     if len(candidates) > max_sc:
-        sort_cols = ["value_metric"] + (
+        sort_cols = ["_jittered"] + (
             ["buy_to_sell_ratio"] if "buy_to_sell_ratio" in candidates.columns else []
         )
         candidates = (
             candidates
             .sort_values(sort_cols, ascending=[False] * len(sort_cols), na_position="last")
             .head(max_sc)
+            .drop(columns=["_jittered"])
             .copy()
         )
-        logger.info(f"Candidates capped to {max_sc} (max_sentiment_candidates)")
+        logger.info(
+            f"Candidates capped to {max_sc} (jitter={jitter_pct:.0%}, "
+            f"cooldown={cooldown_days}d)"
+        )
+    else:
+        candidates = candidates.drop(columns=["_jittered"]).copy()
 
     # Load portfolio context once before the loop
     holdings        = get_current_positions()
@@ -1234,6 +1365,7 @@ def make_buys(df: pd.DataFrame, is_first_iteration: bool = True, regime: str = "
                 if ok_frac:
                     purchased.append(symbol)
                     buys_made += 1
+                    _record_buy(symbol)
                     _update_local_exposures_after_buy(symbol, adj_alloc, agg_df, sector_exposure)
                     time.sleep(0.5)
                 elif allow_ws_fallback:

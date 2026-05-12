@@ -7,7 +7,7 @@ from __future__ import annotations
 import streamlit as st
 import pandas as pd
 
-from ui.utils import data_date, load_latest_csv, no_data_msg
+from ui.utils import data_date, load_latest_csv, no_data_msg, fmt_bin_index
 
 
 _SCORE_COLS    = ["value_metric", "value_score", "quality_score", "income_score", "momentum_score"]
@@ -77,7 +77,7 @@ def render() -> None:
         c1.metric("Median volume", f"{vol.median():,.0f}")
         c2.metric("Below 500k", f"{(vol < 500_000).sum()} ({(vol < 500_000).mean():.1%})")
         c3.metric("Below 100k", f"{(vol < 100_000).sum()}")
-        st.bar_chart(vol.clip(upper=vol.quantile(0.95)).value_counts(bins=30, sort=False).sort_index())
+        st.bar_chart(fmt_bin_index(vol.clip(upper=vol.quantile(0.95)).value_counts(bins=30, sort=False).sort_index()))
 
     # ---- Score distributions ----------------------------------------------
     st.divider()
@@ -92,4 +92,4 @@ def render() -> None:
                 c1.metric("Mean", f"{data.mean():.4f}")
                 c2.metric("Std", f"{data.std():.4f}")
                 c3.metric("Median", f"{data.median():.4f}")
-                st.bar_chart(data.value_counts(bins=25, sort=False).sort_index())
+                st.bar_chart(fmt_bin_index(data.value_counts(bins=25, sort=False).sort_index()))

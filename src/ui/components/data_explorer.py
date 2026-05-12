@@ -8,7 +8,7 @@ from __future__ import annotations
 import streamlit as st
 import pandas as pd
 
-from ui.utils import DATA_DIR, list_csv_files
+from ui.utils import DATA_DIR, list_csv_files, fmt_bin_index
 
 _PRESET_VIEWS = [
     "— custom —",
@@ -107,7 +107,7 @@ def render() -> None:
     if chart_type == "Histogram" and num_cols:
         hcol = st.selectbox("Column", num_cols)
         data = view[hcol].dropna()
-        st.bar_chart(data.value_counts(bins=30, sort=False).sort_index())
+        st.bar_chart(fmt_bin_index(data.value_counts(bins=30, sort=False).sort_index()))
 
     elif chart_type == "Scatter" and len(num_cols) >= 2:
         sc1, sc2, sc3 = st.columns(3)
@@ -156,7 +156,7 @@ def _render_preset(df: pd.DataFrame, preset: str, num_cols: list[str]) -> None:
         tabs = st.tabs(score_cols)
         for tab, col in zip(tabs, score_cols):
             with tab:
-                st.bar_chart(df[col].dropna().value_counts(bins=25, sort=False).sort_index())
+                st.bar_chart(fmt_bin_index(df[col].dropna().value_counts(bins=25, sort=False).sort_index()))
 
     elif preset == "Momentum vs quality scatter" and "momentum_score" in df.columns and "quality_score" in df.columns:
         try:
@@ -192,4 +192,4 @@ def _render_preset(df: pd.DataFrame, preset: str, num_cols: list[str]) -> None:
 
     elif preset == "Volume distribution" and "volume" in df.columns:
         vol = df["volume"].dropna()
-        st.bar_chart(vol.clip(upper=vol.quantile(0.95)).value_counts(bins=30, sort=False).sort_index())
+        st.bar_chart(fmt_bin_index(vol.clip(upper=vol.quantile(0.95)).value_counts(bins=30, sort=False).sort_index()))

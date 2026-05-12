@@ -60,6 +60,15 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
+# Columns produced by _evaluate_stock (no reliability scores — those are added
+# afterward by _compute_reliability_scores).  Used for pd.DataFrame construction
+# so the column count matches the row length exactly.
+_RELIABILITY_COLS = {
+    "data_quality_score", "feature_coverage_score",
+    "liquidity_reliability_score", "signal_stability_score", "reliability_score",
+}
+_BASE_AGG_COLUMNS = [c for c in AGG_DATA_COLUMNS if c not in _RELIABILITY_COLS]
+
 # ---------------------------------------------------------------------------
 # Stock universe
 # ---------------------------------------------------------------------------
@@ -98,23 +107,29 @@ def _is_valid_ticker(symbol: str) -> bool:
     return bool(symbol and isinstance(symbol, str) and _VALID_TICKER_RE.match(symbol))
 
 
-def _scrape_wikipedia_tickers(url: str) -> set[str]:
-    try:
-        resp = requests.get(url, headers=_WIKI_HEADERS, timeout=15)
-        soup = BeautifulSoup(resp.content, "html.parser")
-        table = soup.find("table", {"class": "wikitable sortable"})
-        if not table:
-            return set()
-        symbols: set[str] = set()
-        for row in table.find_all("tr")[1:]:
-            for cell in row.find_all("td"):
-                text = cell.text.strip()
-                if _is_valid_ticker(text):
-                    symbols.add(text)
-        return symbols
-    except Exception as e:
-        print(f"Wikipedia scrape failed for {url}: {e}")
-        return set()
+def _scrape_wikipedia_tickers(url: str, retries: int = 3, base_delay: float = 5.0) -> set[str]:
+    for attempt in range(1, retries + 1):
+        try:
+            resp = requests.get(url, headers=_WIKI_HEADERS, timeout=20)
+            soup = BeautifulSoup(resp.content, "html.parser")
+            table = soup.find("table", {"class": "wikitable sortable"})
+            if not table:
+                return set()
+            symbols: set[str] = set()
+            for row in table.find_all("tr")[1:]:
+                for cell in row.find_all("td"):
+                    text = cell.text.strip()
+                    if _is_valid_ticker(text):
+                        symbols.add(text)
+            return symbols
+        except Exception as e:
+            if attempt < retries:
+                wait = base_delay * (2 ** (attempt - 1))
+                logger.warning(f"Wikipedia scrape attempt {attempt}/{retries} failed for {url}: {e} — retrying in {wait:.0f}s")
+                time.sleep(wait)
+            else:
+                logger.warning(f"Wikipedia scrape failed after {retries} attempts for {url}: {e}")
+    return set()
 
 
 def gen_symbols_list(force_refresh: bool = False) -> list[str]:
@@ -399,8 +414,6 @@ def _enrich_with_momentum(symbols: list[str], fundamentals: dict[str, dict]) -> 
     Threads=False + small batches prevents EMFILE on 2500+ symbol universes.
     Period=220d covers: 5d, 21d, 63d, 126d lookbacks + 200dma buffer.
     """
-    import requests as _requests
-
     # Fetch SPY reference returns once — used for relative-strength computation
     spy_returns: dict[str, float | None] = {"5d": None, "1m": None, "3m": None, "6m": None}
     try:
@@ -432,7 +445,6 @@ def _enrich_with_momentum(symbols: list[str], fundamentals: dict[str, dict]) -> 
 
     for i in range(0, n_sym, batch_size):
         batch = symbols[i: i + batch_size]
-        session = _requests.Session()
         try:
             raw = yf.download(
                 batch,
@@ -440,7 +452,6 @@ def _enrich_with_momentum(symbols: list[str], fundamentals: dict[str, dict]) -> 
                 progress=False,
                 auto_adjust=True,
                 threads=False,
-                session=session,
             )
             if raw.empty:
                 continue
@@ -517,8 +528,6 @@ def _enrich_with_momentum(symbols: list[str], fundamentals: dict[str, dict]) -> 
 
         except Exception as e:
             logger.warning(f"Momentum batch {i // batch_size + 1} failed: {str(e)[:80]}")
-        finally:
-            session.close()
 
     for feat, cnt in coverage.items():
         pct = cnt / max(n_sym, 1) * 100
@@ -690,7 +699,7 @@ def _get_robinhood_fundamentals(tickers: list[str], force_refresh: bool) -> pd.D
         if metrics:
             rows.append([symbol] + metrics)
 
-    df_raw = pd.DataFrame(rows, columns=AGG_DATA_COLUMNS)
+    df_raw = pd.DataFrame(rows, columns=_BASE_AGG_COLUMNS)
 
     # Cross-sectional momentum v2 normalization — must run before saving
     _apply_cross_sectional_momentum_scores(df_raw)

@@ -338,3 +338,11 @@ stability:
   max_unstable_params: 5            # warn if more than N params are unstable
   scan_maxiter: 15                  # optimizer iterations per window (faster than full tune)
   scan_popsize: 6                   # population size per window
+
+# ---------------------------------------------------------------------------
+# Candidate rotation — prevents the bot from always buying the same stocks
+# ---------------------------------------------------------------------------
+candidate_rotation:
+  buy_cooldown_days: 30       # exclude a symbol from buys for N days after purchase
+  score_jitter_pct: 0.08      # ±fraction of score range added as noise before candidate cap
+                               # 0.0 = fully deterministic, 0.10 = ±10% of score range
