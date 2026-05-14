@@ -35,6 +35,7 @@ from util import (
     ANALYST_PARAMS,
     DATA_DIRECTORY,
     DIVIDEND_THRESHOLD,
+    EARNINGS_PARAMS,
     EXCLUDED_STOCK_INDUSTRIES,
     EXCLUDED_STOCK_SECTORS,
     IGNORE_NEGATIVE_PB,
@@ -67,7 +68,14 @@ _RELIABILITY_COLS = {
     "data_quality_score", "feature_coverage_score",
     "liquidity_reliability_score", "signal_stability_score", "reliability_score",
 }
-_BASE_AGG_COLUMNS = [c for c in AGG_DATA_COLUMNS if c not in _RELIABILITY_COLS]
+# value_v2 diagnostic columns are injected after DataFrame construction by
+# _apply_cross_sectional_value_scores — exclude them from the per-row schema.
+_VALUE_V2_COLS = {
+    "value_score_raw", "sector_value_score", "relative_pe", "relative_pb",
+}
+_BASE_AGG_COLUMNS = [
+    c for c in AGG_DATA_COLUMNS if c not in _RELIABILITY_COLS and c not in _VALUE_V2_COLS
+]
 
 # ---------------------------------------------------------------------------
 # Stock universe
@@ -195,6 +203,8 @@ from strategy.momentum import (
     apply_cross_sectional_momentum_v2 as _apply_cross_sectional_momentum_scores,
     _pct_rank_series,
 )
+from strategy.value_v2 import apply_cross_sectional_value_v2 as _apply_cross_sectional_value_scores
+from strategy.snapshots import save_snapshot as _save_snapshot, backfill_from_csvs as _backfill_snapshots
 
 
 def _dividend_income_score(dividend_yield: float) -> tuple[float, bool]:
@@ -238,6 +248,48 @@ def _get_buy_to_sell_ratio(symbol: str) -> float | None:
         if "404" not in str(e) and "None" not in str(e):
             print(f"Ratings fetch failed for {symbol}: {str(e)[:50]}")
         return None
+
+
+def _get_earnings_bonus(symbol: str) -> float:
+    """Return a quality_score adjustment based on EPS surprise over the last 3 reported quarters.
+
+    Positive EPS surprise (actual > estimate) → small bonus per quarter.
+    Negative EPS surprise (actual < estimate) → penalty per quarter.
+    Result is clamped to ±max_quality_bonus from config.
+
+    Returns 0.0 on any fetch failure — never raises.
+    """
+    if not EARNINGS_PARAMS.get("enabled"):
+        return 0.0
+    try:
+        reports = rb.get_earnings(symbol) or []
+        if not reports:
+            return 0.0
+
+        pos_bonus   = EARNINGS_PARAMS["positive_surprise_bonus"]
+        neg_penalty = EARNINGS_PARAMS["negative_surprise_penalty"]
+        max_bonus   = EARNINGS_PARAMS["max_quality_bonus"]
+
+        bonus = 0.0
+        quarters_used = 0
+        for report in reports:
+            if quarters_used >= 3:
+                break
+            eps = report.get("eps") or {}
+            estimate = safe_float(eps.get("estimate"))
+            actual   = safe_float(eps.get("actual"))
+            if estimate is None or actual is None:
+                continue
+            quarters_used += 1
+            if actual > estimate:
+                bonus += pos_bonus
+            elif actual < estimate:
+                bonus -= neg_penalty
+
+        return max(-max_bonus, min(max_bonus, bonus))
+    except Exception as e:
+        logger.debug(f"Earnings bonus fetch failed for {symbol}: {e}")
+        return 0.0
 
 
 def _evaluate_stock(symbol: str, stock: dict) -> list | None:
@@ -704,7 +756,12 @@ def _get_robinhood_fundamentals(tickers: list[str], force_refresh: bool) -> pd.D
     # Cross-sectional momentum v2 normalization — must run before saving
     _apply_cross_sectional_momentum_scores(df_raw)
 
-    # Recompute value_metric with updated momentum_score
+    # Cross-sectional value v2 normalization — sector-relative, winsorized
+    # Replaces ratio-based value_score with sector percentile ranks.
+    # Saves legacy score as value_score_raw for diagnostics.
+    _apply_cross_sectional_value_scores(df_raw)
+
+    # Recompute value_metric with updated value_score and momentum_score
     for col in ["value_score", "income_score", "quality_score", "momentum_score"]:
         df_raw[col] = pd.to_numeric(df_raw[col], errors="coerce").fillna(0.0)
     df_raw["value_metric"] = (
@@ -714,8 +771,24 @@ def _get_robinhood_fundamentals(tickers: list[str], force_refresh: bool) -> pd.D
         + SCORE_WEIGHTS["momentum"] * df_raw["momentum_score"]
     ).round(3)
 
+    # Log value_metric distribution after v2 update for calibration awareness
+    vm = df_raw["value_metric"].dropna()
+    logger.info(
+        "value_metric post-v2: mean=%.3f  p25=%.3f  p50=%.3f  p75=%.3f  "
+        "≥metric_threshold(%s): %d/%d",
+        float(vm.mean()), float(vm.quantile(0.25)),
+        float(vm.quantile(0.50)), float(vm.quantile(0.75)),
+        METRIC_THRESHOLD, int((vm >= METRIC_THRESHOLD).sum()), len(vm),
+    )
+
     # Reliability scoring — data/signal quality, not alpha
     df_raw = _compute_reliability_scores(df_raw)
+
+    # Persist as dated Parquet snapshot for rolling IC analysis
+    try:
+        _save_snapshot(df_raw)
+    except Exception as _snap_err:
+        logger.warning("Snapshot save failed (non-fatal): %s", _snap_err)
 
     # Universe composition diagnostics
     if "sector" in df_raw.columns:
@@ -732,19 +805,42 @@ def _get_robinhood_fundamentals(tickers: list[str], force_refresh: bool) -> pd.D
     time.sleep(1)
     df = read_data_as_pd("robinhood_data")
 
-    # Fetch analyst buy/sell ratings only for shortlisted candidates — avoids 1000+
-    # sequential API calls during bulk collection while still giving Claude a signal
-    # and incorporating consensus into the score (±5% multiplier).
+    # Fetch analyst ratings and earnings bonus only for shortlisted candidates.
+    # Analyst BTR: tie-breaker only — sparse coverage (~17%) so never mutates value_metric.
+    # Earnings bonus: applied to quality_score, triggers value_metric recalc.
     if df is not None and not df.empty:
         df["value_metric"] = pd.to_numeric(df["value_metric"], errors="coerce")
         candidates = df[df["value_metric"] >= METRIC_THRESHOLD]["symbol"].tolist()
         if candidates:
-            print(f"Fetching analyst ratings for {len(candidates)} shortlisted stocks...")
+            fetch_earnings = EARNINGS_PARAMS.get("enabled", False)
+            label = "analyst ratings + earnings" if fetch_earnings else "analyst ratings"
+            print(f"Fetching {label} for {len(candidates)} shortlisted stocks...")
             for sym in candidates:
                 ratio = _get_buy_to_sell_ratio(sym)
                 df.loc[df["symbol"] == sym, "buy_to_sell_ratio"] = ratio
-                # BTR is stored for tie-breaking in make_buys but does NOT mutate
-                # value_metric — coverage is too sparse (~17%) for a reliable multiplier.
+
+                if fetch_earnings and "quality_score" in df.columns:
+                    bonus = _get_earnings_bonus(sym)
+                    if bonus != 0.0:
+                        idx = df["symbol"] == sym
+                        old_q = pd.to_numeric(df.loc[idx, "quality_score"], errors="coerce").iloc[0]
+                        new_q = old_q + bonus if pd.notna(old_q) else bonus
+                        df.loc[idx, "quality_score"] = new_q
+                        # Recalculate value_metric with updated quality_score
+                        sw = SCORE_WEIGHTS
+                        for col in ("value_score", "income_score", "momentum_score"):
+                            df[col] = pd.to_numeric(df[col], errors="coerce")
+                        new_vm = (
+                            sw.get("value",    0.08) * df.loc[idx, "value_score"].iloc[0]
+                            + sw.get("quality",  0.50) * new_q
+                            + sw.get("income",   0.08) * pd.to_numeric(df.loc[idx, "income_score"], errors="coerce").iloc[0]
+                            + sw.get("momentum", 0.34) * pd.to_numeric(df.loc[idx, "momentum_score"], errors="coerce").iloc[0]
+                        )
+                        df.loc[idx, "value_metric"] = new_vm
+                        logger.debug(
+                            f"{sym}: earnings bonus {bonus:+.3f} → quality={new_q:.3f}  value_metric={new_vm:.3f}"
+                        )
+
                 time.sleep(0.3)
             store_data_as_csv("robinhood_data", AGG_DATA_COLUMNS, df)
             time.sleep(1)

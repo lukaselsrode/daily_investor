@@ -33,8 +33,10 @@ from source_data import get_data as generate_daily_undervalued_stocks
 from util import (
     AUTO_APPROVE,
     BEAR_MARKET_PARAMS,
+    CANDIDATE_ROTATION_PARAMS,
     CONFIDENCE_THRESHOLD,
     DATA_DIRECTORY,
+    DIVIDEND_PARAMS,
     ETF_RISK_PARAMS,
     ETFS,
     HARVEST_PARAMS,
@@ -54,7 +56,6 @@ from util import (
     safe_float,
     update_industry_valuations,
     store_data_as_csv,
-    CANDIDATE_ROTATION_PARAMS,
 )
 
 load_dotenv()
@@ -114,13 +115,35 @@ def confirm(prompt: str) -> bool:
     return input(f"{prompt} [y/n] ").strip().lower() in ("y", "yes")
 
 
+_open_orders_cache: list | None = None
+
+
+def _get_open_orders_cached() -> list:
+    """Fetch all open stock orders once per process and cache the result.
+
+    get_all_open_stock_orders() paginates through every open order — with a
+    large order history this can be 10+ pages.  Caching ensures the two callers
+    (get_available_cash and get_pending_sell_symbols) only pay that cost once.
+    Call _clear_open_orders_cache() after placing orders to force a refresh.
+    """
+    global _open_orders_cache
+    if _open_orders_cache is None:
+        _open_orders_cache = list(rb.orders.get_all_open_stock_orders() or [])
+    return _open_orders_cache
+
+
+def _clear_open_orders_cache() -> None:
+    global _open_orders_cache
+    _open_orders_cache = None
+
+
 def get_available_cash() -> float:
     """Return cash minus committed-but-not-settled buy orders."""
     cash = float(rb.account.build_user_profile().get("cash", 0))
 
     try:
         committed = 0.0
-        for order in rb.orders.get_all_open_stock_orders():
+        for order in _get_open_orders_cached():
             if order.get("side") != "buy":
                 continue
             if order.get("state") not in ("confirmed", "queued", "unconfirmed"):
@@ -176,8 +199,10 @@ def add_funds_to_account() -> None:
         logger.error(f"Deposit failed: {e}")
 
 
-_PEAK_PRICES_CSV   = os.path.join(DATA_DIRECTORY, "peak_prices.csv")
-_BUY_HISTORY_CSV   = os.path.join(DATA_DIRECTORY, "buy_history.csv")
+_PEAK_PRICES_CSV    = os.path.join(DATA_DIRECTORY, "peak_prices.csv")
+_BUY_HISTORY_CSV    = os.path.join(DATA_DIRECTORY, "buy_history.csv")
+_SELL_HISTORY_CSV   = os.path.join(DATA_DIRECTORY, "sell_history.csv")
+_DIVIDEND_HISTORY_CSV = os.path.join(DATA_DIRECTORY, "dividend_history.csv")
 
 
 def _load_buy_history() -> dict[str, datetime.date]:
@@ -206,6 +231,79 @@ def _record_buy(symbol: str) -> None:
             row.to_csv(_BUY_HISTORY_CSV, index=False)
     except Exception as e:
         logger.warning(f"Could not record buy history for {symbol}: {e}")
+
+
+def _record_sell_event(symbol: str, was_loss: bool) -> None:
+    """Append a sell event to sell_history.csv for wash-sale tracking."""
+    today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+    row = pd.DataFrame([{"symbol": symbol, "sell_date": today, "was_loss": was_loss}])
+    try:
+        if os.path.exists(_SELL_HISTORY_CSV):
+            row.to_csv(_SELL_HISTORY_CSV, mode="a", header=False, index=False)
+        else:
+            row.to_csv(_SELL_HISTORY_CSV, index=False)
+    except Exception as e:
+        logger.warning(f"Could not record sell history for {symbol}: {e}")
+
+
+def _check_wash_sale_risk(symbol: str) -> str | None:
+    """Return a warning string if buying symbol within 30 days of a loss-sale, else None."""
+    if not DIVIDEND_PARAMS.get("wash_sale_warning"):
+        return None
+    try:
+        df = pd.read_csv(_SELL_HISTORY_CSV, parse_dates=["sell_date"])
+        recent_loss = df[
+            (df["symbol"] == symbol) &
+            (df["was_loss"].astype(bool)) &
+            ((datetime.date.today() - df["sell_date"].dt.date).apply(lambda d: d.days) <= 30)
+        ]
+        if not recent_loss.empty:
+            sell_date = recent_loss["sell_date"].max().strftime("%Y-%m-%d")
+            return f"wash-sale risk: {symbol} sold at a loss on {sell_date} (<30d ago)"
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        logger.debug(f"Wash-sale check failed for {symbol}: {e}")
+    return None
+
+
+def _fetch_and_save_dividends() -> None:
+    """Fetch full dividend history from Robinhood, resolve symbols, and save to CSV."""
+    if not DIVIDEND_PARAMS.get("enabled") or not DIVIDEND_PARAMS.get("track_income"):
+        return
+    try:
+        dividends = rb.get_dividends() or []
+        if not dividends:
+            logger.info("No dividend history returned")
+            return
+
+        # Collect all unique instrument URLs and batch-resolve to symbols
+        instrument_urls = list({d.get("instrument") for d in dividends if d.get("instrument")})
+        instruments = rb.get_instruments_by_urls(instrument_urls) or []
+        url_to_symbol: dict[str, str] = {}
+        for inst in instruments:
+            if inst and inst.get("url") and inst.get("symbol"):
+                url_to_symbol[inst["url"]] = inst["symbol"]
+
+        rows = []
+        for d in dividends:
+            url    = d.get("instrument", "")
+            symbol = url_to_symbol.get(url, "")
+            amount = safe_float(d.get("amount"), 0.0) or 0.0
+            rows.append({
+                "symbol":      symbol,
+                "record_date": d.get("record_date", ""),
+                "paid_at":     d.get("paid_at", ""),
+                "state":       d.get("state", ""),
+                "amount":      amount,
+            })
+
+        df = pd.DataFrame(rows)
+        df.to_csv(_DIVIDEND_HISTORY_CSV, index=False)
+        paid = df[df["state"] == "paid"]["amount"].sum()
+        logger.info(f"Dividend history saved: {len(df)} records | total paid=${paid:.2f}")
+    except Exception as e:
+        logger.warning(f"Could not fetch/save dividends: {e}")
 
 
 def _rb_call_with_retry(fn, *args, max_retries: int = 4, retry_on_none: bool = False, **kwargs):
@@ -567,27 +665,91 @@ def get_current_positions() -> dict:
 
 
 def _enrich_holdings_with_created_at(holdings: dict) -> None:
-    """Add 'created_at' to each holdings entry from get_open_stock_positions().
+    """Add 'created_at' (position open date) to each holdings entry.
 
-    build_holdings() omits created_at; get_open_stock_positions() has it but
-    uses instrument URLs instead of symbols — resolve them via get_symbol_by_url.
-    Mutates holdings in place; non-fatal on any failure.
+    Two-phase lookup:
+      Phase 1 — get_open_stock_positions(): fast (2 API calls), but Robinhood
+                 returns null created_at for old / migrated positions.
+      Phase 2 — get_all_stock_orders(): one paginated call; finds the earliest
+                 filled buy order per symbol for anything Phase 1 missed.
+
+    Both phases share the same instrument-URL → symbol map built upfront.
     """
+    if not holdings:
+        return
+
+    # ── Build instrument URL → symbol map (needed by both phases) ─────────────
+    url_to_symbol: dict[str, str] = {}
     try:
-        positions = rb.get_open_stock_positions() or []
-        for pos in positions:
-            instrument_url = pos.get("instrument") or pos.get("instrument_id")
-            created_at = pos.get("created_at")
-            if not instrument_url or not created_at:
+        instruments = rb.get_instruments_by_symbols(list(holdings.keys())) or []
+        for inst in instruments:
+            if inst and inst.get("url") and inst.get("symbol"):
+                url_to_symbol[inst["url"]] = inst["symbol"]
+        if not url_to_symbol:
+            logger.warning("_enrich_holdings_with_created_at: instrument resolution returned no data")
+    except Exception as exc:
+        logger.warning(f"Instrument URL resolution failed: {exc}")
+
+    # ── Phase 1: position records ──────────────────────────────────────────────
+    if url_to_symbol:
+        try:
+            positions = rb.get_open_stock_positions() or []
+            phase1 = 0
+            for pos in positions:
+                inst_url   = pos.get("instrument")
+                created_at = pos.get("created_at")
+                if not inst_url or not created_at:
+                    continue
+                symbol = url_to_symbol.get(inst_url)
+                if symbol and symbol in holdings:
+                    holdings[symbol]["created_at"] = created_at
+                    phase1 += 1
+            logger.info(f"Phase 1 (positions): enriched {phase1}/{len(holdings)} holdings with open date")
+        except Exception as exc:
+            logger.warning(f"Phase 1 (positions) enrichment failed: {exc}")
+
+    # ── Phase 2: order history fallback for anything still missing ─────────────
+    missing: set[str] = {s for s in holdings if not holdings[s].get("created_at")}
+    if not missing:
+        return
+
+    logger.info(
+        f"Phase 2 (order history): resolving open date for "
+        f"{len(missing)} symbol(s): {sorted(missing)}"
+    )
+    try:
+        all_orders = rb.get_all_stock_orders() or []
+        first_buy: dict[str, str] = {}
+
+        for order in all_orders:
+            if order.get("side") != "buy" or order.get("state") != "filled":
                 continue
-            try:
-                symbol = rb.get_symbol_by_url(instrument_url)
-            except Exception:
+            inst_url = order.get("instrument")
+            if not inst_url:
                 continue
-            if symbol and symbol in holdings:
-                holdings[symbol]["created_at"] = created_at
-    except Exception as e:
-        logger.warning(f"Could not enrich holdings with created_at: {e}")
+            sym = url_to_symbol.get(inst_url)
+            if not sym or sym not in missing:
+                continue
+            created = order.get("created_at")
+            if not created:
+                continue
+            # Keep the earliest buy date (orders arrive newest-first)
+            if sym not in first_buy or created < first_buy[sym]:
+                first_buy[sym] = created
+
+        phase2 = 0
+        for sym, date_str in first_buy.items():
+            if sym in holdings:
+                holdings[sym]["created_at"] = date_str
+                phase2 += 1
+
+        if phase2:
+            logger.info(f"Phase 2: resolved {phase2}/{len(missing)} open dates from order history")
+        still_missing = missing - set(first_buy.keys())
+        if still_missing:
+            logger.warning(f"Phase 2: no buy orders found for {sorted(still_missing)}")
+    except Exception as exc:
+        logger.warning(f"Phase 2 (order history) enrichment failed: {exc}")
 
 
 _HOLDINGS_SCHEMA = [
@@ -859,11 +1021,15 @@ def evaluate_sell_candidate(
 
     if value_metric is not None and value_metric < sell_weak:
         if days_held is None or days_held >= min_days:
-            days_str = f"{days_held}d" if days_held is not None else "unknown days"
+            if days_held is not None:
+                yrs, rem = divmod(days_held, 365)
+                days_str = f"{yrs}y{rem}d" if yrs else f"{days_held}d"
+            else:
+                days_str = "unknown"
             return {
                 **base,
                 "should_sell": True,
-                "reason":      f"value_metric={value_metric:.3f} < {sell_weak} (held {days_str})",
+                "reason":      f"value_metric={value_metric:.3f} < {sell_weak} (pos open {days_str})",
                 "severity":    "soft",
                 "exit_type":   "thesis_exit",
             }
@@ -911,7 +1077,7 @@ def get_pending_sell_symbols() -> set[str]:
     """Return symbols that already have an open sell order so we can skip re-evaluating them."""
     try:
         pending: set[str] = set()
-        for order in rb.orders.get_all_open_stock_orders():
+        for order in _get_open_orders_cached():
             if order.get("side") != "sell":
                 continue
             if order.get("state") not in ("confirmed", "queued", "unconfirmed"):
@@ -1054,6 +1220,7 @@ def make_sales() -> list[str]:
         quantity = float(holdings[symbol].get("quantity", 0))
         if _place_sell(symbol, quantity):
             sold.append(symbol)
+            _record_sell_event(symbol, was_loss=(pct is not None and pct < 0))
 
     # ── Soft sells with optional sentiment override ───────────────────────────
     held_on_sentiment: set[str] = set()
@@ -1072,20 +1239,37 @@ def make_sales() -> list[str]:
                 logger.error("Batch sentiment failed for soft sells — executing all", exc_info=True)
 
             for sym, result in sentiment_results.items():
-                if (
-                    result.get("action") == "HOLD"
-                    and result.get("sentiment") == "bullish"
-                    and result["confidence"] >= SELL_SENTIMENT_OVERRIDE_CONFIDENCE
-                ):
+                action     = result.get("action")
+                sentiment  = result.get("sentiment")
+                confidence = result["confidence"]
+
+                # Respect HOLD at normal confidence when sentiment is bullish.
+                # Reserve the high override threshold for non-bullish or ambiguous cases.
+                bullish_hold = (
+                    action == "HOLD"
+                    and sentiment == "bullish"
+                    and confidence >= CONFIDENCE_THRESHOLD
+                )
+                high_conf_hold = (
+                    action == "HOLD"
+                    and confidence >= SELL_SENTIMENT_OVERRIDE_CONFIDENCE
+                )
+
+                if bullish_hold or high_conf_hold:
                     logger.info(
                         f"HOLD {sym} — sentiment overrides soft sell "
-                        f"({result['confidence']}% bullish): {result['reasoning']}"
+                        f"({confidence}% {sentiment}): {result['reasoning']}"
                     )
                     held_on_sentiment.add(sym)
                 else:
+                    reason = (
+                        f"confidence {confidence}% below threshold"
+                        if action == "HOLD"
+                        else f"action={action}"
+                    )
                     logger.info(
-                        f"SELL confirmed {sym} — action={result.get('action')} "
-                        f"sentiment={result.get('sentiment')} ({result['confidence']}%): {result['reasoning']}"
+                        f"SOFT SELL proceeds {sym} — {reason} "
+                        f"sentiment={sentiment} ({confidence}%): {result['reasoning']}"
                     )
 
         harvest_proceeds = 0.0
@@ -1098,6 +1282,7 @@ def make_sales() -> list[str]:
             quantity = float(holdings[symbol].get("quantity", 0))
             if _place_sell(symbol, quantity):
                 sold.append(symbol)
+                _record_sell_event(symbol, was_loss=(pct is not None and pct < 0))
                 if decision.get("exit_type") == "harvest_exit":
                     harvest_proceeds += safe_float(holdings[symbol].get("equity"), 0.0) or 0.0
 
@@ -1357,6 +1542,14 @@ def make_buys(df: pd.DataFrame, is_first_iteration: bool = True, regime: str = "
             skipped.append(symbol)
             continue
 
+        wash_warning = _check_wash_sale_risk(symbol)
+        if wash_warning:
+            if DIVIDEND_PARAMS.get("block_rebuy_on_wash_sale_risk"):
+                logger.warning(f"Blocking buy {symbol} — {wash_warning}")
+                skipped.append(symbol)
+                continue
+            logger.warning(f"TAX WARNING — {wash_warning}")
+
         try:
             if AUTO_APPROVE or confirm(
                 f"Buy ${adj_alloc:,.2f} of {symbol}? ({row['value_metric']/total_value:.1%} of stock budget)"
@@ -1409,6 +1602,7 @@ def run_daily_strat() -> None:
         if not skip_data:
             update_industry_valuations(verbose=True)
             add_funds_to_account()
+            _fetch_and_save_dividends()
             refresh = AUTO_APPROVE or confirm("Generate fresh data? (takes several minutes)")
         else:
             logger.info("--skip-data: using existing CSVs")
@@ -1446,6 +1640,10 @@ def run_daily_strat() -> None:
             break
 
         made_buys = made_sells = False
+
+        # Clear open-orders cache at the start of each iteration so cash
+        # and pending-sell checks reflect any orders placed in the previous pass.
+        _clear_open_orders_cache()
 
         # Sell phase always runs first
         try:
@@ -1490,10 +1688,18 @@ def run_daily_strat() -> None:
             logger.info(f"=== CASH SWEEP: ${remaining:,.2f} → ETFs (${per_etf:.2f} each) ===")
             for etf in ETFS:
                 try:
-                    res = rb.orders.order_buy_fractional_by_price(etf, per_etf)
-                    logger.info(f"Sweep {etf}: {res.get('state') if res else 'None'}")
+                    res = _rb_call_with_retry(
+                        rb.orders.order_buy_fractional_by_price, etf, per_etf,
+                        retry_on_none=True,
+                    )
+                    state = res.get("state") if res else None
+                    if state:
+                        logger.info(f"Sweep {etf}: {state}")
+                    else:
+                        logger.warning(f"Sweep {etf}: order returned None after retries — skipping")
                 except Exception as e:
-                    logger.error(f"Sweep failed for {etf}: {e}")
+                    logger.error(f"Sweep {etf} failed: {e}")
+                time.sleep(1.5)
 
     logger.info(
         f"\n{'='*60}\n"

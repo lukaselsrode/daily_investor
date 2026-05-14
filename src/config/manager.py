@@ -34,6 +34,7 @@ from .schema import (
     RegimeDefensiveConfig,
     RegimeNeutralConfig,
     ReliabilityConfig,
+    ResearchConfig,
     RiskConfig,
     ScoreWeightsConfig,
     ScoringConfig,
@@ -404,6 +405,18 @@ class ConfigManager:
             max_unstable_params=int(st.get("max_unstable_params", 5)),
             scan_maxiter=int(st.get("scan_maxiter", 15)),
             scan_popsize=int(st.get("scan_popsize", 6)),
+        )
+
+    @cached_property
+    def research(self) -> ResearchConfig:
+        rc = self._raw.get("research", {})
+        return ResearchConfig(
+            min_snapshots_for_weight_recommendations=int(
+                rc.get("min_snapshots_for_weight_recommendations", 20)
+            ),
+            min_snapshots_for_high_confidence=int(
+                rc.get("min_snapshots_for_high_confidence", 60)
+            ),
         )
 
     # ── Raw access (backward compat / tuner writes) ───────────────────────────

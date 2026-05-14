@@ -156,6 +156,67 @@ CANDIDATE_ROTATION_PARAMS: dict = {
 }
 
 # ---------------------------------------------------------------------------
+# Value scoring v2 — sector-relative robust normalization
+# ---------------------------------------------------------------------------
+
+_vv2   = _app.get("value_v2", {})
+_vv2_d = _vv2.get("distress", {})
+_vv2_c = _vv2.get("composite", {})
+VALUE_V2_PARAMS: dict = {
+    "enabled":          bool(_vv2.get("enabled",         True)),
+    "winsorize_pct":    float(_vv2.get("winsorize_pct",  0.05)),
+    "sector_relative":  bool(_vv2.get("sector_relative", True)),
+    "min_sector_size":  int(_vv2.get("min_sector_size",  5)),
+    "clamp_low":        float(_vv2.get("clamp_low",      -1.0)),
+    "clamp_high":       float(_vv2.get("clamp_high",      1.5)),
+    "distress": {
+        "pe_threshold":          float(_vv2_d.get("pe_threshold",          5.0)),
+        "pe_penalty":            float(_vv2_d.get("pe_penalty",            0.30)),
+        "negative_eps_penalty":  float(_vv2_d.get("negative_eps_penalty",  0.25)),
+    },
+    "composite": {
+        "pe_weight": float(_vv2_c.get("pe_weight", 0.60)),
+        "pb_weight": float(_vv2_c.get("pb_weight", 0.40)),
+    },
+}
+
+# ---------------------------------------------------------------------------
+# Historical snapshot store parameters
+# ---------------------------------------------------------------------------
+
+_snap = _app.get("snapshots", {})
+SNAPSHOT_PARAMS: dict = {
+    "enabled":        bool(_snap.get("enabled",        True)),
+    "subdir":         str(_snap.get("subdir",          "snapshots")),
+    "retention_days": int(_snap.get("retention_days",  365)),
+    "compression":    str(_snap.get("compression",     "snappy")),
+}
+
+# ---------------------------------------------------------------------------
+# Dividend tracking parameters
+# ---------------------------------------------------------------------------
+
+_dv = _app.get("dividends", {})
+DIVIDEND_PARAMS: dict = {
+    "enabled":                    bool(_dv.get("enabled",                    True)),
+    "track_income":               bool(_dv.get("track_income",               True)),
+    "wash_sale_warning":          bool(_dv.get("wash_sale_warning",          True)),
+    "block_rebuy_on_wash_sale_risk": bool(_dv.get("block_rebuy_on_wash_sale_risk", False)),
+}
+
+# ---------------------------------------------------------------------------
+# Earnings quality bonus parameters
+# ---------------------------------------------------------------------------
+
+_ea = _app.get("earnings", {})
+EARNINGS_PARAMS: dict = {
+    "enabled":                  bool(_ea.get("enabled",                  True)),
+    "max_quality_bonus":        float(_ea.get("max_quality_bonus",        0.10)),
+    "positive_surprise_bonus":  float(_ea.get("positive_surprise_bonus",  0.03)),
+    "negative_surprise_penalty":float(_ea.get("negative_surprise_penalty", 0.05)),
+}
+
+# ---------------------------------------------------------------------------
 
 _hv = _app.get("harvest", {})
 HARVEST_PARAMS: dict = {
@@ -435,6 +496,11 @@ METRIC_KEYS: list[str] = [
     "liquidity_reliability_score",
     "signal_stability_score",
     "reliability_score",
+    # value v2 diagnostic columns (populated by apply_cross_sectional_value_v2)
+    "value_score_raw",        # legacy ratio-based score before normalization
+    "sector_value_score",     # same as new value_score, kept for UI referencing
+    "relative_pe",            # sector-percentile rank of PE (-1=expensive, +1=cheap)
+    "relative_pb",            # sector-percentile rank of PB (-1=expensive, +1=cheap)
 ]
 
 AGG_DATA_COLUMNS: list[str] = ["symbol"] + METRIC_KEYS

@@ -20,6 +20,8 @@ import yfinance as yf
 from util import (
     BACKTEST_PARAMS,
     ETFS,
+    INDEX_PCT,
+    METRIC_THRESHOLD,
     MOMENTUM_PARAMS,
     MOMENTUM_V2_PARAMS,
     RISK_LIMITS,
@@ -30,6 +32,39 @@ from util import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def get_default_params() -> "np.ndarray":
+    """
+    Build the 15-element params vector from the current config values.
+
+    Layout mirrors tuner._current_params():
+      [0-3]  score_weights (value, quality, income, momentum)
+      [4]    index_pct
+      [5]    metric_threshold
+      [6]    take_profit_pct
+      [7]    sell_weak_value_below
+      [8]    trailing_stop_pct
+      [9]    value_pe_weight
+      [10-14] momentum_v2 sub-weights (rs_3m, rs_6m, risk_adj_3m, trend_structure, return_1m)
+    """
+    sw  = SCORE_WEIGHTS
+    v2w = MOMENTUM_V2_PARAMS.get("weights", {})
+    return np.array([
+        sw["value"], sw["quality"], sw["income"], sw["momentum"],
+        INDEX_PCT,
+        METRIC_THRESHOLD,
+        SELL_RULES["take_profit_pct"],
+        SELL_RULES["sell_weak_value_below"],
+        SELL_RULES["trailing_stop_pct"],
+        SCORING_PARAMS["value_pe_weight"],
+        v2w.get("rs_3m",           0.25),
+        v2w.get("rs_6m",           0.25),
+        v2w.get("risk_adj_3m",     0.20),
+        v2w.get("trend_structure", 0.15),
+        v2w.get("return_1m",       0.10),
+    ])
+
 
 _TAKE_PROFIT_FLOOR_MULTIPLIER = 1.2
 _STOP_LOSS_PCT = -0.20  # hard-coded; not a tuned param
@@ -764,6 +799,18 @@ def _extract_closes(raw: "pd.DataFrame", all_tickers: list[str]) -> "pd.DataFram
     return closes.ffill().bfill()
 
 
+def _yf_ticker(sym: str) -> str:
+    """
+    Normalize a ticker symbol for yfinance.
+
+    yfinance uses hyphens where US exchanges use dots for share classes.
+    e.g.  BRK.B → BRK-B,  BF.B → BF-B
+
+    Also strips leading $ that occasionally slips through scrapers.
+    """
+    return sym.lstrip("$").replace(".", "-")
+
+
 def load_and_precompute(
     n_days: int,
     max_symbols: int = 300,
@@ -814,22 +861,33 @@ def load_and_precompute(
     start_date = end_date - datetime.timedelta(days=n_cal_days)
 
     all_tickers = symbols + etf_list + benchmark_tickers
+
+    # Build normalized → original mapping for yfinance compatibility (BRK.B → BRK-B)
+    yf_map = {_yf_ticker(t): t for t in all_tickers}
+    yf_tickers = list(yf_map.keys())
+
     print(
-        f"Downloading price history for {len(all_tickers)} tickers "
+        f"Downloading price history for {len(yf_tickers)} tickers "
         f"({n_days} trading days, mode={mode}, bias={lookahead_bias}) …"
     )
 
     raw = yf.download(
-        all_tickers,
+        yf_tickers,
         start=start_date.isoformat(),
         end=end_date.isoformat(),
         progress=False,
         auto_adjust=True,
+        threads=False,
     )
     if raw.empty:
         raise RuntimeError("yfinance returned no data.")
 
-    closes = _extract_closes(raw, all_tickers)
+    closes = _extract_closes(raw, yf_tickers)
+
+    # Rename normalized columns back to original ticker names
+    rename_back = {yf: orig for yf, orig in yf_map.items() if yf != orig}
+    if rename_back:
+        closes.rename(columns=rename_back, inplace=True)
 
     if len(closes) < n_days:
         raise RuntimeError(
@@ -1059,14 +1117,18 @@ def load_and_precompute(
 
 def run_backtest_report(
     precomp: PrecomputedData,
-    params: np.ndarray,
+    params: "np.ndarray | None",
     train_slice: slice,
     val_slice: "slice | None",
 ) -> BacktestReport:
     """
     Run strategy on train window, optionally evaluate on validation window,
     and compute benchmark metrics.  Returns a BacktestReport.
+
+    params=None uses the current config values via get_default_params().
     """
+    if params is None:
+        params = get_default_params()
     bp = BACKTEST_PARAMS
 
     def _slice_precomp(s: slice) -> PrecomputedData:

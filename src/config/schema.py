@@ -282,3 +282,9 @@ class StabilityConfig:
     max_unstable_params: int = 5
     scan_maxiter: int = 15
     scan_popsize: int = 6
+
+
+@dataclass(frozen=True)
+class ResearchConfig:
+    min_snapshots_for_weight_recommendations: int = 20
+    min_snapshots_for_high_confidence: int = 60

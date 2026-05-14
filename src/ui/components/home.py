@@ -149,6 +149,22 @@ def render() -> None:
 
     st.divider()
 
+    # ----- Dividend income summary -----------------------------------------
+    st.subheader("Dividend income")
+    div_df = load_latest_csv("dividend_history")
+    if div_df is None:
+        st.info("No dividend history yet. Runs automatically when the bot runs.")
+    else:
+        import pandas as _pd
+        div_df["amount"] = _pd.to_numeric(div_df.get("amount", _pd.Series(dtype=float)), errors="coerce").fillna(0.0)
+        paid = div_df[div_df["state"].eq("paid")] if "state" in div_df.columns else div_df
+        total_paid = paid["amount"].sum()
+        dc1, dc2 = st.columns(2)
+        dc1.metric("Total dividends received", f"${total_paid:,.2f}")
+        dc2.metric("Payments recorded", len(paid))
+
+    st.divider()
+
     # ----- Log tail --------------------------------------------------------
     st.subheader("Recent log activity")
     if LOG_PATH.exists():

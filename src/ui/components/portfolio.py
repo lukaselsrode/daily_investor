@@ -158,7 +158,37 @@ def render() -> None:
         for i, (sleeve, val) in enumerate(sleeve_equity.items()):
             [sc1, sc2][i % 2].metric(sleeve, f"${val:,.2f}")
 
+    # ---- Dividend income -----------------------------------------------------
+    _dividend_section()
+
     _live_section(etfs)
+
+
+def _dividend_section() -> None:
+    div_df = load_latest_csv("dividend_history")
+    if div_df is None:
+        return
+
+    st.divider()
+    st.subheader("Dividend income")
+
+    div_df["amount"] = pd.to_numeric(div_df.get("amount", pd.Series(dtype=float)), errors="coerce").fillna(0.0)
+    paid = div_df[div_df.get("state", pd.Series()).eq("paid")] if "state" in div_df.columns else div_df
+    total_paid = paid["amount"].sum()
+
+    d1, d2, d3 = st.columns(3)
+    d1.metric("Total dividends received", f"${total_paid:,.2f}")
+    d2.metric("Dividend payments", len(paid))
+    if "symbol" in div_df.columns:
+        top_sym = (
+            paid.groupby("symbol")["amount"].sum().sort_values(ascending=False).head(1)
+        )
+        if not top_sym.empty:
+            d3.metric("Top payer", f"{top_sym.index[0]}  ${top_sym.iloc[0]:.2f}")
+
+    if "symbol" in paid.columns and not paid.empty:
+        by_symbol = paid.groupby("symbol")["amount"].sum().sort_values(ascending=False).head(15)
+        st.bar_chart(by_symbol)
 
 
 def _live_section(etfs: list[str]) -> None:

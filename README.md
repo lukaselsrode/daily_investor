@@ -1,84 +1,113 @@
 # Daily Investor
 
-An automated investment strategy tool that combines fundamental analysis with AI-powered sentiment analysis to make informed investment decisions. The system evaluates stocks based on financial metrics, multi-factor momentum, market regime, and news analysis, then executes trades via Robinhood.
+An automated investment strategy and quantitative research platform. Combines multi-factor fundamental analysis, AI-powered sentiment, and a full portfolio intelligence stack — backtesting, walk-forward validation, parameter stability, regime detection, factor IC analytics, and exposure diagnostics — all executing via Robinhood.
 
 ## Key Features
 
-- **Multi-Factor Momentum (v2)**: Relative strength vs SPY (3m/6m), risk-adjusted momentum (return/vol), trend structure (50/200 DMA), 5d/1m returns — all cross-sectionally ranked per day, no lookahead
-- **Factor-Based Scoring**: Combines value (P/E, P/B), income (dividend yield), quality, and momentum into a single `value_metric`
-- **Valuation Guardrails**: Caps P/E and P/B components to prevent extreme scores from thin or stale fundamental data
-- **Portfolio Risk Controls**: Per-position cap, per-sector cap, and per-order size cap enforced before every buy
-- **Disciplined Sell Engine**: Separates hard sells (stop-loss, yield trap, quality floor) from soft sells (take-profit, weak value) with sentiment override only on soft sells
-- **Three-Tier Market Regime**: Bullish / Neutral / Defensive classification using SPY 200DMA + VIX. Defensive regime raises ETF allocation, limits active buys, tightens stops, and activates ETF MA filter
-- **ETF Core Protection**: ETF positions are exempt from stock stop-loss logic. The optional ETF MA filter only activates in defensive regime
-- **Profit Harvesting**: Take-profit proceeds are automatically reinvested into core ETFs rather than sitting as idle cash
-- **Anti-Lookahead Backtest**: All rolling features computed causally — only price data up to day D used on day D. Contribution-adjusted TWR (chain-link) for both portfolio and benchmark
-- **Backtest Realism**: Per-trade cooldown after sells/stopouts, weekly trade budget, volatility-scaled slippage, regime tracking, stopout attribution
-- **Validation-Aware Auto-Tune**: Optimizes score weights and sell thresholds via `scipy.differential_evolution`; tuned parameters are only written to config if they pass held-out validation gates
-- **Parameter Stability Reporting**: Shows spread between Sharpe-optimized and Calmar-optimized parameter sets to flag unstable dimensions
-- **Optional LLM Tune Review**: Routes optimizer candidates through Claude for a second-opinion review before applying
-- **Batch AI Sentiment Analysis**: Analyzes multiple stocks per Claude API call using async concurrency
-- **Fractional + Whole Share Fallback**: Attempts fractional orders first; falls back to whole-share market order with a final risk re-check
-- **Centralized Rate-Limit Backoff**: All Robinhood API calls retry with exponential backoff on 429 / throttle errors
+- **Multi-Factor Scoring**: Value (P/E, P/B sector-relative v2), quality, income, and momentum → single `value_metric`
+- **Momentum v2**: Relative strength vs SPY (3m/6m), risk-adjusted return, DMA trend structure, short-term momentum — all cross-sectionally ranked per day, no lookahead
+- **Value v2**: Sector-relative winsorized percentile ranking with distress penalties — replaces ratio-based value scoring
+- **Three-Tier Market Regime**: Bullish / Neutral / Defensive via SPY 200DMA + VIX. Raises ETF allocation, limits active buys, and tightens stops in defensive mode
+- **Regime Detector Service**: `RegimeDetector.detect()` gives live regime + confidence; `classify_history()` replays N days for backtesting
+- **Factor Research Platform**: `FactorResearchEngine` — multi-horizon IC (5/20/60/120/252d), factor decay curves, decile spread / monotonicity, rolling ICIR, cumulative IC
+- **Parquet Snapshot Store**: Each scoring run saves `data/snapshots/YYYY_MM_DD.parquet` for rolling IC and forward-return validation
+- **Exposure Analytics**: `ExposureAnalyzer` — factor tilts (z-score vs. universe), sector weights, HHI concentration, rolling exposure drift
+- **Factor Orthogonalization**: Correlation matrix, VIF analysis, and variance decomposition across factor pairs
+- **Disciplined Sell Engine**: Hard sells (stop-loss, yield trap, quality floor) execute immediately; soft sells (take-profit, weak value) require Claude confirmation
+- **Portfolio Risk Controls**: Per-position, per-sector, per-order caps enforced before every buy
+- **Profit Harvesting**: Take-profit proceeds route to core ETFs rather than sitting as idle cash
+- **Anti-Lookahead Backtest**: All rolling features computed causally. Contribution-adjusted TWR (chain-link) for both portfolio and benchmark
+- **Validation-Aware Auto-Tune**: `scipy.differential_evolution` across Sharpe and Calmar; parameters written only if held-out validation gates pass
+- **Parameter Stability Reporting**: Spread between Sharpe-opt and Calmar-opt parameter sets flags unstable dimensions
+- **Optional LLM Tune Review**: Routes optimizer candidates through Claude for a second-opinion before applying
+- **Batch AI Sentiment**: Async concurrent Claude calls with exponential backoff
 
 ## Project Structure
 
 ```
 daily_investor/
 ├── cfg/
-│   └── config.yaml                  # All tunable parameters (never commit credentials here)
-├── data/                            # CSV cache (dated filenames, newest always used)
+│   └── config.yaml                   # All tunable parameters (never commit credentials)
+├── data/
+│   ├── agg_data_YYYY_MM_DD.csv       # Scored universe (newest always used)
+│   └── snapshots/
+│       └── YYYY_MM_DD.parquet        # Daily scored universe snapshots (IC store)
 ├── src/
-│   ├── cli/                         # CLI dispatcher — new modular entry point
-│   │   ├── main.py                  # Argument parsing, command dispatch
-│   │   └── commands.py              # Per-command handlers (run, backtest, tune, …)
+│   ├── cli/                          # CLI dispatcher
+│   │   ├── main.py                   # Argument parsing, command dispatch
+│   │   └── commands.py               # Per-command handlers
 │   ├── core/
-│   │   ├── types.py                 # Shared dataclasses: SimResult, TradeRecord, SellDecision, …
-│   │   └── logging.py               # Structured JSON logging, configure_logging()
+│   │   ├── types.py                  # Shared dataclasses: SimResult, TradeRecord, SellDecision
+│   │   ├── logging.py                # Structured JSON logging
+│   │   ├── exceptions.py             # Domain exception hierarchy
+│   │   └── interfaces.py             # Typed Protocol contracts for all services
 │   ├── config/
-│   │   ├── schema.py                # 19 frozen dataclasses for all YAML sections
-│   │   └── manager.py               # Singleton ConfigManager with cached_property sections
+│   │   ├── schema.py                 # Frozen dataclasses for all YAML sections
+│   │   └── manager.py                # Singleton ConfigManager with cached_property sections
 │   ├── data/
-│   │   ├── base.py                  # ABCs: MarketDataProvider, SentimentProvider
-│   │   ├── cache.py                 # CSV read/write helpers
-│   │   ├── sentiment.py             # SentimentProvider wrapping sentiment_analysis.py
-│   │   ├── universe.py              # UniverseBuilder wrapping gen_symbols_list
-│   │   ├── fundamentals.py          # FundamentalsProvider (stub — Phase 2)
-│   │   └── market.py                # MarketDataProvider (stub — Phase 2)
+│   │   ├── base.py                   # ABCs: MarketDataProvider, SentimentProvider, etc.
+│   │   ├── cache.py                  # CSV read/write helpers
+│   │   ├── sentiment.py              # SentimentProvider wrapping sentiment_analysis.py
+│   │   ├── universe.py               # UniverseBuilder wrapping gen_symbols_list
+│   │   ├── fundamentals.py           # FundamentalsProvider
+│   │   └── market.py                 # MarketDataProvider (yfinance wrapper)
 │   ├── strategy/
-│   │   ├── value.py                 # ValueScorer: P/E + P/B with guardrails
-│   │   ├── quality.py               # QualityScorer: liquidity, earnings, dividend health
-│   │   ├── income.py                # IncomeScorer: yield with trap detection
-│   │   ├── momentum.py              # MomentumEngine: v2 multi-factor + v1 fallback
-│   │   └── composite.py             # CompositeScorer: weighted combination → value_metric
+│   │   ├── base.py                   # ScorerBase ABC, ScoreBreakdown
+│   │   ├── value.py                  # ValueScorer: P/E + P/B with guardrails
+│   │   ├── value_v2.py               # ValueScorerV2: sector-relative winsorized percentile
+│   │   ├── quality.py                # QualityScorer: liquidity, earnings, dividend health
+│   │   ├── income.py                 # IncomeScorer: yield with trap detection
+│   │   ├── momentum.py               # MomentumEngine: v2 multi-factor + v1 fallback
+│   │   ├── composite.py              # CompositeScorer: weighted combination → value_metric
+│   │   ├── snapshots.py              # Parquet snapshot store: save, load, prune, backfill
+│   │   ├── factors/
+│   │   │   ├── engine.py             # FactorEngine: score_single, score_universe, exposures
+│   │   │   └── __init__.py
+│   │   ├── regimes/
+│   │   │   ├── models.py             # RegimeState, RegimeHistoryEntry, RegimeLabel
+│   │   │   ├── detector.py           # RegimeDetector: live detect + historical replay
+│   │   │   └── __init__.py
+│   │   └── research/
+│   │       ├── ic_engine.py          # FactorResearchEngine: multi-horizon IC, decay, decile
+│   │       └── __init__.py
 │   ├── portfolio/
-│   │   ├── risk.py                  # RiskManager.can_buy() — all position/sector/order gates
-│   │   └── sell_engine.py           # SellDecisionEngine.evaluate() — hard/soft sell logic
+│   │   ├── risk.py                   # RiskManager.can_buy() — position/sector/order gates
+│   │   ├── sell_engine.py            # SellDecisionEngine.evaluate() — hard/soft sell logic
+│   │   ├── manager.py                # PortfolioManager
+│   │   ├── sizing.py                 # Order sizing helpers
+│   │   ├── harvest.py                # Profit harvesting logic
+│   │   └── exposure/
+│   │       ├── analyzer.py           # ExposureAnalyzer: factor tilts, sector, HHI, drift
+│   │       └── __init__.py
 │   ├── execution/
-│   │   ├── base.py                  # BrokerAdapter ABC
-│   │   ├── paper.py                 # PaperBroker — in-memory, no API
-│   │   └── robinhood.py             # RobinhoodBroker — live orders with retry backoff
+│   │   ├── base.py                   # BrokerAdapter ABC
+│   │   ├── paper.py                  # PaperBroker — in-memory, no API
+│   │   └── robinhood.py              # RobinhoodBroker — live orders with retry backoff
 │   ├── backtesting/
-│   │   ├── engine.py                # BacktestEngine: simulate(), run(), run_walk_forward()
-│   │   ├── validator.py             # WalkForwardValidator: train/val split, gate checks
-│   │   └── results.py               # BacktestResult, ValidationResult typed wrappers
+│   │   ├── engine.py                 # BacktestEngine: simulate, run, walk_forward
+│   │   ├── validator.py              # WalkForwardValidator: train/val split, gate checks
+│   │   └── results.py                # BacktestResult, ValidationResult typed wrappers
 │   ├── tuning/
-│   │   ├── tuner.py                 # ParameterTuner: tune(), auto_tune(), apply_params()
-│   │   ├── stability.py             # StabilityAnalyzer: multi-window scan()
-│   │   └── results.py               # TuneResult, AutoTuneResult, StabilityReport
+│   │   ├── tuner.py                  # ParameterTuner: tune, auto_tune, apply_params
+│   │   ├── stability.py              # StabilityAnalyzer: multi-window parameter scan
+│   │   └── results.py                # TuneResult, AutoTuneResult, StabilityReport
 │   ├── reporting/
-│   │   ├── attribution.py           # AttributionReporter: stability classification
-│   │   ├── diagnostics.py           # DiagnosticsReporter: CSV + robustness TXT
-│   │   └── plots.py                 # PlotManager: param/objective/validation heatmaps
-│   ├── main.py                      # Legacy live-trading loop (still the execution engine)
-│   ├── backtest.py                  # Legacy simulation core (still the computation engine)
-│   ├── tuner.py                     # Legacy optimizer core (scipy DE, LLM review)
-│   ├── source_data.py               # Universe + fundamentals + momentum scoring
-│   ├── sentiment_analysis.py        # Batch async + single-stock Claude sentiment
-│   ├── sentiments.py                # News/Reddit data collection
-│   ├── util.py                      # Config constants, schema, CSV helpers
-│   └── tests.py                     # Legacy pure-function unit tests
-├── tests/                           # pytest test suite (271 tests, no API required)
+│   │   ├── attribution.py            # AttributionReporter
+│   │   ├── diagnostics.py            # DiagnosticsReporter: CSV + robustness TXT
+│   │   └── plots.py                  # PlotManager: heatmaps and validation charts
+│   ├── ui/
+│   │   ├── streamlit_app.py          # Dashboard entry point
+│   │   ├── utils.py                  # Shared UI helpers
+│   │   └── components/               # One file per page (see UI section)
+│   ├── main.py                       # Legacy live-trading loop
+│   ├── backtest.py                   # Legacy simulation core
+│   ├── tuner.py                      # Legacy optimizer core
+│   ├── source_data.py                # Universe + fundamentals + scoring pipeline
+│   ├── sentiment_analysis.py         # Batch async + single-stock Claude sentiment
+│   ├── sentiments.py                 # News data collection
+│   ├── util.py                       # Config constants, schema, CSV helpers
+│   └── tests.py                      # Legacy pure-function unit tests
+├── tests/                            # pytest test suite (no API credentials required)
 │   ├── conftest.py
 │   ├── test_config.py
 │   ├── test_scoring.py
@@ -89,10 +118,12 @@ daily_investor/
 │   ├── test_tuning.py
 │   ├── test_reporting.py
 │   └── test_cli.py
-└── .env                             # Credentials (never commit)
+└── .env                              # Credentials (never commit)
 ```
 
-The new modular layer (`cli/`, `core/`, `config/`, `strategy/`, `portfolio/`, `execution/`, `backtesting/`, `tuning/`, `reporting/`) provides a typed, testable API over the legacy engine modules. The legacy `.py` files remain as the computation backends and are gradually being hollowed out.
+The modular layer (`core/`, `config/`, `strategy/`, `portfolio/`, `execution/`, `backtesting/`, `tuning/`, `reporting/`) provides a typed, testable API over the legacy engine files. Legacy `.py` files remain as computation backends and are being gradually hollowed out.
+
+---
 
 ## Scoring Model
 
@@ -100,23 +131,23 @@ The new modular layer (`cli/`, `core/`, `config/`, `strategy/`, `portfolio/`, `e
 
 | Score | What it measures |
 |-------|-----------------|
-| `value_score` | P/E and P/B cheapness relative to sector thresholds |
-| `income_score` | Dividend yield quality (capped at 1.5×; 0 if no yield or yield trap) |
+| `value_score` | Sector-relative P/E and P/B cheapness (v2: winsorized percentile ranking) |
+| `income_score` | Dividend yield quality (capped; 0 if yield trap or no yield) |
 | `quality_score` | Liquidity, earnings existence, dividend health signal |
-| `momentum_score` | Multi-factor v2: relative strength, risk-adjusted return, trend structure, short-term momentum |
+| `momentum_score` | Multi-factor v2: relative strength, risk-adjusted return, DMA trend, short-term momentum |
 
-### Momentum Score v2 — Multi-Factor Continuous Model
+### Momentum Score v2
 
-All sub-scores are **cross-sectionally percentile-ranked** across the live universe on each day. This is causal (ranking across stocks at one point in time, not across time) and removes the need for asset-specific normalization.
+All sub-scores are **cross-sectionally percentile-ranked** across the live universe on each day. Causal — no lookahead.
 
 | Sub-factor | Default weight | What it captures |
 |---|---|---|
 | `rs_3m` | 0.25 | Return_3m − SPY_3m (relative strength, 3-month) |
 | `rs_6m` | 0.25 | Return_6m − SPY_6m (relative strength, 6-month) |
 | `risk_adj_3m` | 0.20 | return_3m / realized_vol_3m (Sharpe-like, 63-day) |
-| `trend_structure` | 0.15 | Price vs 50 DMA and 200 DMA (deterministic signal, not ranked) |
+| `trend_structure` | 0.15 | Price vs 50 DMA and 200 DMA (deterministic, not ranked) |
 | `return_1m` | 0.10 | Raw 21-day return, percentile-ranked |
-| `return_5d` | 0.05 | 5-day short-term check (fixed, not optimizer-tunable) |
+| `return_5d` | 0.05 | 5-day short-term check |
 
 **Penalties applied after weighting:**
 
@@ -126,20 +157,20 @@ All sub-scores are **cross-sectionally percentile-ranked** across the live unive
 | Overextension | 52-week position > 97% |
 | High volatility | Annualized realized vol > 50% |
 
-**Trend structure scoring** (not ranked — deterministic):
+Final momentum score clamped to [−1.0, 1.5].
 
-| Signal | Score |
-|---|---|
-| Above 50 DMA and 200 DMA | +0.50 |
-| Above 50 DMA only | +0.10 |
-| Above 200 DMA only | −0.10 |
-| Below both | −0.50 |
+### Value Score v2
 
-Final momentum score is clamped to [−1.0, 1.5]. All weights are optimizer-tunable under `momentum_v2.weights` in `config.yaml`.
+Replaces the ratio-based value scorer with sector-relative winsorized percentile ranking:
 
-> **Backward compatibility**: The original 5-bin bucket system (`momentum.position_bin_scores`) is retained in config and unit tests. The backtest engine automatically routes to v2 when multi-factor price arrays are available, and falls back to v1 for legacy test fixtures.
+1. Within each sector (minimum 5 stocks), winsorize P/E and P/B at 5th/95th percentile
+2. Percentile-rank each stock against its sector peers
+3. Blend: `0.60 × pe_rank + 0.40 × pb_rank`, scaled to [−1.0, 1.5]
+4. Apply distress penalties: `PE ≤ 5 → −0.30`, negative EPS → `−0.25`
 
-### Final Metric Formula
+Falls back to global ranking for small sectors (< 5 stocks).
+
+### Composite Score
 
 ```
 value_metric = sw_value    × value_score
@@ -148,30 +179,95 @@ value_metric = sw_value    × value_score
              + sw_momentum × momentum_score
 ```
 
-Default weights (from `cfg/config.yaml`):
+Default weights:
 
 ```yaml
 score_weights:
-  value:    0.10
-  quality:  0.45
-  income:   0.10
-  momentum: 0.35
+  value:    0.08
+  quality:  0.50
+  income:   0.08
+  momentum: 0.34
 ```
 
-Weights are YAML-configurable. The optimizer normalizes them internally so they do not need to sum to 1.0 in config, but they are written normalized after a tune run.
+---
 
-### Valuation Guardrails
+## Factor Research Platform
 
+### Snapshot Store
+
+Every scoring run saves a dated Parquet file to `data/snapshots/YYYY_MM_DD.parquet`. These snapshots are the foundation for all rolling IC and forward-return validation.
+
+```python
+from strategy.snapshots import save_snapshot, load_snapshots, list_snapshots
+from strategy.research import FactorResearchEngine
+
+# Snapshots are saved automatically on each run.
+# Backfill from existing CSVs:
+from strategy.snapshots import backfill_from_csvs
+backfill_from_csvs()
+
+# Multi-horizon IC across all snapshot pairs:
+engine = FactorResearchEngine()
+ic_df  = engine.compute_multi_horizon_ic(horizons=[5, 20, 60, 120])
+summ   = engine.compute_ic_summary(ic_df)
+decay  = engine.compute_factor_decay()
+spread = engine.compute_decile_spread("momentum_score", horizon_days=20)
 ```
-pe_comp = sector_PE / pe_ratio   (only if min_pe_ratio ≤ pe_ratio < sector_PE)
-pe_comp = min(pe_comp, max_pe_component)   # default 5.0
 
-pb_comp = sector_PB / pb_ratio   (only if min_pb_ratio ≤ pb_ratio < sector_PB)
-pb_comp = min(pb_comp, max_pb_component)   # default 5.0
+### FactorResearchEngine
 
-value_score = value_pe_weight × pe_comp + (1 − value_pe_weight) × pb_comp
-              (default: 0.60 × pe_comp + 0.40 × pb_comp)
+| Method | Returns |
+|---|---|
+| `compute_multi_horizon_ic(factors, horizons, ic_type)` | `[date, factor, horizon_days, ic, n_stocks, p_value]` |
+| `compute_ic_summary(ic_df)` | `[factor, horizon_days, mean_ic, icir, hit_rate, t_stat, n_periods]` |
+| `compute_factor_decay(factors)` | IC vs. horizon per factor — the decay curve |
+| `compute_decile_spread(factor, horizon_days, n_deciles)` | Mean forward return by score decile |
+| `compute_rolling_icir(factor, horizon_days, window)` | Trailing ICIR over time |
+| `compute_cumulative_ic(factors, horizon_days)` | Cumulative IC over time per factor |
+
+**IC interpretation:**
+
+| IC range | Interpretation |
+|---|---|
+| > 0.10 | Strong signal |
+| 0.05 – 0.10 | Moderate |
+| 0.00 – 0.05 | Weak / noise |
+| < 0.00 | Negative (contrarian) |
+
+ICIR > 0.5 is generally considered actionable.
+
+### RegimeDetector
+
+```python
+from strategy.regimes import RegimeDetector
+
+det   = RegimeDetector()
+state = det.detect()            # fetches live SPY + VIX
+print(state.regime, state.confidence, state.notes)
+
+# Pure computation (testable, no network):
+state = det.detect_from_data(spy_price=580.0, spy_ma200=540.0, vix=18.0)
+
+# Historical replay:
+history = det.classify_history(days=365)
 ```
+
+### ExposureAnalyzer
+
+```python
+from portfolio.exposure import ExposureAnalyzer
+
+analyzer = ExposureAnalyzer()
+report   = analyzer.analyze(portfolio, universe_df, total_equity=50000, cash=5000)
+
+print(report.momentum_tilt)    # z-score vs. universe median
+print(report.hhi)              # Herfindahl-Hirschman concentration
+print(report.sector_weights)   # {sector: weight}
+
+drift_df = analyzer.compute_rolling_drift(portfolio, days=90)
+```
+
+---
 
 ## Portfolio Risk Controls
 
@@ -186,11 +282,13 @@ Applied to every buy before an order is placed:
 | Minimum order | `min_order_amount` | $5.00 | Skip if reduced amount falls below this |
 | ETF floor | `min_index_pct` | 60% | ETF allocation floor; optimizer cannot reduce below this |
 
-When a cap is hit the allocation is **reduced** to the maximum allowed rather than skipped outright. Only if the reduced amount falls below `min_order_amount` is the buy skipped.
+When a cap is hit the allocation is **reduced** to the maximum allowed. The buy is skipped only if the reduced amount falls below `min_order_amount`.
+
+---
 
 ## Sell Decision Engine
 
-Each non-ETF holding is evaluated by `evaluate_sell_candidate()` which classifies sells as **hard** or **soft**. ETF positions are explicitly excluded from stock stop-loss logic.
+Each non-ETF holding is evaluated by `SellDecisionEngine.evaluate()` which classifies sells as **hard** or **soft**.
 
 ### Hard Sells — execute immediately, sentiment cannot override
 
@@ -201,46 +299,40 @@ Each non-ETF holding is evaluated by `evaluate_sell_candidate()` which classifie
 | Yield trap | `yield_trap_flag=True` and `value_metric < sell_weak_value_below` |
 | Quality floor | `quality_score < sell_low_quality_below` (default −0.25) |
 
-### Soft Sells — sentiment can hold
+### Soft Sells — Claude can override with HOLD
 
 | Trigger | Condition |
 |---------|-----------|
 | Take profit | `percent_change ≥ take_profit_pct` (default +60%) and `value_metric` below floor |
-| Weak value | `value_metric < sell_weak_value_below` (default 0.45) and held ≥ `min_days_held_before_value_exit` days |
+| Weak value | `value_metric < sell_weak_value_below` and held ≥ `min_days_held_before_value_exit` days |
 
-Soft sells are sent to Claude. A `HOLD` response with confidence ≥ `sell_sentiment_override_confidence` (default 85%, separate from the buy confidence threshold of 65%) keeps the position. Hard sells always execute regardless of sentiment.
-
-### Pending Order Awareness
-
-Before the sell scan, all open sell orders on Robinhood are fetched. Symbols with an existing open sell order are skipped entirely — no double-sell risk.
+Soft sells are sent to Claude. `HOLD` with confidence ≥ `sell_sentiment_override_confidence` (default 85%) keeps the position.
 
 ### Profit Harvesting
 
-Take-profit proceeds are classified as `harvest_exit`. If the run total exceeds `min_harvest_amount` ($25), proceeds are routed to `harvest_etfs` (default: SPY, VTI) rather than sitting as idle cash. Split: `harvest_to_etfs_pct` (80%) to ETFs, remainder recycled for continued stock exposure.
+Take-profit proceeds are classified as `harvest_exit`. Proceeds exceeding `min_harvest_amount` ($25) route to `harvest_etfs` (default: SPY, VTI) rather than sitting as idle cash. Split: 80% to ETFs, 20% recycled for continued stock exposure.
 
-### ETF MA Filter (defensive regime only)
-
-In defensive regime, ETF positions below their MA are also exited (`etf_risk.use_ma_filter: true`, `ma_period: 200`). This is the only mechanism by which ETF positions are sold — they are never touched by the stock stop-loss or trailing-stop logic.
+---
 
 ## Market Regime
 
-On each run, `get_market_regime()` classifies the environment into one of three tiers:
-
-| Regime | SPY vs 200 DMA | VIX | Effect |
+| Regime | SPY vs 200DMA | VIX | Effect |
 |--------|---------------|-----|--------|
 | **Bullish** | Above | < 20 | Normal operation |
-| **Neutral** | Below or VIX ≥ 20 | 20–30 | Base config (no override) |
-| **Defensive** | Below | ≥ 30 | ETF allocation raised to 85%, max stock buys = 3, stop-loss tightened by 0.05, ETF MA filter active |
+| **Neutral** | Below, or VIX 20–30 | 20–30 | Base config |
+| **Defensive** | — | ≥ 30 | ETF allocation → 85%, max stock buys → 3, stop-loss tightened by 0.05, ETF MA filter active |
 
-All thresholds are configurable under `regime:` in `config.yaml`.
+All thresholds configurable under `regime:` in `config.yaml`. The `RegimeDetector` also exposes confidence scores calibrated by distance from the VIX thresholds.
+
+---
 
 ## Backtest Engine
 
-`backtest.py` simulates the full strategy over historical price data from `yfinance`. Key design choices:
+Simulates the full strategy over historical price data from `yfinance`.
 
 ### Anti-Lookahead Causal Features
 
-All rolling features are computed strictly causally — only price data up to day D is used on day D:
+All rolling features use only price data up to day D on day D:
 
 | Feature | Lookback | Notes |
 |---------|---------|-------|
@@ -249,26 +341,12 @@ All rolling features are computed strictly causally — only price data up to da
 | `return_5d` | 5 bars | 5-day price return |
 | `return_3m` | 63 bars | 3-month price return |
 | `return_6m` | 126 bars | 6-month price return |
-| `realized_vol_3m` | 63 bar daily returns | Annualized std dev |
-| `rs_3m`, `rs_6m` | 63 / 126 bars | Return minus benchmark return |
+| `realized_vol_3m` | 63 bars | Annualized std dev |
+| `rs_3m`, `rs_6m` | 63/126 bars | Return minus benchmark return |
 | `above_50dma` | 50 bars | Price vs 50-bar rolling mean |
 | `above_200dma` | 200 bars | Price vs 200-bar rolling mean |
 
-Cross-sectional percentile ranking across stocks on a single day is **not** a lookahead bias (it ranks contemporaneous values, not future ones).
-
-### Contribution-Adjusted TWR
-
-Both portfolio and benchmark returns use chain-link time-weighted return methodology. External cash flows (weekly contributions) are stripped from the return computation so reported figures reflect market performance only, not capital growth from deposits. The benchmark invests each weekly contribution into SPY on the same schedule.
-
-### Backtest Realism Controls
-
-| Feature | Config key | Default |
-|---------|-----------|---------|
-| Volatility-scaled slippage | `vol_slippage_scaling` | `true` — effective_bps = base × (1 + 2.0 × annualized_vol) |
-| Max trades per week | `max_trades_per_week` | 10 |
-| Post-sell cooldown | `cooldown_days_after_sell` | 3 days |
-| Post-stopout cooldown | `cooldown_days_after_stopout` | 7 days |
-| Regime classification | uses `benchmark_prices` vs 200 DMA + threshold | tracked daily |
+Cross-sectional percentile ranking across stocks at one point in time is **not** a lookahead bias.
 
 ### Backtest Modes
 
@@ -278,47 +356,32 @@ Both portfolio and benchmark returns use chain-link time-weighted return methodo
 | `current_universe_stress_test` | HIGH | Top-N by current `value_metric` — **not predictive** |
 | `walk_forward_price_only_test` | LOW | Liquid sample; fundamental arrays zeroed, momentum only |
 
-### Backtest Report Fields
+### Realism Controls
 
-```
-Return (TWR):       contribution-adjusted time-weighted return
-Bench TWR:          same methodology applied to benchmark (SPY buy-and-hold + contributions)
-Benchmark (buy-hold): simple price return over the window
-Excess return:      strategy TWR − benchmark price return
-Sharpe / Calmar / Max drawdown: from TWR daily series
-Stopouts:           hard stop-loss or trailing-stop exits
-Cooldown skips:     buys blocked by post-sell cooldown
-Regime days:        breakdown of bullish / neutral / defensive days
-```
+| Feature | Config key | Default |
+|---------|-----------|---------|
+| Volatility-scaled slippage | `vol_slippage_scaling` | `true` — effective_bps = base × (1 + 2.0 × annualized_vol) |
+| Max trades per week | `max_trades_per_week` | 10 |
+| Post-sell cooldown | `cooldown_days_after_sell` | 3 days |
+| Post-stopout cooldown | `cooldown_days_after_stopout` | 7 days |
+| Regime classification | SPY vs 200DMA + VIX | tracked daily |
+
+---
 
 ## Parameter Tuner
 
-`tuner.py` uses `scipy.optimize.differential_evolution` to maximize Sharpe or Calmar ratio over a back-simulation window. Tunable parameters:
+`scipy.optimize.differential_evolution` maximizes Sharpe or Calmar ratio over a back-simulation window. Tunable parameters:
 
 ```
 score_weights (value, quality, income, momentum)
-index_pct                   — ETF allocation fraction (floor: min_index_pct)
-metric_threshold            — minimum score to qualify as a buy candidate
-take_profit_pct             — when to harvest gains
-sell_weak_value_below       — when to exit on thesis degradation
+index_pct                   — ETF allocation fraction
+metric_threshold            — minimum score to qualify as a buy
 trailing_stop_pct           — trailing stop distance from peak
-value_pe_weight             — PE vs PB split within value score
 momentum_v2 sub-weights:
-  rs_3m, rs_6m              — relative strength weight (3m, 6m)
-  risk_adj_3m               — risk-adjusted momentum weight
-  trend_structure           — DMA signal weight
-  return_1m                 — raw 1m return weight
+  rs_3m, rs_6m, risk_adj_3m, trend_structure, return_1m
 ```
 
-Safety parameters (stop_loss_pct, position caps, order caps) are never touched by the optimizer.
-
-### Diversification Penalty
-
-The optimizer applies a graduated penalty when `average_positions < 5`, discouraging parameter sets that cherry-pick 1–2 lucky stocks. Combined with the hard trade floor (`_MIN_TRADES_HARD = 20`), this pushes toward genuinely diversified strategies.
-
-### Parameter Stability Reporting
-
-After averaging Sharpe and Calmar runs, the diff table flags any parameter dimension where `|sharpe_opt − calmar_opt| > 0.05`. Unstable dimensions are marked `⚠ unstable` — if a parameter swings wildly between objective functions, the averaged value may be unreliable.
+Safety parameters (stop-loss, position caps, order caps) are never touched by the optimizer.
 
 ### Validation Gates
 
@@ -330,258 +393,170 @@ Before writing any changes to `config.yaml`:
 | Max drawdown | `max_validation_drawdown` | −20% |
 | Sharpe ratio | `min_validation_sharpe` | 0.25 |
 
-All gates must pass. `--apply` with a failed validation prints a warning and does not write config. `--force-apply` bypasses validation for debugging.
+---
 
-### LLM Review (optional)
+## Streamlit Dashboard
 
-When `--llm-review` is passed (or `llm_review_enabled: true` in config), all three candidates — Sharpe-optimized, Calmar-optimized, and averaged — are sent to Claude for a second-opinion review. The model returns a recommendation, rationale, and optional alpha-parameter adjustments. Safety parameters are explicitly excluded from the adjustable set. If `llm_review_apply: true`, Claude's adjustments are merged into `config.yaml`.
+An interactive research and control panel. Runs separately from the CLI — does not replace it.
+
+### Pages
+
+| Page | Description |
+|---|---|
+| 📊 Home | System status, config overview, data freshness, log tail |
+| 🚀 Run Control | Build and execute any CLI command with full options; streams output |
+| 💼 Portfolio | Holdings from cached CSV; live broker data on demand |
+| 🎯 Order Intents | Dry-run preview of proposed buys/sells/harvests |
+| 🔬 Scoring Explorer | Filter, sort, and drill into the scored universe |
+| 📐 Value Diagnostics | Value score breakdown: PE/PB ranks, sector-relative comparisons |
+| 🔗 Factor Orthogonalization | Correlation matrix, VIF, variance decomposition across factors |
+| 📡 Rolling IC | Single-horizon Spearman IC over time with ICIR and distribution |
+| 🧪 Factor Lab | Multi-horizon IC, factor decay curves, cumulative IC, decile spread, rolling ICIR |
+| 📈 Backtests | Run `BacktestEngine` interactively; view full results and attribution |
+| ⚙️ Auto-Tune | Dual-objective tune; view diff and validation status; apply with gate |
+| 🔭 Stability & Robustness | Multi-window stability scan; heatmaps and robustness report |
+| 🌡️ Regime & Risk | Current regime thresholds; effective config under each regime |
+| ⚖️ Exposure | Factor tilts, sector allocation, HHI concentration, rolling exposure drift |
+| 🩺 Reliability Diag. | NaN coverage, score distributions, yield traps, liquidity signals |
+| 🗂️ Data Explorer | Explore any CSV/parquet with interactive charts and filters |
+| 📋 Logs / Audit | Tail application log; browse order intents and order results |
+| 🛠️ Config Viewer | Parsed config.yaml in readable sections; download button |
+
+### Launch
+
+```bash
+make ui
+# or:
+streamlit run src/ui/streamlit_app.py
+```
+
+### Safety
+
+- The UI starts in **read-only mode** by default
+- The live-execution toggle is locked unless `ui.allow_live_execution: true` in config
+- All paths go through the same `RiskManager` and audit logging as the CLI
+
+Add to `cfg/config.yaml` to enable controlled live execution from the UI:
+
+```yaml
+ui:
+  allow_live_execution: true
+  allow_config_writes: true
+  allow_force_apply: false
+  require_confirmation_phrase: true
+  confirmation_phrase: EXECUTE
+  intent_ttl_minutes: 5
+```
+
+---
 
 ## Running the Application
 
-After installation (see **Setup** below), all commands are available as `daily-investor`:
-
 ```bash
-# Full run — refresh data, fetch news, analyze, trade
-daily-investor run
+# Full run — refresh data, analyze, trade
+make run           # safe mode (manual confirmation)
+make run-auto      # automated mode
 
-# Override operating mode for this run only (does not write config.yaml)
-daily-investor run --op-mode safe          # manual confirmation before every trade
-daily-investor run --op-mode automated     # fully hands-off
-daily-investor run --op-mode no-sentiment  # value_metric weight only, no Claude calls
+# Skip data generation — reuse today's cached CSVs
+make run-skip
 
-# Skip data generation — reuse today's cached CSVs (much faster)
-daily-investor run --skip-data
+# Backtesting
+make backtest                        # 365-day default
+make backtest DAYS=180
+make backtest BT_MODE=walk_forward_price_only_test
 
-# Run a backtest (prints BacktestResult summary)
-daily-investor backtest 90
-daily-investor backtest 365 --mode walk_forward_price_only_test
+# Parameter tuning
+make tune                            # single-objective, no write
+make auto-tune                       # dual-objective, walk-forward validation
+make auto-tune-apply                 # write config if validation passes
+make auto-tune-llm                   # + Claude second-opinion
 
-# Single-objective tune: print suggested config diff (no file changes)
-daily-investor tune 90
-daily-investor tune 90 --objective calmar
+# Research
+make stability                       # parameter stability scan
+make report                          # diagnostics report → reports/
+make snapshot-info                   # show snapshot store status
+make regime                          # print current market regime
 
-# Auto-tune: Sharpe + Calmar, train/val split, validate, print diff
-daily-investor auto-tune
-daily-investor auto-tune 180
+# Dashboard
+make ui                              # launch Streamlit
 
-# Auto-tune with backtest mode override
-daily-investor auto-tune --mode walk_forward_price_only_test
-
-# Write config only if validation passes
-daily-investor auto-tune --apply
-
-# Write config regardless of validation (debugging only)
-daily-investor auto-tune --force-apply
-
-# Auto-tune + LLM second-opinion review
-daily-investor auto-tune --llm-review
-daily-investor auto-tune --llm-review --apply
-
-# Parameter stability scan across multiple windows (research only, never writes config)
-daily-investor stability-scan
-daily-investor stability-scan --mode walk_forward_price_only_test --output-dir reports/
-
-# Quick diagnostics report
-daily-investor report
+# Tests
+make test
 ```
 
-The live strategy runs in a loop (up to `max_iterations` runs, default 10). Stocks that were skipped, failed, or already bought are excluded from subsequent iterations.
+Or use the CLI directly:
+
+```bash
+daily-investor run --op-mode safe
+daily-investor backtest 90 --mode liquid_universe_sanity_test
+daily-investor auto-tune 180 --apply --llm-review
+daily-investor stability-scan
+```
+
+---
 
 ## Configuration
 
-All settings live in `cfg/config.yaml`.
+All settings live in `cfg/config.yaml`. Key sections:
 
 ```yaml
-# Fundamental screening
-ignore_negative_pe: true
-ignore_negative_pb: false
-dividend_threshold: 0.03       # Minimum dividend yield (3%)
-metric_threshold: 0.75         # Minimum value_metric to qualify as a buy candidate
-
-# Capital allocation
-weekly_investment: 400
-index_pct: 0.65                # Fraction of investable cash allocated to ETFs
-auto_approve: true
-use_sentiment_analysis: true
-confidence_threshold: 65       # Buy sentiment: minimum Claude confidence (0–100)
-sell_sentiment_override_confidence: 85  # Sell override: higher bar to hold vs. sell
-
-# Factor weights
+# Factor weights (optimizer-tunable)
 score_weights:
-  value:    0.10
-  quality:  0.45
-  income:   0.10
-  momentum: 0.35
-
-# Momentum v2 sub-weights (raw, normalized internally by scorer)
-momentum_v2:
-  weights:
-    rs_3m: 0.25
-    rs_6m: 0.25
-    risk_adj_3m: 0.20
-    trend_structure: 0.15
-    return_1m: 0.10
-    return_5d: 0.05          # fixed — not optimizer-tunable
-  penalties:
-    falling_knife_3m_threshold: -0.15
-    falling_knife_penalty: 0.25
-    overextension_52w_threshold: 0.97
-    overextension_penalty: 0.20
-    high_vol_annual_threshold: 0.50
-    high_vol_penalty: 0.15
-  clamp_low: -1.0
-  clamp_high: 1.5
+  value:    0.08
+  quality:  0.50
+  income:   0.08
+  momentum: 0.34
 
 # Three-tier market regime
 regime:
   spy_ma_period: 200
-  vix_defensive_threshold: 30.0   # VIX ≥ this → defensive
-  vix_neutral_threshold: 20.0     # VIX ≥ this (but < defensive) → neutral
+  vix_defensive_threshold: 30.0
+  vix_neutral_threshold: 20.0
   defensive:
-    index_pct_override: 0.85      # raise ETF allocation
-    max_buys_override: 3          # limit active sleeve buys
-    stop_loss_tighten: 0.05       # tighten stop_loss by this amount
-  neutral:
-    index_pct_override: null      # use base config
-    max_buys_override: null
+    index_pct_override: 0.85
+    max_buys_override: 3
+    stop_loss_tighten: 0.05
 
-# ETF core protection
-etf_risk:
+# Snapshot store (for rolling IC)
+snapshots:
   enabled: true
-  use_ma_filter: true
-  ma_period: 200                  # exit ETF position if price < MA (defensive only)
-  defensive_etf_pct: 0.85
+  retention_days: 365
+  compression: snappy
 
-# Portfolio risk limits
-risk:
-  max_single_position_pct: 0.05
-  max_sector_pct: 0.25
-  max_order_pct_of_cash: 0.10
-  min_order_amount: 5.0
-  min_liquidity_volume: 500000
-  min_index_pct: 0.60             # optimizer floor for ETF allocation
-  max_buys_per_rebalance: 10
+# Sector-relative value scoring (v2)
+value_v2:
+  enabled: true
+  winsorize_pct: 0.05
+  sector_relative: true
 
-# Sell rules (all percentages as decimals)
-sell_rules:
-  stop_loss_pct: -0.20
-  trailing_stop_pct: -0.08
-  take_profit_pct: 0.60
-  sell_weak_value_below: 0.45
-  sell_yield_trap: true
-  sell_low_quality_below: -0.25
-  min_days_held_before_value_exit: 21
-
-# Backtest / tuner settings
+# Backtest
 backtest:
   default_mode: liquid_universe_sanity_test
   starting_capital: 5000.0
   weekly_contribution: 400.0
   slippage_bps: 10.0
   train_pct: 0.70
-  use_out_of_sample_validation: true
-  auto_apply_if_valid: false
-  min_validation_excess_return: 0.0
-  max_validation_drawdown: -0.20
-  min_validation_sharpe: 0.25
   use_time_weighted_returns: true
-  max_trades_per_week: 10
-  cooldown_days_after_sell: 3
-  cooldown_days_after_stopout: 7
   vol_slippage_scaling: true
-  vol_slippage_multiplier: 2.0
-  llm_review_enabled: false      # set true to always run LLM review after auto-tune
-  llm_review_apply: false        # set true to let Claude's adjustments write to config
-  llm_review_model: claude-sonnet-4-6
+
+# Optimizer control
+tuning:
+  frozen_parameters:
+    - score_weights.value
+    - score_weights.income
+    - momentum_v2.weights.rs_3m
+    ...
 ```
 
 ### Operating Modes
 
-Use `--op-mode` on the CLI to override `auto_approve` and `use_sentiment_analysis` for a single run without touching `config.yaml`. Alternatively, set the values directly in config for a permanent change.
+| Mode | `--op-mode` arg | `auto_approve` | `use_sentiment_analysis` |
+|------|-----------------|---------------|--------------------------|
+| Safe | `safe` | `false` | `true` |
+| Automated | `automated` | `true` | `true` |
+| No Sentiment | `no-sentiment` | `false` | `false` |
 
-| Mode | `--op-mode` arg | `auto_approve` | `use_sentiment_analysis` | Notes |
-|------|-----------------|---------------|--------------------------|-------|
-| Safe | `safe` | `false` | `true` | Manual confirmation before each trade |
-| Automated | `automated` | `true` | `true` | Executes high-confidence trades automatically |
-| No Sentiment | `no-sentiment` | `false` | `false` | Buys by `value_metric` weight only, no Claude API calls |
-
-```bash
-daily-investor run --op-mode safe          # one-off safe run
-daily-investor run --op-mode no-sentiment  # no API key needed, pure quantitative
-```
-
-## Sentiment Analysis Architecture
-
-### Buy Path — Batch Async
-1. Pre-filter candidates by `metric_threshold`
-2. Cap to `max_sentiment_candidates` (score + buy-to-sell ratio ranked)
-3. Dispatch all batches concurrently via `asyncio.gather()` with `Semaphore(MAX_CONCURRENT=5)`
-4. Exponential backoff (`2^attempt × (1 + jitter)`) on 429s and transient errors
-5. Parse per-symbol results and run through risk controls before placing orders
-
-### Sell Path — Hard/Soft Engine
-1. Load all holdings and `agg_data` once; fetch open sell orders (skip symbols with pending sells)
-2. Call `evaluate_sell_candidate()` for each non-ETF holding
-3. Execute hard sells immediately (no sentiment check)
-4. Run ETF MA filter (defensive regime only)
-5. Batch soft sell candidates through Claude as a hold-check (confidence ≥ 85% bullish = hold)
-6. Aggregate `harvest_exit` proceeds and route to `harvest_etfs`
-
-## Streamlit UI
-
-An interactive control panel for the full CLI feature set. Runs separately from the CLI — does not replace it.
-
-### What the UI can do
-
-| Page | Capability |
-|---|---|
-| Home | System status, config overview, data freshness, log tail |
-| Run Control | Build and execute any CLI command with full options; streams output |
-| Portfolio | Holdings from cached CSV; live broker data on demand (requires credentials) |
-| Order Intents | Dry-run preview of proposed buys/sells/harvests |
-| Scoring Explorer | Filter, sort, and drill into the scored universe |
-| Backtests | Run `BacktestEngine` interactively; view full results |
-| Auto-Tune | Run single-objective or dual-objective tune; view diff and validation status |
-| Stability & Robustness | Run stability scan; view heatmaps and robustness report |
-| Regime & Risk | Inspect effective config under each regime; view all risk limits |
-| Reliability Diagnostics | NaN coverage, score distributions, yield traps, liquidity |
-| Data Explorer | Explore any CSV (agg_data, robinhood_data, news, stability, …) with charts |
-| Logs / Audit | Tail application log, browse order_intents and order_results CSVs |
-| Config Viewer | Parsed config.yaml in readable sections; download button |
-
-### What the UI cannot do
-
-- Place live orders without explicitly enabling `ui.allow_live_execution: true` in config
-- Write `config.yaml` without `ui.allow_config_writes: true`
-- Bypass `RiskManager`, validation gates, or audit logging (all paths go through the same service layer as the CLI)
-
-### Launch
-
-```bash
-# Install UI dependencies
-pip install -e ".[ui]"
-
-# Launch (from project root)
-streamlit run src/ui/streamlit_app.py
-```
-
-### Safety notes
-
-- The UI starts in **read-only mode** by default. The sidebar live-execution toggle is locked unless `ui.allow_live_execution: true` is set in `cfg/config.yaml`.
-- The **Run Control** page executes commands via `python -m cli <subcommand>` — the exact same path as `daily-investor <subcommand>`.
-- Live order placement is intentionally not wired in the UI adapter. The supported live execution path is `daily-investor run --op-mode safe` via Run Control, which streams output and respects all safety gates.
-
-Add to `cfg/config.yaml` to enable controlled live execution from the UI:
-
-```yaml
-ui:
-  allow_live_execution: true    # enables sidebar toggle
-  allow_config_writes: true     # enables --apply in Auto-Tune
-  allow_force_apply: false      # keep false unless debugging
-  require_confirmation_phrase: true
-  confirmation_phrase: EXECUTE
-  intent_ttl_minutes: 5
-```
+---
 
 ## Setup
 
@@ -592,66 +567,52 @@ git clone https://github.com/yourusername/daily_investor.git
 cd daily_investor
 
 python -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
+source .venv/bin/activate
 
-pip install -e .                 # installs daily-investor CLI + all dependencies
-pip install -e ".[heatmaps]"     # also install matplotlib for stability-scan heatmaps
+pip install -e .               # installs daily-investor CLI + all dependencies
+pip install -e ".[ui,dev]"     # also installs Streamlit and test tools
 ```
 
-`.env` file (at the project root):
+`.env` file (at project root):
 ```
 RB_ACCT=your_robinhood_email
 RB_CREDS=your_robinhood_password
-RB_MFA_SECRET=your_totp_secret        # Optional: skip interactive MFA prompt
-ANTHROPIC_API_KEY=your_anthropic_key  # Required for sentiment analysis and LLM tune review
+RB_MFA_SECRET=your_totp_secret         # optional: skip interactive MFA prompt
+ANTHROPIC_API_KEY=your_anthropic_key   # required for sentiment and LLM tune review
 ```
-
-After installation, `daily-investor` is available on your `PATH`:
 
 ```bash
 daily-investor --help
+pytest                                 # runs all tests — no credentials needed
 ```
 
-To run the test suite (no Robinhood or Anthropic credentials needed):
-
-```bash
-pytest                           # runs all 271 tests
-pytest tests/test_backtesting.py # single module
-```
+---
 
 ## Troubleshooting
 
-**Inflated value_metrics from old cached CSVs**
-The bot always loads the most-recently dated CSV for each dataset. Delete stale files from `data/` or run without `--skip-data` to regenerate.
+**Inflated value_metrics from old cached CSVs** — The bot always loads the most-recently dated CSV. Delete stale files from `data/` or run without `--skip-data` to regenerate.
 
-**"All stocks show NEUTRAL"**
-Batch Claude call failed. Check `investment_bot.log` for the stack trace. Common causes: missing `ANTHROPIC_API_KEY`, network issue, or Python < 3.10 event loop incompatibility. Use `--op-mode no-sentiment` to bypass sentiment entirely.
+**"All stocks show NEUTRAL"** — Batch Claude call failed. Check `investment_bot.log`. Common causes: missing `ANTHROPIC_API_KEY`, or Python < 3.10 event loop. Use `--op-mode no-sentiment` to bypass.
 
-**"Fractional order unavailable, retrying as market order"**
-Some tickers (foreign ADRs, low-liquidity stocks) don't support fractional shares on Robinhood. The bot retries with `order_buy_market(symbol, 1)` automatically, with a final risk re-check before placing.
+**"37 columns passed, passed data had 33 columns"** — Stale `source_data.py` with incorrect `_BASE_AGG_COLUMNS`. The value_v2 diagnostic columns (`value_score_raw`, `sector_value_score`, `relative_pe`, `relative_pb`) are injected post-construction and must be excluded from `_BASE_AGG_COLUMNS`.
 
-**"Skipping SYMBOL: position cap reached"**
-The stock already fills its allowed slice of the portfolio (default 5%). Adjust `max_single_position_pct` in `cfg/config.yaml` if needed.
+**"Config NOT written: validation gates failed"** — Tuned parameters didn't pass the held-out validation window. Use `--force-apply` to override for manual inspection only.
 
-**"Skipping SYMBOL: sector cap reached"**
-A single sector would exceed 25% of portfolio value. Adjust `max_sector_pct` to change the limit.
+**"⚠ unstable" in the diff table** — A parameter's Sharpe-opt and Calmar-opt values differ by > 5%. The averaged value may not be robust; review manually before applying.
 
-**Auto-tune returns impossibly high Sharpe**
-Check that `use_time_weighted_returns: true` is set in the `backtest` section. The `current_universe_stress_test` mode uses current fundamental scores throughout history (HIGH lookahead bias) and is not predictive — prefer `walk_forward_price_only_test` for the most conservative evaluation.
+**Not enough snapshots for IC computation** — `FactorResearchEngine` needs at least 2 dated parquets in `data/snapshots/`. Run the bot on at least two separate days, or use `backfill_from_csvs()` to migrate existing CSVs.
 
-**"Config NOT written: validation gates failed"**
-The tuned parameters did not outperform SPY on the held-out validation window, exceed the Sharpe floor, or stay within the drawdown limit. Use `--force-apply` to override for manual inspection.
-
-**"⚠ unstable" in the diff table**
-A parameter's Sharpe-optimized and Calmar-optimized values differ by more than 5%. The averaged value may not be robust. Consider re-running with a longer window or reviewing the flagged parameter manually before applying.
+---
 
 ## Security
 
 - Never commit `.env` or any file containing credentials
 - All sensitive values are read from environment variables at runtime
-- The LLM review payload is sanitized: it never contains account IDs, balances, credentials, or PII — only performance metrics and alpha parameter candidates
-- Safety parameters (stop-loss, position caps, order caps) are excluded from the LLM-adjustable parameter set
-- `--op-mode` only affects the current process — it never writes to `config.yaml`
+- The LLM review payload contains only performance metrics and parameter candidates — never account IDs, balances, or PII
+- Safety parameters (stop-loss, position caps, order caps) are excluded from the LLM-adjustable set
+- `--op-mode` affects only the current process — it never writes to `config.yaml`
+
+---
 
 ## Disclaimer
 

@@ -6,7 +6,7 @@ metric_threshold: 0.75
 selloff_threshold: 30
 
 weekly_investment: 400
-index_pct: 0.70
+index_pct: 0.72
 
 auto_approve: true
 use_sentiment_analysis: true
@@ -20,21 +20,20 @@ etfs:
   - VTI
   - QQQ
   - SCHD
-  - MPLY
   - SMH
   - VXUS
   - VNQ
   - IWM
 
 score_weights:
-  value: 0.08
-  quality: 0.50
-  income: 0.08
-  momentum: 0.34
+  value: 0.05
+  quality: 0.45
+  income: 0.05
+  momentum: 0.45
 
 valuation_guardrails:
   max_pe_component: 5.0
-  max_pb_component: 5.0
+  max_pb_component: 5.45  
   min_pe_ratio: 1.0
   min_pb_ratio: 0.1
 
@@ -45,7 +44,7 @@ risk:
   min_order_amount: 5.0
   min_liquidity_volume: 500000
 
-  max_buys_per_rebalance: 7
+  max_buys_per_rebalance: 4
   max_sentiment_candidates: 20
 
   minimum_hold_days: 5
@@ -54,7 +53,7 @@ risk:
   max_whole_share_buys_per_run: 2
   max_whole_share_allocation_multiplier: 1.25
 
-  min_index_pct: 0.60
+  min_index_pct: 0.65
 
 sell_rules:
   stop_loss_pct: -0.20
@@ -244,8 +243,8 @@ backtest:
 
   # optimizer realism
   turnover_penalty_enabled: true
-  turnover_penalty_trade_count: 50
-  turnover_penalty_weight: 0.35
+  turnover_penalty_trade_count: 40
+  turnover_penalty_weight: 0.40
 
   # optional LLM review layer
   llm_review_enabled: false
@@ -286,26 +285,20 @@ tuning:
 
   parameter_bounds:
     score_weights.value:
-      min: 0.05
-      max: 0.25
+      min: 0.03
+      max: 0.12
     score_weights.quality:
       min: 0.35
-      max: 0.60
+      max: 0.55
     score_weights.momentum:
-      min: 0.20
-      max: 0.40
+      min: 0.30
+      max: 0.55
     score_weights.income:
-      min: 0.05
-      max: 0.15
-    metric_threshold:
-      min: 0.60
-      max: 1.10
+      min: 0.03
+      max: 0.10
     index_pct:
-      min: 0.60
+      min: 0.65
       max: 0.85
-    sell_rules.trailing_stop_pct:
-      min: -0.12
-      max: -0.05
 
 # ---------------------------------------------------------------------------
 # Reliability scoring — DATA / SIGNAL QUALITY indicators, NOT alpha
@@ -346,3 +339,60 @@ candidate_rotation:
   buy_cooldown_days: 30       # exclude a symbol from buys for N days after purchase
   score_jitter_pct: 0.08      # ±fraction of score range added as noise before candidate cap
                                # 0.0 = fully deterministic, 0.10 = ±10% of score range
+
+# ---------------------------------------------------------------------------
+# Dividend tracking — income reporting and wash-sale awareness
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Value scoring v2 — sector-relative, winsorized percentile normalization
+# Replaces ratio-based value_score with a robust cross-sectional signal.
+# ---------------------------------------------------------------------------
+value_v2:
+  enabled: true
+  winsorize_pct: 0.05       # clip top/bottom N% of PE/PB within each sector
+  sector_relative: true     # rank within sector (false = global ranking only)
+  min_sector_size: 5        # minimum sector sample to use sector rank; smaller → global
+  clamp_low: -1.0           # floor on final value_score
+  clamp_high: 1.5           # ceiling on final value_score
+
+  distress:
+    pe_threshold: 5.0           # PE at or below this → apply skepticism penalty
+    pe_penalty: 0.30            # subtracted from value_score for distress PE
+    negative_eps_penalty: 0.25  # subtracted when PE is negative (loss-making company)
+
+  composite:
+    pe_weight: 0.60             # weight of PE percentile rank in composite
+    pb_weight: 0.40             # weight of PB percentile rank in composite
+
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Historical snapshot store — scored universe saved as daily Parquet files
+# in data/snapshots/. Enables rolling IC analysis and forward-return validation.
+# ---------------------------------------------------------------------------
+snapshots:
+  enabled: true
+  subdir: snapshots          # relative to data/ directory
+  retention_days: 365        # prune snapshots older than this
+  compression: snappy        # parquet compression codec (snappy | zstd | gzip | none)
+
+dividends:
+  enabled: true
+  track_income: true
+  wash_sale_warning: true          # log warning when re-buying within 30d of a loss-sale
+  block_rebuy_on_wash_sale_risk: false  # if true, block the buy entirely
+
+# ---------------------------------------------------------------------------
+# Research platform — IC analysis and factor weight recommendation thresholds
+# ---------------------------------------------------------------------------
+research:
+  min_snapshots_for_weight_recommendations: 20
+  min_snapshots_for_high_confidence: 60
+
+# ---------------------------------------------------------------------------
+# Earnings quality bonus — applied to quality_score during shortlist enrichment
+# ---------------------------------------------------------------------------
+earnings:
+  enabled: true
+  max_quality_bonus: 0.10        # maximum bonus/penalty applied to quality_score
+  positive_surprise_bonus: 0.03  # per quarter of positive EPS surprise (last 3 quarters)
+  negative_surprise_penalty: 0.05  # per quarter of negative EPS surprise
