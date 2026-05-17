@@ -102,10 +102,24 @@ _ROBINHOOD_TAGS = [
     "100-most-popular",
     "upcoming-earnings",
     "new-on-robinhood",
+    # Sector / theme tags verified against the Robinhood midlands API
+    # (tags returning 404 or a single-item stub were removed)
     "technology",
     "finance",
+    "banking",
+    "insurance",
     "healthcare",
     "energy",
+    "oil-and-gas",
+    "manufacturing",        # replaces "industrials" (404)
+    "utilities",
+    "real-estate",
+    "telecommunications",   # replaces "communication-services" (404)
+    "retail",
+    "automotive",
+    "aerospace",
+    "defense",
+    "social-media",
 ]
 
 _VALID_TICKER_RE = __import__("re").compile(r"^[A-Z]{1,5}(\.[A-Z]{1,2})?$")
@@ -141,11 +155,38 @@ def _scrape_wikipedia_tickers(url: str, retries: int = 3, base_delay: float = 5.
     return set()
 
 
-def gen_symbols_list(force_refresh: bool = False) -> list[str]:
+def _fetch_tag_with_retry(tag: str, retries: int = 3, base_delay: float = 2.0) -> list | None:
+    """Fetch a Robinhood market tag with exponential backoff on connection errors."""
+    for attempt in range(1, retries + 1):
+        try:
+            result = rb.get_all_stocks_from_market_tag(tag)
+            return result or None
+        except Exception as e:
+            err = str(e)
+            if attempt < retries:
+                wait = base_delay * (2 ** (attempt - 1))
+                logger.warning("Tag '%s' attempt %d/%d failed: %s — retrying in %.0fs",
+                               tag, attempt, retries, err[:60], wait)
+                time.sleep(wait)
+            else:
+                logger.warning("Tag '%s' failed after %d attempts: %s", tag, retries, err[:80])
+    return None
+
+
+def gen_symbols_list(
+    force_refresh: bool = False,
+    extra_symbols: set[str] | None = None,
+) -> list[str]:
     if not force_refresh:
         cached = read_data_as_pd("stock_tickers")
         if cached is not None and not cached.empty and "symbol" in cached.columns:
-            return cached["symbol"].tolist()
+            base = set(cached["symbol"].tolist())
+            if extra_symbols:
+                added = [s for s in sorted(extra_symbols) if _is_valid_ticker(s) and s not in base]
+                if added:
+                    logger.info("Supplementing cached universe with %d portfolio holdings: %s", len(added), added)
+                base.update(s for s in extra_symbols if _is_valid_ticker(s))
+            return sorted(base)
 
     # Wikipedia indices
     all_symbols: set[str] = set()
@@ -170,14 +211,11 @@ def gen_symbols_list(force_refresh: bool = False) -> list[str]:
         time.sleep(0.5)
 
     for tag in _ROBINHOOD_TAGS:
-        try:
-            stocks = rb.get_all_stocks_from_market_tag(tag)
-            if stocks:
-                rb_sources.append(stocks)
-                print(f"  Tag '{tag}': {len(stocks)} stocks")
-            time.sleep(0.5)
-        except Exception as e:
-            print(f"  Tag '{tag}' failed: {str(e)[:50]}")
+        _tag_result = _fetch_tag_with_retry(tag)
+        if _tag_result is not None:
+            rb_sources.append(_tag_result)
+            print(f"  Tag '{tag}': {len(_tag_result)} stocks")
+        time.sleep(1.0)
 
     invalid = 0
     for source in rb_sources:
@@ -187,6 +225,13 @@ def gen_symbols_list(force_refresh: bool = False) -> list[str]:
                 all_symbols.add(sym)
             else:
                 invalid += 1
+
+    # Always include currently held portfolio positions — ensures we always score what we own
+    if extra_symbols:
+        added = [s for s in sorted(extra_symbols) if _is_valid_ticker(s) and s not in all_symbols]
+        if added:
+            logger.info("Adding %d portfolio holdings to refreshed universe: %s", len(added), added)
+        all_symbols.update(s for s in extra_symbols if _is_valid_ticker(s))
 
     print(f"Universe: {len(all_symbols)} valid tickers ({invalid} invalid skipped)")
     store_data_as_csv("stock_tickers", ["symbol"], [[s] for s in sorted(all_symbols)])
@@ -291,6 +336,31 @@ def _get_earnings_bonus(symbol: str) -> float:
     except Exception as e:
         logger.debug(f"Earnings bonus fetch failed for {symbol}: {e}")
         return 0.0
+
+
+def _diagnose_stock_filter(symbol: str, stock: dict) -> str:
+    """Return a human-readable reason why _evaluate_stock drops this stock. Used for held-stock warnings."""
+    required = ["industry", "sector", "volume", "pe_ratio", "pb_ratio"]
+    missing = [k for k in required if k not in stock]
+    if missing:
+        return f"missing required fields: {missing}"
+    if not stock.get("industry") and not stock.get("sector"):
+        return "no industry/sector returned by API"
+    _sector   = stock.get("sector", "") or ""
+    _industry = stock.get("industry", "") or ""
+    if _sector in EXCLUDED_STOCK_SECTORS:
+        return f"excluded sector: '{_sector}' (EXCLUDED_STOCK_SECTORS)"
+    if _industry in EXCLUDED_STOCK_INDUSTRIES:
+        return f"excluded industry: '{_industry}' (EXCLUDED_STOCK_INDUSTRIES)"
+    if not safe_float(stock.get("volume"), 0):
+        return "volume=0 or None"
+    pe = safe_float(stock.get("pe_ratio"))
+    if pe is not None and pe < 0 and IGNORE_NEGATIVE_PE:
+        return f"negative PE ({pe:.2f}) — set ignore_negative_pe: false in config to include"
+    pb = safe_float(stock.get("pb_ratio"))
+    if pb is not None and pb < 0 and IGNORE_NEGATIVE_PB:
+        return f"negative PB ({pb:.2f}) — set ignore_negative_pb: false in config to include"
+    return "passed all filter checks (scored successfully)"
 
 
 def _evaluate_stock(symbol: str, stock: dict) -> list | None:
@@ -698,7 +768,11 @@ def _compute_reliability_scores(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _get_robinhood_fundamentals(tickers: list[str], force_refresh: bool) -> pd.DataFrame | None:
+def _get_robinhood_fundamentals(
+    tickers: list[str],
+    force_refresh: bool,
+    portfolio_symbols: set[str] | None = None,
+) -> pd.DataFrame | None:
     if not force_refresh:
         return read_data_as_pd("robinhood_data")
 
@@ -802,6 +876,22 @@ def _get_robinhood_fundamentals(tickers: list[str], force_refresh: bool) -> pd.D
     }
     logger.info("NaN rates %%: %s", nan_rates)
 
+    # Warn about portfolio holdings that fell out of scoring, with the specific reason
+    if portfolio_symbols:
+        scored = set(df_raw["symbol"].tolist())
+        for sym in sorted(portfolio_symbols):
+            if sym in scored:
+                continue
+            if sym not in fundamentals:
+                logger.warning(
+                    "HELD %s: Robinhood fundamentals API returned no data — "
+                    "stock may be delisted, suspended, or unsupported",
+                    sym,
+                )
+            else:
+                reason = _diagnose_stock_filter(sym, fundamentals[sym])
+                logger.warning("HELD %s: scored data missing — %s", sym, reason)
+
     # Fetch analyst ratings and earnings bonus only for shortlisted candidates.
     # Analyst BTR: tie-breaker only — sparse coverage (~17%) so never mutates value_metric.
     # Earnings bonus: applied to quality_score, triggers value_metric recalc.
@@ -888,8 +978,15 @@ def _get_news(tickers: list[str], force_refresh: bool) -> pd.DataFrame | None:
 # ---------------------------------------------------------------------------
 
 def get_data(refresh: bool = False) -> pd.DataFrame:
-    tickers = gen_symbols_list(refresh)
-    metrics = _get_robinhood_fundamentals(tickers, refresh)
+    held: set[str] = set()
+    if refresh:
+        try:
+            held = set(rb.build_holdings() or {})
+        except Exception as e:
+            logger.warning("Could not fetch portfolio holdings for universe expansion: %s", e)
+
+    tickers = gen_symbols_list(refresh, extra_symbols=held or None)
+    metrics = _get_robinhood_fundamentals(tickers, refresh, portfolio_symbols=held or None)
     news_df = _get_news(tickers, refresh)
 
     if metrics is None or metrics.empty:

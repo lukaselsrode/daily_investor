@@ -28,12 +28,13 @@ def render() -> None:
     c1, c2, c3 = st.columns(3)
     with c1:
         n_days = st.number_input("Look-back days", min_value=30, max_value=1000,
-                                  value=90, step=30)
+                                  value=90, step=30, key="bt_n_days")
     with c2:
-        mode = st.selectbox("Mode", BACKTEST_MODES)
+        mode = st.selectbox("Mode", BACKTEST_MODES, key="bt_mode")
     with c3:
         capital = st.number_input("Starting capital ($)", min_value=1000.0,
-                                   value=float(bt_cfg.get("starting_capital", 5000.0)), step=500.0)
+                                   value=float(bt_cfg.get("starting_capital", 5000.0)),
+                                   step=500.0, key="bt_capital")
 
     st.caption(f"⚠️ Lookahead bias: {LOOKAHEAD_LABELS[mode]}")
     if mode == "current_universe_stress_test":

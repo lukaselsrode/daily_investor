@@ -29,9 +29,9 @@ def render() -> None:
     st.subheader("Settings")
     c1, c2, c3 = st.columns(3)
     with c1:
-        n_days = st.number_input("Look-back days", min_value=30, max_value=1000, value=90, step=30)
+        n_days = st.number_input("Look-back days", min_value=30, max_value=1000, value=90, step=30, key="tune_n_days")
     with c2:
-        mode = st.selectbox("Backtest mode", BACKTEST_MODES)
+        mode = st.selectbox("Backtest mode", BACKTEST_MODES, key="tune_mode")
         st.caption(LOOKAHEAD_LABELS[mode])
     with c3:
         if tune_type == "Single-Objective Tune":

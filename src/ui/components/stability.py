@@ -41,12 +41,12 @@ def render() -> None:
     st.subheader("Settings")
     c1, c2, c3 = st.columns(3)
     with c1:
-        mode = st.selectbox("Backtest mode", BACKTEST_MODES)
+        mode = st.selectbox("Backtest mode", BACKTEST_MODES, key="stab_mode")
         st.caption(LOOKAHEAD_LABELS[mode])
     with c2:
-        output_dir = st.text_input("Output directory", value=str(ROOT / "reports" / "stability"))
+        output_dir = st.text_input("Output directory", value=str(ROOT / "reports" / "stability"), key="stab_output_dir")
     with c3:
-        windows_str = st.text_input("Windows (days, comma-separated)", value="30,60,90,120")
+        windows_str = st.text_input("Windows (days, comma-separated)", value="30,60,90,120", key="stab_windows")
 
     try:
         windows = [int(w.strip()) for w in windows_str.split(",") if w.strip()]

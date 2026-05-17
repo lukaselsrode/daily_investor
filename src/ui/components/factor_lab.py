@@ -869,3 +869,223 @@ Interpret with caution for horizons > 60 days.
                 "factor_ic.csv",
                 "text/csv",
             )
+
+
+# ---------------------------------------------------------------------------
+# Public sub-section renderers — called by pages/research.py
+# Each covers one Research tab. Keys use unique prefixes to avoid collision
+# with the existing render() function's "fl_*" session-state keys.
+# ---------------------------------------------------------------------------
+
+
+def render_overview_tab(summary: pd.DataFrame, n_dates: int, n_stocks: int) -> None:
+    """Research Summary + Weight Recommendations for Research → Overview."""
+    conc = _synthesize_conclusions(summary, n_dates)
+    _render_research_summary(conc, n_dates)
+    st.divider()
+    recs = _synthesize_weights(summary)
+    _render_weight_recommendations(recs, n_dates=n_dates)
+
+
+def render_ic_analysis_tab(
+    ic_df: pd.DataFrame,
+    summary: pd.DataFrame,
+    decay: pd.DataFrame,
+    sel_factors: list[str],
+    sel_horizons: list[int],
+    ic_type: str,
+) -> None:
+    """IC Summary + Decay + Cumulative IC + Rolling ICIR for Research → IC Analysis."""
+    n_d = int(ic_df["date"].nunique())
+    n_s = int(ic_df["n_stocks"].median())
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Snapshot dates",         n_d)
+    m2.metric("Median universe size",   n_s)
+    m3.metric("Factor × horizon pairs", len(summary) if not summary.empty else 0)
+
+    st.divider()
+
+    # IC Summary Table
+    st.subheader("IC Summary")
+    if not summary.empty:
+        disp = summary.copy()
+        disp["factor"] = disp["factor"].map(lambda x: _FRIENDLY.get(x, x))
+        disp.columns   = [c.replace("_", " ").title() for c in disp.columns]
+        num_cols       = disp.select_dtypes("number").columns.tolist()
+
+        def _color_ic(val: object):
+            if not isinstance(val, float):
+                return ""
+            if val > 0.05:
+                return "color: #00b300; font-weight: bold"
+            if val < -0.05:
+                return "color: #cc0000; font-weight: bold"
+            return "color: #888888"
+
+        styled   = disp.style.format({c: "{:.4f}" for c in num_cols})
+        mean_col = next((c for c in disp.columns if "Mean" in c and "Ic" in c), None)
+        if mean_col:
+            styled = styled.map(_color_ic, subset=[mean_col])
+        st.dataframe(styled, use_container_width=True, hide_index=True)
+    else:
+        st.info("No IC summary — build more snapshot history.")
+
+    st.divider()
+
+    # Factor Decay Curves
+    st.subheader("Factor Decay (IC by Horizon)")
+    st.caption("How predictive power fades as forecast horizon increases.")
+    if not decay.empty:
+        fig_d = go.Figure()
+        for factor in decay["factor"].unique():
+            grp = decay[decay["factor"] == factor].sort_values("horizon_days")
+            fig_d.add_trace(go.Scatter(
+                x=grp["horizon_days"], y=grp["mean_ic"],
+                mode="lines+markers",
+                name=_FRIENDLY.get(factor, factor),
+                marker=dict(size=7),
+            ))
+        fig_d.add_hline(y=0.05,  line_dash="dash", line_color="green", line_width=1)
+        fig_d.add_hline(y=-0.05, line_dash="dash", line_color="red",   line_width=1)
+        fig_d.add_hline(y=0,     line_dash="solid", line_color="gray",  line_width=0.5)
+        fig_d.update_layout(
+            xaxis_title="Horizon (days)", yaxis_title="Mean IC",
+            height=360, margin=dict(t=10), legend_title="Factor",
+        )
+        st.plotly_chart(fig_d, use_container_width=True)
+    else:
+        st.info("Decay data unavailable.")
+
+    st.divider()
+
+    # Cumulative IC
+    st.subheader("Cumulative IC")
+    cum_horizon = st.selectbox(
+        "Horizon", sorted(sel_horizons), key="ria_cum_horizon",
+    )
+    with st.spinner("Computing cumulative IC…"):
+        try:
+            cum_df = _compute_cumulative_ic(tuple(sel_factors), cum_horizon, ic_type)
+        except Exception as exc:
+            cum_df = pd.DataFrame()
+            st.caption(f"Unavailable: {exc}")
+    if not cum_df.empty:
+        fig_c = go.Figure()
+        for factor in cum_df["factor"].unique():
+            grp = cum_df[cum_df["factor"] == factor].sort_values("date")
+            fig_c.add_trace(go.Scatter(
+                x=grp["date"], y=grp["cumulative_ic"],
+                mode="lines", name=_FRIENDLY.get(factor, factor),
+            ))
+        fig_c.add_hline(y=0, line_dash="solid", line_color="gray", line_width=0.5)
+        fig_c.update_layout(xaxis_title="Date", yaxis_title="Cumulative IC", height=300, margin=dict(t=10))
+        st.plotly_chart(fig_c, use_container_width=True)
+    else:
+        st.info("Not enough data for cumulative IC at this horizon.")
+
+    st.divider()
+
+    # Rolling ICIR
+    st.subheader("Rolling ICIR")
+    st.caption("ICIR = mean(IC) / std(IC) — measures consistency of predictive signal.")
+    ra, rb_ = st.columns(2)
+    roll_factor  = ra.selectbox("Factor",  sel_factors, key="ria_roll_factor",
+                                format_func=lambda x: _FRIENDLY.get(x, x))
+    roll_horizon = rb_.selectbox("Horizon", sorted(sel_horizons), key="ria_roll_horizon")
+    roll_window  = st.slider("Rolling window (periods)", 3, 24, 8, key="ria_roll_win")
+    with st.spinner("Computing rolling ICIR…"):
+        try:
+            roll_df = _compute_rolling_icir(roll_factor, roll_horizon, roll_window)
+        except Exception as exc:
+            roll_df = pd.DataFrame()
+            st.caption(f"Error: {exc}")
+    if not roll_df.empty and "rolling_icir" in roll_df.columns:
+        fig_r = go.Figure()
+        fig_r.add_trace(go.Bar(
+            x=roll_df["date"], y=roll_df["ic"],
+            name="IC (period)", opacity=0.40, marker_color="steelblue",
+        ))
+        fig_r.add_trace(go.Scatter(
+            x=roll_df["date"], y=roll_df["rolling_icir"],
+            name=f"Rolling ICIR ({roll_window})",
+            yaxis="y2", line=dict(width=2, color="orange"),
+        ))
+        fig_r.add_hline(y=0.5,  line_dash="dash", line_color="green",
+                        annotation_text="ICIR = 0.5 (actionable)")
+        fig_r.add_hline(y=-0.5, line_dash="dash", line_color="red")
+        fig_r.update_layout(
+            yaxis=dict(title="IC"),
+            yaxis2=dict(title="Rolling ICIR", overlaying="y", side="right"),
+            height=320, margin=dict(t=10),
+            legend=dict(orientation="h", y=1.08),
+        )
+        st.plotly_chart(fig_r, use_container_width=True)
+    else:
+        st.info("Not enough IC periods for rolling ICIR at this configuration.")
+
+    with st.expander("Raw IC data"):
+        if not ic_df.empty:
+            st.dataframe(
+                ic_df.sort_values(["horizon_days", "factor", "date"]),
+                use_container_width=True, hide_index=True,
+            )
+            st.download_button(
+                "Download IC CSV", ic_df.to_csv(index=False), "factor_ic.csv", "text/csv",
+            )
+
+
+def render_decile_tab(sel_factors: list[str], sel_horizons: list[int]) -> None:
+    """Decile spread / monotonicity for Research → Rank & Deciles."""
+    da, db, dc = st.columns(3)
+    dec_factor  = da.selectbox("Factor",  sel_factors,          key="rdt_dec_factor",
+                               format_func=lambda x: _FRIENDLY.get(x, x))
+    dec_horizon = db.selectbox("Horizon", sorted(sel_horizons), key="rdt_dec_horizon")
+    n_deciles   = dc.selectbox("Deciles", [5, 10], index=1,    key="rdt_n_deciles")
+
+    with st.spinner("Computing decile spread…"):
+        try:
+            decile_df = _compute_decile_spread(dec_factor, dec_horizon, n_deciles)
+        except Exception as exc:
+            decile_df = pd.DataFrame()
+            st.caption(f"Error: {exc}")
+
+    if not decile_df.empty:
+        colors = ["#00b300" if r >= 0 else "#cc0000" for r in decile_df["mean_forward_return"]]
+        fig_dec = go.Figure(go.Bar(
+            x=decile_df["decile"],
+            y=(decile_df["mean_forward_return"] * 100).round(2),
+            marker_color=colors,
+            text=[f"{r:.1%}" for r in decile_df["mean_forward_return"]],
+            textposition="outside",
+        ))
+        fig_dec.add_hline(y=0, line_dash="solid", line_color="gray")
+        fig_dec.update_layout(
+            xaxis_title=f"Decile (1 = lowest {_FRIENDLY.get(dec_factor, dec_factor)}, {n_deciles} = highest)",
+            yaxis_title="Mean Forward Return (%)",
+            height=320, margin=dict(t=10),
+        )
+        st.plotly_chart(fig_dec, use_container_width=True)
+        if len(decile_df) >= 2:
+            top_r = decile_df.loc[decile_df["decile"].idxmax(), "mean_forward_return"]
+            bot_r = decile_df.loc[decile_df["decile"].idxmin(), "mean_forward_return"]
+            st.caption(f"Top-minus-bottom spread: **{top_r - bot_r:.2%}**")
+    else:
+        st.info("Not enough data for decile analysis — build more snapshot history.")
+
+
+def render_regime_tab(sel_factors: list[str], sel_horizons: list[int], ic_type: str) -> None:
+    """Regime-conditioned IC heatmap for Research → Regime Analysis."""
+    regime_horizon = st.selectbox(
+        "Horizon for regime IC", sorted(sel_horizons), key="rrt_regime_horizon",
+        help="Forward-return horizon for regime IC computation.",
+    )
+    with st.spinner("Fetching regime history and computing regime-conditioned IC…"):
+        try:
+            regime_df = _compute_regime_ic(
+                tuple(f for f in sel_factors if f != "value_metric"),
+                regime_horizon, ic_type,
+            )
+        except Exception as exc:
+            regime_df = pd.DataFrame()
+            st.caption(f"Regime IC unavailable: {exc}")
+    _render_regime_ic(regime_df, sel_factors)

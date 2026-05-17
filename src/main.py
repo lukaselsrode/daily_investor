@@ -277,13 +277,17 @@ def _fetch_and_save_dividends() -> None:
             logger.info("No dividend history returned")
             return
 
-        # Collect all unique instrument URLs and batch-resolve to symbols
+        # Collect all unique instrument URLs and resolve to symbols one-by-one
+        # (robin_stocks has get_instrument_by_url but no batch variant)
         instrument_urls = list({d.get("instrument") for d in dividends if d.get("instrument")})
-        instruments = rb.get_instruments_by_urls(instrument_urls) or []
         url_to_symbol: dict[str, str] = {}
-        for inst in instruments:
-            if inst and inst.get("url") and inst.get("symbol"):
-                url_to_symbol[inst["url"]] = inst["symbol"]
+        for url in instrument_urls:
+            try:
+                inst = rb.get_instrument_by_url(url)
+                if inst and inst.get("symbol"):
+                    url_to_symbol[url] = inst["symbol"]
+            except Exception:
+                pass
 
         rows = []
         for d in dividends:

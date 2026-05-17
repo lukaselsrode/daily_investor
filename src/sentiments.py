@@ -10,6 +10,7 @@ Key fixes vs original:
 """
 
 import asyncio
+import logging
 import random
 import time
 from datetime import datetime, timedelta
@@ -20,6 +21,15 @@ import robin_stocks.robinhood as rb
 import yfinance as yf
 
 from util import run_async
+
+# yfinance logs "Failed to retrieve the news and received faulty response instead."
+# at ERROR level for rate-limited or empty-result tickers, but returns [] (no exception).
+# Our retry logic handles the empty case; silence these to reduce log noise.
+logging.getLogger("yfinance").addFilter(
+    type("_NoNewsFilter", (logging.Filter,), {
+        "filter": staticmethod(lambda r: "faulty response" not in r.getMessage())
+    })()
+)
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +129,9 @@ def _parse_robinhood_item(item: dict) -> dict:
     }
 
 
+_news_logger = logging.getLogger(__name__)
+
+
 def _fetch_news_with_retry(ticker: str, max_articles: int, max_retries: int = 3) -> list[dict]:
     """
     Fetch news for a single ticker via yfinance with exponential backoff,
@@ -126,28 +139,30 @@ def _fetch_news_with_retry(ticker: str, max_articles: int, max_retries: int = 3)
     """
     for attempt in range(max_retries):
         if attempt > 0:
-            backoff = (2 ** attempt) + random.uniform(0, 1)
-            time.sleep(backoff)
+            time.sleep((2 ** attempt) + random.uniform(0, 1))
         try:
             items = (yf.Ticker(ticker).news or [])[:max_articles]
             if items:
                 parsed = [_parse_yfinance_item(i) for i in items]
                 return [p for p in parsed if p is not None]
-            # Empty but no error — not rate limited, just no news
-            if attempt == max_retries - 1:
-                print(f"No news for {ticker} (normal for some stocks)")
+            # Empty with no exception — yfinance ate the error internally (faulty response)
+            # or genuinely no news. Either way, retry before giving up.
             continue
         except Exception as e:
             msg = str(e).lower()
             is_rate_limit = "rate limit" in msg or "too many requests" in msg
             is_last = attempt == max_retries - 1
+
+            if is_rate_limit:
+                # Back off before hitting Robinhood to avoid cascading rate limits
+                time.sleep(random.uniform(3, 7))
+
             if is_rate_limit or is_last:
-                print(f"yfinance {ticker}: {'rate limited' if is_rate_limit else str(e)[:60]} — trying Robinhood")
                 rb_news = _robinhood_news(ticker, max_articles)
                 if rb_news:
                     return [_parse_robinhood_item(i) for i in rb_news]
                 if is_last:
-                    print(f"Both APIs failed for {ticker}")
+                    _news_logger.debug("No news available for %s from either API", ticker)
                     return []
     return []
 
@@ -156,7 +171,7 @@ def _fetch_news_with_retry(ticker: str, max_articles: int, max_retries: int = 3)
 # Public entry point
 # ---------------------------------------------------------------------------
 
-MAX_NEWS_CONCURRENT = 10  # thread workers running concurrently via asyncio.to_thread
+MAX_NEWS_CONCURRENT = 3  # keep below yfinance's rate limit threshold
 
 
 async def _fetch_all_news_async(tickers: list[str], max_articles: int) -> dict[str, list]:
@@ -167,8 +182,7 @@ async def _fetch_all_news_async(tickers: list[str], max_articles: int) -> dict[s
     async def _one(ticker: str) -> tuple[str, list]:
         nonlocal completed
         async with semaphore:
-            # _fetch_news_with_retry is synchronous (yfinance + time.sleep backoff);
-            # run it in a thread so it doesn't block the event loop
+            await asyncio.sleep(random.uniform(0.1, 0.4))  # stagger within the semaphore window
             articles = await asyncio.to_thread(_fetch_news_with_retry, ticker, max_articles)
             completed += 1
             if completed % 50 == 0 or completed == total:
