@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
 import requests
@@ -801,52 +802,59 @@ def _get_robinhood_fundamentals(tickers: list[str], force_refresh: bool) -> pd.D
     }
     logger.info("NaN rates %%: %s", nan_rates)
 
-    store_data_as_csv("robinhood_data", AGG_DATA_COLUMNS, df_raw)
-    time.sleep(1)
-    df = read_data_as_pd("robinhood_data")
-
     # Fetch analyst ratings and earnings bonus only for shortlisted candidates.
     # Analyst BTR: tie-breaker only — sparse coverage (~17%) so never mutates value_metric.
     # Earnings bonus: applied to quality_score, triggers value_metric recalc.
-    if df is not None and not df.empty:
-        df["value_metric"] = pd.to_numeric(df["value_metric"], errors="coerce")
-        candidates = df[df["value_metric"] >= METRIC_THRESHOLD]["symbol"].tolist()
-        if candidates:
-            fetch_earnings = EARNINGS_PARAMS.get("enabled", False)
-            label = "analyst ratings + earnings" if fetch_earnings else "analyst ratings"
-            print(f"Fetching {label} for {len(candidates)} shortlisted stocks...")
-            for sym in candidates:
-                ratio = _get_buy_to_sell_ratio(sym)
-                df.loc[df["symbol"] == sym, "buy_to_sell_ratio"] = ratio
+    df_raw["value_metric"] = pd.to_numeric(df_raw["value_metric"], errors="coerce")
+    candidates = df_raw[df_raw["value_metric"] >= METRIC_THRESHOLD]["symbol"].tolist()
+    if candidates:
+        fetch_earnings = EARNINGS_PARAMS.get("enabled", False)
+        label = "analyst ratings + earnings" if fetch_earnings else "analyst ratings"
+        print(f"Fetching {label} for {len(candidates)} shortlisted stocks...")
 
-                if fetch_earnings and "quality_score" in df.columns:
-                    bonus = _get_earnings_bonus(sym)
-                    if bonus != 0.0:
-                        idx = df["symbol"] == sym
-                        old_q = pd.to_numeric(df.loc[idx, "quality_score"], errors="coerce").iloc[0]
-                        new_q = old_q + bonus if pd.notna(old_q) else bonus
-                        df.loc[idx, "quality_score"] = new_q
-                        # Recalculate value_metric with updated quality_score
-                        sw = SCORE_WEIGHTS
-                        for col in ("value_score", "income_score", "momentum_score"):
-                            df[col] = pd.to_numeric(df[col], errors="coerce")
-                        new_vm = (
-                            sw.get("value",    0.08) * df.loc[idx, "value_score"].iloc[0]
-                            + sw.get("quality",  0.50) * new_q
-                            + sw.get("income",   0.08) * pd.to_numeric(df.loc[idx, "income_score"], errors="coerce").iloc[0]
-                            + sw.get("momentum", 0.34) * pd.to_numeric(df.loc[idx, "momentum_score"], errors="coerce").iloc[0]
-                        )
-                        df.loc[idx, "value_metric"] = new_vm
-                        logger.debug(
-                            f"{sym}: earnings bonus {bonus:+.3f} → quality={new_q:.3f}  value_metric={new_vm:.3f}"
-                        )
+        # Convert numeric columns once before the update loop
+        for col in ("value_score", "quality_score", "income_score", "momentum_score"):
+            df_raw[col] = pd.to_numeric(df_raw[col], errors="coerce")
 
-                time.sleep(0.3)
-            store_data_as_csv("robinhood_data", AGG_DATA_COLUMNS, df)
-            time.sleep(1)
-            df = read_data_as_pd("robinhood_data")
+        # Pre-fetch all per-symbol API data in parallel (6 workers, 0.3s rate-limit sleep each)
+        def _fetch_one(sym: str) -> tuple[str, float | None, float]:
+            ratio = _get_buy_to_sell_ratio(sym)
+            bonus = _get_earnings_bonus(sym) if fetch_earnings else 0.0
+            time.sleep(0.3)
+            return sym, ratio, bonus
 
-    return df
+        with ThreadPoolExecutor(max_workers=6) as _pool:
+            prefetched = list(_pool.map(_fetch_one, candidates))
+
+        sw = SCORE_WEIGHTS
+        has_q = "quality_score" in df_raw.columns
+        df_raw = df_raw.set_index("symbol", drop=False)
+
+        for sym, ratio, bonus in prefetched:
+            if sym not in df_raw.index:
+                continue
+            df_raw.at[sym, "buy_to_sell_ratio"] = ratio
+
+            if fetch_earnings and has_q and bonus != 0.0:
+                old_q = df_raw.at[sym, "quality_score"]
+                new_q = (old_q + bonus) if pd.notna(old_q) else bonus
+                df_raw.at[sym, "quality_score"] = new_q
+                new_vm = (
+                    sw.get("value",    0.08) * df_raw.at[sym, "value_score"]
+                    + sw.get("quality",  0.50) * new_q
+                    + sw.get("income",   0.08) * df_raw.at[sym, "income_score"]
+                    + sw.get("momentum", 0.34) * df_raw.at[sym, "momentum_score"]
+                )
+                df_raw.at[sym, "value_metric"] = new_vm
+                logger.debug(
+                    "%s: earnings bonus %+.3f → quality=%.3f  value_metric=%.3f",
+                    sym, bonus, new_q, new_vm,
+                )
+
+        df_raw = df_raw.reset_index(drop=True)
+
+    store_data_as_csv("robinhood_data", AGG_DATA_COLUMNS, df_raw)
+    return df_raw
 
 
 def _get_news(tickers: list[str], force_refresh: bool) -> pd.DataFrame | None:

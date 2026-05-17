@@ -783,14 +783,14 @@ def get_position_value(symbol: str, holdings: dict) -> float:
 
 def get_sector_exposure(holdings: dict, agg_df: pd.DataFrame | None) -> dict[str, float]:
     """Return {sector: total_dollar_value} for all current holdings."""
+    sym_to_sector: dict[str, str] = {}
+    if agg_df is not None and not agg_df.empty and "symbol" in agg_df.columns and "sector" in agg_df.columns:
+        sym_to_sector = dict(zip(agg_df["symbol"], agg_df["sector"].fillna("Unknown").astype(str)))
+
     totals: dict[str, float] = {}
     for symbol, data in holdings.items():
         equity = safe_float(data.get("equity"), 0.0)
-        sector = "Unknown"
-        if agg_df is not None and not agg_df.empty and "symbol" in agg_df.columns:
-            row = agg_df[agg_df["symbol"] == symbol]
-            if not row.empty:
-                sector = str(row.iloc[0].get("sector") or "Unknown")
+        sector = sym_to_sector.get(symbol, "Unknown")
         totals[sector] = totals.get(sector, 0.0) + equity
     return totals
 
