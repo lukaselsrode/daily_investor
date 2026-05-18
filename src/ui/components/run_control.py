@@ -25,7 +25,10 @@ def _build_command(run_type: str, op_mode: str | None, skip_data: bool,
                    windows: list[int] | None) -> list[str]:
     base = [sys.executable, "-m", "cli"]
 
-    if run_type == "Full Strategy Run":
+    if run_type == "Fetch Data":
+        base.append("fetch-data")
+
+    elif run_type == "Full Strategy Run":
         base.append("run")
         if op_mode:
             base += ["--op-mode", op_mode]
@@ -106,8 +109,15 @@ def render() -> None:
     # ---- Run type ---------------------------------------------------------
     st.subheader("A. Run type")
     run_type = st.selectbox("What do you want to run?", [
-        "Full Strategy Run", "Backtest", "Tune", "Auto-Tune", "Stability Scan", "Report",
+        "Fetch Data", "Full Strategy Run", "Backtest", "Tune", "Auto-Tune", "Stability Scan", "Report",
     ])
+
+    # ---- Fetch Data info ---------------------------------------------------
+    if run_type == "Fetch Data":
+        st.info(
+            "Fetches fresh fundamentals, news, and saves `agg_data` CSV + snapshot. "
+            "No trades are placed. Requires Robinhood credentials."
+        )
 
     # ---- Operating mode (only relevant for Full Strategy Run) -------------
     op_mode_key = None
@@ -172,7 +182,10 @@ def render() -> None:
         c1, c2 = st.columns(2)
         with c1:
             st.markdown(f"- **Run type:** {run_type}")
-            st.markdown(f"- **Live execution:** {'✅ ON' if live else '🔒 OFF'}")
+            if run_type == "Fetch Data":
+                st.markdown("- **Trades:** ❌ none — data only")
+            else:
+                st.markdown(f"- **Live execution:** {'✅ ON' if live else '🔒 OFF'}")
             if run_type == "Full Strategy Run":
                 st.markdown(f"- **Operating mode:** {mode_label}")
         with c2:
@@ -191,7 +204,8 @@ def render() -> None:
 
     # ---- Run button -------------------------------------------------------
     st.divider()
-    if run_type == "Full Strategy Run" and not live:
+    needs_live_gate = run_type == "Full Strategy Run" and not live
+    if needs_live_gate:
         st.button("▶ Run", disabled=True, help="Enable live execution in the sidebar first.")
         st.info("Live execution is OFF. Enable it in the sidebar to place real orders.")
     else:

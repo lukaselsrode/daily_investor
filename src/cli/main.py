@@ -33,13 +33,17 @@ def main(argv: list[str] | None = None) -> None:
     from cli.commands import (
         cmd_auto_tune,
         cmd_backtest,
+        cmd_fetch_data,
         cmd_report,
         cmd_run,
         cmd_stability_scan,
         cmd_tune,
     )
 
-    if cmd == "run":
+    if cmd == "fetch-data":
+        cmd_fetch_data()
+
+    elif cmd == "run":
         skip_data = "--skip-data" in rest
         op_mode = _flag_value(rest, "--op-mode")
         cmd_run(skip_data=skip_data, op_mode=op_mode)
@@ -96,6 +100,7 @@ def _print_help() -> None:
 daily-investor CLI
 
 COMMANDS
+  fetch-data               Fetch fresh data only — no trades (fundamentals, news, snapshot)
   run                      Live trading run (requires Robinhood credentials)
   backtest DAYS            Run backtest simulation
   tune DAYS                Single-objective parameter tune (prints diff, no write)

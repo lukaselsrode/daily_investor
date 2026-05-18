@@ -23,7 +23,7 @@ st.set_page_config(
 )
 
 from ui.layout.sidebar import render_sidebar
-from ui.pages import operations, portfolio, research, validation, system as system_page
+from ui.sections import operations, portfolio, research, validation, system as system_page
 
 _SECTION_MAP = {
     "operations": operations.render,

@@ -65,8 +65,8 @@ regime:
     max_buys_override: 3
     stop_loss_tighten: 0.05
   neutral:
-    index_pct_override: None
-    max_buys_override: None
+    index_pct_override: 0.77
+    max_buys_override: 4
 etf_risk:
   enabled: true
   use_ma_filter: true

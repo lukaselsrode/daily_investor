@@ -23,6 +23,29 @@ import tuner as _t
 logger = logging.getLogger(__name__)
 
 
+def cmd_fetch_data() -> None:
+    """
+    Fetch fresh market data and save CSVs + snapshot — no trades placed.
+
+    Runs: industry valuation update → fundamentals → news → scoring → agg_data CSV + snapshot.
+    Requires Robinhood login (fundamentals are pulled from Robinhood API).
+    """
+    from main import login, update_industry_valuations, _fetch_and_save_dividends
+    from source_data import get_data as generate_daily_undervalued_stocks
+
+    login()
+    logger.info("=== Fetch-Data run (no trades) ===")
+
+    update_industry_valuations(verbose=True)
+    _fetch_and_save_dividends()
+
+    df = generate_daily_undervalued_stocks(refresh=True)
+    if df.empty:
+        logger.error("Data fetch returned an empty DataFrame — check credentials and connectivity")
+    else:
+        logger.info("Fetch-Data complete: %d symbols written to agg_data CSV + snapshot", len(df))
+
+
 def cmd_run(
     skip_data: bool = False,
     op_mode: Optional[str] = None,

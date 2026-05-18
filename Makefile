@@ -11,6 +11,12 @@ SRC       := src
 ui:                          ## Launch the Streamlit dashboard
 	$(STREAMLIT) run $(SRC)/ui/streamlit_app.py
 
+# ── Data ──────────────────────────────────────────────────────────────────────
+
+.PHONY: fetch-data
+fetch-data:                  ## Fetch fresh fundamentals + news, save CSVs + snapshot (no trades)
+	$(DI) fetch-data
+
 # ── Live trading ──────────────────────────────────────────────────────────────
 
 .PHONY: run
@@ -26,7 +32,7 @@ run-skip:                    ## Live trading run, reuse existing CSV data (faste
 	$(DI) run --op-mode safe --skip-data
 
 .PHONY: run-dry
-run-dry:                     ## Dry-run: no sentiment, no trades  (data + scoring only)
+run-dry:                     ## Dry-run: skip data + sentiment  (scoring + logic preview only)
 	$(DI) run --op-mode no-sentiment --skip-data
 
 # ── Backtesting ───────────────────────────────────────────────────────────────

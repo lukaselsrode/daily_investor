@@ -28,20 +28,34 @@ def render() -> None:
     def_cfg  = regime_cfg.get("defensive", {})
     neut_cfg = regime_cfg.get("neutral", {})
 
+    def _float(val, fallback: float) -> float:
+        try:
+            return float(val) if val is not None else fallback
+        except (TypeError, ValueError):
+            return fallback
+
+    def _int(val, fallback: int) -> int:
+        try:
+            return int(val) if val is not None else fallback
+        except (TypeError, ValueError):
+            return fallback
+
+    base_buys = _int(risk_cfg.get("max_buys_per_rebalance"), 4)
+
     if regime == "Bullish":
-        eff_index = base_index
-        max_buys  = risk_cfg.get("max_buys_per_rebalance", 10)
-        stop_adj  = 0.0
+        eff_index  = _float(base_index, 0.72)
+        max_buys   = base_buys
+        stop_adj   = 0.0
         etf_filter = False
     elif regime == "Neutral":
-        eff_index = neut_cfg.get("index_pct_override") or base_index
-        max_buys  = neut_cfg.get("max_buys_override") or risk_cfg.get("max_buys_per_rebalance", 10)
-        stop_adj  = 0.0
+        eff_index  = _float(neut_cfg.get("index_pct_override"), _float(base_index, 0.72))
+        max_buys   = _int(neut_cfg.get("max_buys_override"), base_buys)
+        stop_adj   = 0.0
         etf_filter = False
     else:  # Defensive
-        eff_index = def_cfg.get("index_pct_override", 0.85)
-        max_buys  = def_cfg.get("max_buys_override", 3)
-        stop_adj  = def_cfg.get("stop_loss_tighten", 0.05)
+        eff_index  = _float(def_cfg.get("index_pct_override"), 0.85)
+        max_buys   = _int(def_cfg.get("max_buys_override"), 3)
+        stop_adj   = _float(def_cfg.get("stop_loss_tighten"), 0.05)
         etf_filter = True
 
     base_stop = cfg.get("sell_rules", {}).get("stop_loss_pct", -0.20)

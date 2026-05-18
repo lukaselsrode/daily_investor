@@ -301,13 +301,13 @@ class ConfigManager:
             vix_defensive_threshold=float(rg.get("vix_defensive_threshold", 30.0)),
             vix_neutral_threshold=float(rg.get("vix_neutral_threshold", 20.0)),
             defensive=RegimeDefensiveConfig(
-                index_pct_override=(float(d["index_pct_override"]) if d.get("index_pct_override") is not None else None),
-                max_buys_override=(int(d["max_buys_override"]) if d.get("max_buys_override") is not None else None),
+                index_pct_override=(float(d["index_pct_override"]) if d.get("index_pct_override") not in (None, "None", "") else None),
+                max_buys_override=(int(d["max_buys_override"]) if d.get("max_buys_override") not in (None, "None", "") else None),
                 stop_loss_tighten=float(d.get("stop_loss_tighten", 0.05)),
             ),
             neutral=RegimeNeutralConfig(
-                index_pct_override=(float(n["index_pct_override"]) if n.get("index_pct_override") else None),
-                max_buys_override=(int(n["max_buys_override"]) if n.get("max_buys_override") else None),
+                index_pct_override=(float(n["index_pct_override"]) if n.get("index_pct_override") not in (None, "None", "") else None),
+                max_buys_override=(int(n["max_buys_override"]) if n.get("max_buys_override") not in (None, "None", "") else None),
             ),
         )
 

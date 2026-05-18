@@ -84,6 +84,9 @@ def _render_readonly(data: dict, prefix: str = "") -> None:
 
 def _edit_widget(section_key: str, path: str, label: str, value):
     key = f"cv_{section_key}_{path}"
+    if value is None:
+        raw = st.text_input(label, value="", key=key)
+        return None if not raw.strip() else raw.strip()
     if isinstance(value, bool):
         return st.toggle(label, value=value, key=key)
     if isinstance(value, int):

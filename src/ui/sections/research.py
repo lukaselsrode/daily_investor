@@ -1,8 +1,8 @@
 """
-ui/pages/research.py — Research: alpha discovery and factor experimentation.
+ui/sections/research.py — Research: alpha discovery and factor experimentation.
 
 Tabs:
-  Overview · Factors · IC Analysis · Rank & Deciles · Correlations · Regime · Experimental
+  Overview · Factors · IC Analysis · Rank & Deciles · Correlations · Regime · Distribution · Experimental
 """
 from __future__ import annotations
 import streamlit as st
@@ -77,6 +77,7 @@ def render() -> None:
         "📊 Rank & Deciles",
         "🔗 Correlations",
         "🌡️ Regime",
+        "🧬 Distribution",
         "🧪 Experimental",
     ])
 
@@ -156,8 +157,13 @@ def render() -> None:
         else:
             st.info("Snapshot data needed — run the bot on multiple days.")
 
-    # ── 7. Experimental ───────────────────────────────────────────────────────
+    # ── 7. Distribution Intelligence ──────────────────────────────────────────
     with tabs[6]:
+        from ui.components.distribution_intelligence import render as _r
+        _r()
+
+    # ── 8. Experimental ───────────────────────────────────────────────────────
+    with tabs[7]:
         st.subheader("Experimental Workspace")
         st.caption(
             "Raw data explorer — browse any CSV, build custom views, "
