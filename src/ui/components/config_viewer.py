@@ -82,6 +82,40 @@ def _render_readonly(data: dict, prefix: str = "") -> None:
         _render_readonly(v, prefix=f"{prefix}{k}.")
 
 
+def _safe_cast(s: str, typ):
+    try:
+        return typ(s)
+    except (ValueError, TypeError):
+        return s
+
+
+def _detect_numeric_type(lst: list):
+    """Return float, int, or None by inspecting the first element — handles string-encoded numbers."""
+    if not lst:
+        return None
+    first = lst[0]
+    if isinstance(first, bool):
+        return None
+    if isinstance(first, float):
+        return float
+    if isinstance(first, int):
+        return int
+    if isinstance(first, str):
+        s = first.strip()
+        try:
+            if "." not in s:
+                int(s)
+                return int
+        except ValueError:
+            pass
+        try:
+            float(s)
+            return float
+        except ValueError:
+            pass
+    return None
+
+
 def _edit_widget(section_key: str, path: str, label: str, value):
     key = f"cv_{section_key}_{path}"
     if value is None:
@@ -96,7 +130,11 @@ def _edit_widget(section_key: str, path: str, label: str, value):
         return st.number_input(label, value=value, step=step, format="%.4g", key=key)
     if isinstance(value, list):
         raw = st.text_input(label, value=", ".join(str(x) for x in value), key=key)
-        return [x.strip() for x in raw.split(",") if x.strip()]
+        items = [x.strip() for x in raw.split(",") if x.strip()]
+        numeric_type = _detect_numeric_type(value)
+        if numeric_type is not None:
+            return [_safe_cast(x, numeric_type) for x in items]
+        return items
     return st.text_input(label, value=str(value), key=key)
 
 

@@ -9,8 +9,26 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 from typing import Literal
+
+# yfinance logs download failures for delisted/bad tickers at ERROR level, e.g.:
+#   ['ITT']: AttributeError("'Response' object has no attribute 'get'")
+# Our code handles missing symbols via per-symbol None checks, so these are noise.
+_YF_FAIL_RE = re.compile(r"^\[")
+_yf_logger = logging.getLogger("yfinance")
+_yf_logger.addFilter(
+    type(
+        "_YfDownloadFailFilter",
+        (logging.Filter,),
+        {
+            "filter": staticmethod(
+                lambda r: not (r.levelno >= logging.ERROR and bool(_YF_FAIL_RE.match(r.getMessage())))
+            )
+        },
+    )()
+)
 
 _LOG_FILE = "investment_bot.log"
 _FMT = "%(asctime)s [%(levelname)s] %(name)s — %(message)s"
