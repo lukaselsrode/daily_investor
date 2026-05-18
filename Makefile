@@ -14,7 +14,7 @@ ui:                          ## Launch the Streamlit dashboard
 # ── Data ──────────────────────────────────────────────────────────────────────
 
 .PHONY: fetch-data
-fetch-data:                  ## Fetch fresh fundamentals + news, save CSVs + snapshot (no trades)
+fetch-data:                  ## Fetch all data: valuations, dividends, holdings, fundamentals, news, snapshot (no trades)
 	$(DI) fetch-data
 
 # ── Live trading ──────────────────────────────────────────────────────────────

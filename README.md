@@ -168,7 +168,7 @@ daily-investor COMMAND [OPTIONS]
 
 | Command | Description |
 |---------|-------------|
-| `fetch-data` | Fetch fresh fundamentals + news, save CSVs + snapshot — **no trades placed** |
+| `fetch-data` | Fetch all data (valuations, dividends, holdings, fundamentals, news, snapshot) — **no trades placed** |
 | `run` | Live trading run (sell + buy cycle) |
 | `backtest DAYS` | Run backtest simulation |
 | `tune DAYS` | Single-objective parameter tune — prints diff, no write |

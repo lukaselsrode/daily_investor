@@ -25,20 +25,46 @@ logger = logging.getLogger(__name__)
 
 def cmd_fetch_data() -> None:
     """
-    Fetch fresh market data and save CSVs + snapshot — no trades placed.
+    Fetch all market data and save CSVs + snapshot — no trades placed.
 
-    Runs: industry valuation update → fundamentals → news → scoring → agg_data CSV + snapshot.
-    Requires Robinhood login (fundamentals are pulled from Robinhood API).
+    Pipeline:
+      1. Industry valuation benchmarks  (ratios.yaml)
+      2. Dividends                       (dividends CSV)
+      3. Holdings                        (holdings CSV — current positions + enriched open dates)
+      4. Universe + fundamentals + news  (stock_tickers, robinhood_data, news, agg_data CSVs)
+      5. Parquet snapshot                (data/snapshots/YYYY_MM_DD.parquet for IC analysis)
+
+    Requires Robinhood login.
     """
-    from main import login, update_industry_valuations, _fetch_and_save_dividends
+    from main import (
+        login,
+        update_industry_valuations,
+        _fetch_and_save_dividends,
+        get_current_positions,
+        _enrich_holdings_with_created_at,
+        save_holdings_csv,
+    )
     from source_data import get_data as generate_daily_undervalued_stocks
 
     login()
     logger.info("=== Fetch-Data run (no trades) ===")
 
+    logger.info("Step 1/4: industry valuations")
     update_industry_valuations(verbose=True)
+
+    logger.info("Step 2/4: dividends")
     _fetch_and_save_dividends()
 
+    logger.info("Step 3/4: holdings")
+    try:
+        holdings = get_current_positions()
+        _enrich_holdings_with_created_at(holdings)
+        save_holdings_csv(holdings)
+        logger.info("Holdings saved: %d positions", len(holdings))
+    except Exception as exc:
+        logger.warning("Holdings fetch failed (continuing): %s", exc)
+
+    logger.info("Step 4/4: universe + fundamentals + news + scoring")
     df = generate_daily_undervalued_stocks(refresh=True)
     if df.empty:
         logger.error("Data fetch returned an empty DataFrame — check credentials and connectivity")
