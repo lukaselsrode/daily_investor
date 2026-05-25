@@ -19,6 +19,7 @@ import yfinance as yf
 
 from util import (
     BACKTEST_PARAMS,
+    CANDIDATE_SELECTION_PARAMS,
     ETFS,
     INDEX_PCT,
     METRIC_THRESHOLD,
@@ -136,6 +137,7 @@ class SimResult:
     cooldown_skips: int = 0         # buys skipped due to post-sell cooldown
     regime_days: "dict | None" = None  # {"bullish": N, "neutral": N, "defensive": N}
     benchmark_twr: float = 0.0     # contribution-adjusted benchmark TWR for comparison
+    pool_diagnostics: "CandidatePoolDiagnostics | None" = None  # day-0 candidate pool
 
 
 @dataclass
@@ -156,6 +158,22 @@ class BacktestReport:
     # extended reporting
     train_benchmark_twr: float = 0.0   # contribution-adjusted benchmark TWR
     val_benchmark_twr: float = 0.0
+
+
+@dataclass
+class CandidatePoolDiagnostics:
+    n_candidates: int
+    score_cutoff: float
+    avg_quality: float
+    avg_momentum: float
+    avg_income: float
+    avg_value: float
+    sector_counts: dict
+    n_income_trap_excluded: int
+    n_quality_gate_excluded: int
+    n_momentum_gate_excluded: int
+    n_floor_excluded: int
+    excluded_high_income_low_momentum: list   # up to 10 symbol names
 
 
 def _col_arr(df: pd.DataFrame, name: str, default: float = 0.0) -> np.ndarray:
@@ -418,6 +436,164 @@ def score_stocks_at_day(precomp: PrecomputedData, params: np.ndarray, day: int) 
     )
 
 
+def _momentum_score_at_day(precomp: "PrecomputedData", params: np.ndarray, day: int) -> np.ndarray:
+    """Compute the momentum factor score for all stocks at a given day."""
+    if precomp.ret_3m_daily is not None:
+        return _momentum_score_v2_vec(day, precomp, params[10:15])
+    return _momentum_score_vec(
+        precomp.bin_indices_daily[day],
+        precomp.has_position_52w_daily[day],
+        precomp.position_52w_daily[day],
+        precomp.return_1m_daily[day],
+        params[10:15],
+    )
+
+
+def _detect_regime(precomp: "PrecomputedData", day: int) -> str:
+    bench = precomp.benchmark_prices
+    if day >= 200 and np.isfinite(bench[day]) and bench[day] > 0:
+        ma200 = float(np.nanmean(bench[max(0, day - 199): day + 1]))
+        if bench[day] < ma200 * 0.95:
+            return "defensive"
+        if bench[day] < ma200:
+            return "neutral"
+    return "bullish"
+
+
+def select_candidates(
+    day: int,
+    composite_scores: np.ndarray,
+    precomp: "PrecomputedData",
+    params: np.ndarray,
+    cs_params: "dict | None" = None,
+) -> "tuple[np.ndarray, CandidatePoolDiagnostics]":
+    """
+    Choose the buy-eligible candidate mask using percentile or absolute selection,
+    optional score floor, factor gates, and income trap protection.
+
+    Returns (candidate_mask, diagnostics).
+    """
+    if cs_params is None:
+        cs_params = CANDIDATE_SELECTION_PARAMS
+
+    n = len(composite_scores)
+    mode        = cs_params["mode"]
+    max_cands   = cs_params["max_candidates"]
+    min_cands   = cs_params["min_candidates"]  # noqa: used in diagnostics
+    min_qual    = cs_params["min_quality_score"]
+    min_mom     = cs_params["min_momentum_score"]
+    min_cond_mom= cs_params["min_conditional_momentum_score"]
+    allow_def   = cs_params["allow_income_defensive_exception"]
+    is_defensive= _detect_regime(precomp, day) == "defensive"
+
+    # ── Step 1: primary score gate ─────────────────────────────────────────
+    valid = np.isfinite(composite_scores)
+    if mode == "percentile":
+        top_pct = cs_params["top_percentile"]
+        valid_scores = composite_scores[valid]
+        cutoff = float(np.percentile(valid_scores, (1.0 - top_pct) * 100.0)) if len(valid_scores) else float(params[5])
+    else:
+        cutoff = float(params[5])   # metric_threshold
+
+    score_mask = composite_scores >= cutoff
+
+    # ── Step 2: optional hard floor ────────────────────────────────────────
+    floor_excluded = 0
+    if cs_params.get("use_absolute_score_floor", True):
+        floor = cs_params["absolute_score_floor"]
+        floor_gate = composite_scores >= floor
+        floor_excluded = int((score_mask & ~floor_gate).sum())
+        score_mask = score_mask & floor_gate
+
+    # ── Step 3: quality gate ───────────────────────────────────────────────
+    quality_gate = precomp.quality_scores >= min_qual
+    qual_excluded = int((score_mask & ~quality_gate).sum())
+
+    # ── Step 4: base momentum gate ─────────────────────────────────────────
+    mom_scores = _momentum_score_at_day(precomp, params, day)
+    mom_gate = mom_scores >= min_mom
+    mom_excluded = int((score_mask & quality_gate & ~mom_gate).sum())
+
+    # ── Step 5: income trap protection ─────────────────────────────────────
+    has_income = precomp.income_scores > 0.0
+    cond_mom_weak = mom_scores < min_cond_mom
+    income_at_risk = has_income & cond_mom_weak & ~precomp.yield_trap_mask
+
+    # Exempt if defensive regime + exception allowed; exclude otherwise
+    income_trap_gate = ~income_at_risk | (allow_def & is_defensive)
+    income_trap_excluded = int((score_mask & quality_gate & mom_gate & ~income_trap_gate).sum())
+
+    final_mask = score_mask & quality_gate & mom_gate & income_trap_gate
+
+    # ── Step 6: enforce max_candidates ────────────────────────────────────
+    n_sel = int(final_mask.sum())
+    if n_sel > max_cands:
+        tmp = np.where(final_mask, composite_scores, -np.inf)
+        threshold_k = float(np.sort(tmp)[::-1][max_cands - 1])
+        top_indices = sorted(np.where(final_mask)[0], key=lambda i: -composite_scores[i])[:max_cands]
+        final_mask = np.zeros(n, dtype=bool)
+        for i in top_indices:
+            final_mask[i] = True
+
+    # ── Diagnostics ────────────────────────────────────────────────────────
+    selected = np.where(final_mask)[0]
+    n_sel = len(selected)
+
+    value_pe_w = float(params[9])
+    value_scores = value_pe_w * precomp.pe_comp + (1.0 - value_pe_w) * precomp.pb_comp
+
+    avg_q  = float(precomp.quality_scores[selected].mean()) if n_sel else 0.0
+    avg_m  = float(mom_scores[selected].mean())             if n_sel else 0.0
+    avg_i  = float(precomp.income_scores[selected].mean())  if n_sel else 0.0
+    avg_v  = float(value_scores[selected].mean())           if n_sel else 0.0
+
+    sector_counts: dict = {}
+    for i in selected:
+        s = precomp.sector_labels[i] if i < len(precomp.sector_labels) else "Unknown"
+        sector_counts[s] = sector_counts.get(s, 0) + 1
+
+    # Excluded high-income / low-momentum names (first 10)
+    hi_inc_lo_mom = score_mask & has_income & (mom_scores < min_cond_mom) & ~final_mask
+    excl_names = [precomp.symbols[i] for i in np.where(hi_inc_lo_mom)[0][:10]]
+
+    diag = CandidatePoolDiagnostics(
+        n_candidates=n_sel,
+        score_cutoff=cutoff,
+        avg_quality=avg_q,
+        avg_momentum=avg_m,
+        avg_income=avg_i,
+        avg_value=avg_v,
+        sector_counts=sector_counts,
+        n_income_trap_excluded=income_trap_excluded,
+        n_quality_gate_excluded=qual_excluded,
+        n_momentum_gate_excluded=mom_excluded,
+        n_floor_excluded=floor_excluded,
+        excluded_high_income_low_momentum=excl_names,
+    )
+    return final_mask, diag
+
+
+def print_pool_diagnostics(diag: CandidatePoolDiagnostics, label: str = "") -> None:
+    prefix = f"[{label}] " if label else ""
+    print(
+        f"{prefix}Candidate pool: n={diag.n_candidates}  cutoff={diag.score_cutoff:.3f}  "
+        f"qual={diag.avg_quality:.2f}  mom={diag.avg_momentum:.2f}  "
+        f"income={diag.avg_income:.2f}  value={diag.avg_value:.2f}"
+    )
+    if diag.n_quality_gate_excluded or diag.n_momentum_gate_excluded or diag.n_income_trap_excluded or diag.n_floor_excluded:
+        print(
+            f"{prefix}  Excluded — floor={diag.n_floor_excluded}  "
+            f"quality={diag.n_quality_gate_excluded}  "
+            f"momentum={diag.n_momentum_gate_excluded}  "
+            f"income_trap={diag.n_income_trap_excluded}"
+        )
+    if diag.excluded_high_income_low_momentum:
+        print(f"{prefix}  High-income/low-momentum excluded: {', '.join(diag.excluded_high_income_low_momentum)}")
+    if diag.sector_counts:
+        top_sectors = sorted(diag.sector_counts.items(), key=lambda x: -x[1])[:5]
+        print(f"{prefix}  Sectors: " + "  ".join(f"{s}={c}" for s, c in top_sectors))
+
+
 def _bench_twr(bench_prices: np.ndarray, starting_capital: float,
                weekly_contribution: float, rebalance_freq: int) -> float:
     """
@@ -457,6 +633,7 @@ def run_simulation(
     commission_per_trade: float = 0.0,
     weekly_contribution: float = 0.0,
     rebalance_frequency_days: int = 5,
+    cs_params: "dict | None" = None,
 ) -> SimResult:
     """
     Simulate the strategy over the precomputed price history.
@@ -490,8 +667,9 @@ def run_simulation(
     max_order_pct    = RISK_LIMITS["max_order_pct_of_cash"]
     max_buys         = RISK_LIMITS["max_buys_per_rebalance"]
 
+    _cs_params = cs_params if cs_params is not None else CANDIDATE_SELECTION_PARAMS
     current_scores = score_stocks_at_day(precomp, params, 0)
-    candidate_mask = current_scores >= metric_threshold
+    candidate_mask, _init_diag = select_candidates(0, current_scores, precomp, params, _cs_params)
 
     # Portfolio state
     stock_shares    = np.zeros(n_stocks)
@@ -716,7 +894,7 @@ def run_simulation(
         contrib_today  = weekly_contribution if is_contrib_day else 0.0
         if is_contrib_day:
             current_scores = score_stocks_at_day(precomp, params, d)
-            candidate_mask = current_scores >= metric_threshold
+            candidate_mask, _ = select_candidates(d, current_scores, precomp, params, _cs_params)
             cash += weekly_contribution
             total_contributions += weekly_contribution
             if cash >= min_order:
@@ -787,6 +965,7 @@ def run_simulation(
         cooldown_skips=cooldown_skips,
         regime_days=regime_days,
         benchmark_twr=bench_twr_val,
+        pool_diagnostics=_init_diag,
     )
 
 
@@ -1235,6 +1414,25 @@ def print_backtest_report(report: BacktestReport) -> None:
     print(f"BACKTEST REPORT  [{r.mode}  sel={r.universe_selection}  bias={r.lookahead_bias_level}]")
     print(f"{'=' * 64}")
     print(f"  Universe: {r.n_symbols} symbols, {r.n_days} trading days")
+
+    pool = tr.pool_diagnostics
+    if pool is not None:
+        print(f"\n  CANDIDATE POOL  (selection mode: {CANDIDATE_SELECTION_PARAMS['mode']})")
+        print(f"    Candidates:    {pool.n_candidates}  (cutoff={pool.score_cutoff:.3f})")
+        print(f"    Avg factors:   quality={pool.avg_quality:.2f}  momentum={pool.avg_momentum:.2f}  income={pool.avg_income:.2f}  value={pool.avg_value:.2f}")
+        if pool.n_floor_excluded or pool.n_quality_gate_excluded or pool.n_momentum_gate_excluded or pool.n_income_trap_excluded:
+            print(
+                f"    Gates excluded: floor={pool.n_floor_excluded}  "
+                f"quality={pool.n_quality_gate_excluded}  "
+                f"momentum={pool.n_momentum_gate_excluded}  "
+                f"income_trap={pool.n_income_trap_excluded}"
+            )
+        if pool.excluded_high_income_low_momentum:
+            print(f"    Income-trap excluded: {', '.join(pool.excluded_high_income_low_momentum)}")
+        if pool.sector_counts:
+            top = sorted(pool.sector_counts.items(), key=lambda x: -x[1])[:6]
+            print(f"    Sectors:       " + "  ".join(f"{s}={c}" for s, c in top))
+
     print(f"\n  TRAIN WINDOW")
     print(f"    Return (TWR):    {tr.total_return:+.2%}  (bench TWR {r.train_benchmark_twr:+.2%})")
     print(f"    Benchmark (buy-hold):  {r.benchmark_return:+.2%}")
@@ -1279,3 +1477,118 @@ def print_backtest_report(report: BacktestReport) -> None:
         for n in r.notes:
             print(f"    • {n}")
     print("=" * 64)
+
+
+def compare_candidate_selection_modes(
+    precomp: PrecomputedData,
+    params: "np.ndarray | None" = None,
+) -> dict:
+    """
+    Run the same precomputed data through three candidate selection modes and
+    return a comparison dict:
+      A_absolute         — original absolute metric_threshold (no gates)
+      B_percentile       — percentile cutoff only, no factor gates
+      C_percentile_gates — percentile cutoff + quality/momentum/income-trap gates
+    """
+    if params is None:
+        params = get_default_params()
+
+    bp = BACKTEST_PARAMS
+    sim_kwargs = dict(
+        starting_capital=bp["starting_capital"],
+        slippage_bps=bp["slippage_bps"],
+        commission_per_trade=bp["commission_per_trade"],
+        weekly_contribution=bp["weekly_contribution"],
+        rebalance_frequency_days=bp["rebalance_frequency_days"],
+    )
+
+    cs_base = CANDIDATE_SELECTION_PARAMS
+    _GATE_OFF = -999.0
+
+    mode_configs = {
+        "A_absolute": {
+            "mode": "absolute",
+            "top_percentile": cs_base["top_percentile"],
+            "max_candidates": 999,
+            "min_candidates": 0,
+            "use_absolute_score_floor": False,
+            "absolute_score_floor": _GATE_OFF,
+            "min_quality_score": _GATE_OFF,
+            "min_momentum_score": _GATE_OFF,
+            "min_conditional_momentum_score": _GATE_OFF,
+            "allow_income_defensive_exception": False,
+        },
+        "B_percentile": {
+            "mode": "percentile",
+            "top_percentile": cs_base["top_percentile"],
+            "max_candidates": cs_base["max_candidates"],
+            "min_candidates": cs_base["min_candidates"],
+            "use_absolute_score_floor": cs_base["use_absolute_score_floor"],
+            "absolute_score_floor": cs_base["absolute_score_floor"],
+            "min_quality_score": _GATE_OFF,
+            "min_momentum_score": _GATE_OFF,
+            "min_conditional_momentum_score": _GATE_OFF,
+            "allow_income_defensive_exception": False,
+        },
+        "C_percentile_gates": dict(cs_base),
+    }
+
+    n_days = precomp.prices.shape[0]
+    train_slice, _ = split_price_window(n_days, bp.get("train_pct", 0.70))
+
+    def _slice(s: slice) -> PrecomputedData:
+        def _o(a): return a[s] if a is not None else None
+        return precomp._replace(
+            prices=precomp.prices[s],
+            etf_prices=precomp.etf_prices[s],
+            benchmark_prices=precomp.benchmark_prices[s],
+            position_52w_daily=precomp.position_52w_daily[s],
+            return_1m_daily=precomp.return_1m_daily[s],
+            bin_indices_daily=precomp.bin_indices_daily[s],
+            has_position_52w_daily=precomp.has_position_52w_daily[s],
+            ret_5d_daily=_o(precomp.ret_5d_daily),
+            ret_3m_daily=_o(precomp.ret_3m_daily),
+            ret_6m_daily=_o(precomp.ret_6m_daily),
+            rs_3m_daily=_o(precomp.rs_3m_daily),
+            rs_6m_daily=_o(precomp.rs_6m_daily),
+            vol_3m_daily=_o(precomp.vol_3m_daily),
+            above_50dma_daily=_o(precomp.above_50dma_daily),
+            above_200dma_daily=_o(precomp.above_200dma_daily),
+        )
+
+    train_precomp = _slice(train_slice)
+    bench_vals = precomp.benchmark_prices[train_slice]
+    bench_ret = float(bench_vals[-1] / bench_vals[0] - 1.0) if (
+        len(bench_vals) >= 2 and np.isfinite(bench_vals).all() and bench_vals[0] > 0
+    ) else 0.0
+
+    results: dict = {"_benchmark_return": bench_ret, "_n_days": train_precomp.prices.shape[0]}
+    for label, cs in mode_configs.items():
+        sim = run_simulation(train_precomp, params, cs_params=cs, **sim_kwargs)
+        pool_mask, pool_diag = select_candidates(0, score_stocks_at_day(train_precomp, params, 0), train_precomp, params, cs)
+        results[label] = {"sim": sim, "pool": pool_diag}
+
+    return results
+
+
+def print_comparison_report(comparison: dict) -> None:
+    """Print a formatted A/B/C comparison table."""
+    bench = comparison.get("_benchmark_return", 0.0)
+    n_days = comparison.get("_n_days", "?")
+    print(f"\n{'=' * 72}")
+    print(f"CANDIDATE SELECTION MODE COMPARISON  ({n_days}d train)  bench={bench:+.1%}")
+    print(f"{'=' * 72}")
+    hdr = f"  {'Mode':<22}  {'Return':>8}  {'Sharpe':>7}  {'DD':>7}  {'Trades':>7}  {'Cands':>6}  {'AvgMom':>7}"
+    print(hdr)
+    print("  " + "-" * 68)
+    labels = {"A_absolute": "A absolute", "B_percentile": "B percentile", "C_percentile_gates": "C +factor gates"}
+    for key, name in labels.items():
+        if key not in comparison:
+            continue
+        s = comparison[key]["sim"]
+        p = comparison[key]["pool"]
+        print(
+            f"  {name:<22}  {s.total_return:>+8.2%}  {s.sharpe:>+7.3f}  "
+            f"{s.max_drawdown:>7.2%}  {s.trades_made:>7d}  {p.n_candidates:>6d}  {p.avg_momentum:>+7.2f}"
+        )
+    print("=" * 72)

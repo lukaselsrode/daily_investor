@@ -77,7 +77,10 @@ def render() -> None:
         "📊 Rank & Deciles",
         "🔗 Correlations",
         "🌡️ Regime",
+        "🔀 Conditional Features",
         "🧬 Distribution",
+        "🎯 Model Calibration",
+        "🎯 Candidate Pool",
         "🧪 Experimental",
     ])
 
@@ -157,13 +160,34 @@ def render() -> None:
         else:
             st.info("Snapshot data needed — run the bot on multiple days.")
 
-    # ── 7. Distribution Intelligence ──────────────────────────────────────────
+    # ── 7. Conditional Features ───────────────────────────────────────────────
     with tabs[6]:
+        from ui.components.conditional_features import render as _r
+        _r()
+
+    # ── 8. Distribution Intelligence ──────────────────────────────────────────
+    with tabs[7]:
         from ui.components.distribution_intelligence import render as _r
         _r()
 
-    # ── 8. Experimental ───────────────────────────────────────────────────────
-    with tabs[7]:
+    # ── 9. Model Calibration ──────────────────────────────────────────────────
+    with tabs[8]:
+        from ui.components.model_calibration import render as _r
+        _r()
+
+    # ── 10. Candidate Pool ────────────────────────────────────────────────────
+    with tabs[9]:
+        st.subheader("Candidate Pool")
+        st.caption(
+            "Analyze how the candidate_selection config filters the score distribution "
+            "into a buy-eligible pool. Includes threshold sensitivity, factor distributions, "
+            "income trap detection, and A/B/C selection mode comparison."
+        )
+        from ui.components.candidate_diagnostics import render as _r
+        _r()
+
+    # ── 11. Experimental ──────────────────────────────────────────────────────
+    with tabs[10]:
         st.subheader("Experimental Workspace")
         st.caption(
             "Raw data explorer — browse any CSV, build custom views, "

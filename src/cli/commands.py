@@ -89,12 +89,22 @@ def cmd_backtest(
     n_days: int,
     mode: Optional[str] = None,
     params: Optional[dict] = None,
+    compare: bool = False,
 ) -> None:
     """Run a single backtest and print results."""
     from backtesting.engine import BacktestEngine
+    import backtest as _bt
+
     engine = BacktestEngine()
-    result = engine.run(n_days=n_days, params=params, mode=mode)
-    print(result)
+
+    if compare:
+        precomp = _bt.load_and_precompute(n_days, mode=mode)
+        default_params = _bt.get_default_params()
+        comparison = _bt.compare_candidate_selection_modes(precomp, default_params)
+        _bt.print_comparison_report(comparison)
+    else:
+        result = engine.run(n_days=n_days, params=params, mode=mode)
+        _bt.print_backtest_report(result.report)
 
 
 def cmd_tune(

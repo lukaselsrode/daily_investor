@@ -51,7 +51,8 @@ def main(argv: list[str] | None = None) -> None:
     elif cmd == "backtest":
         n_days = int(rest[0]) if rest and rest[0].isdigit() else 365
         mode = _flag_value(rest, "--mode")
-        cmd_backtest(n_days=n_days, mode=mode)
+        compare = "--compare" in rest
+        cmd_backtest(n_days=n_days, mode=mode, compare=compare)
 
     elif cmd == "tune":
         if not rest or not rest[0].isdigit():

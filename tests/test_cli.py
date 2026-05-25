@@ -233,7 +233,7 @@ class TestCliDispatch:
     def test_dispatch_backtest(self):
         with patch("cli.commands.cmd_backtest") as mock_cmd:
             cli_main(["backtest", "180"])
-        mock_cmd.assert_called_once_with(n_days=180, mode=None)
+        mock_cmd.assert_called_once_with(n_days=180, mode=None, compare=False)
 
     def test_dispatch_tune(self):
         with patch("cli.commands.cmd_tune") as mock_cmd:

@@ -531,6 +531,207 @@ class FactorResearchEngine:
 
         return pd.DataFrame(rows)
 
+    # ── Conditional / interaction IC ─────────────────────────────────────────
+
+    def compute_conditional_ic(
+        self,
+        horizon_days: int = 20,
+        ic_type: str = "spearman",
+    ) -> pd.DataFrame:
+        """
+        Compute IC summary for all conditional-momentum features vs baseline momentum_score.
+
+        For each snapshot pair the interaction features are engineered on-the-fly from
+        the base scores in the snapshot; no production columns are altered.
+
+        Columns: [feature, label, group, description,
+                  mean_ic, icir, hit_rate, t_stat, tail_ic, stability_score, n_periods]
+        Rows are sorted: engineered features (by mean_ic desc) first, then baseline.
+        """
+        from strategy.factor_interactions import (
+            add_interaction_features,
+            INTERACTION_FEATURES,
+            INTERACTION_FEATURE_NAMES,
+        )
+
+        dates_map    = self._load_dates_map()
+        sorted_dates = sorted(dates_map.keys())
+        if len(sorted_dates) < 2:
+            return pd.DataFrame()
+
+        min_days = max(1, int(horizon_days * (1 - self.max_horizon_slop_pct)))
+        max_days = int(horizon_days * (1 + self.max_horizon_slop_pct))
+        all_factors = ["momentum_score"] + INTERACTION_FEATURE_NAMES
+
+        bucket: dict[str, list[float]] = {f: [] for f in all_factors}
+
+        for i, t_date in enumerate(sorted_dates):
+            fwd_date: Optional[datetime.date] = None
+            best_diff = 9999
+            for fwd in sorted_dates[i + 1:]:
+                diff = (fwd - t_date).days
+                if diff < min_days:
+                    continue
+                if diff > max_days:
+                    break
+                if abs(diff - horizon_days) < best_diff:
+                    fwd_date = fwd
+                    best_diff = abs(diff - horizon_days)
+
+            if fwd_date is None:
+                continue
+
+            df_t   = dates_map[t_date].copy()
+            df_fwd = dates_map[fwd_date]
+            fr     = self._forward_returns(df_t, df_fwd)
+            if fr.empty or len(fr) < self.min_overlap:
+                continue
+
+            add_interaction_features(df_t)
+
+            for factor in all_factors:
+                if factor not in df_t.columns or "symbol" not in df_t.columns:
+                    continue
+                fv = pd.to_numeric(
+                    df_t.set_index("symbol")[factor], errors="coerce"
+                ).rename("factor_val")
+                merged = pd.DataFrame({"factor_val": fv, "forward_return": fr}).dropna()
+                if len(merged) < self.min_overlap:
+                    continue
+                try:
+                    if ic_type == "spearman":
+                        ic_val, _ = stats.spearmanr(
+                            merged["factor_val"].values, merged["forward_return"].values
+                        )
+                    else:
+                        ic_val, _ = stats.pearsonr(
+                            merged["factor_val"].values, merged["forward_return"].values
+                        )
+                except Exception:
+                    continue
+                if not np.isnan(ic_val):
+                    bucket[factor].append(float(ic_val))
+
+        feat_meta = {f["name"]: f for f in INTERACTION_FEATURES}
+        rows: list[dict] = []
+        for feature, ic_vals in bucket.items():
+            if not ic_vals:
+                continue
+            arr      = np.array(ic_vals)
+            mean_ic  = float(arr.mean())
+            std_ic   = float(arr.std()) if len(arr) > 1 else 0.0
+            icir     = mean_ic / std_ic if std_ic > 1e-9 else 0.0
+            hit_rate = float((arr > 0).mean())
+            t_stat   = (
+                mean_ic / (std_ic / np.sqrt(len(arr)))
+                if std_ic > 1e-9 and len(arr) > 1 else 0.0
+            )
+            tail_ic  = float(np.percentile(arr, 25)) if len(arr) >= 4 else mean_ic
+            stability = float((arr > 0).mean())
+            meta = feat_meta.get(feature, {})
+            rows.append({
+                "feature":         feature,
+                "label":           meta.get("label", "Baseline Momentum"),
+                "group":           meta.get("group", "baseline"),
+                "description":     meta.get("description", "Raw momentum_score (benchmark)"),
+                "mean_ic":         round(mean_ic, 4),
+                "icir":            round(icir, 3),
+                "hit_rate":        round(hit_rate, 3),
+                "t_stat":          round(t_stat, 3),
+                "tail_ic":         round(tail_ic, 4),
+                "stability_score": round(stability, 3),
+                "n_periods":       len(arr),
+            })
+
+        if not rows:
+            return pd.DataFrame()
+
+        result = pd.DataFrame(rows)
+        baseline    = result[result["feature"] == "momentum_score"]
+        engineered  = (
+            result[result["feature"] != "momentum_score"]
+            .sort_values("mean_ic", ascending=False)
+        )
+        return pd.concat([engineered, baseline], ignore_index=True)
+
+    def compute_conditional_ic_timeseries(
+        self,
+        horizon_days: int = 20,
+        ic_type: str = "spearman",
+    ) -> pd.DataFrame:
+        """
+        Per-snapshot-date IC for each conditional feature and baseline momentum_score.
+
+        Columns: [date, feature, ic]
+        """
+        from strategy.factor_interactions import (
+            add_interaction_features,
+            INTERACTION_FEATURE_NAMES,
+        )
+
+        dates_map    = self._load_dates_map()
+        sorted_dates = sorted(dates_map.keys())
+        if len(sorted_dates) < 2:
+            return pd.DataFrame()
+
+        min_days = max(1, int(horizon_days * (1 - self.max_horizon_slop_pct)))
+        max_days = int(horizon_days * (1 + self.max_horizon_slop_pct))
+        all_factors = ["momentum_score"] + INTERACTION_FEATURE_NAMES
+
+        rows: list[dict] = []
+        for i, t_date in enumerate(sorted_dates):
+            fwd_date: Optional[datetime.date] = None
+            best_diff = 9999
+            for fwd in sorted_dates[i + 1:]:
+                diff = (fwd - t_date).days
+                if diff < min_days:
+                    continue
+                if diff > max_days:
+                    break
+                if abs(diff - horizon_days) < best_diff:
+                    fwd_date = fwd
+                    best_diff = abs(diff - horizon_days)
+
+            if fwd_date is None:
+                continue
+
+            df_t   = dates_map[t_date].copy()
+            df_fwd = dates_map[fwd_date]
+            fr     = self._forward_returns(df_t, df_fwd)
+            if fr.empty or len(fr) < self.min_overlap:
+                continue
+
+            add_interaction_features(df_t)
+
+            for factor in all_factors:
+                if factor not in df_t.columns or "symbol" not in df_t.columns:
+                    continue
+                fv = pd.to_numeric(
+                    df_t.set_index("symbol")[factor], errors="coerce"
+                ).rename("factor_val")
+                merged = pd.DataFrame({"factor_val": fv, "forward_return": fr}).dropna()
+                if len(merged) < self.min_overlap:
+                    continue
+                try:
+                    if ic_type == "spearman":
+                        ic_val, _ = stats.spearmanr(
+                            merged["factor_val"].values, merged["forward_return"].values
+                        )
+                    else:
+                        ic_val, _ = stats.pearsonr(
+                            merged["factor_val"].values, merged["forward_return"].values
+                        )
+                except Exception:
+                    continue
+                if not np.isnan(ic_val):
+                    rows.append({
+                        "date":    t_date,
+                        "feature": factor,
+                        "ic":      round(float(ic_val), 4),
+                    })
+
+        return pd.DataFrame(rows)
+
     # ── Cumulative IC ─────────────────────────────────────────────────────────
 
     def compute_cumulative_ic(

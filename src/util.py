@@ -443,6 +443,24 @@ STABILITY_PARAMS: dict = {
 }
 
 # ---------------------------------------------------------------------------
+# Candidate selection — percentile/absolute mode + factor gates
+# ---------------------------------------------------------------------------
+
+_cs = _app.get("candidate_selection", {})
+CANDIDATE_SELECTION_PARAMS: dict = {
+    "mode":                             str(_cs.get("mode",                             "percentile")),
+    "top_percentile":                   float(_cs.get("top_percentile",                 0.15)),
+    "max_candidates":                   int(_cs.get("max_candidates",                   25)),
+    "min_candidates":                   int(_cs.get("min_candidates",                   5)),
+    "use_absolute_score_floor":         bool(_cs.get("use_absolute_score_floor",        True)),
+    "absolute_score_floor":             float(_cs.get("absolute_score_floor",           0.45)),
+    "min_quality_score":                float(_cs.get("min_quality_score",              0.30)),
+    "min_momentum_score":               float(_cs.get("min_momentum_score",            -0.10)),
+    "min_conditional_momentum_score":   float(_cs.get("min_conditional_momentum_score", 0.00)),
+    "allow_income_defensive_exception": bool(_cs.get("allow_income_defensive_exception",False)),
+}
+
+# ---------------------------------------------------------------------------
 # Optimizer tuning controls — frozen params and tighter bounds
 # ---------------------------------------------------------------------------
 
