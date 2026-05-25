@@ -512,7 +512,8 @@ def _process_whole_share_queue(
         # Re-run full risk checks — cash and sector exposure may have shifted
         # since the original buy attempt earlier in the same run.
         if holdings is not None:
-            available_cash = get_available_cash() * (1 - INDEX_PCT)
+            # ETF orders already committed — remaining cash is the stock budget; no multiplier.
+            available_cash = get_available_cash()
             ok, reason, _ = can_buy_symbol(
                 symbol, current_price, holdings, agg_df, portfolio_value, available_cash, sector_exposure
             )
@@ -807,11 +808,16 @@ def can_buy_symbol(
     portfolio_value: float,
     available_cash: float,
     sector_exposure: dict | None = None,
+    n_remaining_candidates: int | None = None,
 ) -> tuple[bool, str, float]:
     """
     Validate and adjust a proposed buy allocation against risk limits.
     Returns (approved, reason, adjusted_allocation).
     Reduces allocation to the maximum allowed rather than blocking outright when possible.
+
+    n_remaining_candidates: how many candidates (including this one) are still to be evaluated.
+    When only 1 candidate remains, the max_order_pct cap is raised to 1.0 so the full
+    stock budget deploys rather than leaving half sitting idle for the end-of-run sweep.
     """
     max_single    = RISK_LIMITS["max_single_position_pct"]
     max_sector    = RISK_LIMITS["max_sector_pct"]
@@ -827,12 +833,17 @@ def can_buy_symbol(
             if vol < min_volume:
                 return False, f"volume {vol:,.0f} < min {min_volume:,.0f}", 0.0
 
-    # Order size cap (fraction of available cash)
-    max_order = available_cash * max_order_pct
+    # Order size cap — raised to 1/n_remaining when few candidates remain so the stock
+    # budget is fully deployed rather than swept to ETFs by the end-of-run cash sweep.
+    if n_remaining_candidates and n_remaining_candidates > 0:
+        effective_order_pct = max(max_order_pct, 1.0 / n_remaining_candidates)
+    else:
+        effective_order_pct = max_order_pct
+    max_order = available_cash * effective_order_pct
     if allocation > max_order:
         logger.info(
-            f"{symbol}: order ${allocation:.2f} capped to {max_order_pct:.0%} of cash "
-            f"(${available_cash:.2f}) = ${max_order:.2f}"
+            f"{symbol}: order ${allocation:.2f} capped to {effective_order_pct:.0%} of cash "
+            f"(${available_cash:.2f}, {n_remaining_candidates} remaining) = ${max_order:.2f}"
         )
         allocation = max_order
 
@@ -1134,6 +1145,90 @@ def _etf_ma_sell_check(holdings: dict, sold: list[str]) -> None:
         logger.warning(f"ETF MA filter check failed: {e}")
 
 
+# ---------------------------------------------------------------------------
+# Decision outcome logging helpers (fire-and-forget — never crash the bot)
+# ---------------------------------------------------------------------------
+
+def _log_all_holding_decisions(
+    all_evaluated: dict,
+    sold: set,
+    held_on_sentiment: set,
+    regime: str,
+    bc_df,
+    agg_df,
+) -> None:
+    """Log every evaluated holding to decision_outcomes.parquet."""
+    try:
+        from portfolio.decision_logger import log_holding_decision
+    except Exception as exc:
+        logger.debug("decision_logger not available: %s", exc)
+        return
+
+    for symbol, info in all_evaluated.items():
+        try:
+            bc_row: dict | None = None
+            if bc_df is not None and not bc_df.empty and "symbol" in bc_df.columns:
+                match = bc_df[bc_df["symbol"] == symbol]
+                if not match.empty:
+                    bc_row = match.iloc[0].to_dict()
+
+            executed = symbol in sold
+            soft_held = symbol in held_on_sentiment
+
+            log_holding_decision(
+                symbol=symbol,
+                holding=info["data"],
+                metrics_row=info["metrics_row"],
+                raw_decision=info["decision"],
+                executed=executed,
+                order_id=None,
+                regime=regime,
+                buy_context_row=bc_row,
+                agg_df=agg_df,
+                soft_sell_held=soft_held,
+            )
+        except Exception as exc:
+            logger.debug("Outcome log failed for %s: %s", symbol, exc)
+
+
+def _log_candidate(
+    symbol: str,
+    row: "pd.Series",
+    state: str,
+    selected: bool,
+    skip_reason: str,
+    sentiment: dict | None,
+    risk_ok: bool,
+    risk_reason: str,
+    proposed_alloc: float,
+    final_alloc: float,
+    regime: str,
+    rank: int,
+    agg_df,
+) -> None:
+    """Fire-and-forget candidate logging."""
+    try:
+        from portfolio.decision_logger import log_candidate_decision
+        log_candidate_decision(
+            symbol=symbol,
+            row=row,
+            decision_state=state,
+            selected_bool=selected,
+            skipped_bool=not selected,
+            skip_reason=skip_reason,
+            sentiment_result_dict=sentiment,
+            risk_check_passed=risk_ok,
+            risk_check_fail_reason=risk_reason,
+            proposed_allocation=proposed_alloc,
+            final_allocation=final_alloc,
+            regime=regime,
+            candidate_rank=rank,
+            agg_df=agg_df,
+        )
+    except Exception as exc:
+        logger.debug("Candidate log failed for %s: %s", symbol, exc)
+
+
 def make_sales() -> list[str]:
     """
     Evaluate all holdings for sell conditions.
@@ -1177,9 +1272,18 @@ def make_sales() -> list[str]:
     if pending_sells:
         logger.info(f"Skipping {len(pending_sells)} symbol(s) with existing open sell orders: {sorted(pending_sells)}")
 
+    # Load buy context once for decision logging
+    try:
+        from portfolio.buy_context import load_buy_context
+        _bc_df = load_buy_context()
+    except Exception:
+        _bc_df = None
+
     scanned    = 0
     hard_sells: dict[str, dict] = {}
     soft_sells: dict[str, dict] = {}
+    # Track all evaluated holdings for outcome logging (symbol → {data, metrics_row, decision})
+    _all_evaluated: dict[str, dict] = {}
 
     for symbol, data in holdings.items():
         if symbol in ETFS:
@@ -1198,6 +1302,12 @@ def make_sales() -> list[str]:
                 metrics_row = row.iloc[0]
 
         decision = evaluate_sell_candidate(symbol, data, metrics_row, peak_price=peaks.get(symbol))
+
+        _all_evaluated[symbol] = {
+            "data": data,
+            "metrics_row": metrics_row,
+            "decision": decision,
+        }
 
         if not decision["should_sell"]:
             continue
@@ -1298,6 +1408,16 @@ def make_sales() -> list[str]:
         for sym in sold:
             peaks.pop(sym, None)
         _save_peak_prices(peaks)
+
+    # ── Log all holding decisions to outcome tracker ──────────────────────────
+    _log_all_holding_decisions(
+        all_evaluated=_all_evaluated,
+        sold=set(sold),
+        held_on_sentiment=held_on_sentiment,
+        regime=get_market_regime(),
+        bc_df=_bc_df,
+        agg_df=agg_df,
+    )
 
     logger.info(
         f"Sell summary: {scanned} scanned | "
@@ -1507,16 +1627,30 @@ def make_buys(df: pd.DataFrame, is_first_iteration: bool = True, regime: str = "
     allow_ws_fallback = RISK_LIMITS["allow_whole_share_fallback"]
     total_value = candidates["value_metric"].sum()
     buys_made = 0
+    _cand_rank = 0  # 1-based ranking within this run's candidate set
+    # Track deployed stock cash against pre-computed stock_amount so ETF orders committing
+    # mid-run don't cause get_available_cash() * (1-index_pct) to double-discount the budget.
+    stock_deployed = 0.0
 
     for _, row in candidates.iterrows():
+        _cand_rank += 1
+
         if buys_made >= effective_max_buys:
             logger.info(f"Reached max_buys limit ({effective_max_buys}) for regime={regime} — stopping")
             remaining_syms = [r["symbol"] for _, r in candidates.iterrows()
                               if r["symbol"] not in purchased + skipped + failed]
+            for _sym in remaining_syms:
+                _log_candidate(_sym, row, "SKIP", False, "max_buys_limit",
+                               None, True, "", 0.0, 0.0, regime, _cand_rank, agg_df)
             skipped.extend(remaining_syms)
             break
 
         symbol = row["symbol"]
+        _sent_result = sentiment_results.get(symbol) if sentiment_results else None
+        remaining_stock = max(0.0, stock_amount - stock_deployed)
+        _raw_alloc = (row["value_metric"] / total_value) * remaining_stock if total_value else 0
+        _min_floor = stock_amount * RISK_LIMITS["min_candidate_allocation_pct"]
+        alloc = min(max(_raw_alloc, _min_floor), remaining_stock)
 
         if sentiment_results:
             result = sentiment_results.get(
@@ -1529,20 +1663,31 @@ def make_buys(df: pd.DataFrame, is_first_iteration: bool = True, regime: str = "
             )
             if result.get("action") != "BUY" or result["confidence"] < CONFIDENCE_THRESHOLD:
                 logger.info(f"Skipping {symbol}")
+                _log_candidate(symbol, row, "SKIP", False, "sentiment_gate",
+                               _sent_result, True, "", alloc, 0.0, regime, _cand_rank, agg_df)
                 skipped.append(symbol)
                 continue
 
-        cash = get_available_cash() * (1 - effective_index_pct)
+        cash = max(0.0, stock_amount - stock_deployed)
         if cash < RISK_LIMITS["min_order_amount"]:
-            logger.info(f"Cash ${cash:.2f} below min order ${RISK_LIMITS['min_order_amount']:.2f} — exiting buy loop")
+            logger.info(f"Stock budget ${cash:.2f} below min order ${RISK_LIMITS['min_order_amount']:.2f} — exiting buy loop")
             break
 
         alloc = (row["value_metric"] / total_value) * cash if total_value else 0
+        # Floor: each winning candidate gets at least min_candidate_allocation_pct of the
+        # total stock budget, so small-scoring stocks still get meaningful position sizes.
+        min_alloc_floor = stock_amount * RISK_LIMITS["min_candidate_allocation_pct"]
+        alloc = min(max(alloc, min_alloc_floor), cash)
+
+        n_remaining = len(candidates) - (_cand_rank - 1)
         ok, reason, adj_alloc = can_buy_symbol(
-            symbol, alloc, holdings, agg_df, portfolio_value, cash, sector_exposure
+            symbol, alloc, holdings, agg_df, portfolio_value, cash, sector_exposure,
+            n_remaining_candidates=n_remaining,
         )
         if not ok:
             logger.info(f"Skipping {symbol}: {reason}")
+            _log_candidate(symbol, row, "SKIP", False, reason,
+                           _sent_result, False, reason, alloc, 0.0, regime, _cand_rank, agg_df)
             skipped.append(symbol)
             continue
 
@@ -1550,6 +1695,8 @@ def make_buys(df: pd.DataFrame, is_first_iteration: bool = True, regime: str = "
         if wash_warning:
             if DIVIDEND_PARAMS.get("block_rebuy_on_wash_sale_risk"):
                 logger.warning(f"Blocking buy {symbol} — {wash_warning}")
+                _log_candidate(symbol, row, "SKIP", False, f"wash_sale: {wash_warning}",
+                               _sent_result, True, wash_warning, alloc, 0.0, regime, _cand_rank, agg_df)
                 skipped.append(symbol)
                 continue
             logger.warning(f"TAX WARNING — {wash_warning}")
@@ -1562,24 +1709,36 @@ def make_buys(df: pd.DataFrame, is_first_iteration: bool = True, regime: str = "
                 if ok_frac:
                     purchased.append(symbol)
                     buys_made += 1
+                    stock_deployed += adj_alloc
                     _record_buy(symbol)
                     _update_local_exposures_after_buy(symbol, adj_alloc, agg_df, sector_exposure)
+                    _log_candidate(symbol, row, "BUY", True, "",
+                                   _sent_result, True, "", alloc, adj_alloc, regime, _cand_rank, agg_df)
                     time.sleep(0.5)
                 elif allow_ws_fallback:
                     logger.warning(f"{symbol}: fractional failed ({detail}) — queued for whole-share fallback")
                     whole_share_queue.append((symbol, adj_alloc))
                 else:
                     logger.warning(f"{symbol}: fractional failed ({detail}) — skipping")
+                    _log_candidate(symbol, row, "SKIP", False, f"fractional_failed: {detail}",
+                                   _sent_result, True, detail, alloc, 0.0, regime, _cand_rank, agg_df)
                     failed.append(symbol)
         except Exception as e:
             logger.error(f"Order failed for {symbol}: {e}")
+            _log_candidate(symbol, row, "SKIP", False, f"order_exception: {e}",
+                           _sent_result, True, str(e), alloc, 0.0, regime, _cand_rank, agg_df)
             failed.append(symbol)
 
     if whole_share_queue:
+        ws_purchased_before = len(purchased)
         _process_whole_share_queue(
             whole_share_queue, agg_df, sector_exposure, purchased, failed, skipped,
             holdings, portfolio_value,
         )
+        # Approximate deployment tracking for whole-share fallbacks
+        for sym in purchased[ws_purchased_before:]:
+            ws_alloc = next((a for s, a in whole_share_queue if s == sym), 0.0)
+            stock_deployed += ws_alloc
 
     logger.info(
         f"Buy summary: {len(purchased)} bought, {len(skipped)} skipped, {len(failed)} failed"

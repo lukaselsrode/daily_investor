@@ -153,7 +153,7 @@ def render() -> None:
             ])
             chart = (
                 alt.Chart(comp_df)
-                .mark_bar(opacity=0.6, binStep=0.05)
+                .mark_bar(opacity=0.6)
                 .encode(
                     alt.X("score:Q", bin=alt.Bin(step=0.05), title=friendly.get(sel_f, sel_f)),
                     alt.Y("count()", title="Count"),

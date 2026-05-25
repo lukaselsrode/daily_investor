@@ -28,7 +28,7 @@ import pandas as pd
 def _load_calibration():
     try:
         from research.decision_calibration import compute_calibration
-        return compute_calibration()
+        return compute_calibration(), None
     except Exception as exc:
         return None, str(exc)
 
@@ -220,6 +220,50 @@ def _render_raw_outcomes() -> None:
     st.dataframe(df[show_cols].tail(200), use_container_width=True)
 
 
+def _render_by_group(result, attr: str, label: str, group_col: str) -> None:
+    st.subheader(f"Returns by {label}")
+    st.caption(
+        f"Mean 30-day forward return grouped by {group_col}. "
+        "Reveals which exit drivers and regimes produce better/worse outcomes."
+    )
+    df = getattr(result, attr, None)
+    if df is None or df.empty:
+        st.info(f"Not enough data to break down by {label.lower()} yet.")
+        return
+
+    import plotly.graph_objects as go
+
+    display = df.copy()
+    if "mean_30d_return" in display.columns:
+        colors = ["#e74c3c" if v < 0 else "#27ae60" for v in display["mean_30d_return"]]
+        fig = go.Figure(go.Bar(
+            x=display[group_col].astype(str),
+            y=(display["mean_30d_return"] * 100).round(2),
+            marker_color=colors,
+            text=[f"n={int(n)}" for n in display["n"]],
+            textposition="outside",
+        ))
+        fig.update_layout(
+            title=f"Mean 30-Day Return by {label}",
+            yaxis_title="Mean 30d Return (%)",
+            xaxis_title=label,
+            height=380,
+            margin=dict(t=40, b=80),
+            yaxis=dict(tickformat=".1f", ticksuffix="%"),
+        )
+        st.plotly_chart(fig, use_container_width=True, key=f"by_group_{attr}")
+
+    table = display.copy()
+    table.columns = [c.replace("_", " ").title() for c in table.columns]
+    if "Mean 30D Return" in table.columns:
+        table["Mean 30D Return"] = table["Mean 30D Return"].apply(lambda x: f"{x:+.1%}" if pd.notna(x) else "—")
+    if "Pct Positive" in table.columns:
+        table["Pct Positive"] = table["Pct Positive"].apply(lambda x: f"{x:.0%}" if pd.notna(x) else "—")
+    if "Pct Negative" in table.columns:
+        table["Pct Negative"] = table["Pct Negative"].apply(lambda x: f"{x:.0%}" if pd.notna(x) else "—")
+    st.dataframe(table, use_container_width=True)
+
+
 def _render_apply_calibration(result) -> None:
     st.subheader("Apply Calibration")
     st.caption(
@@ -264,9 +308,9 @@ def render() -> None:
         "factor scores and weights are never modified here."
     )
 
-    result = _load_calibration()
+    result, load_err = _load_calibration()
     if result is None:
-        st.error("Could not load calibration data.")
+        st.error(f"Could not load calibration data: {load_err}")
         return
 
     if result.n_total == 0:
@@ -277,11 +321,25 @@ def render() -> None:
         )
         return
 
+    if result.n_with_outcomes == 0 and result.n_total > 0:
+        st.info(
+            f"**{result.n_total:,} decisions recorded** — but none have realized 30-day returns yet. "
+            "This is expected: the bot only started logging recently. "
+            "Calibration metrics will appear once 30+ days have elapsed. "
+            "\n\n"
+            "**To populate returns early** (7-day window): run `daily-investor update-outcomes` "
+            "7+ days after the first recorded decision. The command downloads current prices "
+            "and backfills `future_7d_return` through `future_90d_return` for any records "
+            "whose horizon has elapsed — it never modifies live factor scores."
+        )
+
     tabs = st.tabs([
         "📊 Accuracy Summary",
         "📋 By State",
         "🔀 Confusion Matrix",
         "📈 Confidence Calibration",
+        "🎯 By Exit Driver",
+        "🌡️ By Regime",
         "⚙️ Calibration State",
         "🗂️ Raw Log",
     ])
@@ -301,7 +359,13 @@ def render() -> None:
         _render_calibration_curve(result)
 
     with tabs[4]:
-        _render_calibration_state()
+        _render_by_group(result, "by_exit_driver", "Exit Driver", "primary_exit_driver")
 
     with tabs[5]:
+        _render_by_group(result, "by_regime", "Regime", "regime")
+
+    with tabs[6]:
+        _render_calibration_state()
+
+    with tabs[7]:
         _render_raw_outcomes()

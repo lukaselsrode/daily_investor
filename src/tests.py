@@ -850,6 +850,246 @@ def test_llm_merge_skips_forbidden_params():
 
 
 # ---------------------------------------------------------------------------
+# Outcome tracker tests
+# ---------------------------------------------------------------------------
+
+try:
+    import tempfile, pathlib
+    from portfolio.outcome_tracker import (
+        record_decision_holding,
+        record_decision_candidate,
+        load_outcomes,
+        fill_future_returns,
+        _outcomes_path,
+    )
+    _HAS_TRACKER = True
+except Exception as _e:
+    print(f"Warning: could not import outcome_tracker ({_e}) — tracker tests will be skipped")
+    _HAS_TRACKER = False
+
+
+def _with_tmp_parquet(fn):
+    """Run fn() with decision_outcomes.parquet redirected to a temp file."""
+    import portfolio.outcome_tracker as _ot
+    orig = _ot._outcomes_path
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = pathlib.Path(tmp) / "decision_outcomes.parquet"
+        _ot._outcomes_path = lambda: tmp_path  # type: ignore[assignment]
+        try:
+            fn(tmp_path)
+        finally:
+            _ot._outcomes_path = orig  # type: ignore[assignment]
+
+
+def test_record_holding_hold_is_logged():
+    if not _HAS_TRACKER:
+        return
+    def _run(path):
+        record_decision_holding(
+            symbol="HOLD_TEST", decision_state="HOLD",
+            raw_signal="HOLD", final_action="HOLD", executed_bool=False,
+            current_value_metric=0.8, regime="bullish",
+        )
+        df = pd.read_parquet(path)
+        _assert(len(df) == 1, f"expected 1 row, got {len(df)}")
+        _assert(df.iloc[0]["decision_state"] == "HOLD")
+        _assert(df.iloc[0]["symbol"] == "HOLD_TEST")
+        _assert(df.iloc[0]["executed_bool"] == False)
+    _with_tmp_parquet(_run)
+
+
+def test_record_holding_exit_is_logged():
+    if not _HAS_TRACKER:
+        return
+    def _run(path):
+        record_decision_holding(
+            symbol="EXIT_TEST", decision_state="EXIT",
+            raw_signal="EXIT", final_action="EXIT", executed_bool=True,
+            current_value_metric=0.3, percent_change=-0.25, regime="bearish",
+        )
+        df = pd.read_parquet(path)
+        _assert(df.iloc[0]["decision_state"] == "EXIT")
+        _assert(df.iloc[0]["executed_bool"] == True)
+    _with_tmp_parquet(_run)
+
+
+def test_record_holding_multiple_states():
+    """HOLD, WATCH, REVIEW, TRIM, EXIT all produce separate rows."""
+    if not _HAS_TRACKER:
+        return
+    def _run(path):
+        for state in ("HOLD", "WATCH", "REVIEW", "TRIM", "EXIT"):
+            record_decision_holding(
+                symbol=f"{state}_SYM", decision_state=state,
+                raw_signal=state, final_action=state, executed_bool=state == "EXIT",
+            )
+        df = pd.read_parquet(path)
+        _assert(len(df) == 5, f"expected 5 rows, got {len(df)}")
+        logged_states = set(df["decision_state"].tolist())
+        _assert(logged_states == {"HOLD", "WATCH", "REVIEW", "TRIM", "EXIT"})
+    _with_tmp_parquet(_run)
+
+
+def test_record_candidate_buy_is_logged():
+    if not _HAS_TRACKER:
+        return
+    def _run(path):
+        record_decision_candidate(
+            symbol="CAND_BUY", decision_state="BUY",
+            selected_bool=True, skipped_bool=False,
+            current_value_metric=0.9, regime="bullish",
+            proposed_allocation=500.0, final_allocation=480.0,
+        )
+        df = pd.read_parquet(path)
+        _assert(len(df) == 1)
+        _assert(df.iloc[0]["decision_state"] == "BUY")
+        _assert(df.iloc[0]["selected_bool"] == True)
+        _assert(df.iloc[0]["record_type"] == "candidate")
+    _with_tmp_parquet(_run)
+
+
+def test_record_candidate_skip_is_logged():
+    if not _HAS_TRACKER:
+        return
+    def _run(path):
+        record_decision_candidate(
+            symbol="CAND_SKIP", decision_state="SKIP",
+            selected_bool=False, skipped_bool=True,
+            skip_reason="sentiment_gate", regime="neutral",
+        )
+        df = pd.read_parquet(path)
+        row = df.iloc[0]
+        _assert(row["decision_state"] == "SKIP")
+        _assert(row["skip_reason"] == "sentiment_gate")
+        _assert(row["executed_bool"] == False)
+    _with_tmp_parquet(_run)
+
+
+def test_parquet_append_accumulates_rows():
+    """Each call appends a new row; no rows are silently dropped."""
+    if not _HAS_TRACKER:
+        return
+    def _run(path):
+        for i in range(5):
+            record_decision_holding(
+                symbol=f"SYM_{i}", decision_state="HOLD",
+                raw_signal="HOLD", final_action="HOLD", executed_bool=False,
+            )
+        df = pd.read_parquet(path)
+        _assert(len(df) == 5, f"expected 5 rows after 5 appends, got {len(df)}")
+    _with_tmp_parquet(_run)
+
+
+def test_duplicate_same_symbol_timestamp_state_deduped():
+    """Two identical (symbol, timestamp, state) calls produce only one row."""
+    if not _HAS_TRACKER:
+        return
+    def _run(path):
+        fixed_ts = "2026-01-01T00:00:00+00:00"
+        record_decision_holding(
+            symbol="DUPE_SYM", decision_state="HOLD",
+            raw_signal="HOLD", final_action="HOLD", executed_bool=False,
+            timestamp=fixed_ts,
+        )
+        record_decision_holding(
+            symbol="DUPE_SYM", decision_state="HOLD",
+            raw_signal="HOLD", final_action="HOLD", executed_bool=False,
+            timestamp=fixed_ts,
+        )
+        df = pd.read_parquet(path)
+        _assert(len(df) == 1, f"expected 1 row after dedup, got {len(df)}")
+    _with_tmp_parquet(_run)
+
+
+def test_fill_future_returns_respects_horizon():
+    """fill_future_returns must NOT fill a 30d return if only 5 days have elapsed."""
+    if not _HAS_TRACKER:
+        return
+    def _run(path):
+        import datetime, portfolio.outcome_tracker as _ot
+
+        # Inject a decision from 5 days ago
+        recent_date = (datetime.date.today() - datetime.timedelta(days=5)).isoformat()
+        record_decision_holding(
+            symbol="RECENT", decision_state="EXIT",
+            raw_signal="EXIT", final_action="EXIT", executed_bool=True,
+            price=100.0,
+        )
+        # Patch decision_date on the row to be 5 days ago
+        df = pd.read_parquet(path)
+        df.at[0, "decision_date"] = recent_date
+        df.to_parquet(path, index=False)
+
+        n = fill_future_returns(current_prices={"RECENT": 105.0})
+        df2 = pd.read_parquet(path)
+
+        # 7d not elapsed → future_7d_return must still be null
+        _assert(
+            pd.isna(df2.at[0, "future_7d_return"]),
+            "future_7d_return should be null when only 5 days have elapsed",
+        )
+    _with_tmp_parquet(_run)
+
+
+def test_fill_future_returns_fills_elapsed_horizon():
+    """fill_future_returns fills return when enough time has passed."""
+    if not _HAS_TRACKER:
+        return
+    def _run(path):
+        import datetime, portfolio.outcome_tracker as _ot
+
+        old_date = (datetime.date.today() - datetime.timedelta(days=40)).isoformat()
+        record_decision_holding(
+            symbol="OLD_SYM", decision_state="EXIT",
+            raw_signal="EXIT", final_action="EXIT", executed_bool=True,
+            price=100.0,
+        )
+        df = pd.read_parquet(path)
+        df.at[0, "decision_date"] = old_date
+        df.at[0, "price"] = 100.0
+        df.to_parquet(path, index=False)
+
+        n = fill_future_returns(current_prices={"OLD_SYM": 110.0})
+        df2 = pd.read_parquet(path)
+
+        # 30d elapsed → should be filled
+        r30 = df2.at[0, "future_30d_return"]
+        _assert(r30 is not None and not pd.isna(r30), "future_30d_return should be filled")
+        _assert(abs(r30 - 0.10) < 1e-4, f"expected +10%, got {r30}")
+    _with_tmp_parquet(_run)
+
+
+def test_update_outcomes_does_not_touch_live_decisions():
+    """
+    fill_future_returns only fills future_Xd_return columns.
+    It must NOT modify decision_state, final_action, or any factor score column.
+    """
+    if not _HAS_TRACKER:
+        return
+    def _run(path):
+        import datetime
+        old_date = (datetime.date.today() - datetime.timedelta(days=40)).isoformat()
+        record_decision_holding(
+            symbol="SAFE_SYM", decision_state="HOLD",
+            raw_signal="HOLD", final_action="HOLD", executed_bool=False,
+            price=50.0, value_score=0.7, momentum_score=0.4,
+        )
+        df = pd.read_parquet(path)
+        df.at[0, "decision_date"] = old_date
+        df.to_parquet(path, index=False)
+
+        fill_future_returns(current_prices={"SAFE_SYM": 55.0})
+        df2 = pd.read_parquet(path)
+
+        _assert(df2.at[0, "decision_state"] == "HOLD", "decision_state must not change")
+        _assert(df2.at[0, "final_action"] == "HOLD", "final_action must not change")
+        _assert(abs(float(df2.at[0, "value_score"]) - 0.7) < 1e-6, "value_score must not change")
+        _assert(abs(float(df2.at[0, "momentum_score"]) - 0.4) < 1e-6, "momentum_score must not change")
+    _with_tmp_parquet(_run)
+
+
+# ---------------------------------------------------------------------------
 # Test runner
 # ---------------------------------------------------------------------------
 
@@ -917,6 +1157,17 @@ _ALL_TESTS = [
     test_llm_review_accepts_valid_response,
     test_llm_merge_applies_alpha_params,
     test_llm_merge_skips_forbidden_params,
+    # outcome tracker
+    test_record_holding_hold_is_logged,
+    test_record_holding_exit_is_logged,
+    test_record_holding_multiple_states,
+    test_record_candidate_buy_is_logged,
+    test_record_candidate_skip_is_logged,
+    test_parquet_append_accumulates_rows,
+    test_duplicate_same_symbol_timestamp_state_deduped,
+    test_fill_future_returns_respects_horizon,
+    test_fill_future_returns_fills_elapsed_horizon,
+    test_update_outcomes_does_not_touch_live_decisions,
 ]
 
 

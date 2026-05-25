@@ -172,3 +172,83 @@ def cmd_report(output_dir: str = "reports") -> None:
     result = engine.run(n_days=90)
     print(result)
     print(f"\nFor full diagnostics, run: stability-scan --output-dir {output_dir}")
+
+
+def cmd_update_outcomes() -> None:
+    """
+    Backfill future return outcomes for past decisions in decision_outcomes.parquet.
+
+    Fetches current prices + SPY price history via yfinance, then fills:
+      future_7d_return / future_30d_return / future_90d_return
+      future_7d_vs_spy / future_30d_vs_spy / future_90d_vs_spy
+      outperformed_hold / premature_exit / bad_hold / good_trim / good_exit
+
+    Only fills rows where enough calendar time has elapsed.
+    NEVER modifies live factor weights or decision logic.
+    """
+    import datetime
+    import logging
+
+    import pandas as pd
+    import yfinance as yf
+
+    from portfolio.outcome_tracker import load_outcomes, fill_future_returns
+
+    log = logging.getLogger(__name__)
+    log.info("=== update-outcomes: backfilling realized outcomes ===")
+
+    df = load_outcomes()
+    if df.empty:
+        print("No decision outcomes recorded yet. Run the bot first.")
+        return
+
+    # Collect unique symbols that need outcome backfill
+    sym_col = "symbol" if "symbol" in df.columns else "ticker"
+    symbols = [s for s in df[sym_col].dropna().unique() if str(s).strip()]
+    if not symbols:
+        print("No symbols found in outcome log.")
+        return
+
+    # Add SPY for benchmark comparison
+    fetch_syms = sorted(set(symbols) | {"SPY"})
+    print(f"Fetching prices for {len(fetch_syms)} symbols...")
+
+    # Download last 120 days of history to cover all horizons
+    today = datetime.date.today()
+    start = (today - datetime.timedelta(days=125)).isoformat()
+    try:
+        hist = yf.download(fetch_syms, start=start, auto_adjust=True, progress=False)
+        close = hist["Close"] if "Close" in hist.columns else hist
+    except Exception as exc:
+        print(f"Price download failed: {exc}")
+        return
+
+    current_prices: dict[str, float] = {}
+    spy_price_history: dict[str, float] = {}
+    spy_current_price: float | None = None
+
+    for sym in fetch_syms:
+        try:
+            col = close[sym] if sym in close.columns else None
+            if col is None or col.dropna().empty:
+                continue
+            current_prices[sym] = float(col.dropna().iloc[-1])
+        except Exception:
+            continue
+
+    # Build SPY daily history dict for VS-SPY computation
+    if "SPY" in close.columns:
+        spy_series = close["SPY"].dropna()
+        spy_current_price = float(spy_series.iloc[-1])
+        for ts, px in spy_series.items():
+            date_str = str(ts)[:10]   # YYYY-MM-DD
+            spy_price_history[date_str] = float(px)
+
+    n_updated = fill_future_returns(
+        current_prices=current_prices,
+        spy_current_price=spy_current_price,
+        spy_price_history=spy_price_history,
+    )
+
+    print(f"update-outcomes complete: {n_updated} outcome cells filled across {len(df)} recorded decisions.")
+    log.info("update-outcomes: %d cells updated", n_updated)

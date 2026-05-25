@@ -38,6 +38,7 @@ def main(argv: list[str] | None = None) -> None:
         cmd_run,
         cmd_stability_scan,
         cmd_tune,
+        cmd_update_outcomes,
     )
 
     if cmd == "fetch-data":
@@ -80,6 +81,9 @@ def main(argv: list[str] | None = None) -> None:
         out_dir = _flag_value(rest, "--output-dir") or "reports"
         cmd_report(output_dir=out_dir)
 
+    elif cmd == "update-outcomes":
+        cmd_update_outcomes()
+
     else:
         print(f"Unknown command: {cmd!r}")
         _print_help()
@@ -108,6 +112,7 @@ COMMANDS
   auto-tune [DAYS]         Dual-objective tune with walk-forward validation (default: 90d)
   stability-scan           Parameter stability scan (research only, no writes)
   report                   Generate diagnostics report
+  update-outcomes          Backfill future returns for past decisions (calibration only)
 
 OPTIONS (run)
   --skip-data              Reuse existing CSV data

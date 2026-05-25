@@ -141,6 +141,7 @@ RISK_LIMITS: dict = {
     "max_whole_share_buys_per_run":         int(_rl.get("max_whole_share_buys_per_run",           3)),
     "max_whole_share_allocation_multiplier":float(_rl.get("max_whole_share_allocation_multiplier",1.5)),
     "min_index_pct":                        float(_rl.get("min_index_pct",                        0.60)),
+    "min_candidate_allocation_pct":         float(_rl.get("min_candidate_allocation_pct",         0.10)),
 }
 
 # ---------------------------------------------------------------------------

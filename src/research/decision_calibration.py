@@ -59,7 +59,9 @@ class CalibrationResult:
     suggested_review_confidence_threshold: float  # default 0.50
 
     # Raw DataFrames for UI display
-    by_state: Optional[pd.DataFrame] = None     # accuracy broken down by state
+    by_state: Optional[pd.DataFrame] = None         # accuracy broken down by state
+    by_exit_driver: Optional[pd.DataFrame] = None   # returns by primary_exit_driver
+    by_regime: Optional[pd.DataFrame] = None        # returns by regime
     confusion_matrix: Optional[pd.DataFrame] = None
     calibration_curve: Optional[pd.DataFrame] = None  # confidence vs actual accuracy
 
@@ -199,6 +201,12 @@ def compute_calibration(min_outcomes: int = _MIN_SAMPLE) -> CalibrationResult:
         })
     by_state = pd.DataFrame(by_state_rows) if by_state_rows else None
 
+    # ── By exit driver ────────────────────────────────────────────────────────
+    by_exit_driver = _compute_by_group(has_30d, "primary_exit_driver")
+
+    # ── By regime ─────────────────────────────────────────────────────────────
+    by_regime = _compute_by_group(has_30d, "regime")
+
     # ── Calibration curve — confidence bin vs actual accuracy ────────────────
     calibration_curve = _compute_calibration_curve(has_30d)
 
@@ -218,6 +226,8 @@ def compute_calibration(min_outcomes: int = _MIN_SAMPLE) -> CalibrationResult:
         suggested_premature_exit_threshold=suggested_pet,
         suggested_review_confidence_threshold=suggested_rct,
         by_state=by_state,
+        by_exit_driver=by_exit_driver,
+        by_regime=by_regime,
         confusion_matrix=_compute_confusion_matrix(has_30d),
         calibration_curve=calibration_curve,
     )
@@ -265,6 +275,34 @@ def _suggest_review_confidence_threshold(review_precision: float) -> float:
 # ---------------------------------------------------------------------------
 # Confusion matrix and calibration curve
 # ---------------------------------------------------------------------------
+
+def _compute_by_group(df: pd.DataFrame, group_col: str) -> Optional[pd.DataFrame]:
+    """
+    Return mean 30d return and % positive/negative broken down by group_col.
+    Used for by_exit_driver and by_regime reports.
+    """
+    if df.empty or group_col not in df.columns:
+        return None
+    try:
+        rows = []
+        for grp_val, grp in df.groupby(group_col):
+            if not grp_val or str(grp_val).strip() in ("", "nan", "None"):
+                continue
+            r30 = pd.to_numeric(grp["future_30d_return"], errors="coerce").dropna()
+            if r30.empty:
+                continue
+            rows.append({
+                group_col:           grp_val,
+                "n":                 len(r30),
+                "mean_30d_return":   round(float(r30.mean()), 4),
+                "pct_positive":      round(float((r30 > 0).mean()), 4),
+                "pct_negative":      round(float((r30 < 0).mean()), 4),
+            })
+        rows.sort(key=lambda x: x["mean_30d_return"])
+        return pd.DataFrame(rows) if rows else None
+    except Exception:
+        return None
+
 
 def _compute_confusion_matrix(df: pd.DataFrame) -> Optional[pd.DataFrame]:
     """
