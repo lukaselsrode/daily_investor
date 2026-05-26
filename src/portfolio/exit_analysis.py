@@ -13,7 +13,7 @@ This module is purely analytical. It never places orders or modifies the sell en
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import pandas as pd

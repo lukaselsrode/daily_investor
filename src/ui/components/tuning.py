@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from ui.utils import BACKTEST_MODES, LOOKAHEAD_LABELS, load_config_raw, ui_config
+from ui.utils import BACKTEST_MODES, LOOKAHEAD_LABELS, ui_config
 
 
 def render() -> None:
@@ -15,9 +15,6 @@ def render() -> None:
     st.caption("Optimize parameters via scipy differential evolution. Validation-gated before any config write.")
 
     ui_cfg = ui_config()
-    cfg = load_config_raw()
-    bt_cfg = cfg.get("backtest", {})
-
     allow_write = ui_cfg.get("allow_config_writes", False)
     allow_force = ui_cfg.get("allow_force_apply", False)
 
@@ -136,7 +133,7 @@ def render() -> None:
     else:  # auto
         # Validation status
         if result.validation_passed:
-            st.success(f"✅ Validation PASSED" + (" — config written" if result.config_written else ""))
+            st.success("✅ Validation PASSED" + (" — config written" if result.config_written else ""))
         else:
             st.error(f"❌ Validation FAILED: {'; '.join(result.validation_reasons)}")
 

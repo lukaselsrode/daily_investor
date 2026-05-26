@@ -206,7 +206,6 @@ def render() -> None:
     if not scatter_df.empty:
         try:
             import plotly.express as px
-            import plotly.graph_objects as go
 
             fig = px.scatter(
                 scatter_df, x=fa, y=fb,
@@ -275,7 +274,6 @@ def render() -> None:
                                format_func=lambda c: _FACTOR_LABELS.get(c, c))
 
     resid_series, r2_show, slope_show = _ols_residualize(df[resid_y], df[resid_x])
-    resid_col = f"{resid_y}_orth_{resid_x[:3]}"
 
     if resid_series.dropna().empty:
         st.warning("Not enough data to residualize.")
@@ -340,7 +338,6 @@ def render() -> None:
 
     if "value_score" in df.columns and "momentum_score" in df.columns and "value_metric" in df.columns:
         cfg = load_config_raw()
-        thresh  = float(cfg.get("metric_threshold", 0.75))
         sw      = cfg.get("score_weights", {})
         w_val   = float(sw.get("value", 0.08))
         w_qual  = float(sw.get("quality", 0.50))
@@ -383,7 +380,7 @@ def render() -> None:
         sc4.metric("Dropped",     len(removed))
 
         st.metric(
-            f"Value⊥Momentum shared variance (R²)",
+            "Value⊥Momentum shared variance (R²)",
             f"{r2_vm:.1%}" if not np.isnan(r2_vm) else "—",
             help="How much of value_score is explained by momentum_score. "
                  "High R² means the residualization changes rankings significantly."

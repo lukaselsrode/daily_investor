@@ -36,7 +36,6 @@ def render_sidebar() -> str:
 def _render_status_panel() -> None:
     """Lightweight status strip — no heavy computation."""
     from ui.utils import load_latest_csv, load_config_raw, latest_csv_path, DATA_DIR
-    import pandas as pd
 
     # Data freshness
     snap_path = latest_csv_path("agg_data")

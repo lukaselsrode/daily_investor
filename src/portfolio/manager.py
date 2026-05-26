@@ -39,7 +39,6 @@ from util import (
     RISK_LIMITS,
     SELL_SENTIMENT_OVERRIDE_CONFIDENCE,
     USE_SENTIMENT_ANALYSIS,
-    WEEKLY_INVESTMENT,
     read_data_as_pd,
     safe_float,
     store_data_as_csv,

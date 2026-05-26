@@ -24,12 +24,9 @@ Backward compatibility:
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
-import numpy as np
 import pandas as pd
 
-from .base import ScoreBreakdown, ScorerBase
 
 logger = logging.getLogger(__name__)
 
@@ -46,25 +43,6 @@ def winsorize_series(s: pd.Series, lo_pct: float = 0.05, hi_pct: float = 0.95) -
     lo = float(finite.quantile(lo_pct))
     hi = float(finite.quantile(hi_pct))
     return s.clip(lo, hi)
-
-
-def robust_zscore(s: pd.Series) -> pd.Series:
-    """
-    Robust z-score using median and MAD instead of mean / std.
-
-    Scale factor 1.4826 makes the result consistent with standard normal
-    z-scores when the underlying distribution is Gaussian.
-    NaN → 0.0 (neutral).
-    """
-    finite = s.dropna()
-    if len(finite) < 2:
-        return pd.Series(0.0, index=s.index)
-    med = float(finite.median())
-    mad = float((finite - med).abs().median())
-    if mad < 1e-9:
-        mad = float(finite.std()) or 1.0
-    result = (s - med) / (1.4826 * mad)
-    return result.fillna(0.0)
 
 
 def sector_relative_percentile(
@@ -234,48 +212,3 @@ def apply_cross_sectional_value_v2(df: pd.DataFrame) -> None:
     )
 
 
-# ---------------------------------------------------------------------------
-# Scorer class (single-stock interface for diagnostic / testing use)
-# ---------------------------------------------------------------------------
-
-class ValueEngineV2(ScorerBase):
-    """
-    Sector-relative value scorer.
-
-    Single-stock score() uses the legacy ratio-based approach (sector context
-    is unavailable for a single row).  Full cross-sectional normalization is
-    only available through apply_cross_sectional() which requires the whole
-    universe DataFrame.
-    """
-
-    def score(self, features: dict) -> float:
-        from strategy.value import compute_value_components
-        _, _, value_score, _ = compute_value_components(
-            features.get("pe_ratio"),
-            features.get("pb_ratio"),
-            features.get("sector") or "",
-            features.get("industry") or "",
-        )
-        return value_score
-
-    def apply_cross_sectional(self, df: pd.DataFrame) -> None:
-        apply_cross_sectional_value_v2(df)
-
-    def breakdown(self, symbol: str, features: dict) -> ScoreBreakdown:
-        score = self.score(features)
-        pe = features.get("pe_ratio")
-        pb = features.get("pb_ratio")
-        return ScoreBreakdown(
-            symbol=symbol,
-            score=score,
-            components={
-                "relative_pe": features.get("relative_pe", float("nan")),
-                "relative_pb": features.get("relative_pb", float("nan")),
-            },
-            flags={
-                "missing_valuation": pe is None and pb is None,
-                "distress_pe": pe is not None and pe > 0 and pe <= 5.0,
-                "negative_eps": pe is not None and pe < 0,
-            },
-            notes=["Single-stock score uses legacy ratios; sector-relative score requires full universe."],
-        )

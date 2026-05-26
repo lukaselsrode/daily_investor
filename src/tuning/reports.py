@@ -14,7 +14,6 @@ from backtesting.types import SimResult
 from util import CONFIG_FILE, RISK_LIMITS
 
 from .constants import (
-    _CONFIG_PATH_TO_PARAM_IDX,
     _current_params,
     PARAM_NAMES,
 )

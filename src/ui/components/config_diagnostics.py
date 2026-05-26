@@ -10,7 +10,7 @@ SAFE: read-only except for the optional "Apply patch" flow which requires
 from __future__ import annotations
 
 import difflib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -57,7 +57,6 @@ def audit_config(cfg: dict) -> list[Finding]:
     tn            = cfg.get("tuning", {})
     bt            = cfg.get("backtest", {})
     exit_d        = cfg.get("exit_decision", {})
-    harvest       = cfg.get("harvest", {})
     sell          = cfg.get("sell_rules", {})
     regime        = cfg.get("regime", {})
     neutral_rg    = regime.get("neutral", {})
@@ -169,7 +168,7 @@ def audit_config(cfg: dict) -> list[Finding]:
                 f"Winners clipped at {trim_threshold:.0%} cannot compound to backtest levels."
             ),
             severity="CRITICAL",
-            recommendation=f"Raise trim_profit_threshold to 0.15 and harvest_profit_threshold to 0.25. "
+            recommendation="Raise trim_profit_threshold to 0.15 and harvest_profit_threshold to 0.25. "
                            "Or add trim/harvest simulation to the backtest engine so results are comparable.",
         ))
 
@@ -202,7 +201,7 @@ def audit_config(cfg: dict) -> list[Finding]:
                 "the penalty. This creates contradictory optimizer pressure right at the boundary."
             ),
             severity="MODERATE",
-            recommendation=f"Raise turnover_penalty_trade_count to 60 (above the 40-trade floor) "
+            recommendation="Raise turnover_penalty_trade_count to 60 (above the 40-trade floor) "
                            "and reduce turnover_penalty_weight to 0.15 to soften the penalty.",
         ))
     elif tp_weight > 0.3:
@@ -468,7 +467,6 @@ def render() -> None:
 
     exit_d    = cfg.get("exit_decision", {})
     sell      = cfg.get("sell_rules", {})
-    bt        = cfg.get("backtest", {})
     index_pct = float(cfg.get("index_pct", 0.85))
 
     rows = [

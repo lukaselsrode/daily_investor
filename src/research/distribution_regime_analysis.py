@@ -18,7 +18,7 @@ All analyses are read-only. No config writes, no orders.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
@@ -595,7 +595,6 @@ class DistributionAnalyzer:
             confidence = 0.40 * icir_score + 0.35 * hit_score + 0.25 * sign_score
 
             # Suggested weight direction: +/- relative to equal weight
-            base_weight = 0.25
             weight_adj = round((confidence - 0.5) * 0.2, 3)  # up to ±10% adjustment
 
             rows.append({

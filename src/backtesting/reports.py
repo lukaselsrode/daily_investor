@@ -37,9 +37,9 @@ def print_backtest_report(report: BacktestReport) -> None:
             print(f"    Income-trap excluded: {', '.join(pool.excluded_high_income_low_momentum)}")
         if pool.sector_counts:
             top = sorted(pool.sector_counts.items(), key=lambda x: -x[1])[:6]
-            print(f"    Sectors:       " + "  ".join(f"{s}={c}" for s, c in top))
+            print("    Sectors:       " + "  ".join(f"{s}={c}" for s, c in top))
 
-    print(f"\n  TRAIN WINDOW")
+    print("\n  TRAIN WINDOW")
     print(f"    Return (TWR):    {tr.total_return:+.2%}  (bench TWR {r.train_benchmark_twr:+.2%})")
     print(f"    Benchmark (buy-hold):  {r.benchmark_return:+.2%}")
     print(f"    Excess return:   {r.excess_return:+.2%}")
@@ -66,7 +66,7 @@ def print_backtest_report(report: BacktestReport) -> None:
         )
     if r.validation_result:
         vr = r.validation_result
-        print(f"\n  VALIDATION WINDOW")
+        print("\n  VALIDATION WINDOW")
         print(f"    Return (TWR):    {vr.total_return:+.2%}  (bench TWR {r.val_benchmark_twr:+.2%})")
         print(f"    Benchmark:       {r.validation_benchmark_return:+.2%}")
         print(f"    Sharpe:          {vr.sharpe:+.3f}")
@@ -82,7 +82,7 @@ def print_backtest_report(report: BacktestReport) -> None:
                 f"defensive={rd['defensive']} ({rd['defensive']/total_rd:.0%})"
             )
     if r.notes:
-        print(f"\n  NOTES")
+        print("\n  NOTES")
         for n in r.notes:
             print(f"    • {n}")
     print("=" * 64)

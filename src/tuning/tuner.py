@@ -15,7 +15,7 @@ import numpy as np
 
 from backtesting.data_loader import load_and_precompute
 from backtesting.simulator import run_backtest_report, run_simulation
-from backtesting.types import BacktestReport, PrecomputedData, SimResult
+from backtesting.types import BacktestReport, SimResult
 from util import BACKTEST_PARAMS
 
 from .constants import (
@@ -24,13 +24,11 @@ from .constants import (
     _effective_bounds,
     _get_active_indices,
 )
-from .objective import _run_single, make_objective
+from .objective import _run_single
 from .reports import (
-    _diff_table,
     apply_config_params,
     build_llm_review_payload,
     merge_llm_recommendation_with_config,
-    print_config_diff,
     request_llm_tune_review,
     validate_llm_review_response,
 )

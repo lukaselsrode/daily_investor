@@ -17,7 +17,7 @@ from backtesting.data_loader import load_and_precompute
 from backtesting.simulator import run_backtest_report, run_simulation, split_price_window
 from util import BACKTEST_PARAMS, STABILITY_PARAMS
 
-from .constants import PARAM_NAMES, _current_params
+from .constants import PARAM_NAMES
 from .objective import _run_single
 from .results import StabilityReport
 from .tuner import validate_tuned_params

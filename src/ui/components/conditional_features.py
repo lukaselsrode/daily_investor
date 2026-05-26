@@ -188,7 +188,6 @@ def _render_decile_comparison(best_feature: str, horizon: int) -> None:
         max_days = int(h * (1 + engine.max_horizon_slop_pct))
         n_deciles = 5
 
-        import numpy as np
         pooled: list[pd.DataFrame] = []
         for i, t_date in enumerate(sorted_dates):
             fwd_date = None
@@ -352,7 +351,7 @@ def render() -> None:
         "All variants are computed on-the-fly from snapshot data. Nothing here affects live scoring."
     )
 
-    from strategy.factor_interactions import INTERACTION_FEATURES, _FEAT_META
+    from strategy.factor_interactions import INTERACTION_FEATURES
 
     c1, c2, c3 = st.columns([2, 2, 2])
     with c1:
@@ -428,7 +427,7 @@ def render() -> None:
     if not best_row.empty:
         best_feature = str(best_row.iloc[0]["feature"])
         best_label   = str(best_row.iloc[0]["label"])
-        st.markdown(f"#### Quintile Spread — Best vs Baseline")
+        st.markdown("#### Quintile Spread — Best vs Baseline")
         st.caption(
             f"Pooled quintiles across all snapshot pairs. "
             f"Best engineered feature: **{best_label}**."

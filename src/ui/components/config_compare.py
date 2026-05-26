@@ -205,14 +205,14 @@ def render() -> None:
         return
 
     # Allow the user to pick which configs to compare
-    all_labels = [l for l, _ in loaded]
+    all_labels = [lbl for lbl, _ in loaded]
     selected = st.multiselect(
         "Configs to show",
         all_labels,
         default=all_labels,
         key="compare_selected",
     )
-    visible = [(l, c) for l, c in loaded if l in selected]
+    visible = [(lbl, c) for lbl, c in loaded if lbl in selected]
     if not visible:
         st.info("Select at least one config above.")
         return
@@ -268,7 +268,7 @@ def render() -> None:
 
     # ── Frozen parameters summary ─────────────────────────────────────────
     st.subheader("Frozen Parameters")
-    rows = [{"Config": l, "Frozen params": _frozen_params(c)} for l, c in visible]
+    rows = [{"Config": lbl, "Frozen params": _frozen_params(c)} for lbl, c in visible]
     st.dataframe(pd.DataFrame(rows).set_index("Config"), use_container_width=True)
 
     # ── Major diffs from current ──────────────────────────────────────────

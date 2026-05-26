@@ -6,12 +6,11 @@ if available, or shows instructions for generating one.
 
 from __future__ import annotations
 
-from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
-from ui.utils import DATA_DIR, load_config_raw, ui_config, MODES, _SRC_DIR
+from ui.utils import DATA_DIR, MODES, _SRC_DIR
 import sys
 
 
@@ -25,9 +24,6 @@ _INTENT_COLS = [
 def render() -> None:
     st.title("🎯 Order Intent Preview")
     st.caption("Preview what the bot plans to do. No orders are placed here.")
-
-    ui_cfg = ui_config()
-    cfg = load_config_raw()
 
     # Try loading from CSV first
     intent_files = sorted(DATA_DIR.glob("order_intents_*.csv"))
@@ -52,7 +48,9 @@ def render() -> None:
     st.code(" ".join(cmd_parts) + "  # (dry-run preview)", language="bash")
 
     if st.button("▶ Generate intent preview (dry run)"):
-        import subprocess, threading, time
+        import subprocess
+        import threading
+        import time
         cmd = [sys.executable, "-m", "cli", "run"]
         if op_mode:
             cmd += ["--op-mode", op_mode]
@@ -71,8 +69,8 @@ def render() -> None:
                     text=True, bufsize=1,
                 )
                 def _r():
-                    for l in proc.stdout:
-                        lines.append(l.rstrip())
+                    for line in proc.stdout:
+                        lines.append(line.rstrip())
                 t = threading.Thread(target=_r, daemon=True)
                 t.start()
                 while proc.poll() is None or t.is_alive():

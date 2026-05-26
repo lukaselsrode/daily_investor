@@ -60,8 +60,6 @@ def select_backtest_universe(
       liquid_universe_sanity_test   → MEDIUM (uses volume / random sample)
       walk_forward_price_only_test  → LOW    (uses volume filter only, no scores)
     """
-    import random as _random
-
     liquid = agg_df[agg_df["volume"] >= min_volume].copy()
     if liquid.empty:
         logger.warning("No symbols pass min_volume filter — using all available")
@@ -78,7 +76,6 @@ def select_backtest_universe(
         selected = liquid.head(max_symbols)
         bias = "MEDIUM"
     elif universe_selection == "sector_balanced_sample":
-        rng     = _random.Random(random_seed)
         sectors = liquid["sector"].dropna().unique().tolist() if "sector" in liquid.columns else []
         if not sectors:
             selected = liquid.sample(n=min(max_symbols, len(liquid)), random_state=random_seed)

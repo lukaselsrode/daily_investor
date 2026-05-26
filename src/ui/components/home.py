@@ -4,16 +4,13 @@ ui/components/home.py — System status dashboard.
 
 from __future__ import annotations
 
-import glob
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 
 import streamlit as st
 
 from ui.utils import (
-    DATA_DIR, CFG_PATH, LOG_PATH, ROOT,
-    data_date, load_config_raw, load_latest_csv, ui_config,
+    DATA_DIR, CFG_PATH, LOG_PATH, data_date, load_config_raw, load_latest_csv,
 )
 
 
@@ -43,7 +40,6 @@ def _metric_card(col, label: str, value: str, color: str = "green") -> None:
 def render() -> None:
     st.title("📊 System Status")
     cfg = load_config_raw()
-    ui_cfg = ui_config()
 
     # ----- Config status --------------------------------------------------
     st.subheader("Configuration")

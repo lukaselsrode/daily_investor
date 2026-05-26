@@ -7,7 +7,7 @@ ValidationResult: output of WalkForwardValidator.split_and_validate().
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 from .types import BacktestReport, SimResult

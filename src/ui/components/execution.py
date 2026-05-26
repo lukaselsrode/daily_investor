@@ -69,10 +69,14 @@ def render() -> None:
     sel_harv  = st.checkbox(f"Execute {len(harvests)} harvest ETF buy(s)", value=False)
 
     selected = []
-    if sel_hard:  selected += hard_sells
-    if sel_soft:  selected += soft_sells
-    if sel_buys:  selected += buys
-    if sel_harv:  selected += harvests
+    if sel_hard:
+        selected += hard_sells
+    if sel_soft:
+        selected += soft_sells
+    if sel_buys:
+        selected += buys
+    if sel_harv:
+        selected += harvests
 
     if not selected:
         st.info("No intents selected.")

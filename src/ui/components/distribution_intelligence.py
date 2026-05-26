@@ -43,7 +43,7 @@ _FRIENDLY = {
 
 @st.cache_data(ttl=600)
 def _get_analyzer(_df_hash, df_json: str):
-    import json, io
+    import io
     from research.distribution_regime_analysis import DistributionAnalyzer
     df = pd.read_json(io.StringIO(df_json))
     return DistributionAnalyzer(df)
@@ -246,7 +246,6 @@ def _tab_distribution(df: pd.DataFrame, df_json: str, score_col: str, return_col
     col_a, col_b = st.columns(2)
     with col_a:
         bc = bm.bimodality_coeff
-        bc_color = "red" if bm.is_bimodal else "green"
         st.metric(
             "Bimodality coefficient",
             f"{bc:.4f}",
@@ -310,7 +309,7 @@ def _tab_tail_analysis(df: pd.DataFrame, df_json: str, score_col: str, return_co
     )
     _try_plotly_bar(
         bucket_df, x="bucket", y="hit_rate",
-        title=f"Hit rate by score bucket",
+        title="Hit rate by score bucket",
         color="hit_rate",
     )
     st.dataframe(
@@ -529,7 +528,7 @@ def _tab_conditional_alpha(df: pd.DataFrame, df_json: str, return_col: str) -> N
     )
 
     # Summary insight
-    sig_q = cic_df[cic_df["significant"] == True]
+    sig_q = cic_df[cic_df["significant"]]
     if not sig_q.empty:
         best = cic_df.loc[cic_df["ic"].abs().idxmax()]
         st.info(

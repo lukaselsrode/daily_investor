@@ -13,9 +13,8 @@ from typing import Optional, TYPE_CHECKING
 import pandas as pd
 
 from .attribution import (
-    _STABLE, _MODERATELY_STABLE, _UNSTABLE,
+    _MODERATELY_STABLE, _UNSTABLE,
     _ensure_dir, _date_str,
-    classify_stability, compute_parameter_stability,
 )
 from .plots import (
     generate_param_heatmap,

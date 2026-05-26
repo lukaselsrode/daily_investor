@@ -17,6 +17,8 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+import numpy as np
+
 from util import BACKTEST_PARAMS
 
 from .results import ValidationResult

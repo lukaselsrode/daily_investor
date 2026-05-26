@@ -4,7 +4,6 @@ ui/components/logs.py — Log viewer and audit trail.
 
 from __future__ import annotations
 
-from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -31,7 +30,7 @@ def render() -> None:
         lines = text.splitlines()
 
         if filter_text:
-            lines = [l for l in lines if filter_text.lower() in l.lower()]
+            lines = [ln for ln in lines if filter_text.lower() in ln.lower()]
 
         tail = "\n".join(lines[-n_lines:])
         st.code(tail or "(no matching lines)", language="text")

@@ -22,7 +22,6 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from ui.utils import load_config_raw
 
 
 # ---------------------------------------------------------------------------
@@ -196,7 +195,6 @@ def render() -> None:
 
     # Pivot: rows = date, cols = factor
     ic_pivot = ic_df.pivot(index="date", columns="factor", values="ic").sort_index()
-    n_pivot  = ic_df.pivot(index="date", columns="factor", values="n_stocks").sort_index()
 
     # ── 2. IC summary table ───────────────────────────────────────────────────
     st.divider()
@@ -377,7 +375,7 @@ def render() -> None:
                     legend=dict(orientation="h", y=-0.15),
                 )
                 st.plotly_chart(fig3, use_container_width=True)
-        except (ImportError, Exception) as e:
+        except (ImportError, Exception):
             # Fallback to simple bar chart per factor
             for factor in dist_cols:
                 s = ic_pivot[factor].dropna()

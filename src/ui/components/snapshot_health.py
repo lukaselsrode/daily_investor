@@ -15,7 +15,7 @@ import pandas as pd
 import streamlit as st
 
 from ui.utils import DATA_DIR
-from ui.components.common import metric_row, section, empty_state, df_download
+from ui.components.common import metric_row, section, empty_state
 
 
 def _file_size(p: Path) -> str:

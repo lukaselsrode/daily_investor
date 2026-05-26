@@ -256,9 +256,6 @@ class DecisionAdjustmentEngine:
         # Thresholds from config (with calibration overrides)
         pet  = float(self._cal.get("premature_exit_threshold",
                      ec.get("premature_exit_threshold", 0.45)))
-        rct  = float(self._cal.get("review_confidence_threshold",
-                     ec.get("review_confidence_threshold", 0.50)))
-
         hard_score_floor = float(ec.get("hard_exit_score_below",  0.20))
         tis_hard_floor   = float(ec.get("thesis_intact_hard_exit_below", 0.35))
         harvest_pct      = float(ec.get("harvest_profit_threshold",  0.15))
@@ -302,8 +299,10 @@ class DecisionAdjustmentEngine:
         if pnl >= harvest_pct and ec.get("positive_pnl_exit_downgrade", True):
             if positive_mom or thesis_ok:
                 parts = [f"gain={pnl:+.1%}"]
-                if positive_mom: parts.append(f"momentum={mom:.2f}")
-                if thesis_ok:    parts.append(f"thesis_intact={tis:.2f}")
+                if positive_mom:
+                    parts.append(f"momentum={mom:.2f}")
+                if thesis_ok:
+                    parts.append(f"thesis_intact={tis:.2f}")
                 reason = f"Large gain with active signals: {', '.join(parts)}"
                 return DecisionOutput(
                     action="HARVEST",
@@ -344,11 +343,16 @@ class DecisionAdjustmentEngine:
 
         if has_any_positive:
             parts = []
-            if pnl > 0:       parts.append(f"P/L={pnl:+.1%}")
-            if positive_mom:  parts.append(f"momentum={mom:.2f}")
-            if strong_qual:   parts.append(f"quality={qual:.2f}")
-            if thesis_ok:     parts.append(f"thesis_intact={tis:.2f}")
-            if inp.is_premature: parts.append("premature_exit_flag")
+            if pnl > 0:
+                parts.append(f"P/L={pnl:+.1%}")
+            if positive_mom:
+                parts.append(f"momentum={mom:.2f}")
+            if strong_qual:
+                parts.append(f"quality={qual:.2f}")
+            if thesis_ok:
+                parts.append(f"thesis_intact={tis:.2f}")
+            if inp.is_premature:
+                parts.append("premature_exit_flag")
             reason = (
                 f"Score below threshold but conflicting evidence — "
                 f"{', '.join(parts) if parts else 'positive signals present'}. "

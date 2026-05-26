@@ -185,7 +185,6 @@ def cmd_update_outcomes() -> None:
     import datetime
     import logging
 
-    import pandas as pd
     import yfinance as yf
 
     from portfolio.outcome_tracker import load_outcomes, fill_future_returns

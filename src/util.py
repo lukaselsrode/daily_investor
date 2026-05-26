@@ -41,7 +41,6 @@ IGNORE_NEGATIVE_PE:   bool  = _app.get("ignore_negative_pe", False)
 IGNORE_NEGATIVE_PB:   bool  = _app.get("ignore_negative_pb", False)
 DIVIDEND_THRESHOLD:   float = float(_app.get("dividend_threshold", 0.03))
 METRIC_THRESHOLD:     float = float(_app.get("metric_threshold", 0.8))
-SELLOFF_THRESHOLD:    float = float(_app.get("selloff_threshold", 30))
 WEEKLY_INVESTMENT:    float = float(_app.get("weekly_investment", 400))
 INDEX_PCT:            float = float(_app.get("index_pct", 0.85))
 AUTO_APPROVE:         bool  = _app.get("auto_approve", False)
@@ -92,13 +91,6 @@ MAX_PE_COMPONENT: float = float(_vg.get("max_pe_component", 5.0))
 MAX_PB_COMPONENT: float = float(_vg.get("max_pb_component", 5.0))
 MIN_PE_RATIO:     float = float(_vg.get("min_pe_ratio",     1.0))
 MIN_PB_RATIO:     float = float(_vg.get("min_pb_ratio",     0.1))
-
-VALUATION_GUARDRAILS: dict = {
-    "max_pe_component": MAX_PE_COMPONENT,
-    "max_pb_component": MAX_PB_COMPONENT,
-    "min_pe_ratio":     MIN_PE_RATIO,
-    "min_pb_ratio":     MIN_PB_RATIO,
-}
 
 # ---------------------------------------------------------------------------
 # Risk limits
@@ -264,12 +256,6 @@ SELL_RULES: dict = {
 # Bear market regime
 # ---------------------------------------------------------------------------
 
-_bm = _app.get("bear_market", {})
-BEAR_MARKET_PARAMS: dict = {
-    "spy_ma_period": int(_bm.get("spy_ma_period", 200)),
-    "vix_threshold": float(_bm.get("vix_threshold", 25.0)),
-}
-
 # ---------------------------------------------------------------------------
 # Scoring parameters
 # ---------------------------------------------------------------------------
@@ -307,18 +293,6 @@ MOMENTUM_PARAMS: dict = {
     "return_1m_falling_knife_threshold": float(_mo.get("return_1m_falling_knife_threshold",  -0.10)),
     "return_1m_recovery_bonus":          float(_mo.get("return_1m_recovery_bonus",           0.15)),
     "return_1m_falling_knife_penalty":   float(_mo.get("return_1m_falling_knife_penalty",    0.20)),
-}
-
-# ---------------------------------------------------------------------------
-# Analyst ratings parameters
-# ---------------------------------------------------------------------------
-
-_ar = _app.get("analyst_ratings", {})
-ANALYST_PARAMS: dict = {
-    "strong_buy_ratio":      float(_ar.get("strong_buy_ratio",      5.0)),
-    "net_sell_ratio":        float(_ar.get("net_sell_ratio",        1.0)),
-    "strong_buy_multiplier": float(_ar.get("strong_buy_multiplier", 1.05)),
-    "net_sell_multiplier":   float(_ar.get("net_sell_multiplier",   0.95)),
 }
 
 MAX_ITERATIONS: int = int(_app.get("max_iterations", 10))

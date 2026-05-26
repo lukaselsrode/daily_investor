@@ -12,11 +12,10 @@ import subprocess
 import sys
 import threading
 import time
-from pathlib import Path
 
 import streamlit as st
 
-from ui.utils import BACKTEST_MODES, LOOKAHEAD_LABELS, MODES, _SRC_DIR, ui_config, load_config_raw
+from ui.utils import BACKTEST_MODES, LOOKAHEAD_LABELS, MODES, _SRC_DIR, ui_config
 
 
 def _build_command(run_type: str, op_mode: str | None, skip_data: bool,
@@ -103,7 +102,6 @@ def render() -> None:
     st.caption("Build and execute CLI commands. The equivalent shell command is shown before every run.")
 
     ui_cfg = ui_config()
-    cfg = load_config_raw()
     live = st.session_state.get("live_enabled", False)
 
     # ---- Run type ---------------------------------------------------------

@@ -18,11 +18,8 @@ from __future__ import annotations
 
 import datetime
 import logging
-import os
 from pathlib import Path
-from typing import Optional
 
-import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -35,7 +32,7 @@ _FACTOR_COLS_DEFAULT = ["value_score", "momentum_score", "quality_score", "incom
 # ---------------------------------------------------------------------------
 
 def _snapshot_dir() -> Path:
-    from util import DATA_DIRECTORY, SNAPSHOT_PARAMS  # noqa: deferred import
+    from util import DATA_DIRECTORY, SNAPSHOT_PARAMS  # noqa: PLC0415
     d = Path(DATA_DIRECTORY) / SNAPSHOT_PARAMS.get("subdir", "snapshots")
     d.mkdir(parents=True, exist_ok=True)
     return d
@@ -68,7 +65,7 @@ def save_snapshot(
     overwrite=False the existing path is returned without re-writing.
     Returns an empty Path if snapshots are disabled in config.
     """
-    from util import SNAPSHOT_PARAMS  # noqa: deferred import
+    from util import SNAPSHOT_PARAMS  # noqa: PLC0415
 
     if not SNAPSHOT_PARAMS.get("enabled", True):
         return Path()
@@ -187,7 +184,7 @@ def backfill_from_csvs() -> int:
     Skips dates that already have a Parquet snapshot.
     Returns the number of new snapshots written.
     """
-    from util import DATA_DIRECTORY, SNAPSHOT_PARAMS  # noqa: deferred import
+    from util import DATA_DIRECTORY, SNAPSHOT_PARAMS  # noqa: PLC0415
 
     if not SNAPSHOT_PARAMS.get("enabled", True):
         return 0
@@ -242,7 +239,7 @@ def compute_forward_ic(
     DataFrame with columns: date, factor, ic, n_stocks, p_value
     Empty DataFrame if fewer than 2 snapshots exist.
     """
-    from scipy.stats import spearmanr  # noqa: deferred import
+    from scipy.stats import spearmanr  # noqa: PLC0415
 
     if factor_cols is None:
         factor_cols = _FACTOR_COLS_DEFAULT

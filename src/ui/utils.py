@@ -4,7 +4,6 @@ ui/utils.py — Shared path constants and helpers for all UI components.
 
 from __future__ import annotations
 
-import glob
 import sys
 from pathlib import Path
 from typing import Optional

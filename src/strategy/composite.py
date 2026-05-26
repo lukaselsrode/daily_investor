@@ -15,12 +15,11 @@ Also provides per-factor attribution breakdown.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import pandas as pd
 
-from .base import ScorerBase
 from .income import IncomeScorer, compute_income_score
 from .momentum import MomentumEngine, apply_cross_sectional_momentum_v2, compute_momentum_score_v1
 from .quality import QualityScorer, compute_quality_score

@@ -18,7 +18,6 @@ from execution.robinhood import RobinhoodBroker
 from portfolio.harvest import HarvestManager
 from portfolio.manager import PortfolioManager
 from portfolio.risk import RiskManager
-from portfolio.sell_engine import evaluate_sell_candidate  # re-exported for legacy callers
 from strategy.regimes.detector import get_current_regime
 
 from data.market import get_data as generate_daily_undervalued_stocks
@@ -117,19 +116,6 @@ def _fetch_and_save_dividends() -> None:
         logger.info(f"Dividend history saved: {len(df)} records | total paid=${paid:.2f}")
     except Exception as e:
         logger.warning(f"Could not fetch/save dividends: {e}")
-
-
-def wipe_data() -> None:
-    if not confirm("Wipe data directory?"):
-        return
-    for f in os.listdir(DATA_DIRECTORY):
-        path = os.path.join(DATA_DIRECTORY, f)
-        try:
-            os.remove(path)
-            logger.debug(f"Removed {path}")
-        except Exception as e:
-            logger.error(f"Could not remove {path}: {e}")
-    logger.info("Data directory cleared")
 
 
 # ---------------------------------------------------------------------------

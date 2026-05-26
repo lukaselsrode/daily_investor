@@ -6,7 +6,6 @@ Components should call these functions rather than hitting data files directly.
 """
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Optional
 
 import pandas as pd

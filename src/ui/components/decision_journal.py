@@ -9,7 +9,6 @@ from __future__ import annotations
 import streamlit as st
 import pandas as pd
 
-from ui.utils import DATA_DIR
 from ui.components.common import empty_state, section, df_download
 
 

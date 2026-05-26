@@ -13,7 +13,7 @@ All logic is deterministic — no LLM, no randomness.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import pandas as pd
@@ -471,7 +471,6 @@ def build_position_rationale(
     buy_context: Optional[dict],
     peak_price: Optional[float],
     universe_rank_pct: Optional[float],
-    all_scores: Optional[pd.DataFrame] = None,
 ) -> PositionRationale:
     """
     Build a complete PositionRationale for one holding.

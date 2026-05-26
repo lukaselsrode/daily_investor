@@ -75,7 +75,6 @@ class _JsonFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         import json
-        import traceback
 
         payload: dict = {
             "ts": self.formatTime(record, self.datefmt or _DATE_FMT),

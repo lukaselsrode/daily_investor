@@ -383,27 +383,6 @@ def select_candidates(
     return final_mask, diag
 
 
-def print_pool_diagnostics(diag: CandidatePoolDiagnostics, label: str = "") -> None:
-    prefix = f"[{label}] " if label else ""
-    print(
-        f"{prefix}Candidate pool: n={diag.n_candidates}  cutoff={diag.score_cutoff:.3f}  "
-        f"qual={diag.avg_quality:.2f}  mom={diag.avg_momentum:.2f}  "
-        f"income={diag.avg_income:.2f}  value={diag.avg_value:.2f}"
-    )
-    if diag.n_quality_gate_excluded or diag.n_momentum_gate_excluded or diag.n_income_trap_excluded or diag.n_floor_excluded:
-        print(
-            f"{prefix}  Excluded — floor={diag.n_floor_excluded}  "
-            f"quality={diag.n_quality_gate_excluded}  "
-            f"momentum={diag.n_momentum_gate_excluded}  "
-            f"income_trap={diag.n_income_trap_excluded}"
-        )
-    if diag.excluded_high_income_low_momentum:
-        print(f"{prefix}  High-income/low-momentum excluded: {', '.join(diag.excluded_high_income_low_momentum)}")
-    if diag.sector_counts:
-        top_sectors = sorted(diag.sector_counts.items(), key=lambda x: -x[1])[:5]
-        print(f"{prefix}  Sectors: " + "  ".join(f"{s}={c}" for s, c in top_sectors))
-
-
 # ---------------------------------------------------------------------------
 # Benchmark TWR
 # ---------------------------------------------------------------------------

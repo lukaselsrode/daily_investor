@@ -12,10 +12,11 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+import numpy as np
+
 from .data_loader import load_and_precompute, split_price_window
-from .reports import print_backtest_report
 from .results import BacktestResult, ValidationResult
-from .simulator import get_default_params, run_backtest_report, run_simulation
+from .simulator import run_backtest_report, run_simulation
 from .types import BacktestReport, PrecomputedData, SimResult
 from .validator import WalkForwardValidator
 

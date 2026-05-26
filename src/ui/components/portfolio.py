@@ -815,7 +815,6 @@ def _tab_attribution(df: pd.DataFrame, agg: Optional[pd.DataFrame]) -> None:
 
     if not active.empty:
         winners = (pd.to_numeric(active["percent_change"], errors="coerce") > 0).sum()
-        losers  = len(active) - winners
         st.caption(f"Active hit rate: {winners}/{len(active)} positions positive ({winners/max(len(active),1):.0%})")
 
     st.divider()

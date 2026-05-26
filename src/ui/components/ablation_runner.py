@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -190,8 +189,8 @@ def render_ablation() -> None:
     # ── Controls ──────────────────────────────────────────────────────────
     c1, c2, c3 = st.columns(3)
     with c1:
-        _label_to_file = {l: f for l, f in _NAMED_CONFIGS}
-        available_labels = [l for l, f in _NAMED_CONFIGS if (CFG_DIR / f).exists()]
+        _label_to_file = {lbl: f for lbl, f in _NAMED_CONFIGS}
+        available_labels = [lbl for lbl, f in _NAMED_CONFIGS if (CFG_DIR / f).exists()]
         cfg_label = st.selectbox("Config file", available_labels, key="abl_cfg")
         cfg_file = _label_to_file.get(cfg_label, "config.yaml")
     with c2:
@@ -313,15 +312,15 @@ def render_candidate_drift() -> None:
 
     c1, c2 = st.columns(2)
     with c1:
-        label_a = st.selectbox("Config A", [l for l, _ in _NAMED_CONFIGS], index=0, key="drift_a")
+        label_a = st.selectbox("Config A", [lbl for lbl, _ in _NAMED_CONFIGS], index=0, key="drift_a")
     with c2:
-        label_b = st.selectbox("Config B", [l for l, _ in _NAMED_CONFIGS], index=2, key="drift_b")
+        label_b = st.selectbox("Config B", [lbl for lbl, _ in _NAMED_CONFIGS], index=2, key="drift_b")
 
     if label_a == label_b:
         st.info("Select two different configs to compare.")
         return
 
-    _lmap = {l: f for l, f in _NAMED_CONFIGS}
+    _lmap = {lbl: f for lbl, f in _NAMED_CONFIGS}
     cfg_a = _load_cfg(_lmap[label_a])
     cfg_b = _load_cfg(_lmap[label_b])
 
@@ -337,7 +336,7 @@ def render_candidate_drift() -> None:
             try:
                 from backtesting.data_loader import load_and_precompute as _lp
                 from backtesting.simulator import score_stocks, select_candidates
-                from util import CANDIDATE_SELECTION_PARAMS, read_data_as_pd
+                from util import read_data_as_pd
 
                 agg_df = read_data_as_pd("agg_data")
                 if agg_df is None or agg_df.empty:
@@ -454,8 +453,8 @@ def render_exit_diagnostics() -> None:
         "Shows which exit rules are active and where the strategies diverge."
     )
 
-    _lmap = {l: f for l, f in _NAMED_CONFIGS}
-    available_labels = [l for l, f in _NAMED_CONFIGS if (CFG_DIR / f).exists()]
+    _lmap = {lbl: f for lbl, f in _NAMED_CONFIGS}
+    available_labels = [lbl for lbl, f in _NAMED_CONFIGS if (CFG_DIR / f).exists()]
     cfg_label = st.selectbox("Config", available_labels, key="exit_diag_cfg")
     cfg = _load_cfg(_lmap.get(cfg_label, "config.yaml"))
     if cfg is None:

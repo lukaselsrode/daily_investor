@@ -59,7 +59,7 @@ daily_investor/
 │   │   ├── universe.py               # UniverseBuilder (scrapes Wikipedia + Robinhood sources)
 │   │   ├── fundamentals.py           # FundamentalsProvider (yfinance + Robinhood)
 │   │   ├── market.py                 # MarketDataProvider (yfinance wrapper)
-│   │   └── sentiment.py              # SentimentProvider wrapping sentiment_analysis.py
+│   │   └── sentiment.py              # SentimentProvider — async Claude batch sentiment
 │   ├── strategy/
 │   │   ├── base.py                   # ScorerBase ABC, ScoreBreakdown
 │   │   ├── value.py                  # ValueScorer: P/E + P/B with guardrails (legacy)
@@ -136,11 +136,6 @@ daily_investor/
 │   │       ├── config_viewer.py      # Config viewer + live editor (gated write)
 │   │       └── logs.py               # Log tail + audit CSVs
 │   ├── main.py                       # Live trading loop
-│   ├── backtest.py                   # Simulation core (PrecomputedData, SimResult)
-│   ├── tuner.py                      # Optimizer core
-│   ├── source_data.py                # Universe + fundamentals + scoring pipeline
-│   ├── sentiment_analysis.py         # Batch async + single-stock Claude sentiment
-│   ├── sentiments.py                 # News data collection (yfinance + Robinhood fallback)
 │   └── util.py                       # Config constants, schema, CSV helpers
 ├── tests/                            # pytest test suite (no API credentials required)
 │   ├── conftest.py
@@ -175,6 +170,7 @@ daily-investor COMMAND [OPTIONS]
 | `auto-tune [DAYS]` | Dual-objective tune with walk-forward validation (default: 90d) |
 | `stability-scan` | Parameter stability scan across multiple windows — research only, no writes |
 | `report` | Run a quick 90-day backtest and print results |
+| `update-outcomes` | Backfill realized future returns for past decisions — calibration only, never touches live scoring |
 
 **Key options:**
 
@@ -202,6 +198,7 @@ all:
 ```bash
 # Data
 make fetch-data            # Fetch fresh fundamentals + news, save CSVs + snapshot (no trades)
+make update-outcomes       # Backfill future return labels for past decisions (calibration only)
 
 # Live trading
 make run                   # Safe mode — manual confirmation at each step
@@ -214,6 +211,7 @@ make backtest              # 365-day backtest (default mode)
 make backtest DAYS=180
 make backtest BT_MODE=walk_forward_price_only_test
 make backtest-wf           # Walk-forward mode (low lookahead)
+make backtest-compare      # A/B/C candidate selection mode comparison
 
 # Parameter tuning
 make tune                  # Single-objective tune, no write  (TUNE_DAYS=120  OBJ=sharpe)
@@ -234,9 +232,11 @@ make ui                    # Launch Streamlit dashboard
 
 # Development
 make install               # Install / reinstall package in editable mode
+make install-system        # Install editable, bypassing Homebrew protection (macOS Homebrew Python)
 make test                  # Run full pytest suite
 make test-watch            # Re-run tests on file changes (requires pytest-watch)
 make lint                  # Run ruff linter over src/
+make format                # Auto-format src/ with ruff
 ```
 
 ---

@@ -4,8 +4,7 @@ tuning/results.py — Typed result containers for ParameterTuner and StabilityAn
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
 
 import numpy as np
 

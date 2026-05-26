@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import streamlit as st
 import pandas as pd
-import numpy as np
 
 from ui.utils import data_date, load_latest_csv, no_data_msg, fmt_bin_index
 

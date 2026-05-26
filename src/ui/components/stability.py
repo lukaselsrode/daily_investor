@@ -9,7 +9,7 @@ from pathlib import Path
 import streamlit as st
 import pandas as pd
 
-from ui.utils import BACKTEST_MODES, LOOKAHEAD_LABELS, ROOT, load_config_raw
+from ui.utils import BACKTEST_MODES, LOOKAHEAD_LABELS, ROOT
 
 
 def _load_stability_csv(output_dir: str) -> pd.DataFrame | None:
@@ -34,8 +34,6 @@ def _load_robustness_txt(output_dir: str) -> str | None:
 def render() -> None:
     st.title("🔭 Stability & Robustness")
     st.caption("Multi-window parameter stability scan. RESEARCH ONLY — never writes config.")
-
-    cfg = load_config_raw()
 
     # ---- Controls ---------------------------------------------------------
     st.subheader("Settings")
@@ -93,7 +91,6 @@ def render() -> None:
         cc = st.columns(3)
         for i, label in enumerate(["STABLE", "MODERATELY_STABLE", "UNSTABLE"]):
             count = stable_counts.get(label, 0)
-            color = ["green", "orange", "red"][i]
             cc[i].metric(label, count)
 
         def _color_row(row):
