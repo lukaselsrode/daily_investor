@@ -5,6 +5,10 @@ metric_threshold: 0.75
 selloff_threshold: 30
 weekly_investment: 400
 index_pct: 0.7
+rebalance:
+  mode: contribution_driven
+  drift_tolerance_pct: 0.03
+  proportional_deficit_routing: true
 auto_approve: true
 use_sentiment_analysis: true
 confidence_threshold: 65
@@ -290,6 +294,13 @@ exit_decision:
   harvest_profit_threshold: 0.25
   thesis_intact_review_floor: 0.6
   thesis_intact_hard_exit_below: 0.35
+  # --- True TRIM (partial exit) ---
+  trim_enabled: true
+  trim_fraction: 0.33
+  trim_min_gain_pct: 0.08
+  trim_score_delta_threshold: -0.15
+  trim_requires_positive_momentum: true
+  trim_to_etfs_pct: 0.85
 decision_adjustment:
   premature_exit_threshold: 0.45
   review_confidence_threshold: 0.5

@@ -24,11 +24,18 @@ class HarvestManager:
         self._cfg = config
 
     def route_proceeds(self, amount: float, broker: "BrokerAdapter") -> None:
-        """Reinvest take-profit proceeds into harvest ETFs."""
+        """Reinvest take-profit proceeds into harvest ETFs.
+
+        Only `harvest_to_etfs_pct` of proceeds is deployed to ETFs; the remainder
+        stays as cash available for the active sleeve (no extra ETF buy triggered).
+        """
         harvest_etfs = HARVEST_PARAMS["harvest_etfs"]
         if not harvest_etfs:
             return
-        per_etf = amount / len(harvest_etfs)
+        to_etfs_pct   = float(HARVEST_PARAMS.get("harvest_to_etfs_pct", 1.0))
+        etf_amount    = amount * to_etfs_pct
+        active_reserve = amount - etf_amount
+        per_etf = etf_amount / len(harvest_etfs)
         min_order = RISK_LIMITS["min_order_amount"]
         if per_etf < min_order:
             logger.info(
@@ -36,7 +43,11 @@ class HarvestManager:
                 f"— skipping harvest reinvestment"
             )
             return
-        logger.info(f"=== HARVEST: ${amount:.2f} → {harvest_etfs} (${per_etf:.2f} each) ===")
+        logger.info(
+            f"=== HARVEST: ${amount:.2f} → ETFs ${etf_amount:.2f} "
+            f"({to_etfs_pct:.0%}) + active reserve ${active_reserve:.2f} "
+            f"({1 - to_etfs_pct:.0%}) ==="
+        )
         for etf in harvest_etfs:
             try:
                 result = broker.buy_fractional(etf, per_etf)

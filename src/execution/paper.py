@@ -24,6 +24,8 @@ class PaperBroker(BrokerAdapter):
     Prices must be supplied externally (e.g. from a price lookup function).
     """
 
+    is_live: bool = False  # prevents CSV saves and other live-only side-effects
+
     def __init__(
         self,
         starting_cash: float = 10_000.0,
@@ -83,4 +85,13 @@ class PaperBroker(BrokerAdapter):
         return []
 
     def deposit(self, amount: float) -> None:
+        self._cash += amount
+
+    def clear_orders_cache(self) -> None:
+        pass
+
+    def enrich_holdings_created_at(self, holdings: dict) -> None:
+        pass
+
+    def add_funds(self, amount: float) -> None:
         self._cash += amount

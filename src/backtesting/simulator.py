@@ -13,6 +13,7 @@ import pandas as pd
 from util import (
     BACKTEST_PARAMS,
     CANDIDATE_SELECTION_PARAMS,
+    EXIT_DECISION_PARAMS,
     INDEX_PCT,
     METRIC_THRESHOLD,
     MOMENTUM_PARAMS,
@@ -450,6 +451,14 @@ def run_simulation(
     sell_weak_below  = float(params[7])
     trailing_stop    = float(params[8])
 
+    _trim_cfg            = EXIT_DECISION_PARAMS
+    _trim_enabled        = bool(_trim_cfg.get("trim_enabled", True))
+    _trim_fraction       = float(_trim_cfg.get("trim_fraction", 0.33))
+    _trim_min_gain       = float(_trim_cfg.get("trim_min_gain_pct", 0.08))
+    _trim_score_delta    = float(_trim_cfg.get("trim_score_delta_threshold", -0.15))
+    _trim_to_etfs_pct    = float(_trim_cfg.get("trim_to_etfs_pct", 0.85))
+    _trim_weak_threshold = metric_threshold * (1.0 + _trim_score_delta)
+
     base_slippage   = slippage_bps / 10_000.0
     bp_cfg          = BACKTEST_PARAMS
     use_vol_slip    = bp_cfg.get("vol_slippage_scaling", True)
@@ -483,6 +492,7 @@ def run_simulation(
 
     trades_made          = 0
     sells_made           = 0
+    trim_count           = 0
     skipped_buys         = 0
     cap_reductions       = 0
     cooldown_skips       = 0
@@ -702,6 +712,55 @@ def run_simulation(
             stock_peak[sell_mask]      = 0.0
             stock_day_bought[sell_mask]= -1
 
+        # ── Trim exits (partial position reduction) ──────────────────────────
+        if _trim_enabled:
+            trim_mask = (
+                held
+                & ~sell_mask
+                & (pct_from_avg >= _trim_min_gain)
+                & (current_scores < metric_threshold)
+                & (current_scores >= sell_weak_below)
+                & (current_scores < _trim_weak_threshold)
+            )
+            if trim_mask.any():
+                sell_prices_t = np.where(valid_price, prices, stock_avg_cost)
+                trim_indices  = np.where(trim_mask)[0]
+                trim_notional = 0.0
+                for i in trim_indices:
+                    shares_to_sell = stock_shares[i] * _trim_fraction
+                    if shares_to_sell <= 0:
+                        continue
+                    slip        = _effective_slippage(i)
+                    proceeds_i  = float(shares_to_sell * sell_prices_t[i] * (1.0 - slip))
+                    total_friction += float(shares_to_sell * sell_prices_t[i] * slip) + commission_per_trade
+                    trim_notional  += proceeds_i
+                    cash           += proceeds_i
+                    stock_shares[i] -= shares_to_sell
+                    sym = precomp.symbols[i] if i < len(precomp.symbols) else str(i)
+                    cost_basis_i = float(stock_avg_cost[i] * shares_to_sell)
+                    trade_log.append(TradeRecord(
+                        date=str(d), symbol=sym, side="sell",
+                        quantity=shares_to_sell, price=float(sell_prices_t[i]),
+                        amount=proceeds_i, exit_type="trim_exit",
+                        pnl=proceeds_i - cost_basis_i,
+                        hold_days=int(days_held[i]), is_partial=True,
+                    ))
+                trim_count            += int(trim_mask.sum())
+                total_traded_notional += trim_notional
+                sells_made            += int(trim_mask.sum())
+                # Route trim proceeds to ETF sleeve
+                etf_portion = trim_notional * _trim_to_etfs_pct
+                if n_etfs > 0 and etf_portion > 0:
+                    p_etf     = precomp.etf_prices[d]
+                    valid_etfs = np.isfinite(p_etf) & (p_etf > 0)
+                    n_valid_e  = int(valid_etfs.sum())
+                    if n_valid_e > 0:
+                        per_etf = etf_portion / n_valid_e
+                        if per_etf >= min_order:
+                            for j in np.where(valid_etfs)[0]:
+                                etf_shares[j] += per_etf / p_etf[j]
+                                cash           -= per_etf
+
         is_contrib_day = d > 0 and d % rebalance_frequency_days == 0
         contrib_today  = weekly_contribution if is_contrib_day else 0.0
         if is_contrib_day:
@@ -785,6 +844,7 @@ def run_simulation(
         net_contributions=total_contributions,
         profit=profit,
         stopout_count=stopout_count,
+        trim_count=trim_count,
         cooldown_skips=cooldown_skips,
         regime_days=regime_days,
         benchmark_twr=bench_twr_val,

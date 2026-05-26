@@ -98,6 +98,15 @@ _SCHEMA: list[str] = [
     "risk_check_fail_reason",
     "proposed_allocation",
     "final_allocation",
+    # ── Partial exit details (TRIM decisions) ───────────────────────────────
+    "trim_fraction",             # fraction of position sold (e.g. 0.33)
+    "quantity_sold",             # shares sold in a trim
+    "quantity_remaining",        # shares kept after trim
+    # ── Cluster / regime context ─────────────────────────────────────────────
+    "cluster",                   # optional market cluster label (string)
+    # ── Post-decision price path (backfilled later) ──────────────────────────
+    "max_drawdown_after_decision",  # worst drawdown within 90d of decision
+    "max_runup_after_decision",     # best runup within 90d of decision
     # ── Outcomes (backfilled later) ──────────────────────────────────────────
     "future_7d_return",
     "future_30d_return",
@@ -229,6 +238,10 @@ def record_decision_holding(
     industry: Optional[str]   = None,
     reliability_score: Optional[float] = None,
     yield_trap_flag: Optional[bool]    = None,
+    trim_fraction: Optional[float]     = None,
+    quantity_sold: Optional[float]     = None,
+    quantity_remaining: Optional[float] = None,
+    cluster: Optional[str]             = None,
 ) -> None:
     """Append one holding-evaluation record to decision_outcomes.parquet."""
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -278,6 +291,10 @@ def record_decision_holding(
         "industry":        industry,
         "reliability_score": reliability_score,
         "yield_trap_flag":   yield_trap_flag,
+        "trim_fraction":     trim_fraction,
+        "quantity_sold":     quantity_sold,
+        "quantity_remaining": quantity_remaining,
+        "cluster":           cluster,
     })
 
     _append_row(row)
@@ -514,3 +531,67 @@ def fill_future_returns(
         _save_outcomes(df)
 
     return n_updated
+
+
+# ---------------------------------------------------------------------------
+# Calibration summary — research / diagnostics only
+# NEVER fed back into live scoring or factor weights.
+# ---------------------------------------------------------------------------
+
+def get_calibration_summary(df: Optional[pd.DataFrame] = None) -> dict:
+    """
+    Compute calibration metrics from recorded decision outcomes.
+
+    Returns a dict with the following keys (all floats 0–1, or None if no data):
+      premature_exit_rate  — fraction of EXIT decisions where stock gained ≥2% after
+      trim_success_rate    — fraction of TRIM decisions where stock subsequently declined
+                             or underperformed SPY (i.e. trim was well-timed)
+      harvest_regret_rate  — fraction of HARVEST decisions where stock continued rising ≥10%
+                             after the exit (regret = sold too early)
+      bad_hold_rate        — fraction of HOLD decisions where stock fell ≥5% while SPY flat/up
+      n_exit               — number of EXIT decisions with resolved outcomes
+      n_trim               — number of TRIM decisions with resolved outcomes
+      n_harvest            — number of HARVEST decisions with resolved outcomes
+      n_hold               — number of HOLD decisions with resolved outcomes
+    """
+    if df is None:
+        df = load_outcomes()
+
+    if df.empty:
+        return {
+            "premature_exit_rate": None, "trim_success_rate": None,
+            "harvest_regret_rate": None, "bad_hold_rate": None,
+            "n_exit": 0, "n_trim": 0, "n_harvest": 0, "n_hold": 0,
+        }
+
+    def _rate(mask_state: str, bool_col: str, invert: bool = False) -> tuple[Optional[float], int]:
+        subset = df[df["decision_state"] == mask_state]
+        resolved = subset[bool_col].dropna()
+        if resolved.empty:
+            return None, 0
+        rate = float(resolved.astype(bool).mean())
+        return (1.0 - rate if invert else rate), len(resolved)
+
+    premature_exit_rate, n_exit    = _rate("EXIT",    "premature_exit")
+    trim_success_rate,   n_trim    = _rate("TRIM",    "good_trim")
+    bad_hold_rate,       n_hold    = _rate("HOLD",    "bad_hold")
+
+    # Harvest regret: HARVEST exit + stock continued ≥10% (premature_exit proxy at higher bar)
+    harvest_subset = df[df["decision_state"] == "HARVEST"]
+    h_resolved = harvest_subset["future_30d_return"].dropna()
+    if h_resolved.empty:
+        harvest_regret_rate, n_harvest = None, 0
+    else:
+        harvest_regret_rate = float((h_resolved > 0.10).mean())
+        n_harvest = len(h_resolved)
+
+    return {
+        "premature_exit_rate": premature_exit_rate,
+        "trim_success_rate":   trim_success_rate,
+        "harvest_regret_rate": harvest_regret_rate,
+        "bad_hold_rate":       bad_hold_rate,
+        "n_exit":              n_exit,
+        "n_trim":              n_trim,
+        "n_harvest":           n_harvest,
+        "n_hold":              n_hold,
+    }

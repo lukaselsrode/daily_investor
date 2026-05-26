@@ -125,7 +125,7 @@ def render() -> None:
         for col in ["equity", "percent_change", "equity_change"]:
             if col in hdf.columns:
                 hdf[col] = pd.to_numeric(hdf[col], errors="coerce")
-        etfs = cfg.get("etfs", ["SPY", "VOO", "VTI", "QQQ", "SCHD"])
+        etfs = cfg.get("etfs", [])
         hdf["sleeve"] = hdf["symbol"].apply(lambda s: "ETF/core" if s in etfs else "active") if "symbol" in hdf.columns else "unknown"
         hc1, hc2, hc3, hc4 = st.columns(4)
         hc1.metric("Positions", len(hdf))

@@ -70,6 +70,7 @@ class SimResult:
     profit: float = 0.0             # final_value - net_contributions
     # attribution & regime diagnostics
     stopout_count: int = 0          # hard stop-loss triggered
+    trim_count: int = 0             # partial exits (trim_exit)
     cooldown_skips: int = 0         # buys skipped due to post-sell cooldown
     regime_days: "dict | None" = None  # {"bullish": N, "neutral": N, "defensive": N}
     benchmark_twr: float = 0.0     # contribution-adjusted benchmark TWR for comparison

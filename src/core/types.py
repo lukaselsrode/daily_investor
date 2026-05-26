@@ -97,9 +97,11 @@ class TradeRecord:
     amount: float
     reason: str = ""
     exit_type: Literal["stop_loss", "trailing_stop", "take_profit", "weak_value",
-                       "yield_trap", "quality_floor", "harvest_exit", "regime", ""] = ""
+                       "yield_trap", "quality_floor", "harvest_exit", "trim_exit",
+                       "regime", ""] = ""
     pnl: float = 0.0
     hold_days: int = 0
+    is_partial: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -116,11 +118,12 @@ class SellDecision:
     should_sell: bool
     reason: str
     severity: Optional[Literal["hard", "soft"]]
-    exit_type: Optional[Literal["failure_exit", "harvest_exit", "thesis_exit"]]
+    exit_type: Optional[Literal["failure_exit", "harvest_exit", "trim_exit", "thesis_exit"]]
     percent_change: Optional[float]
     value_metric: Optional[float]
     quality_score: Optional[float]
     yield_trap_flag: Optional[bool]
+    trim_fraction: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------

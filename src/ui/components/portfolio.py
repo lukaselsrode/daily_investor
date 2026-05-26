@@ -1013,7 +1013,7 @@ def render() -> None:
     )
 
     cfg  = load_config_raw()
-    etfs = cfg.get("etfs", ["SPY", "VOO", "VTI", "QQQ", "SCHD"])
+    etfs = cfg.get("etfs", [])
 
     holdings = _load_holdings()
     if holdings is None:

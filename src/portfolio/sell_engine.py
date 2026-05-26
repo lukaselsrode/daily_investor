@@ -22,7 +22,7 @@ from typing import Optional
 import pandas as pd
 
 from core.types import SellDecision
-from util import METRIC_THRESHOLD, SELL_RULES, safe_float
+from util import EXIT_DECISION_PARAMS, METRIC_THRESHOLD, SELL_RULES, safe_float
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +157,39 @@ class SellDecisionEngine:
                     **base,
                 )
 
+        # ── Trim (partial exit) ─────────────────────────────────────────────
+        # Fires when: profitable + thesis weakening (score below buy threshold)
+        # but not yet collapsed to thesis_exit territory.  Sells only trim_fraction.
+        _trim = EXIT_DECISION_PARAMS
+        if _trim.get("trim_enabled") and percent_change is not None:
+            _trim_min_gain = _trim["trim_min_gain_pct"]
+            _trim_fraction  = _trim["trim_fraction"]
+            _trim_delta_thr = _trim["trim_score_delta_threshold"]  # e.g. -0.15
+
+            _weakening_threshold = METRIC_THRESHOLD * (1.0 + _trim_delta_thr)  # e.g. 0.8 * 0.85 = 0.68
+            _profitable           = percent_change >= _trim_min_gain
+            _thesis_weakening     = (
+                value_metric is not None
+                and value_metric < METRIC_THRESHOLD
+                and value_metric >= sell_weak  # not yet thesis_exit territory
+                and value_metric < _weakening_threshold
+            )
+
+            if _profitable and _thesis_weakening:
+                return SellDecision(
+                    symbol=symbol,
+                    should_sell=True,
+                    reason=(
+                        f"trim: profit {percent_change:.1%} ≥ {_trim_min_gain:.0%}, "
+                        f"value_metric={value_metric:.3f} below buy threshold "
+                        f"({_weakening_threshold:.2f}) — partial exit"
+                    ),
+                    severity="soft",
+                    exit_type="trim_exit",
+                    trim_fraction=_trim_fraction,
+                    **base,
+                )
+
         if value_metric is not None and value_metric < sell_weak:
             if days_held is None or days_held >= min_days:
                 days_str = f"{days_held}d" if days_held is not None else "unknown days"
@@ -239,6 +272,7 @@ def evaluate_sell_candidate(
         "reason":         d.reason,
         "severity":       d.severity,
         "exit_type":      d.exit_type,
+        "trim_fraction":  d.trim_fraction,
         "percent_change": d.percent_change,
         "value_metric":   d.value_metric,
         "quality_score":  d.quality_score,

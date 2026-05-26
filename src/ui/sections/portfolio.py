@@ -13,6 +13,8 @@ def render() -> None:
         "🌡️ Regime",
         "📓 Decision Journal",
         "📈 Attribution",
+        "🏦 Allocation",
+        "🎯 Decision Quality",
     ])
 
     with tabs[0]:
@@ -33,4 +35,12 @@ def render() -> None:
 
     with tabs[4]:
         from ui.components.attribution import render as _r
+        _r()
+
+    with tabs[5]:
+        from ui.components.allocation_diagnostics import render as _r
+        _r()
+
+    with tabs[6]:
+        from ui.components.decision_quality import render as _r
         _r()

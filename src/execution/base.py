@@ -28,6 +28,8 @@ class OrderResult:
 class BrokerAdapter(ABC):
     """Minimal broker interface needed by PortfolioManager."""
 
+    is_live: bool = True  # False for PaperBroker — skips side-effects like CSV saves
+
     @abstractmethod
     def buy_fractional(self, symbol: str, amount: float) -> OrderResult:
         """Place a fractional dollar-amount buy order."""

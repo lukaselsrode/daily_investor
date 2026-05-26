@@ -29,11 +29,13 @@ from util import (
     DIVIDEND_PARAMS,
     ETF_RISK_PARAMS,
     ETFS,
+    EXIT_DECISION_PARAMS,
     HARVEST_PARAMS,
     INDEX_PCT,
     MAX_ITERATIONS,
     METRIC_KEYS,
     METRIC_THRESHOLD,
+    REBALANCE_PARAMS,
     REGIME_PARAMS,
     RELIABILITY_PARAMS,
     RISK_LIMITS,
@@ -450,25 +452,30 @@ class PortfolioManager:
     # Sell cycle
     # ------------------------------------------------------------------
 
-    def sell_cycle(self) -> list[str]:
+    def sell_cycle(self) -> tuple[list[str], list[str]]:
         """
         Evaluate all holdings for sell conditions.
 
         Hard sells (stop-loss, yield-trap, quality floor) execute immediately.
         Soft sells (take-profit, weak value) are optionally held by sentiment.
+        Trim exits (trim_exit) execute a partial position reduction.
         Sentiment can only override soft sells — never hard sells.
         ETF positions are protected from stock stop-loss logic; they are only
         exited by the ETF MA filter (defensive regime only).
+
+        Returns (sold_full, trimmed_partial) — symbols with full vs partial exits.
         """
         sold: list[str] = []
+        trimmed: list[str] = []
 
         try:
             holdings = self._broker.get_holdings()
             self._broker.enrich_holdings_created_at(holdings)
-            self._save_holdings_csv(holdings)
+            if getattr(self._broker, "is_live", True):
+                self._save_holdings_csv(holdings)
         except Exception as e:
             logger.error(f"Could not fetch holdings: {e}")
-            return sold
+            return sold, trimmed
 
         try:
             agg_df = read_data_as_pd("agg_data")
@@ -605,22 +612,63 @@ class PortfolioManager:
                         )
 
             harvest_proceeds = 0.0
+            trim_proceeds    = 0.0
+
             for symbol, decision in soft_sells.items():
                 if symbol in held_on_sentiment:
                     continue
-                pct = decision.get("percent_change")
-                pct_str = f" | P/L={pct:.1%}" if pct is not None else ""
-                logger.info(f"SOFT SELL {symbol} | {decision['reason']}{pct_str}")
-                quantity = float(holdings[symbol].get("quantity", 0))
-                if self._confirm(f"Sell {quantity} shares of {symbol}?") and \
-                        self._broker.sell(symbol, quantity).success:
-                    sold.append(symbol)
-                    self._record_sell_event(symbol, was_loss=(pct is not None and pct < 0))
-                    if decision.get("exit_type") == "harvest_exit":
-                        harvest_proceeds += safe_float(holdings[symbol].get("equity"), 0.0) or 0.0
 
+                pct      = decision.get("percent_change")
+                pct_str  = f" | P/L={pct:.1%}" if pct is not None else ""
+                quantity = float(holdings[symbol].get("quantity", 0))
+                exit_type = decision.get("exit_type")
+
+                if exit_type == "trim_exit":
+                    # --- Partial exit: sell trim_fraction of position ---
+                    frac      = decision.get("trim_fraction") or EXIT_DECISION_PARAMS["trim_fraction"]
+                    sell_qty  = round(quantity * frac, 6)
+                    remain    = quantity - sell_qty
+                    equity    = safe_float(holdings[symbol].get("equity"), 0.0) or 0.0
+                    logger.info(
+                        f"TRIM {symbol} | selling {sell_qty:.4f} / {quantity:.4f} shares "
+                        f"({frac:.0%}) | {decision['reason']}{pct_str}"
+                    )
+                    if sell_qty > 0 and self._confirm(
+                        f"Trim {sell_qty:.4f} shares of {symbol} "
+                        f"({frac:.0%}, keeping {remain:.4f})?"
+                    ) and self._broker.sell(symbol, sell_qty).success:
+                        trimmed.append(symbol)
+                        trim_proceeds += equity * frac
+                        self._record_sell_event(symbol, was_loss=False)
+                        logger.info(
+                            f"TRIM executed {symbol}: sold {sell_qty:.4f} "
+                            f"shares, {remain:.4f} remain | proceeds ${equity * frac:.2f}"
+                        )
+                else:
+                    # --- Full exit ---
+                    logger.info(f"SOFT SELL {symbol} | {decision['reason']}{pct_str}")
+                    if self._confirm(f"Sell {quantity} shares of {symbol}?") and \
+                            self._broker.sell(symbol, quantity).success:
+                        sold.append(symbol)
+                        self._record_sell_event(symbol, was_loss=(pct is not None and pct < 0))
+                        if exit_type == "harvest_exit":
+                            harvest_proceeds += safe_float(holdings[symbol].get("equity"), 0.0) or 0.0
+
+            # Route harvest proceeds (take-profit full exits)
             if harvest_proceeds >= HARVEST_PARAMS["min_harvest_amount"]:
                 self._harvest.route_proceeds(harvest_proceeds, self._broker)
+
+            # Route trim proceeds (partial exits)
+            if trim_proceeds >= HARVEST_PARAMS["min_harvest_amount"]:
+                trim_to_etfs = EXIT_DECISION_PARAMS["trim_to_etfs_pct"]
+                etf_portion  = trim_proceeds * trim_to_etfs
+                logger.info(
+                    f"TRIM proceeds routing: ${trim_proceeds:.2f} total | "
+                    f"${etf_portion:.2f} ({trim_to_etfs:.0%}) → ETFs | "
+                    f"${trim_proceeds - etf_portion:.2f} retained as active reserve"
+                )
+                if etf_portion >= HARVEST_PARAMS["min_harvest_amount"]:
+                    self._harvest.route_proceeds(etf_portion, self._broker)
 
         if sold:
             for sym in sold:
@@ -629,7 +677,7 @@ class PortfolioManager:
 
         self._log_all_holding_decisions(
             all_evaluated=_all_evaluated,
-            sold=set(sold),
+            sold=set(sold) | set(trimmed),
             held_on_sentiment=held_on_sentiment,
             regime=get_current_regime(),
             bc_df=_bc_df,
@@ -640,69 +688,155 @@ class PortfolioManager:
             f"Sell summary: {scanned} scanned | "
             f"{len(hard_sells)} hard | {len(soft_sells)} soft candidates | "
             f"{len(held_on_sentiment)} held on sentiment | "
-            f"{len(sold)} executed | "
-            f"{len(hard_sells) + len(soft_sells) - len(sold)} skipped/no-action"
+            f"{len(sold)} full exits | {len(trimmed)} trims | "
+            f"{len(hard_sells) + len(soft_sells) - len(sold) - len(trimmed)} skipped/no-action"
         )
-        return sold
+        return sold, trimmed
 
     # ------------------------------------------------------------------
     # Buy cycle
     # ------------------------------------------------------------------
+
+    def _compute_contribution_split(
+        self,
+        total_cash: float,
+        effective_index_pct: float,
+    ) -> tuple[float, float]:
+        """
+        Split `total_cash` between ETF and active sleeves.
+
+        When `proportional_deficit_routing` is enabled:
+          - If the ETF sleeve is within ±drift_tolerance_pct of target → normal proportional split.
+          - If ETF is overweight beyond tolerance → route ALL cash to active.
+          - If ETF is underweight beyond tolerance → route ALL cash to ETF.
+
+        This allows a legacy ETF-heavy portfolio to converge toward target weight via
+        contributions without force-selling ETF lots (no tax event, no turnover).
+        Falls back to proportional split on any error.
+        """
+        rb = REBALANCE_PARAMS
+        if not rb.get("proportional_deficit_routing"):
+            etf_amt = total_cash * effective_index_pct
+            return etf_amt, total_cash - etf_amt
+
+        drift_tol = float(rb.get("drift_tolerance_pct", 0.03))
+        try:
+            holdings         = self._broker.get_holdings()
+            portfolio_equity = self._broker.get_portfolio_value()
+            if portfolio_equity > 0:
+                current_etf = sum(
+                    safe_float(holdings.get(etf, {}).get("equity"), 0.0)
+                    for etf in ETFS
+                )
+                current_etf_pct = current_etf / portfolio_equity
+                drift = current_etf_pct - effective_index_pct
+
+                if drift > drift_tol:
+                    # ETF overweight — all new cash goes to active sleeve.
+                    logger.info(
+                        f"Deficit routing: ETF {current_etf_pct:.1%} is +{drift:.1%} above "
+                        f"target {effective_index_pct:.0%} (tolerance ±{drift_tol:.0%}) "
+                        f"— routing all ${total_cash:.2f} to active sleeve"
+                    )
+                    return 0.0, total_cash
+
+                if drift < -drift_tol:
+                    # ETF underweight — fill only the deficit, remainder to active.
+                    deficit = max(0.0, portfolio_equity * effective_index_pct - current_etf)
+                    etf_amt = min(total_cash, deficit)
+                    logger.info(
+                        f"Deficit routing: ETF {current_etf_pct:.1%} is {drift:.1%} below "
+                        f"target {effective_index_pct:.0%} (tolerance ±{drift_tol:.0%}) "
+                        f"— filling deficit ${deficit:.2f} with ${etf_amt:.2f}, "
+                        f"${total_cash - etf_amt:.2f} to active sleeve"
+                    )
+                    return etf_amt, total_cash - etf_amt
+
+                logger.info(
+                    f"Deficit routing: ETF {current_etf_pct:.1%} within ±{drift_tol:.0%} "
+                    f"tolerance — normal {effective_index_pct:.0%}/{1-effective_index_pct:.0%} split"
+                )
+        except Exception as exc:
+            logger.warning(f"Deficit routing check failed ({exc}) — proportional fallback")
+
+        etf_amt = total_cash * effective_index_pct
+        return etf_amt, total_cash - etf_amt
+
+    @staticmethod
+    def _resolve_regime_params(regime: str) -> tuple[float, int]:
+        """Return (effective_index_pct, effective_max_buys) for the given regime."""
+        rp = REGIME_PARAMS
+        index_pct = INDEX_PCT
+        max_buys  = RISK_LIMITS["max_buys_per_rebalance"]
+        if regime in ("defensive", "neutral"):
+            ovr = rp.get(regime, {})
+            if ovr.get("index_pct_override") is not None:
+                index_pct = float(ovr["index_pct_override"])
+            if ovr.get("max_buys_override") is not None:
+                max_buys = int(ovr["max_buys_override"])
+        return index_pct, max_buys
 
     def buy_cycle(
         self,
         df: pd.DataFrame,
         is_first_iteration: bool = True,
         regime: str = "bullish",
+        effective_index_pct: Optional[float] = None,
     ) -> tuple[list, list, list]:
         """
         Execute buy orders. Returns (purchased, skipped, failed).
-        regime controls index_pct and max_buys overrides.
+
+        ETF buys only happen on the first iteration.  On subsequent iterations
+        `stock_amount` is the full available cash because the ETF sleeve was
+        already funded in iteration 1.
         """
-        rp = REGIME_PARAMS
-        effective_index_pct = INDEX_PCT
-        effective_max_buys  = RISK_LIMITS["max_buys_per_rebalance"]
+        _eff_idx, effective_max_buys = self._resolve_regime_params(regime)
+        if effective_index_pct is None:
+            effective_index_pct = _eff_idx
 
         if regime == "defensive":
-            ovr = rp.get("defensive", {})
-            if ovr.get("index_pct_override") is not None:
-                effective_index_pct = float(ovr["index_pct_override"])
-            if ovr.get("max_buys_override") is not None:
-                effective_max_buys = int(ovr["max_buys_override"])
             logger.info(
                 f"DEFENSIVE regime: index_pct={effective_index_pct:.0%}  max_buys={effective_max_buys}"
             )
         elif regime == "neutral":
-            ovr = rp.get("neutral", {})
-            if ovr.get("index_pct_override") is not None:
-                effective_index_pct = float(ovr["index_pct_override"])
-            if ovr.get("max_buys_override") is not None:
-                effective_max_buys = int(ovr["max_buys_override"])
             logger.info(f"NEUTRAL regime: index_pct={effective_index_pct:.0%}")
 
-        total_cash   = self._broker.get_cash()
-        etf_amount   = total_cash * effective_index_pct
-        stock_amount = total_cash - etf_amount
-        logger.info(
-            f"Allocating ${etf_amount:.2f} to ETFs, ${stock_amount:.2f} to stocks (regime={regime})"
-        )
+        total_cash = self._broker.get_cash()
 
-        if is_first_iteration and etf_amount > 0 and \
-                (self._auto_approve or self._confirm(f"Buy ETFs (${etf_amount:,.2f})?")):
-            per_etf = etf_amount / max(len(ETFS), 1)
-            if per_etf < RISK_LIMITS["min_order_amount"]:
-                logger.info(
-                    f"Per-ETF amount ${per_etf:.2f} < min_order "
-                    f"${RISK_LIMITS['min_order_amount']:.2f} — skipping ETF buys"
-                )
-            else:
-                for etf in ETFS:
-                    try:
-                        if self._auto_approve or self._confirm(f"Buy ${per_etf:,.2f} of {etf}?"):
-                            result = self._broker.buy_fractional(etf, per_etf)
-                            logger.info(f"ETF {etf}: {result.state}")
-                    except Exception as e:
-                        logger.error(f"ETF buy failed for {etf}: {e}")
+        if is_first_iteration:
+            # First pass: split cash between ETF sleeve and active sleeve.
+            # Uses deficit-aware routing when proportional_deficit_routing is enabled.
+            etf_amount, stock_amount = self._compute_contribution_split(
+                total_cash, effective_index_pct
+            )
+            logger.info(
+                f"Iter-1 allocation — ETFs ${etf_amount:.2f} ({etf_amount/max(total_cash,1e-9):.0%}), "
+                f"stocks ${stock_amount:.2f} ({stock_amount/max(total_cash,1e-9):.0%}) "
+                f"| cash=${total_cash:.2f}"
+            )
+            if etf_amount > 0 and \
+                    (self._auto_approve or self._confirm(f"Buy ETFs (${etf_amount:,.2f})?")):
+                per_etf = etf_amount / max(len(ETFS), 1)
+                if per_etf < RISK_LIMITS["min_order_amount"]:
+                    logger.info(
+                        f"Per-ETF amount ${per_etf:.2f} < min_order "
+                        f"${RISK_LIMITS['min_order_amount']:.2f} — skipping ETF buys"
+                    )
+                else:
+                    for etf in ETFS:
+                        try:
+                            if self._auto_approve or self._confirm(f"Buy ${per_etf:,.2f} of {etf}?"):
+                                result = self._broker.buy_fractional(etf, per_etf)
+                                logger.info(f"ETF {etf}: {result.state}")
+                        except Exception as e:
+                            logger.error(f"ETF buy failed for {etf}: {e}")
+        else:
+            # Subsequent iterations: ETF sleeve already funded; all cash is for stocks.
+            stock_amount = total_cash
+            logger.info(
+                f"Iter-N allocation — all ${total_cash:.2f} available for stocks "
+                f"(ETFs already funded this run)"
+            )
 
         if regime == "defensive":
             logger.info(
@@ -991,11 +1125,78 @@ class PortfolioManager:
     # Rebalance loop
     # ------------------------------------------------------------------
 
+    def _compute_etf_sweep_amount(self, remaining_cash: float, effective_index_pct: float) -> float:
+        """
+        Compute how much of `remaining_cash` should be swept to ETFs.
+
+        Uses target-allocation accounting: only fills the gap between the current
+        ETF sleeve value and the target (portfolio_equity * effective_index_pct).
+        This prevents double-buying ETFs when the sleeve is already at or above target.
+        """
+        if not ETFS or remaining_cash <= 0:
+            return 0.0
+        try:
+            holdings = self._broker.get_holdings()
+            portfolio_equity = self._broker.get_portfolio_value()
+            if portfolio_equity <= 0:
+                return remaining_cash * effective_index_pct
+
+            current_etf_equity = sum(
+                safe_float(holdings.get(etf, {}).get("equity"), 0.0)
+                for etf in ETFS
+            )
+            target_etf = portfolio_equity * effective_index_pct
+            deficit = max(0.0, target_etf - current_etf_equity)
+            sweep = min(remaining_cash, deficit)
+            logger.info(
+                f"ETF allocation check — portfolio ${portfolio_equity:.2f} | "
+                f"target ETF {effective_index_pct:.0%} = ${target_etf:.2f} | "
+                f"current ETF ${current_etf_equity:.2f} | "
+                f"deficit ${deficit:.2f} | sweep ${sweep:.2f}"
+            )
+            return sweep
+        except Exception as exc:
+            logger.warning(f"ETF sweep computation failed ({exc}) — using proportional fallback")
+            return remaining_cash * effective_index_pct
+
     def rebalance(self, df: pd.DataFrame, regime: str = "bullish") -> None:
         """
         Run the full iteration loop: sell → buy → repeat until cash exhausted,
-        then sweep remaining cash into ETFs.
+        then sweep any ETF-sleeve deficit into ETFs.
+
+        ETF buys happen exactly once (iteration 1).  Sell proceeds in later
+        iterations are fully available for stock buys.  The end-of-run sweep
+        only fills the gap between current ETF value and the target weight —
+        it never over-allocates to ETFs.
         """
+        effective_index_pct, _ = self._resolve_regime_params(regime)
+
+        # Snapshot portfolio state at run start for diagnostics.
+        try:
+            _start_pv    = self._broker.get_portfolio_value()
+            _start_cash  = self._broker.get_cash()
+            _start_etf   = sum(
+                safe_float(self._broker.get_holdings().get(etf, {}).get("equity"), 0.0)
+                for etf in ETFS
+            )
+            _start_active = _start_pv - _start_cash - _start_etf
+            logger.info(
+                f"\n{'='*60}\n"
+                f"PORTFOLIO SNAPSHOT (run start)\n"
+                f"  Portfolio equity : ${_start_pv:,.2f}\n"
+                f"  Cash             : ${_start_cash:,.2f}\n"
+                f"  ETF sleeve       : ${_start_etf:,.2f}  "
+                f"({_start_etf / max(_start_pv, 1):.1%} actual vs "
+                f"{effective_index_pct:.0%} target)\n"
+                f"  Active sleeve    : ${_start_active:,.2f}  "
+                f"({_start_active / max(_start_pv, 1):.1%} actual vs "
+                f"{1 - effective_index_pct:.0%} target)\n"
+                f"  Regime           : {regime}\n"
+                f"{'='*60}"
+            )
+        except Exception:
+            _start_pv = 0.0
+
         permanently_skipped: set[str] = set()
 
         for iteration in range(1, MAX_ITERATIONS + 1):
@@ -1019,11 +1220,12 @@ class PortfolioManager:
 
             try:
                 logger.info("=== SELL PHASE ===")
-                sold = self.sell_cycle()
-                if sold:
+                sold, trimmed = self.sell_cycle()
+                if sold or trimmed:
                     made_sells = True
             except Exception as e:
                 logger.error(f"Sell phase error (iter {iteration}): {e}")
+                sold, trimmed = [], []
 
             cash = self._broker.get_cash()
             if cash < RISK_LIMITS["min_order_amount"]:
@@ -1039,7 +1241,10 @@ class PortfolioManager:
             try:
                 logger.info("=== BUY PHASE ===")
                 purchased, skipped, failed = self.buy_cycle(
-                    df, is_first_iteration=(iteration == 1), regime=regime
+                    df,
+                    is_first_iteration=(iteration == 1),
+                    regime=regime,
+                    effective_index_pct=effective_index_pct,
                 )
                 if purchased:
                     made_buys = True
@@ -1052,16 +1257,22 @@ class PortfolioManager:
                 logger.info("No activity this iteration — exiting loop")
                 break
 
+        # End-of-run ETF sweep: only fill the ETF-sleeve deficit.
         remaining = self._broker.get_cash()
         if remaining > 0 and ETFS:
-            per_etf = remaining / len(ETFS)
-            if per_etf < RISK_LIMITS["min_order_amount"]:
+            sweep_amount = self._compute_etf_sweep_amount(remaining, effective_index_pct)
+            if sweep_amount < RISK_LIMITS["min_order_amount"]:
                 logger.info(
-                    f"Sweep per-ETF ${per_etf:.2f} < min_order "
-                    f"${RISK_LIMITS['min_order_amount']:.2f} — skipping sweep"
+                    f"ETF sweep skipped — deficit ${sweep_amount:.2f} < "
+                    f"min_order ${RISK_LIMITS['min_order_amount']:.2f} "
+                    f"(ETFs at or near target)"
                 )
             else:
-                logger.info(f"=== CASH SWEEP: ${remaining:,.2f} → ETFs (${per_etf:.2f} each) ===")
+                per_etf = sweep_amount / len(ETFS)
+                logger.info(
+                    f"=== CASH SWEEP: ${sweep_amount:,.2f} → ETFs "
+                    f"(${per_etf:.2f} each, ${remaining - sweep_amount:.2f} retained) ==="
+                )
                 for etf in ETFS:
                     try:
                         result = self._broker.buy_fractional(etf, per_etf)
@@ -1072,10 +1283,30 @@ class PortfolioManager:
                     except Exception as e:
                         logger.error(f"Sweep {etf} failed: {e}")
 
-        logger.info(
-            f"\n{'='*60}\n"
-            f"STRATEGY COMPLETE\n"
-            f"Final cash: ${self._broker.get_cash():,.2f}\n"
-            f"Total skipped: {len(permanently_skipped)}\n"
-            f"{'='*60}"
-        )
+        # Run-end summary.
+        try:
+            _end_pv   = self._broker.get_portfolio_value()
+            _end_cash = self._broker.get_cash()
+            _end_etf  = sum(
+                safe_float(self._broker.get_holdings().get(etf, {}).get("equity"), 0.0)
+                for etf in ETFS
+            )
+            _end_active = _end_pv - _end_cash - _end_etf
+            logger.info(
+                f"\n{'='*60}\n"
+                f"STRATEGY COMPLETE\n"
+                f"  Portfolio equity : ${_end_pv:,.2f}\n"
+                f"  Cash remaining   : ${_end_cash:,.2f}\n"
+                f"  ETF sleeve       : ${_end_etf:,.2f}  ({_end_etf / max(_end_pv, 1):.1%})\n"
+                f"  Active sleeve    : ${_end_active:,.2f}  ({_end_active / max(_end_pv, 1):.1%})\n"
+                f"  Total skipped    : {len(permanently_skipped)}\n"
+                f"{'='*60}"
+            )
+        except Exception:
+            logger.info(
+                f"\n{'='*60}\n"
+                f"STRATEGY COMPLETE\n"
+                f"  Final cash: ${self._broker.get_cash():,.2f}\n"
+                f"  Total skipped: {len(permanently_skipped)}\n"
+                f"{'='*60}"
+            )

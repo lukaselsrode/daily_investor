@@ -193,6 +193,7 @@ HARVEST_PARAMS: dict = {
     "min_harvest_amount":           float(_hv.get("min_harvest_amount",           25.0)),
     "max_harvest_pct_of_portfolio": float(_hv.get("max_harvest_pct_of_portfolio",  0.02)),
     "harvest_etfs":                 list(_hv.get("harvest_etfs",                  ["SPY", "VTI"])),
+    "harvest_to_etfs_pct":         float(_hv.get("harvest_to_etfs_pct",          1.0)),
 }
 
 # ---------------------------------------------------------------------------
@@ -474,4 +475,35 @@ METRIC_KEYS: list[str] = [
 ]
 
 AGG_DATA_COLUMNS: list[str] = ["symbol"] + METRIC_KEYS
+
+# ---------------------------------------------------------------------------
+# Exit-decision / TRIM parameters
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Rebalance / contribution-routing parameters
+# ---------------------------------------------------------------------------
+
+_rb = _app.get("rebalance", {})
+REBALANCE_PARAMS: dict = {
+    "mode":                         str(_rb.get("mode",                         "contribution_driven")),
+    "drift_tolerance_pct":          float(_rb.get("drift_tolerance_pct",        0.03)),
+    "proportional_deficit_routing": bool(_rb.get("proportional_deficit_routing", True)),
+}
+
+# ---------------------------------------------------------------------------
+# Exit-decision / TRIM parameters
+# ---------------------------------------------------------------------------
+
+_ed = _app.get("exit_decision", {})
+EXIT_DECISION_PARAMS: dict = {
+    "trim_enabled":                bool(_ed.get("trim_enabled",                True)),
+    "trim_fraction":               float(_ed.get("trim_fraction",              0.33)),
+    "trim_min_gain_pct":           float(_ed.get("trim_min_gain_pct",          0.08)),
+    "trim_score_delta_threshold":  float(_ed.get("trim_score_delta_threshold", -0.15)),
+    "trim_requires_positive_momentum": bool(_ed.get("trim_requires_positive_momentum", True)),
+    "trim_to_etfs_pct":            float(_ed.get("trim_to_etfs_pct",           0.85)),
+    "trim_profit_threshold":       float(_ed.get("trim_profit_threshold",      0.15)),
+    "harvest_profit_threshold":    float(_ed.get("harvest_profit_threshold",   0.25)),
+}
 
