@@ -74,6 +74,7 @@ class SimResult:
     regime_days: "dict | None" = None  # {"bullish": N, "neutral": N, "defensive": N}
     benchmark_twr: float = 0.0     # contribution-adjusted benchmark TWR for comparison
     pool_diagnostics: "CandidatePoolDiagnostics | None" = None  # day-0 candidate pool
+    trade_log: list = field(default_factory=list)  # list[TradeRecord] for attribution
 
 
 @dataclass
@@ -94,6 +95,7 @@ class BacktestReport:
     # extended reporting
     train_benchmark_twr: float = 0.0   # contribution-adjusted benchmark TWR
     val_benchmark_twr: float = 0.0
+    trade_log: list = field(default_factory=list)  # list[TradeRecord] from train window
 
 
 @dataclass

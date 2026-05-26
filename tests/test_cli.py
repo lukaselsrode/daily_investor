@@ -13,7 +13,7 @@ import pytest
 import numpy as np
 from unittest.mock import MagicMock, patch
 
-import tuner as _t
+import tuning.reports as _t
 from cli.commands import (
     cmd_backtest, cmd_tune, cmd_auto_tune, cmd_stability_scan, cmd_report,
 )
@@ -25,7 +25,7 @@ from cli.main import main as cli_main
 # ---------------------------------------------------------------------------
 
 def _sim(total_return=0.12, sharpe=0.80, calmar=1.2, max_drawdown=-0.08, trades=40):
-    from backtest import SimResult
+    from backtesting.types import SimResult
     return SimResult(
         final_value=11_200.0, total_return=total_return,
         sharpe=sharpe, calmar=calmar, max_drawdown=max_drawdown,
@@ -34,7 +34,7 @@ def _sim(total_return=0.12, sharpe=0.80, calmar=1.2, max_drawdown=-0.08, trades=
 
 
 def _bt_result():
-    from backtest import BacktestReport, SimResult as BtSim
+    from backtesting.types import BacktestReport, SimResult as BtSim
     from backtesting.results import BacktestResult
     sim = BtSim(
         final_value=12_000.0, total_return=0.20, sharpe=1.2,

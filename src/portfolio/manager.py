@@ -568,7 +568,7 @@ class PortfolioManager:
                 ])
                 stocks_data = self._build_stocks_data(soft_df, action="sell")
                 try:
-                    from sentiment_analysis import get_batch_sentiment_recommendations
+                    from data.sentiment import get_batch_sentiment_recommendations
                     sentiment_results = get_batch_sentiment_recommendations(stocks_data, action="sell")
                 except Exception:
                     logger.error("Batch sentiment failed for soft sells — executing all", exc_info=True)
@@ -828,7 +828,7 @@ class PortfolioManager:
             logger.info(f"Running batch sentiment on {len(candidates)} candidates...")
             stocks_data = self._build_stocks_data(candidates, action="buy")
             try:
-                from sentiment_analysis import get_batch_sentiment_recommendations
+                from data.sentiment import get_batch_sentiment_recommendations
                 sentiment_results = get_batch_sentiment_recommendations(stocks_data, action="buy")
             except Exception:
                 logger.error("Batch sentiment failed — all candidates skipped", exc_info=True)

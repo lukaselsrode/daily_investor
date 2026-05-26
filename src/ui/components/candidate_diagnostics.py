@@ -14,7 +14,7 @@ import streamlit as st
 
 def _load_agg() -> "pd.DataFrame | None":
     try:
-        from source_data import read_data_as_pd
+        from data.cache import read_data_as_pd
         df = read_data_as_pd("agg_data")
         if df is None or df.empty:
             return None

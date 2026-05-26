@@ -23,6 +23,7 @@ from util import (
     SELL_RULES,
 )
 
+from core.types import TradeRecord
 from .types import BacktestReport, CandidatePoolDiagnostics, PrecomputedData, SimResult
 
 logger = logging.getLogger(__name__)
@@ -515,6 +516,7 @@ def run_simulation(
     total_friction       = 0.0
     total_traded_notional= 0.0
     regime_days          = {"bullish": 0, "neutral": 0, "defensive": 0}
+    trade_log: list      = []
 
     _cur_day = 0
 
@@ -623,6 +625,11 @@ def run_simulation(
                 stock_day_bought[i]= day
                 trades_made       += 1
                 trades_this_week  += 1
+                sym = precomp.symbols[i] if i < len(precomp.symbols) else str(i)
+                trade_log.append(TradeRecord(
+                    date=str(day), symbol=sym, side="buy",
+                    quantity=shares, price=effective_price, amount=alloc, reason="buy",
+                ))
             stock_shares[i] += shares
             stock_peak[i]    = max(stock_peak[i], p)
             sector_exp[sector] = sector_exp.get(sector, 0.0) + alloc
@@ -693,6 +700,22 @@ def run_simulation(
                 stock_stopout[i]    = is_stopout
                 if is_stopout:
                     stopout_count += 1
+                cost_basis = float(stock_avg_cost[i] * stock_shares[i])
+                if stop_loss_mask[i]:
+                    _exit = "stop_loss"
+                elif trail_mask[i]:
+                    _exit = "trailing_stop"
+                elif tp_mask[i]:
+                    _exit = "take_profit"
+                else:
+                    _exit = "weak_value"
+                sym = precomp.symbols[i] if i < len(precomp.symbols) else str(i)
+                trade_log.append(TradeRecord(
+                    date=str(d), symbol=sym, side="sell",
+                    quantity=float(stock_shares[i]), price=float(sell_prices[i]),
+                    amount=proceeds_i, exit_type=_exit,
+                    pnl=proceeds_i - cost_basis, hold_days=int(days_held[i]),
+                ))
             total_traded_notional += sell_notional
             sells_made            += int(sell_mask.sum())
             stock_shares[sell_mask]    = 0.0
@@ -787,6 +810,7 @@ def run_simulation(
         regime_days=regime_days,
         benchmark_twr=bench_twr_val,
         pool_diagnostics=_init_diag,
+        trade_log=trade_log,
     )
 
 
@@ -896,6 +920,7 @@ def run_backtest_report(
         notes=notes,
         train_benchmark_twr=train_bench_twr,
         val_benchmark_twr=val_bench_twr,
+        trade_log=train_result.trade_log,
     )
 
 

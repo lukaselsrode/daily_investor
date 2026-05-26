@@ -181,10 +181,48 @@ class AttributionReporter:
         return classify_stability(cv, spread, cv_threshold, spread_threshold)
 
     def factor_attribution(self, trades: list[TradeRecord]) -> dict:
-        raise NotImplementedError
+        """P&L breakdown by exit type for sell trades (proxy for factor attribution)."""
+        from collections import defaultdict
+        breakdown: dict = defaultdict(lambda: {"count": 0, "total_pnl": 0.0})
+        for t in trades:
+            if t.side == "sell":
+                key = t.exit_type or "unknown"
+                breakdown[key]["count"] += 1
+                breakdown[key]["total_pnl"] += t.pnl
+        for v in breakdown.values():
+            v["avg_pnl"] = v["total_pnl"] / max(v["count"], 1)
+        return dict(breakdown)
 
     def sleeve_attribution(self, report: BacktestReport) -> dict:
-        raise NotImplementedError
+        """Split return attribution between ETF sleeve and active stock sleeve."""
+        sim = getattr(report, "train", None) or getattr(report, "train_result", None)
+        if sim is None:
+            return {}
+        return {
+            "etf": {
+                "return": getattr(sim, "etf_return", 0.0),
+                "avg_allocation": getattr(sim, "etf_allocation_avg", 0.0),
+            },
+            "stock": {
+                "return": getattr(sim, "stock_return", 0.0),
+            },
+        }
 
     def exit_type_breakdown(self, trades: list[TradeRecord]) -> dict:
-        raise NotImplementedError
+        """Count and P&L summary grouped by exit type for sell trades."""
+        from collections import defaultdict
+        breakdown: dict = defaultdict(lambda: {"count": 0, "total_pnl": 0.0, "wins": 0, "losses": 0})
+        for t in trades:
+            if t.side == "sell":
+                key = t.exit_type or "unknown"
+                breakdown[key]["count"] += 1
+                breakdown[key]["total_pnl"] += t.pnl
+                if t.pnl >= 0:
+                    breakdown[key]["wins"] += 1
+                else:
+                    breakdown[key]["losses"] += 1
+        for v in breakdown.values():
+            c = v["count"]
+            v["avg_pnl"] = v["total_pnl"] / max(c, 1)
+            v["win_rate"] = v["wins"] / c if c > 0 else 0.0
+        return dict(breakdown)

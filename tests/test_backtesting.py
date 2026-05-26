@@ -14,8 +14,7 @@ import pytest
 import numpy as np
 from unittest.mock import MagicMock, patch
 
-import backtest as _bt
-from backtest import BacktestReport, SimResult
+from backtesting.types import BacktestReport, SimResult
 from backtesting.results import BacktestResult, ValidationResult
 from backtesting.validator import WalkForwardValidator
 
@@ -269,9 +268,7 @@ class TestWalkForwardValidatorGates:
 
 # ---------------------------------------------------------------------------
 # WalkForwardValidator.split_and_validate — mocked I/O
-# The validator calls _bt.run_backtest_report where _bt is the backtest module.
-# patch.object(_bt, "run_backtest_report") replaces it on the module object so
-# validator.py's _bt.run_backtest_report(...) picks up the mock.
+# Patches target backtesting.validator.run_backtest_report directly.
 # ---------------------------------------------------------------------------
 
 class TestWalkForwardValidatorSplitAndValidate:

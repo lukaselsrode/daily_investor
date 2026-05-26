@@ -14,8 +14,7 @@ import pytest
 import numpy as np
 from unittest.mock import MagicMock, patch
 
-import tuner as _t
-from backtest import SimResult
+from backtesting.types import SimResult
 from tuning.results import AutoTuneResult, StabilityReport, TuneResult
 from tuning.tuner import ParameterTuner
 from tuning.stability import StabilityAnalyzer

@@ -11,14 +11,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import pytest
 
 try:
-    from tuner import (
+    from tuning.constants import (
         PARAM_NAMES,
         _get_active_indices,
         _effective_bounds,
         _expand_params,
         _current_params,
-        should_apply_tuned_config,
     )
+    from tuning.tuner import should_apply_tuned_config
     import numpy as np
     _HAS_TUNER = True
 except Exception as e:

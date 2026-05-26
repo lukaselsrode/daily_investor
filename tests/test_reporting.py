@@ -186,17 +186,51 @@ class TestAttributionReporter:
         # cv between 0.18 (0.6 * 0.30) and 0.30 → MODERATELY_STABLE
         assert AttributionReporter().classify(0.20, 0.05) == "MODERATELY_STABLE"
 
-    def test_factor_attribution_not_implemented(self):
-        with pytest.raises(NotImplementedError):
-            AttributionReporter().factor_attribution([])
+    def _sell_trades(self) -> list:
+        from core.types import TradeRecord
+        return [
+            TradeRecord(date="1", symbol="AAPL", side="sell", quantity=10, price=100,
+                        amount=1000, exit_type="stop_loss", pnl=-50.0, hold_days=5),
+            TradeRecord(date="2", symbol="MSFT", side="sell", quantity=5, price=200,
+                        amount=1000, exit_type="take_profit", pnl=100.0, hold_days=20),
+            TradeRecord(date="3", symbol="GOOG", side="buy", quantity=2, price=150,
+                        amount=300),  # buys should be ignored
+        ]
 
-    def test_sleeve_attribution_not_implemented(self):
-        with pytest.raises(NotImplementedError):
-            AttributionReporter().sleeve_attribution(MagicMock())
+    def test_factor_attribution_returns_dict(self):
+        result = AttributionReporter().factor_attribution(self._sell_trades())
+        assert isinstance(result, dict)
+        assert "stop_loss" in result
+        assert result["stop_loss"]["count"] == 1
+        assert result["stop_loss"]["total_pnl"] == pytest.approx(-50.0)
 
-    def test_exit_type_breakdown_not_implemented(self):
-        with pytest.raises(NotImplementedError):
-            AttributionReporter().exit_type_breakdown([])
+    def test_factor_attribution_ignores_buys(self):
+        result = AttributionReporter().factor_attribution(self._sell_trades())
+        keys = set(result.keys())
+        assert len(keys) == 2  # stop_loss + take_profit only (buy ignored)
+
+    def test_sleeve_attribution_returns_dict(self):
+        mock_report = MagicMock()
+        mock_report.train.etf_return = 0.05
+        mock_report.train.stock_return = 0.10
+        mock_report.train.etf_allocation_avg = 0.20
+        result = AttributionReporter().sleeve_attribution(mock_report)
+        assert isinstance(result, dict)
+        assert "etf" in result
+        assert "stock" in result
+        assert result["etf"]["return"] == pytest.approx(0.05)
+
+    def test_exit_type_breakdown_returns_dict(self):
+        result = AttributionReporter().exit_type_breakdown(self._sell_trades())
+        assert isinstance(result, dict)
+        assert "stop_loss" in result
+        assert result["stop_loss"]["win_rate"] == pytest.approx(0.0)
+        assert result["take_profit"]["win_rate"] == pytest.approx(1.0)
+
+    def test_exit_type_breakdown_win_loss_counts(self):
+        result = AttributionReporter().exit_type_breakdown(self._sell_trades())
+        assert result["stop_loss"]["losses"] == 1
+        assert result["take_profit"]["wins"] == 1
 
 
 # ---------------------------------------------------------------------------
