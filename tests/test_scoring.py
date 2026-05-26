@@ -10,7 +10,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import pytest
-from source_data import _position_52w, get_momentum_score
+from data.fundamentals import _position_52w, get_momentum_score
 from util import MOMENTUM_PARAMS, SELL_RULES, RISK_LIMITS
 
 

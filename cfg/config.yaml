@@ -4,7 +4,7 @@ dividend_threshold: 0.03
 metric_threshold: 0.75
 selloff_threshold: 30
 weekly_investment: 400
-index_pct: 0.5
+index_pct: 0.7
 auto_approve: true
 use_sentiment_analysis: true
 confidence_threshold: 65
@@ -20,6 +20,7 @@ etfs:
 - VXUS
 - VNQ
 - IWM
+- DRAM
 score_weights:
   value: 0.05
   quality: 0.45
@@ -43,7 +44,7 @@ risk:
   max_whole_share_buys_per_run: 2
   max_whole_share_allocation_multiplier: 1.25
   min_index_pct: 0.65
-  min_candidate_allocation_pct: 0.10
+  min_candidate_allocation_pct: 0.1
 sell_rules:
   stop_loss_pct: -0.2
   trailing_stop_pct: -0.08
@@ -264,34 +265,34 @@ earnings:
 portfolio_intelligence:
   enabled: true
   watch_score_drop_pct: 0.25
-  watch_rank_drop_pct: 0.30
+  watch_rank_drop_pct: 0.3
   exit_score_below: 0.45
-  exit_rank_below_pct: 0.40
+  exit_rank_below_pct: 0.4
   min_holding_days_before_watch: 5
   show_etf_rationale: true
   show_active_rationale: true
   premature_exit_min_thesis_score: 0.65
-  premature_exit_min_quality: 0.30
-  premature_exit_min_momentum: 0.00
-  confidence_collapse_reliability_threshold: 0.60
+  premature_exit_min_quality: 0.3
+  premature_exit_min_momentum: 0.0
+  confidence_collapse_reliability_threshold: 0.6
 exit_decision:
   enabled: true
   score_below_threshold_requires_confirmation: true
   positive_pnl_exit_downgrade: true
   positive_momentum_exit_downgrade: true
   strong_quality_exit_downgrade: true
-  hard_exit_score_below: 0.20
+  hard_exit_score_below: 0.2
   review_score_below: 0.45
   positive_pnl_review_floor: 0.0
-  positive_momentum_review_floor: 0.10
-  strong_quality_review_floor: 0.70
+  positive_momentum_review_floor: 0.1
+  strong_quality_review_floor: 0.7
   trim_profit_threshold: 0.15
   harvest_profit_threshold: 0.25
-  thesis_intact_review_floor: 0.60
+  thesis_intact_review_floor: 0.6
   thesis_intact_hard_exit_below: 0.35
 decision_adjustment:
   premature_exit_threshold: 0.45
-  review_confidence_threshold: 0.50
+  review_confidence_threshold: 0.5
   escalate_watch_to_review: false
 outcome_tracking:
   enabled: true
@@ -303,8 +304,8 @@ candidate_selection:
   min_candidates: 5
   use_absolute_score_floor: false
   absolute_score_floor: 0.45
-  min_quality_score: 0.30
-  min_momentum_score: -0.10
+  min_quality_score: 0.3
+  min_momentum_score: -0.1
   min_conditional_momentum_score: -0.05
   allow_income_defensive_exception: true
 ui:

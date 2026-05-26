@@ -21,7 +21,7 @@ from portfolio.risk import RiskManager
 from portfolio.sell_engine import evaluate_sell_candidate  # re-exported for legacy callers
 from strategy.regimes.detector import get_current_regime
 
-from source_data import get_data as generate_daily_undervalued_stocks
+from data.market import get_data as generate_daily_undervalued_stocks
 from util import (
     AUTO_APPROVE,
     CONFIDENCE_THRESHOLD,
@@ -181,7 +181,8 @@ def run_daily_strat() -> None:
 # ---------------------------------------------------------------------------
 
 def _run_tuner_cli(n_days: int, objective: str) -> None:
-    from tuner import print_config_diff, run_tuner
+    from tuning.reports import print_config_diff
+    from tuning.tuner import run_tuner
     try:
         best_params, best_result = run_tuner(
             n_days=n_days,
@@ -200,7 +201,7 @@ def _run_stability_scan_cli(
     output_dir: "str | None" = None,
 ) -> None:
     """CLI entry point for --stability-scan. RESEARCH / DIAGNOSTIC ONLY — never writes config.yaml."""
-    from tuner import run_stability_scan
+    from tuning.stability import run_stability_scan
     try:
         run_stability_scan(windows=windows, mode=mode, output_dir=output_dir)
     except RuntimeError as e:
@@ -215,7 +216,8 @@ def _run_auto_tune_cli(
     force_apply: bool = False,
     llm_review: bool = False,
 ) -> None:
-    from tuner import run_auto_tune, _diff_table
+    from tuning.tuner import run_auto_tune
+    from tuning.reports import _diff_table
     try:
         avg_params, sharpe_result, calmar_result, avg_result, sharpe_params, calmar_params = run_auto_tune(
             n_days=n_days,

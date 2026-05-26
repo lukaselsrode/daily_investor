@@ -34,7 +34,7 @@ class TestActiveIndices:
         active = _get_active_indices()
         frozen_paths = TUNING_PARAMS["frozen_parameters"]
         # Active set should NOT contain any frozen parameter indices
-        from tuner import _CONFIG_PATH_TO_PARAM_IDX
+        from tuning.constants import _CONFIG_PATH_TO_PARAM_IDX
         frozen_indices = {_CONFIG_PATH_TO_PARAM_IDX[p] for p in frozen_paths if p in _CONFIG_PATH_TO_PARAM_IDX}
         for idx in active:
             assert idx not in frozen_indices
@@ -79,7 +79,7 @@ class TestEffectiveBounds:
 
     def test_bounds_respect_config_overrides(self):
         eff = _effective_bounds()
-        from tuner import _CONFIG_PATH_TO_PARAM_IDX
+        from tuning.constants import _CONFIG_PATH_TO_PARAM_IDX
         # Check that quality bounds match config
         if "score_weights.quality" in TUNING_PARAMS["parameter_bounds"]:
             q_idx = _CONFIG_PATH_TO_PARAM_IDX["score_weights.quality"]

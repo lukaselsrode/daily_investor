@@ -12,14 +12,14 @@ import pytest
 import numpy as np
 
 try:
-    from backtest import (
-        SimResult,
+    from backtesting.types import SimResult
+    from backtesting.simulator import (
         compute_performance_metrics,
         run_simulation,
         score_stocks_at_day,
-        select_backtest_universe,
         split_price_window,
     )
+    from backtesting.data_loader import select_backtest_universe
     _HAS_BACKTEST = True
 except Exception as e:
     _HAS_BACKTEST = False

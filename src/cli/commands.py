@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-import tuner as _t
+import tuning.reports as _t
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ def cmd_fetch_data() -> None:
     """
     from main import login, _broker, _fetch_and_save_dividends, save_holdings_csv
     from data.valuation import update_industry_valuations
-    from source_data import get_data as generate_daily_undervalued_stocks
+    from data.market import get_data as generate_daily_undervalued_stocks
 
     login()
     logger.info("=== Fetch-Data run (no trades) ===")
@@ -87,18 +87,20 @@ def cmd_backtest(
 ) -> None:
     """Run a single backtest and print results."""
     from backtesting.engine import BacktestEngine
-    import backtest as _bt
+    from backtesting.data_loader import load_and_precompute
+    from backtesting.simulator import get_default_params, compare_candidate_selection_modes
+    from backtesting.reports import print_backtest_report, print_comparison_report
 
     engine = BacktestEngine()
 
     if compare:
-        precomp = _bt.load_and_precompute(n_days, mode=mode)
-        default_params = _bt.get_default_params()
-        comparison = _bt.compare_candidate_selection_modes(precomp, default_params)
-        _bt.print_comparison_report(comparison)
+        precomp = load_and_precompute(n_days, mode=mode)
+        default_params = get_default_params()
+        comparison = compare_candidate_selection_modes(precomp, default_params)
+        print_comparison_report(comparison)
     else:
         result = engine.run(n_days=n_days, params=params, mode=mode)
-        _bt.print_backtest_report(result.report)
+        print_backtest_report(result.report)
 
 
 def cmd_tune(

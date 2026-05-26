@@ -35,7 +35,7 @@ class WalkForwardValidator:
 
     Usage:
         import numpy as np
-        from backtest import load_and_precompute
+        from backtesting.data_loader import load_and_precompute
 
         precomp = load_and_precompute(n_days=90)
         params  = np.array([...])          # tuned param vector

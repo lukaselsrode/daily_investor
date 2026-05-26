@@ -12,10 +12,8 @@ import pandas as pd
 from unittest.mock import MagicMock, patch
 
 from core.types import SimResult, BacktestReport, TradeRecord
-from backtest import BacktestReport as BtReport, SimResult as BtSim
+from backtesting.types import BacktestReport as BtReport, SimResult as BtSim
 from backtesting.results import BacktestResult as BtResult
-
-import _reporting_legacy as _rl
 from reporting.attribution import AttributionReporter
 from reporting.diagnostics import DiagnosticsReporter
 from reporting.plots import PlotManager

@@ -115,7 +115,8 @@ def _backtest_kwargs(cfg: dict) -> dict:
 
 def _run_ablation(cfg: dict, n_days: int, mode: str) -> dict:
     """Load price data and simulate. Returns result dict."""
-    from backtest import load_and_precompute, run_simulation, split_price_window
+    from backtesting.data_loader import load_and_precompute
+    from backtesting.simulator import run_simulation, split_price_window
 
     params    = _params_from_cfg(cfg)
     cs_params = _cs_params_from_cfg(cfg)
@@ -334,7 +335,8 @@ def render_candidate_drift() -> None:
     if st.button("▶ Compute candidate drift", type="primary", key="drift_run"):
         with st.spinner("Scoring candidates for both configs…"):
             try:
-                import backtest as _bt
+                from backtesting.data_loader import load_and_precompute as _lp
+                from backtesting.simulator import score_stocks, select_candidates
                 from util import CANDIDATE_SELECTION_PARAMS, read_data_as_pd
 
                 agg_df = read_data_as_pd("agg_data")
@@ -347,11 +349,11 @@ def render_candidate_drift() -> None:
                 cs_a      = _cs_params_from_cfg(cfg_a)
                 cs_b      = _cs_params_from_cfg(cfg_b)
 
-                precomp = _bt.load_and_precompute(30, mode="liquid_universe_sanity_test")
-                scores_a = _bt.score_stocks(precomp, params_a)
-                scores_b = _bt.score_stocks(precomp, params_b)
-                mask_a, diag_a = _bt.select_candidates(0, scores_a, precomp, params_a, cs_a)
-                mask_b, diag_b = _bt.select_candidates(0, scores_b, precomp, params_b, cs_b)
+                precomp = _lp(30, mode="liquid_universe_sanity_test")
+                scores_a = score_stocks(precomp, params_a)
+                scores_b = score_stocks(precomp, params_b)
+                mask_a, diag_a = select_candidates(0, scores_a, precomp, params_a, cs_a)
+                mask_b, diag_b = select_candidates(0, scores_b, precomp, params_b, cs_b)
 
                 syms   = np.array(precomp.symbols)
                 set_a  = set(syms[mask_a])
