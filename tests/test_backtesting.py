@@ -294,7 +294,7 @@ class TestWalkForwardValidatorSplitAndValidate:
 
     def test_returns_validation_result(self):
         precomp = self._precomp_mock()
-        with patch.object(_bt, "run_backtest_report", return_value=self._good_report()):
+        with patch("backtesting.validator.run_backtest_report", return_value=self._good_report()):
             result = WalkForwardValidator().split_and_validate(
                 precomp, None, n_days=90, backtest_cfg=self._GATES
             )
@@ -302,7 +302,7 @@ class TestWalkForwardValidatorSplitAndValidate:
 
     def test_passed_when_all_gates_pass(self):
         precomp = self._precomp_mock()
-        with patch.object(_bt, "run_backtest_report", return_value=self._good_report()):
+        with patch("backtesting.validator.run_backtest_report", return_value=self._good_report()):
             result = WalkForwardValidator().split_and_validate(
                 precomp, None, n_days=90, backtest_cfg=self._GATES
             )
@@ -312,7 +312,7 @@ class TestWalkForwardValidatorSplitAndValidate:
         precomp = self._precomp_mock()
         val = _sim(total_return=0.10, sharpe=0.05, max_drawdown=-0.08)
         bad_report = _report(val=val, val_bench_return=0.05)
-        with patch.object(_bt, "run_backtest_report", return_value=bad_report):
+        with patch("backtesting.validator.run_backtest_report", return_value=bad_report):
             result = WalkForwardValidator().split_and_validate(
                 precomp, None, n_days=90, backtest_cfg=self._GATES
             )
@@ -321,7 +321,7 @@ class TestWalkForwardValidatorSplitAndValidate:
 
     def test_slices_set_on_result(self):
         precomp = self._precomp_mock(100)
-        with patch.object(_bt, "run_backtest_report", return_value=self._good_report()):
+        with patch("backtesting.validator.run_backtest_report", return_value=self._good_report()):
             result = WalkForwardValidator().split_and_validate(
                 precomp, None, n_days=100, train_pct=0.70, backtest_cfg=self._GATES
             )
@@ -330,7 +330,7 @@ class TestWalkForwardValidatorSplitAndValidate:
 
     def test_no_val_slice_when_use_validation_false(self):
         precomp = self._precomp_mock()
-        with patch.object(_bt, "run_backtest_report", return_value=_report(val=None)) as mock_rbr:
+        with patch("backtesting.validator.run_backtest_report", return_value=_report(val=None)) as mock_rbr:
             WalkForwardValidator().split_and_validate(
                 precomp, None, n_days=90, backtest_cfg=self._GATES, use_validation=False
             )
@@ -358,37 +358,37 @@ class TestBacktestEngine:
 
     def test_run_returns_backtest_result(self):
         from backtesting.engine import BacktestEngine
-        with patch.object(_bt, "load_and_precompute", return_value=self._precomp()), \
-             patch.object(_bt, "run_backtest_report", return_value=self._good_report()):
+        with patch("backtesting.engine.load_and_precompute", return_value=self._precomp()), \
+             patch("backtesting.engine.run_backtest_report", return_value=self._good_report()):
             result = BacktestEngine().run(n_days=90)
         assert isinstance(result, BacktestResult)
 
     def test_run_passes_mode(self):
         from backtesting.engine import BacktestEngine
-        with patch.object(_bt, "load_and_precompute", return_value=self._precomp()) as mock_lp, \
-             patch.object(_bt, "run_backtest_report", return_value=self._good_report()):
+        with patch("backtesting.engine.load_and_precompute", return_value=self._precomp()) as mock_lp, \
+             patch("backtesting.engine.run_backtest_report", return_value=self._good_report()):
             BacktestEngine().run(n_days=90, mode="walk_forward_price_only_test")
         mock_lp.assert_called_once_with(90, mode="walk_forward_price_only_test")
 
     def test_run_no_validation_passes_none_val_slice(self):
         from backtesting.engine import BacktestEngine
-        with patch.object(_bt, "load_and_precompute", return_value=self._precomp()), \
-             patch.object(_bt, "run_backtest_report", return_value=_report(val=None)) as mock_rbr:
+        with patch("backtesting.engine.load_and_precompute", return_value=self._precomp()), \
+             patch("backtesting.engine.run_backtest_report", return_value=_report(val=None)) as mock_rbr:
             BacktestEngine().run(n_days=90, with_validation=False)
         _, _, _, val_arg = mock_rbr.call_args[0]
         assert val_arg is None
 
     def test_run_walk_forward_returns_validation_result(self):
         from backtesting.engine import BacktestEngine
-        with patch.object(_bt, "load_and_precompute", return_value=self._precomp()), \
-             patch.object(_bt, "run_backtest_report", return_value=self._good_report()):
+        with patch("backtesting.engine.load_and_precompute", return_value=self._precomp()), \
+             patch("backtesting.validator.run_backtest_report", return_value=self._good_report()):
             result = BacktestEngine().run_walk_forward(n_days=90, params=None)
         assert isinstance(result, ValidationResult)
 
     def test_run_report_delegates_correctly(self):
         from backtesting.engine import BacktestEngine
         precomp = self._precomp()
-        with patch.object(_bt, "run_backtest_report", return_value=self._good_report()) as mock_rbr:
+        with patch("backtesting.engine.run_backtest_report", return_value=self._good_report()) as mock_rbr:
             result = BacktestEngine().run_report(precomp, None, slice(0, 63), slice(63, 90))
         mock_rbr.assert_called_once_with(precomp, None, slice(0, 63), slice(63, 90))
         assert isinstance(result, BacktestReport)

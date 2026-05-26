@@ -153,7 +153,7 @@ class TestAttributionReporter:
     def test_compute_stability_delegates(self):
         wr = _window_results()
         mock_df = _stability_df()
-        with patch.object(_rl, "compute_parameter_stability", return_value=mock_df) as mock_fn:
+        with patch("reporting.attribution.compute_parameter_stability", return_value=mock_df) as mock_fn:
             result = AttributionReporter().compute_stability(wr, _PARAM_NAMES)
         mock_fn.assert_called_once_with(wr, _PARAM_NAMES, cv_threshold=0.30, spread_threshold=0.15)
         assert result is mock_df
@@ -166,12 +166,12 @@ class TestAttributionReporter:
 
     def test_compute_stability_custom_thresholds(self):
         wr = _window_results()
-        with patch.object(_rl, "compute_parameter_stability", return_value=_stability_df()) as mock_fn:
+        with patch("reporting.attribution.compute_parameter_stability", return_value=_stability_df()) as mock_fn:
             AttributionReporter().compute_stability(wr, _PARAM_NAMES, cv_threshold=0.20, spread_threshold=0.10)
         mock_fn.assert_called_once_with(wr, _PARAM_NAMES, cv_threshold=0.20, spread_threshold=0.10)
 
     def test_classify_delegates(self):
-        with patch.object(_rl, "classify_stability", return_value="STABLE") as mock_fn:
+        with patch("reporting.attribution.classify_stability", return_value="STABLE") as mock_fn:
             result = AttributionReporter().classify(0.1, 0.05)
         mock_fn.assert_called_once_with(0.1, 0.05, 0.30, 0.15)
         assert result == "STABLE"
@@ -207,20 +207,20 @@ class TestDiagnosticsReporter:
 
     def test_write_stability_csv_delegates(self):
         df, wr = _stability_df(), _window_results()
-        with patch.object(_rl, "write_stability_summary_csv", return_value="/tmp/out.csv") as mock_fn:
+        with patch("reporting.diagnostics.write_stability_summary_csv", return_value="/tmp/out.csv") as mock_fn:
             result = DiagnosticsReporter().write_stability_csv(df, wr, "/tmp")
         mock_fn.assert_called_once_with(df, wr, "/tmp", None)
         assert result == "/tmp/out.csv"
 
     def test_write_stability_csv_passes_date(self):
         df, wr = _stability_df(), _window_results()
-        with patch.object(_rl, "write_stability_summary_csv", return_value="/tmp/out.csv") as mock_fn:
+        with patch("reporting.diagnostics.write_stability_summary_csv", return_value="/tmp/out.csv") as mock_fn:
             DiagnosticsReporter().write_stability_csv(df, wr, "/tmp", date="2026-01-01")
         mock_fn.assert_called_once_with(df, wr, "/tmp", "2026-01-01")
 
     def test_write_robustness_txt_delegates(self):
         df, wr = _stability_df(), _window_results()
-        with patch.object(_rl, "write_robustness_report_txt", return_value="/tmp/r.txt") as mock_fn:
+        with patch("reporting.diagnostics.write_robustness_report_txt", return_value="/tmp/r.txt") as mock_fn:
             result = DiagnosticsReporter().write_robustness_txt(df, wr, _PARAM_NAMES, "/tmp")
         mock_fn.assert_called_once_with(df, wr, _PARAM_NAMES, "/tmp", None)
         assert result == "/tmp/r.txt"
@@ -228,14 +228,14 @@ class TestDiagnosticsReporter:
     def test_generate_all_delegates(self):
         df, wr = _stability_df(), _window_results()
         expected = {"stability_csv": "/tmp/s.csv", "robustness_txt": "/tmp/r.txt"}
-        with patch.object(_rl, "generate_all_reports", return_value=expected) as mock_fn:
+        with patch("reporting.diagnostics.generate_all_reports", return_value=expected) as mock_fn:
             result = DiagnosticsReporter().generate_all(wr, df, _PARAM_NAMES, "/tmp")
         mock_fn.assert_called_once_with(wr, df, _PARAM_NAMES, "/tmp")
         assert result is expected
 
     def test_generate_all_returns_dict(self):
         df, wr = _stability_df(), _window_results()
-        with patch.object(_rl, "generate_all_reports", return_value={"stability_csv": "/x"}):
+        with patch("reporting.diagnostics.generate_all_reports", return_value={"stability_csv": "/x"}):
             result = DiagnosticsReporter().generate_all(wr, df, _PARAM_NAMES, "/tmp")
         assert isinstance(result, dict)
 
@@ -248,33 +248,33 @@ class TestPlotManager:
 
     def test_param_heatmap_delegates(self):
         wr = _window_results()
-        with patch.object(_rl, "generate_param_heatmap", return_value="/tmp/h.png") as mock_fn:
+        with patch("reporting.plots.generate_param_heatmap", return_value="/tmp/h.png") as mock_fn:
             result = PlotManager().param_heatmap(wr, _PARAM_NAMES, "/tmp")
         mock_fn.assert_called_once_with(wr, _PARAM_NAMES, "/tmp", None)
         assert result == "/tmp/h.png"
 
     def test_param_heatmap_passes_date(self):
         wr = _window_results()
-        with patch.object(_rl, "generate_param_heatmap", return_value="/tmp/h.png") as mock_fn:
+        with patch("reporting.plots.generate_param_heatmap", return_value="/tmp/h.png") as mock_fn:
             PlotManager().param_heatmap(wr, _PARAM_NAMES, "/tmp", date="2026-01-01")
         mock_fn.assert_called_once_with(wr, _PARAM_NAMES, "/tmp", "2026-01-01")
 
     def test_objective_heatmap_delegates(self):
         wr = _window_results()
-        with patch.object(_rl, "generate_objective_heatmap", return_value="/tmp/o.png") as mock_fn:
+        with patch("reporting.plots.generate_objective_heatmap", return_value="/tmp/o.png") as mock_fn:
             result = PlotManager().objective_heatmap(wr, _PARAM_NAMES, "/tmp")
         mock_fn.assert_called_once_with(wr, _PARAM_NAMES, "/tmp", None)
         assert result == "/tmp/o.png"
 
     def test_validation_heatmap_delegates(self):
         wr = _window_results()
-        with patch.object(_rl, "generate_validation_heatmap", return_value="/tmp/v.png") as mock_fn:
+        with patch("reporting.plots.generate_validation_heatmap", return_value="/tmp/v.png") as mock_fn:
             result = PlotManager().validation_heatmap(wr, "/tmp")
         mock_fn.assert_called_once_with(wr, "/tmp", None)
         assert result == "/tmp/v.png"
 
     def test_validation_heatmap_passes_date(self):
         wr = _window_results()
-        with patch.object(_rl, "generate_validation_heatmap", return_value="/tmp/v.png") as mock_fn:
+        with patch("reporting.plots.generate_validation_heatmap", return_value="/tmp/v.png") as mock_fn:
             PlotManager().validation_heatmap(wr, "/tmp", date="2026-01-01")
         mock_fn.assert_called_once_with(wr, "/tmp", "2026-01-01")

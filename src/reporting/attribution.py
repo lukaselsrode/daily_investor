@@ -1,35 +1,161 @@
 """
-reporting/attribution.py — AttributionReporter.
+reporting/attribution.py — Stability classification and attribution.
 
-Wraps _reporting_legacy for parameter stability attribution.
-Factor/sleeve attribution (from BacktestReport.trade_log) is stubbed pending
-trade-log instrumentation in the backtest engine.
+RESEARCH / DIAGNOSTIC ONLY — never modifies config.yaml.
 """
 
 from __future__ import annotations
 
+import datetime
+import logging
+import os
+from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
-import _reporting_legacy as _rl
+import numpy as np
+import pandas as pd
+
 from core.types import BacktestReport, TradeRecord
 
 if TYPE_CHECKING:
-    import pandas as pd
+    pass
 
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Shared constants (imported by diagnostics.py and plots.py)
+# ---------------------------------------------------------------------------
+
+_STABLE            = "STABLE"
+_MODERATELY_STABLE = "MODERATELY_STABLE"
+_UNSTABLE          = "UNSTABLE"
+
+_STABILITY_PALETTE = {
+    _STABLE:            "green",
+    _MODERATELY_STABLE: "orange",
+    _UNSTABLE:          "red",
+}
+
+
+def _ensure_dir(path: str) -> str:
+    Path(path).mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _date_str() -> str:
+    return datetime.date.today().isoformat()
+
+
+def _try_matplotlib():
+    """Import matplotlib with headless backend. Returns (plt, sns_or_None)."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        try:
+            import seaborn as sns
+        except ImportError:
+            sns = None
+        return plt, sns
+    except ImportError:
+        raise RuntimeError(
+            "matplotlib is required for heatmaps. Install: pip install matplotlib"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Stability classification
+# ---------------------------------------------------------------------------
+
+def classify_stability(
+    cv: float,
+    spread: float,
+    cv_threshold: float = 0.30,
+    spread_threshold: float = 0.15,
+) -> str:
+    if cv > cv_threshold or spread > spread_threshold:
+        return _UNSTABLE
+    if cv > cv_threshold * 0.60 or spread > spread_threshold * 0.60:
+        return _MODERATELY_STABLE
+    return _STABLE
+
+
+# ---------------------------------------------------------------------------
+# Core stability analysis
+# ---------------------------------------------------------------------------
+
+def compute_parameter_stability(
+    window_results: list[dict],
+    param_names: list[str],
+    cv_threshold: float = 0.30,
+    spread_threshold: float = 0.15,
+) -> pd.DataFrame:
+    """
+    Compute per-parameter stability metrics across all window runs.
+
+    window_results entries must have:
+        window (int), params_avg (np.ndarray),
+        params_sharpe (np.ndarray), params_calmar (np.ndarray).
+
+    Returns a DataFrame with columns:
+        param, mean, stddev, cv, sharpe_calmar_spread,
+        convergence_frequency, instability_score, stability.
+    """
+    rows = []
+    n_windows = len(window_results)
+
+    for i, name in enumerate(param_names):
+        avg_vals = np.array([
+            r["params_avg"][i] for r in window_results
+            if r.get("params_avg") is not None
+        ], dtype=float)
+
+        if len(avg_vals) == 0:
+            continue
+
+        mean   = float(avg_vals.mean())
+        std    = float(avg_vals.std())
+        cv     = float(std / abs(mean)) if abs(mean) > 1e-9 else 0.0
+
+        sc_spreads = []
+        for r in window_results:
+            ps = r.get("params_sharpe")
+            pc = r.get("params_calmar")
+            if ps is not None and pc is not None:
+                sc_spreads.append(abs(float(ps[i]) - float(pc[i])))
+        sc_spread = float(np.mean(sc_spreads)) if sc_spreads else 0.0
+
+        if std > 1e-9 and n_windows > 1:
+            within_1std = float(np.mean(np.abs(avg_vals - mean) <= std))
+        else:
+            within_1std = 1.0
+
+        norm_cv     = min(cv     / max(cv_threshold,     1e-9), 1.0)
+        norm_spread = min(sc_spread / max(spread_threshold, 1e-9), 1.0)
+        instability = 0.50 * norm_cv + 0.50 * norm_spread
+
+        stability = classify_stability(cv, sc_spread, cv_threshold, spread_threshold)
+
+        rows.append({
+            "param":                 name,
+            "mean":                  round(mean,          4),
+            "stddev":                round(std,           4),
+            "cv":                    round(cv,            4),
+            "sharpe_calmar_spread":  round(sc_spread,     4),
+            "convergence_frequency": round(within_1std,   3),
+            "instability_score":     round(instability,   3),
+            "stability":             stability,
+        })
+
+    return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# AttributionReporter
+# ---------------------------------------------------------------------------
 
 class AttributionReporter:
-    """
-    Parameter stability attribution and (future) factor attribution.
-
-    Currently wraps _reporting_legacy.compute_parameter_stability and
-    classify_stability with a typed interface.  Factor attribution methods
-    require BacktestReport.trade_log, which is not yet populated by
-    BacktestEngine.
-    """
-
-    # ------------------------------------------------------------------
-    # Parameter stability attribution
-    # ------------------------------------------------------------------
+    """Parameter stability attribution and (future) factor attribution."""
 
     def compute_stability(
         self,
@@ -37,15 +163,8 @@ class AttributionReporter:
         param_names: list[str],
         cv_threshold: float = 0.30,
         spread_threshold: float = 0.15,
-    ) -> "pd.DataFrame":
-        """
-        Compute per-parameter stability metrics across optimization windows.
-
-        Returns DataFrame with columns:
-            param, mean, stddev, cv, sharpe_calmar_spread,
-            convergence_frequency, instability_score, stability.
-        """
-        return _rl.compute_parameter_stability(
+    ) -> pd.DataFrame:
+        return compute_parameter_stability(
             window_results,
             param_names,
             cv_threshold=cv_threshold,
@@ -59,21 +178,13 @@ class AttributionReporter:
         cv_threshold: float = 0.30,
         spread_threshold: float = 0.15,
     ) -> str:
-        """Return STABLE / MODERATELY_STABLE / UNSTABLE for one parameter."""
-        return _rl.classify_stability(cv, spread, cv_threshold, spread_threshold)
-
-    # ------------------------------------------------------------------
-    # Factor attribution — stubbed; requires trade_log in BacktestReport
-    # ------------------------------------------------------------------
+        return classify_stability(cv, spread, cv_threshold, spread_threshold)
 
     def factor_attribution(self, trades: list[TradeRecord]) -> dict:
-        """Break down P&L by factor (value, quality, income, momentum)."""
         raise NotImplementedError
 
     def sleeve_attribution(self, report: BacktestReport) -> dict:
-        """Break down returns between ETF sleeve and active sleeve."""
         raise NotImplementedError
 
     def exit_type_breakdown(self, trades: list[TradeRecord]) -> dict:
-        """P&L and count grouped by exit type."""
         raise NotImplementedError

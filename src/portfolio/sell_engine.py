@@ -213,3 +213,34 @@ class SellDecisionEngine:
                 soft[symbol] = decision
 
         return hard, soft
+
+
+# ---------------------------------------------------------------------------
+# Convenience wrapper — backward-compatible with main.py's dict-returning API
+# ---------------------------------------------------------------------------
+
+_engine = SellDecisionEngine()
+
+
+def evaluate_sell_candidate(
+    symbol: str,
+    holding: dict,
+    metrics_row: "Optional[pd.Series]",
+    peak_price: "Optional[float]" = None,
+) -> dict:
+    """
+    Module-level wrapper around SellDecisionEngine.evaluate() that returns a
+    plain dict. Keeps main.py callers working while the class-based API is
+    the canonical interface going forward.
+    """
+    d = _engine.evaluate(symbol, holding, metrics_row, peak_price)
+    return {
+        "should_sell":    d.should_sell,
+        "reason":         d.reason,
+        "severity":       d.severity,
+        "exit_type":      d.exit_type,
+        "percent_change": d.percent_change,
+        "value_metric":   d.value_metric,
+        "quality_score":  d.quality_score,
+        "yield_trap_flag": d.yield_trap_flag,
+    }

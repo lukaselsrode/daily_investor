@@ -9,7 +9,7 @@ from typing import Optional
 
 import numpy as np
 
-from backtest import SimResult
+from backtesting.types import SimResult
 
 
 @dataclass
@@ -54,7 +54,7 @@ class AutoTuneResult:
     @property
     def param_spread(self) -> dict[str, float]:
         """Per-parameter absolute difference between Sharpe and Calmar optimized values."""
-        from tuner import PARAM_NAMES
+        from tuning.constants import PARAM_NAMES
         return {
             name: abs(float(self.sharpe_params[i]) - float(self.calmar_params[i]))
             for i, name in enumerate(PARAM_NAMES)

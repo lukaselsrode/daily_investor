@@ -216,13 +216,13 @@ class TestParameterTunerTune:
 
     def test_returns_tune_result(self):
         p, s = _params(), _sim()
-        with patch.object(_t, "run_tuner", return_value=(p, s)):
+        with patch("tuning.tuner.run_tuner", return_value=(p, s)):
             result = ParameterTuner().tune(n_days=90)
         assert isinstance(result, TuneResult)
 
     def test_passes_n_days_and_objective(self):
         p, s = _params(), _sim()
-        with patch.object(_t, "run_tuner", return_value=(p, s)) as mock_rt:
+        with patch("tuning.tuner.run_tuner", return_value=(p, s)) as mock_rt:
             ParameterTuner().tune(n_days=60, objective="calmar")
         mock_rt.assert_called_once_with(
             n_days=60, objective="calmar", starting_capital=10_000.0, mode=None
@@ -230,25 +230,25 @@ class TestParameterTunerTune:
 
     def test_result_params_matches_tuner_output(self):
         p, s = _params(seed=7), _sim()
-        with patch.object(_t, "run_tuner", return_value=(p, s)):
+        with patch("tuning.tuner.run_tuner", return_value=(p, s)):
             result = ParameterTuner().tune(n_days=90)
         assert np.array_equal(result.params, p)
 
     def test_result_sim_matches_tuner_output(self):
         p, s = _params(), _sim(sharpe=1.5)
-        with patch.object(_t, "run_tuner", return_value=(p, s)):
+        with patch("tuning.tuner.run_tuner", return_value=(p, s)):
             result = ParameterTuner().tune(n_days=90)
         assert result.sim.sharpe == pytest.approx(1.5)
 
     def test_result_n_days_stored(self):
         p, s = _params(), _sim()
-        with patch.object(_t, "run_tuner", return_value=(p, s)):
+        with patch("tuning.tuner.run_tuner", return_value=(p, s)):
             result = ParameterTuner().tune(n_days=120)
         assert result.n_days == 120
 
     def test_passes_mode(self):
         p, s = _params(), _sim()
-        with patch.object(_t, "run_tuner", return_value=(p, s)) as mock_rt:
+        with patch("tuning.tuner.run_tuner", return_value=(p, s)) as mock_rt:
             ParameterTuner().tune(n_days=90, mode="liquid_universe_sanity_test")
         mock_rt.assert_called_once_with(
             n_days=90, objective="sharpe", starting_capital=10_000.0,
@@ -257,7 +257,7 @@ class TestParameterTunerTune:
 
     def test_calmar_objective_score(self):
         p, s = _params(), _sim(calmar=2.5)
-        with patch.object(_t, "run_tuner", return_value=(p, s)):
+        with patch("tuning.tuner.run_tuner", return_value=(p, s)):
             result = ParameterTuner().tune(n_days=90, objective="calmar")
         assert result.score == pytest.approx(2.5)
 
@@ -270,7 +270,7 @@ class TestParameterTunerApplyParams:
 
     def test_delegates_to_apply_config_params(self):
         p = _params()
-        with patch.object(_t, "apply_config_params") as mock_acp:
+        with patch("tuning.tuner.apply_config_params") as mock_acp:
             ParameterTuner().apply_params(p)
         mock_acp.assert_called_once_with(p)
 
@@ -292,27 +292,27 @@ class TestStabilityAnalyzerScan:
         }
 
     def test_returns_stability_report(self):
-        with patch.object(_t, "run_stability_scan", return_value=self._raw_result()):
+        with patch("tuning.stability.run_stability_scan", return_value=self._raw_result()):
             result = StabilityAnalyzer().scan()
         assert isinstance(result, StabilityReport)
 
     def test_n_windows_from_raw(self):
-        with patch.object(_t, "run_stability_scan", return_value=self._raw_result()):
+        with patch("tuning.stability.run_stability_scan", return_value=self._raw_result()):
             result = StabilityAnalyzer().scan()
         assert result.n_windows == 2
 
     def test_output_paths_forwarded(self):
-        with patch.object(_t, "run_stability_scan", return_value=self._raw_result()):
+        with patch("tuning.stability.run_stability_scan", return_value=self._raw_result()):
             result = StabilityAnalyzer().scan()
         assert "csv" in result.output_paths
 
     def test_passes_windows_to_scan(self):
-        with patch.object(_t, "run_stability_scan", return_value=self._raw_result()) as mock_rss:
+        with patch("tuning.stability.run_stability_scan", return_value=self._raw_result()) as mock_rss:
             StabilityAnalyzer().scan(windows=[30, 45, 60])
         mock_rss.assert_called_once_with(windows=[30, 45, 60], mode=None, output_dir=None)
 
     def test_passes_mode_and_output_dir(self):
-        with patch.object(_t, "run_stability_scan", return_value=self._raw_result()) as mock_rss:
+        with patch("tuning.stability.run_stability_scan", return_value=self._raw_result()) as mock_rss:
             StabilityAnalyzer().scan(mode="walk_forward_price_only_test", output_dir="/out")
         mock_rss.assert_called_once_with(
             windows=None, mode="walk_forward_price_only_test", output_dir="/out"
@@ -321,7 +321,7 @@ class TestStabilityAnalyzerScan:
     def test_stability_df_forwarded(self):
         raw = self._raw_result()
         raw["stability_df"] = MagicMock()  # stand-in for a DataFrame
-        with patch.object(_t, "run_stability_scan", return_value=raw):
+        with patch("tuning.stability.run_stability_scan", return_value=raw):
             result = StabilityAnalyzer().scan()
         assert result.stability_df is raw["stability_df"]
 

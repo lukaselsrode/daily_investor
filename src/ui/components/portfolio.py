@@ -987,12 +987,12 @@ def _live_section(etfs: list[str]) -> None:
     if st.button("Fetch live holdings from Robinhood"):
         with st.spinner("Connecting to Robinhood…"):
             try:
-                from main import login, get_current_positions, get_available_cash, get_portfolio_value, save_holdings_csv
+                from main import login, _broker, save_holdings_csv
                 login()
-                holdings = get_current_positions()
+                holdings = _broker.get_holdings()
                 save_holdings_csv(holdings)
-                cash     = get_available_cash()
-                port_val = get_portfolio_value()
+                cash     = _broker.get_cash()
+                port_val = _broker.get_portfolio_value()
                 st.session_state["live_holdings"] = holdings
                 st.session_state["live_cash"]     = cash
                 st.session_state["live_port_val"] = port_val

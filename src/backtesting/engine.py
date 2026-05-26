@@ -12,14 +12,11 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-import backtest as _bt
-from backtest import (
-    BacktestReport,
-    PrecomputedData,
-    SimResult,
-)
-
+from .data_loader import load_and_precompute, split_price_window
+from .reports import print_backtest_report
 from .results import BacktestResult, ValidationResult
+from .simulator import get_default_params, run_backtest_report, run_simulation
+from .types import BacktestReport, PrecomputedData, SimResult
 from .validator import WalkForwardValidator
 
 logger = logging.getLogger(__name__)
@@ -54,7 +51,7 @@ class BacktestEngine:
         **kwargs,
     ) -> SimResult:
         """Run one simulation pass. Returns a raw SimResult."""
-        return _bt.run_simulation(precomp, params, **kwargs)
+        return run_simulation(precomp, params, **kwargs)
 
     # ------------------------------------------------------------------
     # Mid-level: train + optional validation report
@@ -71,7 +68,7 @@ class BacktestEngine:
         Run train (and optionally validation) simulation on an existing
         precomp and return a BacktestReport.
         """
-        return _bt.run_backtest_report(precomp, params, train_slice, val_slice)
+        return run_backtest_report(precomp, params, train_slice, val_slice)
 
     # ------------------------------------------------------------------
     # High-level: load data + run report in one call
@@ -95,13 +92,13 @@ class BacktestEngine:
             train_pct:       Fraction of window used for training (rest = validation).
             with_validation: Whether to run the out-of-sample validation pass.
         """
-        precomp = _bt.load_and_precompute(n_days, mode=mode)
+        precomp  = load_and_precompute(n_days, mode=mode)
         actual_n = precomp.prices.shape[0]
 
-        train_slice, val_slice = _bt.split_price_window(actual_n, train_pct)
+        train_slice, val_slice = split_price_window(actual_n, train_pct)
         effective_val = val_slice if with_validation else None
 
-        report = _bt.run_backtest_report(precomp, params, train_slice, effective_val)
+        report = run_backtest_report(precomp, params, train_slice, effective_val)
 
         return BacktestResult(
             report=report,
@@ -130,7 +127,7 @@ class BacktestEngine:
         Use .should_apply() to get the write-or-not decision including the
         apply_flag / force_apply / auto_apply_if_valid logic.
         """
-        precomp = _bt.load_and_precompute(n_days, mode=mode)
+        precomp  = load_and_precompute(n_days, mode=mode)
         actual_n = precomp.prices.shape[0]
 
         return self._validator.split_and_validate(

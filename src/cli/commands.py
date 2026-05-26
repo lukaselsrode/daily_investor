@@ -36,14 +36,8 @@ def cmd_fetch_data() -> None:
 
     Requires Robinhood login.
     """
-    from main import (
-        login,
-        update_industry_valuations,
-        _fetch_and_save_dividends,
-        get_current_positions,
-        _enrich_holdings_with_created_at,
-        save_holdings_csv,
-    )
+    from main import login, _broker, _fetch_and_save_dividends, save_holdings_csv
+    from data.valuation import update_industry_valuations
     from source_data import get_data as generate_daily_undervalued_stocks
 
     login()
@@ -57,8 +51,8 @@ def cmd_fetch_data() -> None:
 
     logger.info("Step 3/4: holdings")
     try:
-        holdings = get_current_positions()
-        _enrich_holdings_with_created_at(holdings)
+        holdings = _broker.get_holdings()
+        _broker.enrich_holdings_created_at(holdings)
         save_holdings_csv(holdings)
         logger.info("Holdings saved: %d positions", len(holdings))
     except Exception as exc:

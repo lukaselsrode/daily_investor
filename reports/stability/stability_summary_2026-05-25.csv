@@ -1,0 +1,16 @@
+param,mean,stddev,cv,sharpe_calmar_spread,convergence_frequency,instability_score,stability
+sw_value,0.05,0.0,0.0,0.0,1.0,0.0,STABLE
+sw_quality,0.4153,0.0333,0.0802,0.0048,0.4,0.15,STABLE
+sw_income,0.1,0.0,0.0,0.0,1.0,0.0,STABLE
+sw_momentum,0.3719,0.0336,0.0904,0.004,0.8,0.164,STABLE
+index_pct,0.8201,0.0442,0.0539,0.0075,0.8,0.115,STABLE
+metric_threshold,0.75,0.0,0.0,0.0,1.0,0.0,STABLE
+take_profit_pct,0.6,0.0,0.0,0.0,1.0,0.0,STABLE
+sell_weak_below,0.45,0.0,0.0,0.0,1.0,0.0,STABLE
+trailing_stop,-0.08,0.0,0.0,0.0,1.0,0.0,STABLE
+value_pe_weight,0.6,0.0,0.0,0.0,1.0,0.0,STABLE
+mom_rs3m,0.25,0.0,0.0,0.0,1.0,0.0,STABLE
+mom_rs6m,0.25,0.0,0.0,0.0,1.0,0.0,STABLE
+mom_radj,0.2,0.0,0.0,0.0,1.0,0.0,STABLE
+mom_trend,0.15,0.0,0.0,0.0,1.0,0.0,STABLE
+mom_r1m,0.1,0.0,0.0,0.0,1.0,0.0,STABLE

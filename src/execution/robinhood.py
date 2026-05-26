@@ -8,6 +8,11 @@ Confirmation prompts (AUTO_APPROVE) are NOT here — that is a CLI / portfolio-m
 from __future__ import annotations
 
 import logging
+import time
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 from .base import BrokerAdapter, OrderResult
 
@@ -25,7 +30,11 @@ class RobinhoodBroker(BrokerAdapter):
       get_available_cash         → get_cash  (subtracts pending committed orders)
       get_portfolio_value        → get_portfolio_value
       get_current_positions      → get_holdings
-      rb.get_all_open_stock_orders → get_open_orders
+      rb.get_all_open_stock_orders → get_open_orders  (cached per-run)
+      login()                    → login
+      add_funds_to_account()     → add_funds
+      _fetch_and_save_dividends() → get_dividends
+      _enrich_holdings_with_created_at → enrich_holdings_created_at
     """
 
     def __init__(self) -> None:
@@ -34,28 +43,70 @@ class RobinhoodBroker(BrokerAdapter):
             self._rb = rb
         except ImportError as e:
             raise RuntimeError("robin_stocks not installed") from e
+        self._orders_cache: list | None = None
+
+    # ------------------------------------------------------------------
+    # Auth
+    # ------------------------------------------------------------------
+
+    def login(self, username: str | None, password: str | None, mfa_secret: str | None = None) -> None:
+        if not username or not password:
+            raise ValueError("Missing required env vars: RB_ACCT and RB_CREDS must be set in .env")
+
+        import pyotp
+        mfa_code = None
+        if mfa_secret:
+            mfa_secret = mfa_secret.strip().replace(" ", "").replace("-", "").upper()
+            try:
+                mfa_code = pyotp.TOTP(mfa_secret).now()
+                logger.info("MFA code generated from RB_MFA_SECRET")
+            except Exception as e:
+                logger.error(
+                    f"MFA generation failed: {e} — check RB_MFA_SECRET in .env (must be plain base32)"
+                )
+
+        try:
+            self._rb.login(username=username, password=password, mfa_code=mfa_code, store_session=True)
+            logger.info("Logged in to Robinhood")
+        except Exception as e:
+            if "mfa_required" in str(e).lower() and not mfa_code:
+                mfa_code = input("Enter MFA code: ").strip()
+                self._rb.login(
+                    username=username, password=password, mfa_code=mfa_code, store_session=True
+                )
+                logger.info("Logged in with manual MFA code")
+            else:
+                raise
 
     # ------------------------------------------------------------------
     # Internal retry helper
     # ------------------------------------------------------------------
 
-    def _retry(self, fn, *args, max_retries: int = 3, **kwargs):
+    def _retry(self, fn, *args, max_retries: int = 3, retry_on_none: bool = False, **kwargs):
         import random
-        import time
         for attempt in range(max_retries):
             try:
-                return fn(*args, **kwargs)
+                result = fn(*args, **kwargs)
             except Exception as exc:
                 msg = str(exc).lower()
                 if "429" in msg or "too many requests" in msg or "throttle" in msg:
-                    wait = (2 ** attempt) * (0.5 + random.random())
+                    wait = (2 ** attempt) * (1.0 + random.random())
                     logger.warning(
                         f"Rate-limited on {fn.__name__} (attempt {attempt + 1}/{max_retries}), "
                         f"sleeping {wait:.1f}s"
                     )
                     time.sleep(wait)
-                else:
-                    raise
+                    continue
+                raise
+            if result is None and retry_on_none and attempt < max_retries - 1:
+                wait = (2 ** attempt) * (1.0 + random.random())
+                logger.warning(
+                    f"{fn.__name__} returned None (possible 429) — "
+                    f"attempt {attempt + 1}/{max_retries}, sleeping {wait:.1f}s"
+                )
+                time.sleep(wait)
+                continue
+            return result
         return fn(*args, **kwargs)  # final attempt — let it raise
 
     # ------------------------------------------------------------------
@@ -65,11 +116,14 @@ class RobinhoodBroker(BrokerAdapter):
     def buy_fractional(self, symbol: str, amount: float) -> OrderResult:
         try:
             res = self._retry(
-                self._rb.orders.order_buy_fractional_by_price, symbol, amount
+                self._rb.orders.order_buy_fractional_by_price, symbol, amount,
+                retry_on_none=True,
             )
         except Exception as e:
             logger.error(f"{symbol}: fractional buy exception: {e}")
             return OrderResult(symbol, "buy", amount, 0.0, False, None, "error", str(e))
+        finally:
+            time.sleep(1.5)
 
         if res and res.get("id"):
             logger.info(
@@ -79,7 +133,7 @@ class RobinhoodBroker(BrokerAdapter):
                 symbol=symbol,
                 side="buy",
                 amount=amount,
-                quantity=0.0,  # fractional qty not returned synchronously
+                quantity=0.0,
                 success=True,
                 order_id=res["id"],
                 state=res.get("state", "confirmed"),
@@ -91,10 +145,15 @@ class RobinhoodBroker(BrokerAdapter):
 
     def buy_whole(self, symbol: str, quantity: int) -> OrderResult:
         try:
-            res = self._retry(self._rb.orders.order_buy_market, symbol, quantity)
+            res = self._retry(
+                self._rb.orders.order_buy_market, symbol, quantity,
+                retry_on_none=True,
+            )
         except Exception as e:
             logger.error(f"{symbol}: whole-share market order failed: {e}")
             return OrderResult(symbol, "buy", 0.0, float(quantity), False, None, "error", str(e))
+        finally:
+            time.sleep(1.5)
 
         if res and res.get("id"):
             logger.info(
@@ -103,7 +162,7 @@ class RobinhoodBroker(BrokerAdapter):
             return OrderResult(
                 symbol=symbol,
                 side="buy",
-                amount=0.0,  # market order — dollar amount unknown until fill
+                amount=0.0,
                 quantity=float(quantity),
                 success=True,
                 order_id=res["id"],
@@ -130,7 +189,9 @@ class RobinhoodBroker(BrokerAdapter):
                 logger.warning(
                     f"Skipping sell for {symbol}: position already closed (live qty={live_qty})"
                 )
-                return OrderResult(symbol, "sell", 0.0, 0.0, False, None, "skipped", "position already closed")
+                return OrderResult(
+                    symbol, "sell", 0.0, 0.0, False, None, "skipped", "position already closed"
+                )
             quantity = live_qty  # use live quantity to avoid partial-fill mismatch
         except Exception as e:
             logger.warning(
@@ -141,15 +202,19 @@ class RobinhoodBroker(BrokerAdapter):
         try:
             if is_fractional:
                 res = self._retry(
-                    self._rb.orders.order_sell_fractional_by_quantity, symbol, quantity
+                    self._rb.orders.order_sell_fractional_by_quantity, symbol, quantity,
+                    retry_on_none=True,
                 )
             else:
                 res = self._retry(
-                    self._rb.order_sell_market, symbol, int(quantity), timeInForce="gfd"
+                    self._rb.order_sell_market, symbol, int(quantity), timeInForce="gfd",
+                    retry_on_none=True,
                 )
         except Exception as e:
             logger.error(f"Sell order exception for {symbol}: {e}")
             return OrderResult(symbol, "sell", 0.0, quantity, False, None, "error", str(e))
+        finally:
+            time.sleep(1.5)
 
         if not res:
             logger.warning(f"Sell order returned None for {symbol}")
@@ -196,7 +261,7 @@ class RobinhoodBroker(BrokerAdapter):
 
         try:
             committed = 0.0
-            for order in self._rb.orders.get_all_open_stock_orders():
+            for order in self.get_open_orders():
                 if order.get("side") != "buy":
                     continue
                 if order.get("state") not in ("confirmed", "queued", "unconfirmed"):
@@ -233,8 +298,155 @@ class RobinhoodBroker(BrokerAdapter):
             return 0.0
 
     def get_open_orders(self) -> list[dict]:
+        if getattr(self, "_orders_cache", None) is None:
+            try:
+                self._orders_cache = list(self._rb.orders.get_all_open_stock_orders() or [])
+            except Exception as e:
+                logger.warning(f"Could not fetch open orders: {e}")
+                return []
+        return self._orders_cache
+
+    def clear_orders_cache(self) -> None:
+        self._orders_cache = None
+
+    # ------------------------------------------------------------------
+    # Fund management
+    # ------------------------------------------------------------------
+
+    def add_funds(self, target_amount: float) -> None:
+        """Initiate an ACH deposit for target_amount. Caller must handle confirmation prompt."""
         try:
-            return list(self._rb.orders.get_all_open_stock_orders() or [])
+            accounts = self._rb.get_linked_bank_accounts()
+            ach = accounts[0].get("url") if accounts else None
+            if not ach:
+                logger.warning("No linked bank account found — cannot deposit")
+                return
+            resp = self._rb.deposit_funds_to_robinhood_account(ach, round(target_amount, 2))
+            logger.info(f"Deposit requested: ${target_amount:,.2f} — state={resp.get('state')}")
         except Exception as e:
-            logger.warning(f"Could not fetch open orders: {e}")
-            return []
+            logger.error(f"Deposit failed: {e}")
+
+    # ------------------------------------------------------------------
+    # Dividend data
+    # ------------------------------------------------------------------
+
+    def get_dividends(self) -> "pd.DataFrame":
+        """Fetch dividend history and resolve instrument URLs to symbols."""
+        import pandas as pd
+
+        dividends = self._rb.get_dividends() or []
+        if not dividends:
+            return pd.DataFrame()
+
+        instrument_urls = list({d.get("instrument") for d in dividends if d.get("instrument")})
+        url_to_symbol: dict[str, str] = {}
+        for url in instrument_urls:
+            try:
+                inst = self._rb.get_instrument_by_url(url)
+                if inst and inst.get("symbol"):
+                    url_to_symbol[url] = inst["symbol"]
+            except Exception:
+                pass
+
+        rows = []
+        for d in dividends:
+            url    = d.get("instrument", "")
+            symbol = url_to_symbol.get(url, "")
+            amount = float(d.get("amount") or 0)
+            rows.append({
+                "symbol":      symbol,
+                "record_date": d.get("record_date", ""),
+                "paid_at":     d.get("paid_at", ""),
+                "state":       d.get("state", ""),
+                "amount":      amount,
+            })
+
+        return pd.DataFrame(rows)
+
+    # ------------------------------------------------------------------
+    # Holdings enrichment
+    # ------------------------------------------------------------------
+
+    def enrich_holdings_created_at(self, holdings: dict) -> None:
+        """Add 'created_at' (position open date) to each holdings entry in-place.
+
+        Two-phase lookup:
+          Phase 1 — get_open_stock_positions(): fast, but Robinhood returns null
+                     created_at for old / migrated positions.
+          Phase 2 — get_all_stock_orders(): finds the earliest filled buy order
+                     per symbol for anything Phase 1 missed.
+        """
+        if not holdings:
+            return
+
+        url_to_symbol: dict[str, str] = {}
+        try:
+            instruments = self._rb.get_instruments_by_symbols(list(holdings.keys())) or []
+            for inst in instruments:
+                if inst and inst.get("url") and inst.get("symbol"):
+                    url_to_symbol[inst["url"]] = inst["symbol"]
+            if not url_to_symbol:
+                logger.warning("enrich_holdings_created_at: instrument resolution returned no data")
+        except Exception as exc:
+            logger.warning(f"Instrument URL resolution failed: {exc}")
+
+        if url_to_symbol:
+            try:
+                positions = self._rb.get_open_stock_positions() or []
+                phase1 = 0
+                for pos in positions:
+                    inst_url   = pos.get("instrument")
+                    created_at = pos.get("created_at")
+                    if not inst_url or not created_at:
+                        continue
+                    symbol = url_to_symbol.get(inst_url)
+                    if symbol and symbol in holdings:
+                        holdings[symbol]["created_at"] = created_at
+                        phase1 += 1
+                logger.info(
+                    f"Phase 1 (positions): enriched {phase1}/{len(holdings)} holdings with open date"
+                )
+            except Exception as exc:
+                logger.warning(f"Phase 1 (positions) enrichment failed: {exc}")
+
+        missing: set[str] = {s for s in holdings if not holdings[s].get("created_at")}
+        if not missing:
+            return
+
+        logger.info(
+            f"Phase 2 (order history): resolving open date for "
+            f"{len(missing)} symbol(s): {sorted(missing)}"
+        )
+        try:
+            all_orders = self._rb.get_all_stock_orders() or []
+            first_buy: dict[str, str] = {}
+            for order in all_orders:
+                if order.get("side") != "buy" or order.get("state") != "filled":
+                    continue
+                inst_url = order.get("instrument")
+                if not inst_url:
+                    continue
+                sym = url_to_symbol.get(inst_url)
+                if not sym or sym not in missing:
+                    continue
+                created = order.get("created_at")
+                if not created:
+                    continue
+                if sym not in first_buy or created < first_buy[sym]:
+                    first_buy[sym] = created
+
+            phase2 = 0
+            for sym, date_str in first_buy.items():
+                if sym in holdings:
+                    holdings[sym]["created_at"] = date_str
+                    phase2 += 1
+
+            if phase2:
+                logger.info(
+                    f"Phase 2: resolved {phase2}/{len(missing)} open dates from order history"
+                )
+            still_missing = missing - set(first_buy.keys())
+            if still_missing:
+                logger.warning(f"Phase 2: no buy orders found for {sorted(still_missing)}")
+        except Exception as exc:
+            logger.warning(f"Phase 2 (order history) enrichment failed: {exc}")

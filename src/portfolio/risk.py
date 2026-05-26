@@ -53,6 +53,7 @@ class RiskManager:
         portfolio_value: float,
         available_cash: float,
         sector_exposure: Optional[dict] = None,
+        n_remaining_candidates: Optional[int] = None,
     ) -> BuyDecision:
         max_single    = RISK_LIMITS["max_single_position_pct"]
         max_sector    = RISK_LIMITS["max_sector_pct"]
@@ -72,12 +73,17 @@ class RiskManager:
                         adjusted_allocation=0.0,
                     )
 
-        # Order size cap (fraction of available cash)
-        max_order = available_cash * max_order_pct
+        # Order size cap — raised to 1/n_remaining when few candidates remain so the stock
+        # budget is fully deployed rather than swept to ETFs by the end-of-run cash sweep.
+        if n_remaining_candidates and n_remaining_candidates > 0:
+            effective_order_pct = max(max_order_pct, 1.0 / n_remaining_candidates)
+        else:
+            effective_order_pct = max_order_pct
+        max_order = available_cash * effective_order_pct
         if allocation > max_order:
             logger.info(
-                f"{symbol}: order ${allocation:.2f} capped to {max_order_pct:.0%} of cash "
-                f"(${available_cash:.2f}) = ${max_order:.2f}"
+                f"{symbol}: order ${allocation:.2f} capped to {effective_order_pct:.0%} of cash "
+                f"(${available_cash:.2f}, {n_remaining_candidates} remaining) = ${max_order:.2f}"
             )
             allocation = max_order
 

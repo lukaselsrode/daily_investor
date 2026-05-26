@@ -1,26 +1,29 @@
-"""ui/pages/validation.py — Validation: backtests, robustness, stability, reliability."""
+"""ui/sections/validation.py — Validation: backtests, robustness, stability, reliability, config debug."""
 from __future__ import annotations
 import streamlit as st
 
 
 def render() -> None:
     st.header("✅ Validation")
-    st.caption("Answer: 'Can I trust this system?' — backtests, stability, and data quality.")
+    st.caption("Answer: 'Can I trust this system?' — backtests, stability, config diagnostics, and data quality.")
 
-    tab_bt, tab_stab, tab_rel, tab_tune = st.tabs([
+    tabs = st.tabs([
         "📈 Backtests",
         "🔭 Stability & Robustness",
         "🩺 Reliability",
         "⚙️ Tuning",
+        "🔍 Config Diagnostics",
+        "📋 Config Compare",
+        "🧪 Ablation Runner",
     ])
 
-    with tab_bt:
+    with tabs[0]:
         st.subheader("Backtest Results")
         st.caption("Performance curves, drawdowns, trade statistics, and benchmark comparison.")
         from ui.components.backtests import render as _r
         _r()
 
-    with tab_stab:
+    with tabs[1]:
         st.subheader("Stability & Robustness")
         st.caption(
             "Parameter sensitivity across time windows and objectives. "
@@ -29,7 +32,7 @@ def render() -> None:
         from ui.components.stability import render as _r
         _r()
 
-    with tab_rel:
+    with tabs[2]:
         st.subheader("Reliability Diagnostics")
         st.caption(
             "Data pipeline integrity: NaN rates, zero-score coverage, "
@@ -38,11 +41,23 @@ def render() -> None:
         from ui.components.reliability import render as _r
         _r()
 
-    with tab_tune:
+    with tabs[3]:
         st.subheader("Parameter Tuning")
         st.caption(
             "Auto-tune factor weights and risk parameters. "
             "Review before applying — tuning suggestions are not auto-applied."
         )
         from ui.components.tuning import render as _r
+        _r()
+
+    with tabs[4]:
+        from ui.components.config_diagnostics import render as _r
+        _r()
+
+    with tabs[5]:
+        from ui.components.config_compare import render as _r
+        _r()
+
+    with tabs[6]:
+        from ui.components.ablation_runner import render as _r
         _r()

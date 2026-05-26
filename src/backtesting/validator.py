@@ -17,11 +17,11 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-import backtest as _bt
-from backtest import BacktestReport, PrecomputedData
 from util import BACKTEST_PARAMS
 
 from .results import ValidationResult
+from .simulator import run_backtest_report, split_price_window
+from .types import BacktestReport, PrecomputedData
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +54,7 @@ class WalkForwardValidator:
     def split(self, n_days: int, train_pct: Optional[float] = None) -> tuple[slice, slice]:
         """Return (train_slice, val_slice) for a window of n_days."""
         pct = train_pct if train_pct is not None else BACKTEST_PARAMS.get("train_pct", 0.70)
-        return _bt.split_price_window(n_days, pct)
+        return split_price_window(n_days, pct)
 
     # ------------------------------------------------------------------
     # Gate check
@@ -129,7 +129,7 @@ class WalkForwardValidator:
         train_slice, val_slice = self.split(n_days, train_pct)
         effective_val = val_slice if use_validation else None
 
-        report = _bt.run_backtest_report(precomp, params, train_slice, effective_val)
+        report = run_backtest_report(precomp, params, train_slice, effective_val)
 
         passed, reasons = self.validate_report(report, backtest_cfg)
 

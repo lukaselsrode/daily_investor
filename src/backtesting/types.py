@@ -1,0 +1,112 @@
+"""
+backtesting/types.py — Shared data types for the backtesting package.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import NamedTuple
+
+import numpy as np
+
+
+class PrecomputedData(NamedTuple):
+    symbols: list[str]
+    prices: np.ndarray            # (n_days, n_stocks) float64
+    pe_comp: np.ndarray           # (n_stocks,)
+    pb_comp: np.ndarray           # (n_stocks,)
+    quality_scores: np.ndarray    # (n_stocks,)
+    income_scores: np.ndarray     # (n_stocks,)
+    yield_trap_mask: np.ndarray   # (n_stocks,) bool
+    bin_indices: np.ndarray       # (n_stocks,) int 0-4
+    has_position_52w: np.ndarray  # (n_stocks,) bool
+    position_52w_arr: np.ndarray  # (n_stocks,) float, NaN where missing
+    return_1m_arr: np.ndarray     # (n_stocks,) float, NaN where missing
+    etf_symbols: list[str]
+    etf_prices: np.ndarray        # (n_days, n_etfs) float64
+    baseline_scores: np.ndarray   # (n_stocks,) scored with current config
+    sector_labels: list[str]      # (n_stocks,) sector per stock
+    volume_arr: np.ndarray        # (n_stocks,) daily avg volume
+    mode: str                     # lookahead bias mode
+    universe_selection: str       # selection method used
+    lookahead_bias_level: str     # HIGH / MEDIUM / LOW
+    benchmark_prices: np.ndarray  # (n_days,) benchmark close prices
+    benchmark_symbol: str
+    # Daily rolling price-derived features for dynamic re-scoring
+    position_52w_daily: np.ndarray      # (n_days, n_stocks) float, NaN until window fills
+    return_1m_daily: np.ndarray         # (n_days, n_stocks) float, NaN until 21d available
+    bin_indices_daily: np.ndarray       # (n_days, n_stocks) int
+    has_position_52w_daily: np.ndarray  # (n_days, n_stocks) bool
+    # Momentum v2 daily rolling features — None when not computed (v1 fallback activates)
+    ret_5d_daily: "np.ndarray | None" = None    # (n_days, n_stocks) 5-day return
+    ret_3m_daily: "np.ndarray | None" = None    # (n_days, n_stocks) 63-day return
+    ret_6m_daily: "np.ndarray | None" = None    # (n_days, n_stocks) 126-day return
+    rs_3m_daily: "np.ndarray | None" = None     # (n_days, n_stocks) relative strength vs SPY
+    rs_6m_daily: "np.ndarray | None" = None     # (n_days, n_stocks) relative strength vs SPY
+    vol_3m_daily: "np.ndarray | None" = None    # (n_days, n_stocks) annualized realized vol
+    above_50dma_daily: "np.ndarray | None" = None   # (n_days, n_stocks) bool
+    above_200dma_daily: "np.ndarray | None" = None  # (n_days, n_stocks) bool
+    spy_prices: "np.ndarray | None" = None      # (n_days,) SPY closes for RS computation
+
+
+@dataclass
+class SimResult:
+    final_value: float
+    total_return: float       # time-weighted return (excludes contributions)
+    sharpe: float             # computed from TWR daily series
+    calmar: float
+    max_drawdown: float
+    trades_made: int
+    # extended fields — default to 0 for backward compat with existing tuner calls
+    sells_made: int = 0
+    skipped_buys: int = 0
+    cap_reductions: int = 0
+    average_positions: float = 0.0
+    max_positions: int = 0
+    average_cash_pct: float = 0.0
+    turnover_estimate: float = 0.0
+    friction_cost: float = 0.0
+    net_contributions: float = 0.0  # starting_capital + all weekly contributions
+    profit: float = 0.0             # final_value - net_contributions
+    # attribution & regime diagnostics
+    stopout_count: int = 0          # hard stop-loss triggered
+    cooldown_skips: int = 0         # buys skipped due to post-sell cooldown
+    regime_days: "dict | None" = None  # {"bullish": N, "neutral": N, "defensive": N}
+    benchmark_twr: float = 0.0     # contribution-adjusted benchmark TWR for comparison
+    pool_diagnostics: "CandidatePoolDiagnostics | None" = None  # day-0 candidate pool
+
+
+@dataclass
+class BacktestReport:
+    mode: str
+    universe_selection: str
+    lookahead_bias_level: str
+    n_symbols: int
+    n_days: int
+    train_result: SimResult
+    validation_result: "SimResult | None"
+    benchmark_return: float            # train-window benchmark (simple price return)
+    benchmark_sharpe: float
+    benchmark_max_drawdown: float
+    excess_return: float               # train excess return vs benchmark
+    validation_benchmark_return: float # validation-window benchmark (0.0 if no val window)
+    notes: list[str]
+    # extended reporting
+    train_benchmark_twr: float = 0.0   # contribution-adjusted benchmark TWR
+    val_benchmark_twr: float = 0.0
+
+
+@dataclass
+class CandidatePoolDiagnostics:
+    n_candidates: int
+    score_cutoff: float
+    avg_quality: float
+    avg_momentum: float
+    avg_income: float
+    avg_value: float
+    sector_counts: dict
+    n_income_trap_excluded: int
+    n_quality_gate_excluded: int
+    n_momentum_gate_excluded: int
+    n_floor_excluded: int
+    excluded_high_income_low_momentum: list   # up to 10 symbol names

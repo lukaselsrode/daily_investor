@@ -238,3 +238,8 @@ class RegimeDetector:
             )
 
         return result
+
+
+def get_current_regime() -> str:
+    """Return the current market regime string: 'bullish', 'neutral', or 'defensive'."""
+    return RegimeDetector().detect().regime

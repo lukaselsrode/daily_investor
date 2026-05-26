@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
-from backtest import BacktestReport, SimResult
+from .types import BacktestReport, SimResult
 
 
 @dataclass
