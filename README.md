@@ -48,29 +48,27 @@ daily_investor/
 │   ├── core/
 │   │   ├── types.py                  # Shared dataclasses: SimResult, TradeRecord, SellDecision
 │   │   ├── logging.py                # Structured JSON logging
-│   │   ├── exceptions.py             # Domain exception hierarchy
-│   │   └── interfaces.py             # Typed Protocol contracts for all services
+│   │   ├── paths.py                  # Canonical path constants
+│   │   └── utils.py                  # safe_float, run_async
 │   ├── config/
 │   │   ├── schema.py                 # Frozen dataclasses for all YAML sections
 │   │   └── manager.py                # Singleton ConfigManager with cached_property sections
 │   ├── data/
-│   │   ├── base.py                   # ABCs: MarketDataProvider, SentimentProvider, etc.
 │   │   ├── cache.py                  # CSV read/write helpers
-│   │   ├── universe.py               # UniverseBuilder (scrapes Wikipedia + Robinhood sources)
-│   │   ├── fundamentals.py           # FundamentalsProvider (yfinance + Robinhood)
-│   │   ├── market.py                 # MarketDataProvider (yfinance wrapper)
-│   │   └── sentiment.py              # SentimentProvider — async Claude batch sentiment
+│   │   ├── universe.py               # Universe builder (scrapes Wikipedia + Robinhood sources)
+│   │   ├── fundamentals.py           # Fundamentals fetch + scoring (yfinance + Robinhood)
+│   │   ├── market.py                 # get_data(): full scored universe pipeline
+│   │   ├── valuation.py              # Industry ratio fetching (FinViz)
+│   │   └── sentiment.py              # Async Claude batch sentiment
 │   ├── strategy/
 │   │   ├── base.py                   # ScorerBase ABC, ScoreBreakdown
 │   │   ├── value.py                  # ValueScorer: P/E + P/B with guardrails (legacy)
-│   │   ├── value_v2.py               # ValueScorerV2: sector-relative winsorized percentile
+│   │   ├── value_v2.py               # Sector-relative winsorized percentile value scoring
 │   │   ├── quality.py                # QualityScorer: liquidity, earnings, dividend health
 │   │   ├── income.py                 # IncomeScorer: yield with trap detection
 │   │   ├── momentum.py               # MomentumEngine: v2 multi-factor + v1 fallback
 │   │   ├── composite.py              # CompositeScorer: weighted combination → value_metric
 │   │   ├── snapshots.py              # Parquet snapshot store: save, load, prune, backfill
-│   │   ├── factors/
-│   │   │   └── engine.py             # FactorEngine: score_single, score_universe, exposures
 │   │   ├── regimes/
 │   │   │   ├── models.py             # RegimeState, RegimeHistoryEntry, RegimeLabel
 │   │   │   ├── detector.py           # RegimeDetector: live detect + historical replay
@@ -83,9 +81,13 @@ daily_investor/
 │   ├── portfolio/
 │   │   ├── risk.py                   # RiskManager.can_buy() — position/sector/order gates
 │   │   ├── sell_engine.py            # SellDecisionEngine.evaluate() — hard/soft sell logic
-│   │   ├── manager.py                # PortfolioManager
-│   │   ├── sizing.py                 # Order sizing helpers
-│   │   ├── harvest.py                # Profit harvesting logic
+│   │   ├── manager.py                # PortfolioManager: sell_cycle, buy_cycle, rebalance
+│   │   ├── harvest.py                # Profit harvesting + ETF routing
+│   │   ├── decision_logger.py        # Structured decision audit log
+│   │   ├── outcome_tracker.py        # Forward-return outcome backfill
+│   │   ├── position_rationale.py     # Deterministic position rationale engine
+│   │   ├── exit_analysis.py          # Exit signal analysis helpers
+│   │   ├── decision_adjustment_engine.py  # HARVEST/TRIM/REVIEW downgrade logic
 │   │   └── exposure/
 │   │       └── analyzer.py           # ExposureAnalyzer: factor tilts, sector, HHI, drift
 │   ├── execution/
@@ -93,27 +95,36 @@ daily_investor/
 │   │   ├── paper.py                  # PaperBroker — in-memory, no API
 │   │   └── robinhood.py              # RobinhoodBroker — live orders with retry backoff
 │   ├── backtesting/
+│   │   ├── types.py                  # PrecomputedData, SimResult, BacktestReport, TradeRecord
+│   │   ├── data_loader.py            # load_and_precompute(), select_backtest_universe()
+│   │   ├── simulator.py              # run_simulation(), score_stocks_at_day(), select_candidates()
+│   │   ├── reports.py                # print_backtest_report(), compare_candidate_selection_modes()
 │   │   ├── engine.py                 # BacktestEngine: simulate, run, walk_forward
 │   │   ├── validator.py              # WalkForwardValidator: train/val split, gate checks
 │   │   └── results.py                # BacktestResult, ValidationResult typed wrappers
 │   ├── tuning/
+│   │   ├── constants.py              # PARAM_NAMES, PARAM_BOUNDS, _CONFIG_PATH_TO_PARAM_IDX
+│   │   ├── objective.py              # _objective(), run_simulation_for_objective()
+│   │   ├── reports.py                # print_config_diff(), _diff_table()
 │   │   ├── tuner.py                  # ParameterTuner: tune, auto_tune, apply_params
 │   │   ├── stability.py              # StabilityAnalyzer: multi-window parameter scan
 │   │   └── results.py                # TuneResult, AutoTuneResult, StabilityReport
 │   ├── reporting/
-│   │   ├── attribution.py            # AttributionReporter
+│   │   ├── attribution.py            # AttributionReporter: factor/sleeve/exit-type attribution
 │   │   ├── diagnostics.py            # DiagnosticsReporter: CSV + robustness TXT
 │   │   └── plots.py                  # PlotManager: heatmaps and validation charts
+│   ├── research/
+│   │   └── distribution_regime_analysis.py  # DistributionAnalyzer: bimodality, tail IC, clusters
 │   ├── ui/
 │   │   ├── streamlit_app.py          # Dashboard entry point
 │   │   ├── utils.py                  # Shared UI helpers, path constants, CSV loaders
 │   │   ├── layout/sidebar.py         # Navigation sidebar
 │   │   ├── sections/                 # Top-level page sections (one per sidebar entry)
-│   │   │   ├── operations.py         # ⚡ Operations section
-│   │   │   ├── portfolio.py          # 💼 Portfolio section
-│   │   │   ├── research.py           # 🔬 Research section
-│   │   │   ├── validation.py         # ✅ Validation section
-│   │   │   └── system.py             # ⚙️ System section
+│   │   │   ├── operations.py
+│   │   │   ├── portfolio.py
+│   │   │   ├── research.py
+│   │   │   ├── validation.py
+│   │   │   └── system.py
 │   │   └── components/               # Reusable tab components
 │   │       ├── home.py               # System dashboard / status
 │   │       ├── run_control.py        # CLI command builder + subprocess runner
