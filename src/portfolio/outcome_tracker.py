@@ -104,6 +104,10 @@ _SCHEMA: list[str] = [
     "quantity_remaining",        # shares kept after trim
     # ── Cluster / regime context ─────────────────────────────────────────────
     "cluster",                   # optional market cluster label (string)
+    # ── Archetype classification ─────────────────────────────────────────────
+    "archetype",                 # classified archetype label at decision time
+    "archetype_confidence",      # float 0–1 confidence in the classification
+    "archetype_drivers",         # JSON string list of driver strings
     # ── Post-decision price path (backfilled later) ──────────────────────────
     "max_drawdown_after_decision",  # worst drawdown within 90d of decision
     "max_runup_after_decision",     # best runup within 90d of decision
@@ -242,6 +246,9 @@ def record_decision_holding(
     quantity_sold: Optional[float]     = None,
     quantity_remaining: Optional[float] = None,
     cluster: Optional[str]             = None,
+    archetype: Optional[str]           = None,
+    archetype_confidence: Optional[float] = None,
+    archetype_drivers: Optional[list]  = None,
 ) -> None:
     """Append one holding-evaluation record to decision_outcomes.parquet."""
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -295,6 +302,9 @@ def record_decision_holding(
         "quantity_sold":     quantity_sold,
         "quantity_remaining": quantity_remaining,
         "cluster":           cluster,
+        "archetype":              archetype,
+        "archetype_confidence":   archetype_confidence,
+        "archetype_drivers":      json.dumps(archetype_drivers) if archetype_drivers else None,
     })
 
     _append_row(row)
@@ -595,3 +605,76 @@ def get_calibration_summary(df: Optional[pd.DataFrame] = None) -> dict:
         "n_harvest":           n_harvest,
         "n_hold":              n_hold,
     }
+
+
+def get_archetype_calibration_summary(df: Optional[pd.DataFrame] = None) -> dict:
+    """
+    Break down calibration metrics by archetype label.
+
+    Returns a dict keyed by archetype label, each value a dict with:
+      trim_success_rate, premature_exit_rate, bad_hold_rate, harvest_regret_rate,
+      avg_30d_return, avg_holding_days, n_trim, n_exit, n_hold, n_harvest, n_total
+
+    Only archetypes with at least one resolved record are included.
+    NEVER fed back into live scoring or factor weights.
+    """
+    if df is None:
+        df = load_outcomes()
+
+    if df.empty or "archetype" not in df.columns:
+        return {}
+
+    result: dict = {}
+    archetypes = df["archetype"].dropna().unique()
+
+    for arch in archetypes:
+        sub = df[df["archetype"] == arch]
+        if sub.empty:
+            continue
+
+        def _rate(state: str, bool_col: str) -> tuple[Optional[float], int]:
+            s = sub[sub["decision_state"] == state]
+            resolved = s[bool_col].dropna() if bool_col in s.columns else pd.Series(dtype=float)
+            if resolved.empty:
+                return None, 0
+            return float(resolved.astype(bool).mean()), len(resolved)
+
+        trim_rate,  n_trim  = _rate("TRIM",    "good_trim")
+        exit_rate,  n_exit  = _rate("EXIT",    "premature_exit")
+        hold_rate,  n_hold  = _rate("HOLD",    "bad_hold")
+
+        h_sub = sub[sub["decision_state"] == "HARVEST"]
+        if "future_30d_return" in h_sub.columns:
+            h_resolved = h_sub["future_30d_return"].dropna()
+            harvest_regret = float((h_resolved > 0.10).mean()) if not h_resolved.empty else None
+            n_harvest = len(h_resolved)
+        else:
+            harvest_regret, n_harvest = None, 0
+
+        avg_return: Optional[float] = None
+        if "future_30d_return" in sub.columns:
+            ret_vals = sub["future_30d_return"].dropna()
+            if not ret_vals.empty:
+                avg_return = round(float(ret_vals.mean()), 5)
+
+        avg_hold_days: Optional[float] = None
+        if "holding_days" in sub.columns:
+            hd_vals = pd.to_numeric(sub["holding_days"], errors="coerce").dropna()
+            if not hd_vals.empty:
+                avg_hold_days = round(float(hd_vals.mean()), 1)
+
+        result[arch] = {
+            "trim_success_rate":   trim_rate,
+            "premature_exit_rate": exit_rate,
+            "bad_hold_rate":       hold_rate,
+            "harvest_regret_rate": harvest_regret,
+            "avg_30d_return":      avg_return,
+            "avg_holding_days":    avg_hold_days,
+            "n_trim":              n_trim,
+            "n_exit":              n_exit,
+            "n_hold":              n_hold,
+            "n_harvest":           n_harvest,
+            "n_total":             len(sub),
+        }
+
+    return result

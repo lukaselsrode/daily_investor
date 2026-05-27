@@ -121,8 +121,13 @@ RISK_LIMITS: dict = {
 
 _cr = _app.get("candidate_rotation", {})
 CANDIDATE_ROTATION_PARAMS: dict = {
-    "buy_cooldown_days": int(_cr.get("buy_cooldown_days", 30)),
-    "score_jitter_pct":  float(_cr.get("score_jitter_pct", 0.08)),
+    "buy_cooldown_days":                    int(_cr.get("buy_cooldown_days", 30)),
+    "score_jitter_pct":                     float(_cr.get("score_jitter_pct", 0.08)),
+    "allow_add_to_existing_if_score_above": (
+        float(_cr["allow_add_to_existing_if_score_above"])
+        if "allow_add_to_existing_if_score_above" in _cr else None
+    ),
+    "cooldown_exempt_if_active_underweight": bool(_cr.get("cooldown_exempt_if_active_underweight", False)),
 }
 
 # ---------------------------------------------------------------------------
@@ -299,6 +304,20 @@ MOMENTUM_PARAMS: dict = {
 MAX_ITERATIONS: int = int(_app.get("max_iterations", 10))
 
 # ---------------------------------------------------------------------------
+# Archetype management parameters
+# ---------------------------------------------------------------------------
+
+ARCHETYPE_PARAMS: dict = _app.get("archetype_management", {"enabled": False})
+
+_cp = _app.get("contrarian_penalty", {})
+CONTRARIAN_PENALTY_PARAMS: dict = {
+    "enabled":                bool(_cp.get("enabled", True)),
+    "score_multiplier":       float(_cp.get("score_multiplier", 0.92)),
+    "max_position_multiplier": float(_cp.get("max_position_multiplier", 0.60)),
+    "archetype_bias":         str(_cp.get("archetype_bias", "speculative_momentum")),
+}
+
+# ---------------------------------------------------------------------------
 # Momentum v2 parameters
 # ---------------------------------------------------------------------------
 
@@ -411,6 +430,8 @@ CANDIDATE_SELECTION_PARAMS: dict = {
     "min_momentum_score":               float(_cs.get("min_momentum_score",            -0.10)),
     "min_conditional_momentum_score":   float(_cs.get("min_conditional_momentum_score", 0.00)),
     "allow_income_defensive_exception": bool(_cs.get("allow_income_defensive_exception",False)),
+    "fallback_thresholds":              [float(t) for t in _cs.get("fallback_thresholds", [])],
+    "min_post_cooldown_candidates":     int(_cs.get("min_post_cooldown_candidates",     1)),
 }
 
 # ---------------------------------------------------------------------------

@@ -99,6 +99,7 @@ def log_holding_decision(
     buy_context_row: Optional[dict],
     agg_df=None,
     soft_sell_held: bool = False,
+    archetype_result=None,
 ) -> None:
     """
     Assemble and persist a holding evaluation record.
@@ -120,6 +121,7 @@ def log_holding_decision(
         _log_holding_inner(
             symbol, holding, metrics_row, raw_decision, executed,
             order_id, regime, buy_context_row, agg_df, soft_sell_held,
+            archetype_result=archetype_result,
         )
     except Exception as exc:
         logger.warning("log_holding_decision failed for %s: %s", symbol, exc)
@@ -128,6 +130,7 @@ def log_holding_decision(
 def _log_holding_inner(
     symbol, holding, metrics_row, raw_decision, executed,
     order_id, regime, buy_context_row, agg_df, soft_sell_held,
+    archetype_result=None,
 ) -> None:
     from portfolio.outcome_tracker import record_decision_holding
 
@@ -232,6 +235,9 @@ def _log_holding_inner(
         industry        = industry or None,
         reliability_score = _m("reliability_score"),
         yield_trap_flag   = raw_decision.get("yield_trap_flag"),
+        archetype          = getattr(archetype_result, "archetype",   None) if archetype_result else None,
+        archetype_confidence = getattr(archetype_result, "confidence", None) if archetype_result else None,
+        archetype_drivers  = getattr(archetype_result, "drivers",     None) if archetype_result else None,
     )
 
 

@@ -109,7 +109,7 @@ def render() -> None:
         c2.metric("Buy candidates", len(buy_candidates))
         c3.metric("Yield traps", int(df["yield_trap_flag"].sum()) if "yield_trap_flag" in df.columns else "—")
         if "value_metric" in df.columns:
-            c4.metric("Avg value_metric", f"{df['value_metric'].mean():.3f}")
+            c4.metric("Avg composite score", f"{df['value_metric'].mean():.3f}")
 
         st.caption(f"Source: {data_date('agg_data')}")
 

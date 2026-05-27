@@ -182,6 +182,26 @@ def _enrich_holdings(
         except Exception:
             return None
 
+    # Archetype classification per active position
+    from portfolio.position_archetypes import classify_archetype
+    from ui.utils import load_config_raw as _lcr
+    _arch_cfg = _lcr().get("archetype_management", {})
+
+    # Pre-load market structure signals (maintenance_ratio, etc.) for active positions
+    _mkt_structure: dict[str, dict] = {}
+    try:
+        from data.market_structure import load_market_structure
+        _active_syms = list(df[df["sleeve"] != "ETF/core"]["symbol"].dropna().astype(str).unique())
+        if _active_syms:
+            _mkt_structure = load_market_structure(_active_syms, auto_refresh=False)
+    except Exception:
+        pass
+
+    archetype_col       = []
+    arch_confidence_col = []
+    arch_drivers_col    = []
+    arch_policy_col     = []
+
     # Build rationale for each row
     state_col = []
     state_reason_col = []
@@ -225,6 +245,10 @@ def _enrich_holdings(
             thesis_intact_col.append(True)
             exit_analysis_col.append(None)
             decision_output_col.append(None)
+            archetype_col.append("etf_core")
+            arch_confidence_col.append(None)
+            arch_drivers_col.append([])
+            arch_policy_col.append(None)
         else:
             metrics = None
             if agg is not None and "symbol" in agg.columns:
@@ -241,6 +265,32 @@ def _enrich_holdings(
                 peak_price=peak,
                 universe_rank_pct=rank,
             )
+            # Archetype classification for active positions
+            try:
+                _arch_signals: dict = {}
+                for _k in ("quality_score", "momentum_score", "value_score", "income_score",
+                           "value_metric", "yield_trap_flag", "sector", "industry",
+                           "buy_to_sell_ratio"):
+                    if _k in row.index:
+                        _arch_signals[_k] = row.get(_k)
+                # Enrich with market structure signals
+                _ms = _mkt_structure.get(sym, {})
+                for _mk in ("maintenance_ratio", "day_trade_ratio", "instrument_type",
+                            "country", "market_cap", "description", "num_employees"):
+                    _mv = _ms.get(_mk)
+                    if _mv is not None:
+                        _arch_signals[_mk] = _mv
+                _arch_res = classify_archetype(_arch_signals, _arch_cfg)
+                archetype_col.append(_arch_res.archetype)
+                arch_confidence_col.append(_arch_res.confidence)
+                arch_drivers_col.append(_arch_res.drivers)
+                arch_policy_col.append(_arch_res.policy)
+            except Exception:
+                archetype_col.append("core_default")
+                arch_confidence_col.append(None)
+                arch_drivers_col.append([])
+                arch_policy_col.append(None)
+
             etf_role_col.append("")
             state_col.append(pr.state)
             state_reason_col.append(pr.state_reason)
@@ -258,6 +308,10 @@ def _enrich_holdings(
             exit_analysis_col.append(pr.exit_analysis)
             decision_output_col.append(pr.decision_output)
 
+    df["archetype"]            = archetype_col
+    df["arch_confidence"]      = arch_confidence_col
+    df["arch_drivers"]         = arch_drivers_col
+    df["arch_policy"]          = arch_policy_col
     df["state"]           = state_col
     df["state_reason"]    = state_reason_col
     df["rationale"]       = rationale_col
@@ -714,6 +768,48 @@ def _tab_active_sleeve(df: pd.DataFrame) -> None:
                         f'<span style="color:{color}">{delta:+.3f}</span>',
                         unsafe_allow_html=True,
                     )
+
+                # Archetype badge
+                arch = row.get("archetype")
+                arch_conf = row.get("arch_confidence")
+                arch_drivers = row.get("arch_drivers") or []
+                arch_policy  = row.get("arch_policy")
+                if arch and arch not in ("etf_core", "core_default"):
+                    _ARCH_COLORS = {
+                        "quality_compounder":   "#2ecc71",
+                        "legacy_turnaround":    "#e67e22",
+                        "speculative_momentum": "#e74c3c",
+                        "value_recovery":       "#3498db",
+                        "defensive_income":     "#1abc9c",
+                    }
+                    _ARCH_ICONS = {
+                        "quality_compounder":   "🏆",
+                        "legacy_turnaround":    "⚡",
+                        "speculative_momentum": "🎰",
+                        "value_recovery":       "📈",
+                        "defensive_income":     "🛡️",
+                    }
+                    _color = _ARCH_COLORS.get(arch, "#95a5a6")
+                    _icon  = _ARCH_ICONS.get(arch, "")
+                    _label = arch.replace("_", " ").title()
+                    _conf_str = f"{arch_conf:.0%}" if arch_conf is not None else "?"
+                    st.markdown(
+                        f'<div style="margin-top:8px;padding:6px 10px;border-radius:6px;'
+                        f'background:{_color}22;border-left:3px solid {_color}">'
+                        f'<b>{_icon} {_label}</b> <span style="color:#888">({_conf_str})</span></div>',
+                        unsafe_allow_html=True,
+                    )
+                    if arch_drivers:
+                        with st.expander("Archetype evidence", expanded=False):
+                            for d in arch_drivers[:5]:
+                                st.markdown(f"• {d}")
+                            if arch_policy is not None:
+                                st.divider()
+                                st.markdown("**Management policy:**")
+                                st.markdown(f"Trim at **{arch_policy.trim_profit_threshold:.0%}** · "
+                                            f"Harvest at **{arch_policy.harvest_profit_threshold:.0%}** · "
+                                            f"Stop **{arch_policy.trailing_stop_pct:.0%}** · "
+                                            f"Min hold **{arch_policy.minimum_hold_days}d**")
 
             # Decision diagnostics (all non-HOLD/BUY states)
             if state in ("EXIT", "WATCH", "REVIEW", "TRIM", "HARVEST"):

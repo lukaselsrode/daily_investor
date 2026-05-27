@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 from util import (
+    ARCHETYPE_PARAMS,
     BACKTEST_PARAMS,
     CANDIDATE_SELECTION_PARAMS,
     EXIT_DECISION_PARAMS,
@@ -423,6 +424,45 @@ def _bench_twr(
 # Main simulation
 # ---------------------------------------------------------------------------
 
+def _build_archetype_thresholds(
+    precomp: PrecomputedData,
+    default_take_profit: float,
+    default_trailing_stop: float,
+) -> "tuple[np.ndarray, np.ndarray]":
+    """
+    Classify each stock archetype from precomp quality/income/momentum scores.
+    Returns (take_profit_arr, trailing_stop_arr) of shape (n_stocks,).
+    Falls back to defaults when archetype management is disabled or signals missing.
+    """
+    from portfolio.position_archetypes import classify_archetype_from_scores
+
+    n = precomp.quality_scores.shape[0]
+    tp_arr   = np.full(n, default_take_profit,  dtype=np.float64)
+    stop_arr = np.full(n, default_trailing_stop, dtype=np.float64)
+
+    arch_cfg = ARCHETYPE_PARAMS if ARCHETYPE_PARAMS.get("enabled", False) else None
+    if arch_cfg is None:
+        return tp_arr, stop_arr
+
+    yt_mask = precomp.yield_trap_mask if precomp.yield_trap_mask is not None else np.zeros(n, dtype=bool)
+
+    for i in range(n):
+        try:
+            policy = classify_archetype_from_scores(
+                quality_score  = float(precomp.quality_scores[i]),
+                momentum_score = float(precomp.income_scores[i]),   # proxy at day-0
+                income_score   = float(precomp.income_scores[i]),
+                yield_trap     = bool(yt_mask[i]),
+                archetype_cfg  = arch_cfg,
+            )
+            tp_arr[i]   = policy.harvest_profit_threshold
+            stop_arr[i] = policy.trailing_stop_pct
+        except Exception:
+            pass
+
+    return tp_arr, stop_arr
+
+
 def run_simulation(
     precomp: PrecomputedData,
     params: np.ndarray,
@@ -432,6 +472,7 @@ def run_simulation(
     weekly_contribution: float = 0.0,
     rebalance_frequency_days: int = 5,
     cs_params: "dict | None" = None,
+    archetype_aware: bool = False,
 ) -> SimResult:
     """
     Simulate the strategy over the precomputed price history.
@@ -472,6 +513,13 @@ def run_simulation(
     max_sector_pct = RISK_LIMITS["max_sector_pct"]
     max_order_pct  = RISK_LIMITS["max_order_pct_of_cash"]
     max_buys       = RISK_LIMITS["max_buys_per_rebalance"]
+
+    # Per-stock archetype thresholds (used when archetype_aware=True)
+    _arch_take_profit_arr, _arch_trailing_stop_arr = (
+        _build_archetype_thresholds(precomp, take_profit_pct, trailing_stop)
+        if archetype_aware
+        else (None, None)
+    )
 
     _cs_params     = cs_params if cs_params is not None else CANDIDATE_SELECTION_PARAMS
     current_scores = score_stocks_at_day(precomp, params, 0)
@@ -669,10 +717,13 @@ def run_simulation(
         days_held      = np.where(stock_day_bought >= 0, d - stock_day_bought, 0)
         take_profit_ok = current_scores < metric_threshold * _TAKE_PROFIT_FLOOR_MULTIPLIER
 
+        _eff_tp   = _arch_take_profit_arr   if _arch_take_profit_arr   is not None else take_profit_pct
+        _eff_stop = _arch_trailing_stop_arr if _arch_trailing_stop_arr is not None else trailing_stop
+
         stop_loss_mask = held & (pct_from_avg  <= _STOP_LOSS_PCT)
-        trail_mask     = held & (pct_from_peak <= trailing_stop) & (days_held >= _MIN_HOLD_DAYS)
-        tp_mask        = held & (pct_from_avg  >= take_profit_pct) & take_profit_ok & (days_held >= _MIN_DAYS_BEFORE_TAKE_PROFIT)
-        weak_val_mask  = held & (current_scores < sell_weak_below) & (days_held >= _MIN_DAYS_HELD_BEFORE_VALUE_EXIT)
+        trail_mask     = held & (pct_from_peak <= _eff_stop)        & (days_held >= _MIN_HOLD_DAYS)
+        tp_mask        = held & (pct_from_avg  >= _eff_tp)          & take_profit_ok & (days_held >= _MIN_DAYS_BEFORE_TAKE_PROFIT)
+        weak_val_mask  = held & (current_scores < sell_weak_below)  & (days_held >= _MIN_DAYS_HELD_BEFORE_VALUE_EXIT)
         sell_mask      = stop_loss_mask | trail_mask | tp_mask | weak_val_mask
 
         if sell_mask.any():
@@ -961,6 +1012,78 @@ def run_backtest_report(
         val_benchmark_twr=val_bench_twr,
         trade_log=train_result.trade_log,
     )
+
+
+def compare_archetype_modes(
+    precomp: PrecomputedData,
+    params: "np.ndarray | None" = None,
+) -> dict:
+    """
+    Run the same precomputed window twice — uniform thresholds vs archetype-aware —
+    and return a comparison dict with keys ``uniform`` and ``archetype_aware``,
+    each holding a SimResult, plus ``_delta`` sub-keys for the key deltas.
+
+    Intended for: ``daily-investor backtest N --archetype-compare``
+    """
+    if params is None:
+        params = get_default_params()
+
+    bp = BACKTEST_PARAMS
+    sim_kwargs = dict(
+        starting_capital       = bp["starting_capital"],
+        slippage_bps           = bp["slippage_bps"],
+        commission_per_trade   = bp["commission_per_trade"],
+        weekly_contribution    = bp["weekly_contribution"],
+        rebalance_frequency_days = bp["rebalance_frequency_days"],
+    )
+
+    n_days = precomp.prices.shape[0]
+    train_slice, _ = split_price_window(n_days, bp.get("train_pct", 0.70))
+
+    def _slice(s: slice) -> PrecomputedData:
+        def _o(a): return a[s] if a is not None else None
+        return precomp._replace(
+            prices=precomp.prices[s],
+            etf_prices=precomp.etf_prices[s],
+            benchmark_prices=precomp.benchmark_prices[s],
+            position_52w_daily=precomp.position_52w_daily[s],
+            return_1m_daily=precomp.return_1m_daily[s],
+            bin_indices_daily=precomp.bin_indices_daily[s],
+            has_position_52w_daily=precomp.has_position_52w_daily[s],
+            ret_5d_daily=_o(precomp.ret_5d_daily),
+            ret_3m_daily=_o(precomp.ret_3m_daily),
+            ret_6m_daily=_o(precomp.ret_6m_daily),
+            rs_3m_daily=_o(precomp.rs_3m_daily),
+            rs_6m_daily=_o(precomp.rs_6m_daily),
+            vol_3m_daily=_o(precomp.vol_3m_daily),
+            above_50dma_daily=_o(precomp.above_50dma_daily),
+            above_200dma_daily=_o(precomp.above_200dma_daily),
+        )
+
+    train = _slice(train_slice)
+    bench_vals = precomp.benchmark_prices[train_slice]
+    bench_ret  = float(bench_vals[-1] / bench_vals[0] - 1.0) if (
+        len(bench_vals) >= 2 and np.isfinite(bench_vals).all() and bench_vals[0] > 0
+    ) else 0.0
+
+    uniform  = run_simulation(train, params, archetype_aware=False, **sim_kwargs)
+    arch     = run_simulation(train, params, archetype_aware=True,  **sim_kwargs)
+
+    def _d(a, b): return round(b - a, 5) if (a is not None and b is not None) else None
+
+    return {
+        "uniform":         uniform,
+        "archetype_aware": arch,
+        "_benchmark_return": bench_ret,
+        "_n_days":           train.prices.shape[0],
+        "_delta": {
+            "total_return": _d(uniform.total_return,   arch.total_return),
+            "sharpe":       _d(uniform.sharpe,         arch.sharpe),
+            "calmar":       _d(uniform.calmar,         arch.calmar),
+            "max_drawdown": _d(uniform.max_drawdown,   arch.max_drawdown),
+            "trades_made":  _d(uniform.trades_made,    arch.trades_made),
+        },
+    }
 
 
 def compare_candidate_selection_modes(

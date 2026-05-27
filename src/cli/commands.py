@@ -33,23 +33,24 @@ def cmd_fetch_data() -> None:
       3. Holdings                        (holdings CSV — current positions + enriched open dates)
       4. Universe + fundamentals + news  (stock_tickers, robinhood_data, news, agg_data CSVs)
       5. Parquet snapshot                (data/snapshots/YYYY_MM_DD.parquet for IC analysis)
+      6. Outcome backfill                (decision_outcomes.parquet — if fill_returns_on_run is set)
 
     Requires Robinhood login.
     """
-    from main import login, _broker, _fetch_and_save_dividends, save_holdings_csv
+    from main import login, _broker, _fetch_and_save_dividends, save_holdings_csv, _maybe_fill_outcomes
     from data.valuation import update_industry_valuations
     from data.market import get_data as generate_daily_undervalued_stocks
 
     login()
     logger.info("=== Fetch-Data run (no trades) ===")
 
-    logger.info("Step 1/4: industry valuations")
+    logger.info("Step 1/5: industry valuations")
     update_industry_valuations(verbose=True)
 
-    logger.info("Step 2/4: dividends")
+    logger.info("Step 2/5: dividends")
     _fetch_and_save_dividends()
 
-    logger.info("Step 3/4: holdings")
+    logger.info("Step 3/5: holdings")
     try:
         holdings = _broker.get_holdings()
         _broker.enrich_holdings_created_at(holdings)
@@ -58,12 +59,15 @@ def cmd_fetch_data() -> None:
     except Exception as exc:
         logger.warning("Holdings fetch failed (continuing): %s", exc)
 
-    logger.info("Step 4/4: universe + fundamentals + news + scoring")
+    logger.info("Step 4/5: universe + fundamentals + news + scoring")
     df = generate_daily_undervalued_stocks(refresh=True)
     if df.empty:
         logger.error("Data fetch returned an empty DataFrame — check credentials and connectivity")
     else:
         logger.info("Fetch-Data complete: %d symbols written to agg_data CSV + snapshot", len(df))
+
+    logger.info("Step 5/5: outcome backfill")
+    _maybe_fill_outcomes()
 
 
 def cmd_run(
@@ -84,16 +88,22 @@ def cmd_backtest(
     mode: Optional[str] = None,
     params: Optional[dict] = None,
     compare: bool = False,
+    archetype_compare: bool = False,
 ) -> None:
     """Run a single backtest and print results."""
     from backtesting.engine import BacktestEngine
     from backtesting.data_loader import load_and_precompute
-    from backtesting.simulator import get_default_params, compare_candidate_selection_modes
+    from backtesting.simulator import get_default_params, compare_candidate_selection_modes, compare_archetype_modes
     from backtesting.reports import print_backtest_report, print_comparison_report
 
     engine = BacktestEngine()
 
-    if compare:
+    if archetype_compare:
+        precomp = load_and_precompute(n_days, mode=mode)
+        default_params = get_default_params()
+        result = compare_archetype_modes(precomp, default_params)
+        _print_archetype_comparison(result, n_days)
+    elif compare:
         precomp = load_and_precompute(n_days, mode=mode)
         default_params = get_default_params()
         comparison = compare_candidate_selection_modes(precomp, default_params)
@@ -101,6 +111,38 @@ def cmd_backtest(
     else:
         result = engine.run(n_days=n_days, params=params, mode=mode)
         print_backtest_report(result.report)
+
+
+def _print_archetype_comparison(result: dict, n_days: int) -> None:
+    """Print a side-by-side uniform vs archetype-aware comparison table."""
+    u   = result["uniform"]
+    a   = result["archetype_aware"]
+    d   = result["_delta"]
+    bench = result["_benchmark_return"]
+    actual_days = result["_n_days"]
+
+    def _fmt_pct(v):  return f"{v:+.2%}" if v is not None else "n/a"
+    def _fmt_f(v):    return f"{v:+.3f}" if v is not None else "n/a"
+    def _fmt_d(v, pct=True): return (_fmt_pct(v) if pct else _fmt_f(v)) if v is not None else "n/a"
+
+    print(f"\n{'='*60}")
+    print(f"  Archetype A/B comparison — {n_days}d window ({actual_days} trading days)")
+    print(f"  Benchmark return: {bench:+.2%}")
+    print(f"{'='*60}")
+    print(f"  {'Metric':<22}  {'Uniform':>10}  {'Arch-Aware':>10}  {'Delta':>10}")
+    print(f"  {'-'*22}  {'-'*10}  {'-'*10}  {'-'*10}")
+
+    rows = [
+        ("Total return",  _fmt_pct(u.total_return),   _fmt_pct(a.total_return),   _fmt_d(d["total_return"])),
+        ("Sharpe",        _fmt_f(u.sharpe),            _fmt_f(a.sharpe),           _fmt_d(d["sharpe"], pct=False)),
+        ("Calmar",        _fmt_f(u.calmar),            _fmt_f(a.calmar),           _fmt_d(d["calmar"], pct=False)),
+        ("Max drawdown",  _fmt_pct(u.max_drawdown),    _fmt_pct(a.max_drawdown),   _fmt_d(d["max_drawdown"])),
+        ("Trades made",   str(u.trades_made),          str(a.trades_made),         str(d["trades_made"] or "")),
+    ]
+    for label, uv, av, dv in rows:
+        print(f"  {label:<22}  {uv:>10}  {av:>10}  {dv:>10}")
+
+    print(f"{'='*60}\n")
 
 
 def cmd_tune(

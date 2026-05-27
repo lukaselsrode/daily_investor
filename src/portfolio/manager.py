@@ -20,10 +20,14 @@ from typing import TYPE_CHECKING, Optional
 import pandas as pd
 
 from portfolio.sell_engine import evaluate_sell_candidate
+from portfolio.position_archetypes import classify_archetype, get_archetype_policy
 from strategy.regimes.detector import get_current_regime
 from util import (
+    ARCHETYPE_PARAMS,
     AUTO_APPROVE,
     CANDIDATE_ROTATION_PARAMS,
+    CANDIDATE_SELECTION_PARAMS,
+    CONTRARIAN_PENALTY_PARAMS,
     CONFIDENCE_THRESHOLD,
     DATA_DIRECTORY,
     DIVIDEND_PARAMS,
@@ -392,6 +396,7 @@ class PortfolioManager:
                     buy_context_row=bc_row,
                     agg_df=agg_df,
                     soft_sell_held=(symbol in held_on_sentiment),
+                    archetype_result=info.get("archetype_result"),
                 )
             except Exception as exc:
                 logger.debug("Outcome log failed for %s: %s", symbol, exc)
@@ -513,6 +518,17 @@ class PortfolioManager:
         soft_sells: dict[str, dict] = {}
         _all_evaluated: dict[str, dict] = {}
 
+        # Pre-load market structure signals (maintenance_ratio, day_trade_ratio, etc.)
+        # for all active positions in one batch; used to enrich archetype classification.
+        _mkt_structure: dict[str, dict] = {}
+        if ARCHETYPE_PARAMS.get("enabled", False):
+            try:
+                from data.market_structure import load_market_structure
+                _active_syms = [s for s in holdings if s not in ETFS]
+                _mkt_structure = load_market_structure(_active_syms, auto_refresh=True)
+            except Exception as _mse:
+                logger.debug("market_structure load failed: %s", _mse)
+
         for symbol, data in holdings.items():
             if symbol in ETFS:
                 continue
@@ -529,12 +545,48 @@ class PortfolioManager:
                 if not row.empty:
                     metrics_row = row.iloc[0]
 
-            decision = evaluate_sell_candidate(symbol, data, metrics_row, peak_price=peaks.get(symbol))
+            # Derive archetype policy for this position
+            _arch_policy = None
+            _arch_result = None
+            if ARCHETYPE_PARAMS.get("enabled", False):
+                try:
+                    _signals: dict = {"symbol": symbol}
+                    if metrics_row is not None:
+                        for _k in ("quality_score", "momentum_score", "value_score",
+                                   "income_score", "value_metric", "yield_trap_flag",
+                                   "sector", "industry", "buy_to_sell_ratio"):
+                            _v = metrics_row.get(_k)
+                            if _v is not None:
+                                _signals[_k] = _v
+                    # Enrich with market structure signals
+                    _ms = _mkt_structure.get(symbol, {})
+                    for _mk in ("maintenance_ratio", "day_trade_ratio", "instrument_type",
+                                "country", "market_cap", "description", "num_employees"):
+                        _mv = _ms.get(_mk)
+                        if _mv is not None:
+                            _signals[_mk] = _mv
+                    _arch_result = classify_archetype(_signals, ARCHETYPE_PARAMS)
+                    _arch_policy = _arch_result.policy
+                    logger.debug(
+                        "%s archetype=%s confidence=%.0f%% drivers=%s",
+                        symbol, _arch_result.archetype,
+                        _arch_result.confidence * 100,
+                        "; ".join(_arch_result.drivers[:2]),
+                    )
+                except Exception as _exc:
+                    logger.debug("Archetype classification failed for %s: %s", symbol, _exc)
+
+            decision = evaluate_sell_candidate(
+                symbol, data, metrics_row,
+                peak_price=peaks.get(symbol),
+                archetype_policy=_arch_policy,
+            )
 
             _all_evaluated[symbol] = {
                 "data": data,
                 "metrics_row": metrics_row,
                 "decision": decision,
+                "archetype_result": _arch_result,
             }
 
             if not decision["should_sell"]:
@@ -859,59 +911,146 @@ class PortfolioManager:
             .head(10)
             .to_string(index=False),
         )
-        candidates = df[df["value_metric"] >= METRIC_THRESHOLD].copy()
-        logger.info(
-            f"Pre-filter: {len(df)} → {len(candidates)} stocks "
-            f"(value_metric ≥ {METRIC_THRESHOLD})"
-        )
-
-        if candidates.empty:
-            logger.warning(f"No stocks pass value_metric ≥ {METRIC_THRESHOLD}")
-            return [], df["symbol"].tolist(), []
-
-        if "strategy_bucket" in candidates.columns:
-            contrarian_mask = candidates["strategy_bucket"] == "contrarian_watchlist"
-            contrarian_syms = candidates.loc[contrarian_mask, "symbol"].tolist()
-            candidates = candidates[~contrarian_mask].copy()
+        # --- Constant gates (not threshold-dependent) ---
+        df_eligible = df.copy()
+        if "strategy_bucket" in df_eligible.columns and CONTRARIAN_PENALTY_PARAMS["enabled"]:
+            contrarian_mask = df_eligible["strategy_bucket"] == "contrarian_watchlist"
+            contrarian_syms = df_eligible.loc[contrarian_mask, "symbol"].tolist()
             if contrarian_syms:
-                logger.info(f"Contrarian watchlist excluded from buys: {contrarian_syms}")
+                _sm = CONTRARIAN_PENALTY_PARAMS["score_multiplier"]
+                df_eligible.loc[contrarian_mask, "value_metric"] = (
+                    df_eligible.loc[contrarian_mask, "value_metric"] * _sm
+                )
+                logger.info(
+                    f"Contrarian soft penalty ({_sm}×, pos cap "
+                    f"{CONTRARIAN_PENALTY_PARAMS['max_position_multiplier']}×): {contrarian_syms}"
+                )
 
-        if candidates.empty:
-            logger.warning("No candidates remain after contrarian exclusion")
-            return [], df["symbol"].tolist(), []
-
-        if RELIABILITY_PARAMS["enabled"] and "reliability_score" in candidates.columns:
+        if RELIABILITY_PARAMS["enabled"] and "reliability_score" in df_eligible.columns:
             min_rel = RELIABILITY_PARAMS["min_reliability_score"]
-            rel_scores = pd.to_numeric(candidates["reliability_score"], errors="coerce").fillna(0.0)
-            low_rel = candidates[rel_scores < min_rel]["symbol"].tolist()
-            candidates = candidates[rel_scores >= min_rel].copy()
+            rel_scores = pd.to_numeric(df_eligible["reliability_score"], errors="coerce").fillna(0.0)
+            low_rel = df_eligible[rel_scores < min_rel]["symbol"].tolist()
+            df_eligible = df_eligible[rel_scores >= min_rel].copy()
             if low_rel:
                 logger.info(
                     f"Reliability gate ({min_rel:.2f}): excluded {len(low_rel)} "
                     f"low-quality candidates: {low_rel[:10]}"
                 )
 
-        if candidates.empty:
+        if df_eligible.empty:
             logger.warning("No candidates remain after reliability gate")
             return [], df["symbol"].tolist(), []
 
-        cooldown_days = CANDIDATE_ROTATION_PARAMS["buy_cooldown_days"]
-        if cooldown_days > 0 and "symbol" in candidates.columns:
-            buy_history = self._load_buy_history()
-            today = datetime.date.today()
-            cooled_out = [
-                sym for sym in candidates["symbol"]
-                if sym in buy_history and (today - buy_history[sym]).days < cooldown_days
-            ]
+        # --- Cooldown setup + exemption state ---
+        cooldown_days    = CANDIDATE_ROTATION_PARAMS["buy_cooldown_days"]
+        add_above        = CANDIDATE_ROTATION_PARAMS.get("allow_add_to_existing_if_score_above")
+        exempt_underweight = CANDIDATE_ROTATION_PARAMS.get("cooldown_exempt_if_active_underweight", False)
+
+        # Fetch holdings early for cooldown exemptions (reused below to avoid double API call)
+        _early_holdings: dict = {}
+        held_symbols: set = set()
+        if cooldown_days > 0 and (add_above is not None or exempt_underweight):
+            try:
+                _early_holdings = self._broker.get_holdings()
+                held_symbols = set(_early_holdings.keys())
+            except Exception:
+                pass
+
+        active_is_underweight = False
+        if exempt_underweight and held_symbols:
+            try:
+                _pv   = self._broker.get_portfolio_value()
+                _cash = self._broker.get_cash()
+                _etf_val = sum(
+                    safe_float(_early_holdings.get(e, {}).get("equity"), 0.0) for e in ETFS
+                )
+                _active_pct = (_pv - _cash - _etf_val) / max(_pv, 1.0)
+                active_is_underweight = _active_pct < (1.0 - effective_index_pct)
+                if active_is_underweight:
+                    logger.info(
+                        f"Active sleeve underweight ({_active_pct:.1%} vs "
+                        f"{1.0 - effective_index_pct:.0%} target) — cooldown exemptions active"
+                    )
+            except Exception:
+                pass
+
+        buy_history  = self._load_buy_history() if cooldown_days > 0 else {}
+        _today       = datetime.date.today()
+
+        def _apply_cooldown(frame: pd.DataFrame) -> tuple[pd.DataFrame, list]:
+            if cooldown_days <= 0 or "symbol" not in frame.columns:
+                return frame, []
+            cooled_out = []
+            for sym in frame["symbol"].tolist():
+                if sym not in buy_history:
+                    continue
+                if (_today - buy_history[sym]).days >= cooldown_days:
+                    continue
+                score = float(frame.loc[frame["symbol"] == sym, "value_metric"].iloc[0])
+                if add_above is not None and score >= add_above and sym in held_symbols:
+                    continue  # high-conviction add-to-existing
+                if active_is_underweight and sym in held_symbols:
+                    continue  # sleeve underweight — allow topping up held names
+                cooled_out.append(sym)
             if cooled_out:
-                candidates = candidates[~candidates["symbol"].isin(cooled_out)].copy()
+                frame = frame[~frame["symbol"].isin(cooled_out)].copy()
+            return frame, cooled_out
+
+        # --- Fallback threshold ladder ---
+        _cs            = CANDIDATE_SELECTION_PARAMS
+        _raw_fallbacks = _cs.get("fallback_thresholds", [])
+        _thresholds    = [float(t) for t in _raw_fallbacks] if _raw_fallbacks else [METRIC_THRESHOLD]
+        if not _thresholds or _thresholds[0] != METRIC_THRESHOLD:
+            _thresholds = [METRIC_THRESHOLD] + _thresholds
+        _min_post_cd   = int(_cs.get("min_post_cooldown_candidates", 1))
+
+        candidates = pd.DataFrame()
+        for _fi, _thr in enumerate(_thresholds):
+            _tier = df_eligible[df_eligible["value_metric"] >= _thr].copy()
+            if _fi == 0:
                 logger.info(
-                    f"Buy cooldown ({cooldown_days}d): excluded {len(cooled_out)} "
-                    f"recently-purchased symbols: {cooled_out[:10]}"
+                    f"Pre-filter: {len(df)} → {len(_tier)} stocks (value_metric ≥ {_thr})"
+                )
+            else:
+                logger.info(
+                    f"Fallback threshold {_thr}: {len(_tier)} candidates "
+                    f"(was starved at {_thresholds[_fi - 1]})"
                 )
 
+            if _tier.empty:
+                if _fi < len(_thresholds) - 1:
+                    continue
+                logger.warning(f"No stocks pass value_metric ≥ {_thr} (fallbacks exhausted)")
+                return [], df["symbol"].tolist(), []
+
+            _tier, _cooled = _apply_cooldown(_tier)
+            if _cooled:
+                logger.info(
+                    f"Buy cooldown ({cooldown_days}d): excluded {len(_cooled)} "
+                    f"recently-purchased symbols: {_cooled[:10]}"
+                )
+
+            if _tier.empty:
+                if _fi < len(_thresholds) - 1:
+                    logger.info(
+                        f"All candidates cooled out at threshold {_thr} — "
+                        f"stepping down to {_thresholds[_fi + 1]}"
+                    )
+                    continue
+                logger.warning("No candidates remain after buy cooldown filter (fallbacks exhausted)")
+                return [], df["symbol"].tolist(), []
+
+            if len(_tier) >= _min_post_cd or _fi == len(_thresholds) - 1:
+                candidates = _tier
+                break
+
+            logger.info(
+                f"Only {len(_tier)} candidate(s) post-cooldown at threshold {_thr} "
+                f"(min={_min_post_cd}) — stepping down to {_thresholds[_fi + 1]}"
+            )
+
         if candidates.empty:
-            logger.warning("No candidates remain after buy cooldown filter")
+            logger.warning("No candidates remain after all filters")
             return [], df["symbol"].tolist(), []
 
         jitter_pct = CANDIDATE_ROTATION_PARAMS["score_jitter_pct"]
@@ -948,7 +1087,7 @@ class PortfolioManager:
         else:
             candidates = candidates.drop(columns=["_jittered"]).copy()
 
-        holdings        = self._broker.get_holdings()
+        holdings        = _early_holdings if _early_holdings else self._broker.get_holdings()
         self._save_holdings_csv(holdings)
         portfolio_value = self._broker.get_portfolio_value()
         try:
@@ -1035,6 +1174,16 @@ class PortfolioManager:
             alloc = (row["value_metric"] / total_value) * cash if total_value else 0
             min_alloc_floor = stock_amount * RISK_LIMITS["min_candidate_allocation_pct"]
             alloc = min(max(alloc, min_alloc_floor), cash)
+
+            if (
+                row.get("strategy_bucket") == "contrarian_watchlist"
+                and CONTRARIAN_PENALTY_PARAMS["enabled"]
+            ):
+                _ctr_cap = (
+                    (stock_amount / max(len(candidates), 1))
+                    * CONTRARIAN_PENALTY_PARAMS["max_position_multiplier"]
+                )
+                alloc = min(alloc, _ctr_cap)
 
             n_remaining = len(candidates) - (_cand_rank - 1)
             _buy_dec = self._risk.can_buy(

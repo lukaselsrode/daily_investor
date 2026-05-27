@@ -12,7 +12,7 @@ from ui.utils import DATA_DIR, list_csv_files, fmt_bin_index
 
 _PRESET_VIEWS = [
     "— custom —",
-    "Top value_metric by sector",
+    "Top composite score by sector",
     "Score distributions (all factors)",
     "Momentum vs quality scatter",
     "Value vs momentum scatter",
@@ -147,9 +147,9 @@ def render() -> None:
 def _render_preset(df: pd.DataFrame, preset: str, num_cols: list[str]) -> None:
     score_cols = [c for c in _SCORE_COLS if c in df.columns]
 
-    if preset == "Top value_metric by sector" and "sector" in df.columns and "value_metric" in df.columns:
+    if preset == "Top composite score by sector" and "sector" in df.columns and "value_metric" in df.columns:
         grouped = df.groupby("sector")["value_metric"].mean().sort_values(ascending=False)
-        st.subheader("Mean value_metric by sector")
+        st.subheader("Mean composite score by sector")
         st.bar_chart(grouped)
 
     elif preset == "Score distributions (all factors)":

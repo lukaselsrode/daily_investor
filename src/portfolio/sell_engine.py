@@ -22,7 +22,8 @@ from typing import Optional
 import pandas as pd
 
 from core.types import SellDecision
-from util import EXIT_DECISION_PARAMS, METRIC_THRESHOLD, SELL_RULES, safe_float
+from portfolio.position_archetypes import ArchetypePolicy
+from util import ARCHETYPE_PARAMS, EXIT_DECISION_PARAMS, METRIC_THRESHOLD, SELL_RULES, safe_float
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,7 @@ class SellDecisionEngine:
         holding: dict,
         metrics_row: Optional[pd.Series],
         peak_price: Optional[float] = None,
+        archetype_policy: Optional[ArchetypePolicy] = None,
     ) -> SellDecision:
         # Derive percent_change — Robinhood returns it as a percentage string e.g. "-15.3"
         percent_change: float | None = None
@@ -84,6 +86,12 @@ class SellDecisionEngine:
         sell_lq     = SELL_RULES["sell_low_quality_below"]
         min_days    = SELL_RULES["min_days_held_before_value_exit"]
 
+        # Archetype-aware overrides (position management only — hard sells are unchanged)
+        _arch_enabled = ARCHETYPE_PARAMS.get("enabled", False)
+        if _arch_enabled and archetype_policy is not None:
+            take_profit = archetype_policy.harvest_profit_threshold
+            min_days    = max(min_days, archetype_policy.minimum_hold_days)
+
         base = dict(
             percent_change=percent_change,
             value_metric=value_metric,
@@ -104,6 +112,8 @@ class SellDecisionEngine:
             )
 
         trailing_stop = SELL_RULES["trailing_stop_pct"]
+        if _arch_enabled and archetype_policy is not None:
+            trailing_stop = archetype_policy.trailing_stop_pct
         if peak_price is not None and peak_price > 0:
             current_p = safe_float(holding.get("price"))
             if current_p is not None:
@@ -162,7 +172,11 @@ class SellDecisionEngine:
         # but not yet collapsed to thesis_exit territory.  Sells only trim_fraction.
         _trim = EXIT_DECISION_PARAMS
         if _trim.get("trim_enabled") and percent_change is not None:
-            _trim_min_gain = _trim["trim_min_gain_pct"]
+            _trim_min_gain = (
+                archetype_policy.trim_profit_threshold
+                if _arch_enabled and archetype_policy is not None
+                else _trim["trim_min_gain_pct"]
+            )
             _trim_fraction  = _trim["trim_fraction"]
             _trim_delta_thr = _trim["trim_score_delta_threshold"]  # e.g. -0.15
 
@@ -260,13 +274,14 @@ def evaluate_sell_candidate(
     holding: dict,
     metrics_row: "Optional[pd.Series]",
     peak_price: "Optional[float]" = None,
+    archetype_policy: "Optional[ArchetypePolicy]" = None,
 ) -> dict:
     """
     Module-level wrapper around SellDecisionEngine.evaluate() that returns a
     plain dict. Keeps main.py callers working while the class-based API is
     the canonical interface going forward.
     """
-    d = _engine.evaluate(symbol, holding, metrics_row, peak_price)
+    d = _engine.evaluate(symbol, holding, metrics_row, peak_price, archetype_policy)
     return {
         "should_sell":    d.should_sell,
         "reason":         d.reason,

@@ -15,6 +15,7 @@ def render() -> None:
         "📈 Attribution",
         "🏦 Allocation",
         "🎯 Decision Quality",
+        "🧬 Archetype Attribution",
     ])
 
     with tabs[0]:
@@ -43,4 +44,8 @@ def render() -> None:
 
     with tabs[6]:
         from ui.components.decision_quality import render as _r
+        _r()
+
+    with tabs[7]:
+        from ui.components.archetype_attribution import render as _r
         _r()

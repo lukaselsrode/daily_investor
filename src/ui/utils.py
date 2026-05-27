@@ -42,9 +42,9 @@ def load_latest_csv(prefix: str) -> Optional[pd.DataFrame]:
 
 
 def list_csv_files() -> dict[str, Path]:
-    """Return {display_name: path} for all CSV files in data/."""
+    """Return {display_name: path} for all CSV files in data/, newest first."""
     out: dict[str, Path] = {}
-    for p in sorted(DATA_DIR.glob("*.csv")):
+    for p in sorted(DATA_DIR.glob("*.csv"), reverse=True):
         out[p.name] = p
     return out
 

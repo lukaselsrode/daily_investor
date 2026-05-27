@@ -12,6 +12,13 @@ from ui.utils import data_date, load_latest_csv, load_config_raw, no_data_msg, f
 _SCORE_COLS = ["value_metric", "value_score", "quality_score", "income_score", "momentum_score"]
 _META_COLS  = ["symbol", "owned", "sector", "industry", "pe_ratio", "pb_ratio",
                "dividend_yield", "volume", "current_price", "yield_trap_flag"]
+_FRIENDLY   = {
+    "value_metric":   "Composite Score",
+    "value_score":    "Value",
+    "quality_score":  "Quality",
+    "income_score":   "Income",
+    "momentum_score": "Momentum",
+}
 
 
 def render() -> None:
@@ -34,7 +41,7 @@ def render() -> None:
     if "symbol" in df.columns:
         df["owned"] = df["symbol"].isin(owned_symbols)
 
-    st.caption(f"Source: agg_data {data_date('agg_data')} | {len(df)} symbols | metric_threshold = {thresh} | owned: {len(owned_symbols)}")
+    st.caption(f"Source: agg_data {data_date('agg_data')} | {len(df)} symbols | composite score threshold = {thresh} | owned: {len(owned_symbols)}")
 
     # ---- Filters ----------------------------------------------------------
     with st.expander("Filters", expanded=True):
@@ -45,7 +52,7 @@ def render() -> None:
             sectors = ["All"] + sorted(df["sector"].dropna().unique().tolist()) if "sector" in df.columns else ["All"]
             sector_filter = st.selectbox("Sector", sectors)
         with c3:
-            min_metric = st.slider("Min value_metric", -1.0, 2.0, float(thresh), 0.05)
+            min_metric = st.slider("Min composite score", -1.0, 2.0, float(thresh), 0.05)
         with c4:
             hide_yield_traps = st.checkbox("Hide yield traps", value=False)
             candidates_only  = st.checkbox("Buy candidates only", value=False)
@@ -70,14 +77,19 @@ def render() -> None:
 
     # ---- Score distribution -----------------------------------------------
     if "value_metric" in view.columns and len(view):
-        st.subheader("value_metric distribution")
+        st.subheader("Composite score distribution")
         st.bar_chart(fmt_bin_index(view["value_metric"].dropna().value_counts(bins=20, sort=False).sort_index()))
 
     # ---- Main table -------------------------------------------------------
     display_cols = [c for c in _META_COLS + _SCORE_COLS if c in view.columns]
     st.subheader("Universe table")
-    sort_col = st.selectbox("Sort by", _SCORE_COLS if all(c in view.columns for c in _SCORE_COLS) else display_cols,
-                             index=0)
+    _sort_opts = [c for c in _SCORE_COLS if c in view.columns] or display_cols
+    sort_col = st.selectbox(
+        "Sort by",
+        _sort_opts,
+        format_func=lambda c: _FRIENDLY.get(c, c),
+        index=0,
+    )
     view_sorted = view[display_cols].sort_values(sort_col, ascending=False) if sort_col in view.columns else view[display_cols]
     st.dataframe(view_sorted, use_container_width=True, height=400)
 
@@ -96,7 +108,7 @@ def render() -> None:
                 for col in _SCORE_COLS:
                     if col in r:
                         v = r[col]
-                        st.metric(col, f"{v:.4f}" if pd.notna(v) else "—")
+                        st.metric(_FRIENDLY.get(col, col), f"{v:.4f}" if pd.notna(v) else "—")
             with c2:
                 st.markdown("**Fundamentals**")
                 for col in ["pe_ratio", "pb_ratio", "dividend_yield", "volume"]:

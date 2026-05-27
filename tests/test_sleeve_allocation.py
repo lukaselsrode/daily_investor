@@ -246,8 +246,11 @@ class TestHarvestRouting:
         from util import HARVEST_PARAMS
 
         harvest_pct = HARVEST_PARAMS.get("harvest_to_etfs_pct", 1.0)
-        amount = 100.0
-        broker = _broker(cash=1000.0)
+        n_etfs = len(HARVEST_PARAMS.get("harvest_etfs", ["SPY", "VTI"]))
+        # Ensure per-ETF amount exceeds min_order_amount regardless of config
+        min_order = RISK_LIMITS["min_order_amount"]
+        amount = max(100.0, (min_order * n_etfs / harvest_pct) * 3)
+        broker = _broker(cash=amount * 2)
         hm = HarvestManager()
 
         pre_cash = broker.get_cash()
@@ -268,8 +271,10 @@ class TestHarvestRouting:
         if harvest_pct >= 1.0:
             pytest.skip("harvest_to_etfs_pct=1.0: no active reserve to test")
 
-        amount = 100.0
-        broker = _broker(cash=1000.0)
+        n_etfs = len(HARVEST_PARAMS.get("harvest_etfs", ["SPY", "VTI"]))
+        min_order = RISK_LIMITS["min_order_amount"]
+        amount = max(100.0, (min_order * n_etfs / harvest_pct) * 3)
+        broker = _broker(cash=amount * 2)
         hm = HarvestManager()
 
         pre_cash = broker.get_cash()

@@ -53,7 +53,8 @@ def main(argv: list[str] | None = None) -> None:
         n_days = int(rest[0]) if rest and rest[0].isdigit() else 365
         mode = _flag_value(rest, "--mode")
         compare = "--compare" in rest
-        cmd_backtest(n_days=n_days, mode=mode, compare=compare)
+        archetype_compare = "--archetype-compare" in rest
+        cmd_backtest(n_days=n_days, mode=mode, compare=compare, archetype_compare=archetype_compare)
 
     elif cmd == "tune":
         if not rest or not rest[0].isdigit():
@@ -107,7 +108,7 @@ daily-investor CLI
 COMMANDS
   fetch-data               Fetch fresh data only — no trades (fundamentals, news, snapshot)
   run                      Live trading run (requires Robinhood credentials)
-  backtest DAYS            Run backtest simulation
+  backtest DAYS            Run backtest simulation (--archetype-compare for A/B vs uniform)
   tune DAYS                Single-objective parameter tune (prints diff, no write)
   auto-tune [DAYS]         Dual-objective tune with walk-forward validation (default: 90d)
   stability-scan           Parameter stability scan (research only, no writes)

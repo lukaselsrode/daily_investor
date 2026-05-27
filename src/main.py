@@ -122,6 +122,64 @@ def _fetch_and_save_dividends() -> None:
 # Strategy
 # ---------------------------------------------------------------------------
 
+def _maybe_fill_outcomes() -> None:
+    """Backfill realized return outcomes for past decisions if config flag is set."""
+    import yaml
+    from core.paths import CONFIG_FILE
+    try:
+        with open(CONFIG_FILE) as f:
+            cfg = yaml.safe_load(f) or {}
+        if not cfg.get("outcome_tracking", {}).get("fill_returns_on_run", False):
+            return
+    except Exception:
+        return
+
+    try:
+        import datetime
+        import yfinance as yf
+        from portfolio.outcome_tracker import load_outcomes, fill_future_returns
+
+        df = load_outcomes()
+        if df.empty:
+            return
+
+        sym_col = "symbol" if "symbol" in df.columns else "ticker"
+        symbols = [s for s in df[sym_col].dropna().unique() if str(s).strip()]
+        if not symbols:
+            return
+
+        fetch_syms = sorted(set(symbols) | {"SPY"})
+        today  = datetime.date.today()
+        start  = (today - datetime.timedelta(days=125)).isoformat()
+        hist   = yf.download(fetch_syms, start=start, auto_adjust=True, progress=False)
+        close  = hist["Close"] if "Close" in hist.columns else hist
+
+        current_prices: dict[str, float] = {}
+        spy_price_history: dict[str, float] = {}
+        spy_current_price: float | None = None
+
+        for sym in fetch_syms:
+            col = close[sym] if sym in close.columns else None
+            if col is not None and not col.dropna().empty:
+                current_prices[sym] = float(col.dropna().iloc[-1])
+
+        if "SPY" in close.columns:
+            spy_series = close["SPY"].dropna()
+            spy_current_price = float(spy_series.iloc[-1])
+            for ts, px in spy_series.items():
+                spy_price_history[str(ts)[:10]] = float(px)
+
+        n = fill_future_returns(
+            current_prices=current_prices,
+            spy_current_price=spy_current_price,
+            spy_price_history=spy_price_history,
+        )
+        if n:
+            logger.info("Outcome backfill: %d cells updated", n)
+    except Exception as exc:
+        logger.warning("Outcome backfill failed (non-fatal): %s", exc)
+
+
 def run_daily_strat() -> None:
     logger.info(f"=== Daily Investment Strategy {datetime.datetime.now():%Y-%m-%d %H:%M} ===")
     if USE_SENTIMENT_ANALYSIS:
@@ -160,6 +218,8 @@ def run_daily_strat() -> None:
     regime = get_current_regime()
     pm = PortfolioManager(_broker, _risk, _harvest)
     pm.rebalance(df, regime)
+
+    _maybe_fill_outcomes()
 
 
 # ---------------------------------------------------------------------------

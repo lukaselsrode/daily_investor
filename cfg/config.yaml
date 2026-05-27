@@ -39,11 +39,11 @@ risk:
   max_single_position_pct: 0.07
   max_sector_pct: 0.25
   max_order_pct_of_cash: 0.5
-  min_order_amount: 5.0
+  min_order_amount: 30.0
   min_liquidity_volume: 500000
   max_buys_per_rebalance: 4
   max_sentiment_candidates: 20
-  minimum_hold_days: 5
+  minimum_hold_days: 10
   allow_whole_share_fallback: true
   max_whole_share_buys_per_run: 2
   max_whole_share_allocation_multiplier: 1.25
@@ -59,6 +59,55 @@ sell_rules:
   sell_yield_trap: true
   sell_low_quality_below: -0.25
   min_days_held_before_value_exit: 21
+archetype_management:
+  enabled: true
+  quality_compounder:
+    trim_profit_threshold: 0.35
+    harvest_profit_threshold: 0.50
+    trailing_stop_pct: -0.12
+    minimum_hold_days: 30
+    thesis_exit_requires_confirmation: true
+    allow_deeper_drawdown: true
+  legacy_turnaround:
+    trim_profit_threshold: 0.12
+    harvest_profit_threshold: 0.22
+    trailing_stop_pct: -0.06
+    minimum_hold_days: 5
+    thesis_exit_requires_confirmation: false
+    allow_deeper_drawdown: false
+  speculative_momentum:
+    trim_profit_threshold: 0.10
+    harvest_profit_threshold: 0.20
+    trailing_stop_pct: -0.06
+    minimum_hold_days: 5
+    thesis_exit_requires_confirmation: false
+    allow_deeper_drawdown: false
+  value_recovery:
+    trim_profit_threshold: 0.15
+    harvest_profit_threshold: 0.30
+    trailing_stop_pct: -0.08
+    minimum_hold_days: 10
+    thesis_exit_requires_confirmation: false
+    allow_deeper_drawdown: false
+  defensive_income:
+    trim_profit_threshold: 0.12
+    harvest_profit_threshold: 0.25
+    trailing_stop_pct: -0.08
+    minimum_hold_days: 15
+    thesis_exit_requires_confirmation: false
+    allow_deeper_drawdown: false
+  core_default:
+    trim_profit_threshold: 0.20
+    harvest_profit_threshold: 0.30
+    trailing_stop_pct: -0.08
+    minimum_hold_days: 10
+    thesis_exit_requires_confirmation: false
+    allow_deeper_drawdown: false
+contrarian_penalty:
+  enabled: true
+  score_multiplier: 0.92
+  max_position_multiplier: 0.60
+  archetype_bias: speculative_momentum
 bear_market:
   spy_ma_period: 200
   vix_threshold: 25.0
@@ -234,6 +283,8 @@ stability:
 candidate_rotation:
   buy_cooldown_days: 30
   score_jitter_pct: 0.08
+  allow_add_to_existing_if_score_above: 0.80
+  cooldown_exempt_if_active_underweight: true
 value_v2:
   enabled: true
   winsorize_pct: 0.05
@@ -290,8 +341,8 @@ exit_decision:
   positive_pnl_review_floor: 0.0
   positive_momentum_review_floor: 0.1
   strong_quality_review_floor: 0.7
-  trim_profit_threshold: 0.15
-  harvest_profit_threshold: 0.25
+  trim_profit_threshold: 0.20
+  harvest_profit_threshold: 0.30
   thesis_intact_review_floor: 0.6
   thesis_intact_hard_exit_below: 0.35
   # --- True TRIM (partial exit) ---
@@ -310,8 +361,8 @@ outcome_tracking:
   fill_returns_on_run: true
 candidate_selection:
   mode: percentile
-  top_percentile: 0.15
-  max_candidates: 25
+  top_percentile: 0.10
+  max_candidates: 15
   min_candidates: 5
   use_absolute_score_floor: false
   absolute_score_floor: 0.45
@@ -319,5 +370,10 @@ candidate_selection:
   min_momentum_score: -0.1
   min_conditional_momentum_score: -0.05
   allow_income_defensive_exception: true
+  fallback_thresholds:
+    - 0.75
+    - 0.72
+    - 0.70
+  min_post_cooldown_candidates: 5
 ui:
   allow_config_writes: true
