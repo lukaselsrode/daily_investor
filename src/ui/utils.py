@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Optional
 
 import pandas as pd
 import yaml
@@ -26,12 +25,12 @@ if str(_SRC_DIR) not in sys.path:
 # Data loading helpers
 # ---------------------------------------------------------------------------
 
-def latest_csv_path(prefix: str) -> Optional[Path]:
+def latest_csv_path(prefix: str) -> Path | None:
     files = sorted(DATA_DIR.glob(f"{prefix}_*.csv"))
     return files[-1] if files else None
 
 
-def load_latest_csv(prefix: str) -> Optional[pd.DataFrame]:
+def load_latest_csv(prefix: str) -> pd.DataFrame | None:
     p = latest_csv_path(prefix)
     if p is None:
         return None
@@ -119,8 +118,15 @@ LOOKAHEAD_LABELS = {
     "current_universe_stress_test":  "HIGH — forward-looking selection bias, not predictive",
 }
 
+# (level_str, emoji) pairs — used where compact display is needed
+LOOKAHEAD_LEVELS = {
+    "liquid_universe_sanity_test":  ("MEDIUM", "🟡"),
+    "walk_forward_price_only_test": ("LOW",    "🟢"),
+    "current_universe_stress_test": ("HIGH",   "🔴"),
+}
 
-def fmt_bin_index(counts: "pd.Series") -> "pd.Series":
+
+def fmt_bin_index(counts: pd.Series) -> pd.Series:
     """Replace pd.IntervalIndex labels with 'left–right' strings for st.bar_chart."""
     import pandas as pd
     if isinstance(counts.index, pd.IntervalIndex):

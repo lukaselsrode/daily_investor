@@ -304,7 +304,7 @@ class RobinhoodBroker(BrokerAdapter):
             except Exception as e:
                 logger.warning(f"Could not fetch open orders: {e}")
                 return []
-        return self._orders_cache
+        return self._orders_cache  # type: ignore[return-value]
 
     def clear_orders_cache(self) -> None:
         self._orders_cache = None
@@ -330,7 +330,7 @@ class RobinhoodBroker(BrokerAdapter):
     # Dividend data
     # ------------------------------------------------------------------
 
-    def get_dividends(self) -> "pd.DataFrame":
+    def get_dividends(self) -> pd.DataFrame:
         """Fetch dividend history and resolve instrument URLs to symbols."""
         import pandas as pd
 

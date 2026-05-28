@@ -1,86 +1,17 @@
 """
 core/types.py — Canonical domain types shared across all modules.
 
-These are the single source of truth for data shapes. No business logic lives here —
-only type definitions, dataclasses, and TypedDicts.
+These are the single source of truth for shared data shapes. No business logic lives here.
+
+NOTE: The backtest-specific SimResult and BacktestReport are defined in
+backtesting/types.py (canonical, extended schema). Import them from there.
+core/types.py owns TradeRecord, SellDecision, and the UI/portfolio snapshot types.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal, Optional, TypedDict
-
-
-# ---------------------------------------------------------------------------
-# Simulation / Backtest
-# ---------------------------------------------------------------------------
-
-@dataclass
-class SimResult:
-    """
-    Output of a single backtest simulation run.
-    Moved here from backtest.py to break the import chain.
-    """
-    final_value: float
-    total_return: float
-    sharpe: float
-    calmar: float
-    max_drawdown: float
-    trades_made: int
-
-    # extended diagnostics — default 0 for backward compat
-    sells_made: int = 0
-    skipped_buys: int = 0
-    cap_reductions: int = 0
-    average_positions: float = 0.0
-    max_positions: int = 0
-    average_cash_pct: float = 0.0
-    turnover_estimate: float = 0.0
-    friction_cost: float = 0.0
-    net_contributions: float = 0.0
-    profit: float = 0.0
-
-    # regime / attribution diagnostics
-    stopout_count: int = 0
-    trailing_stop_count: int = 0
-    take_profit_count: int = 0
-    weak_value_exit_count: int = 0
-    yield_trap_exit_count: int = 0
-    quality_floor_exit_count: int = 0
-
-    # attribution by sleeve
-    etf_return: float = 0.0
-    stock_return: float = 0.0
-    etf_allocation_avg: float = 0.0
-
-    # regime days
-    defensive_days: int = 0
-    neutral_days: int = 0
-    bullish_days: int = 0
-
-    # validation
-    is_valid: bool = True
-    validation_notes: list[str] = field(default_factory=list)
-
-
-@dataclass
-class BacktestReport:
-    """Full report output from a backtest run — wraps SimResult with metadata."""
-    train: SimResult
-    validation: Optional[SimResult]
-    full: SimResult
-    n_days: int
-    mode: str
-    universe_size: int
-    benchmark_return: float
-    benchmark_symbol: str
-    excess_return: float
-    passes_validation: bool
-    validation_reason: str = ""
-
-    # parameter snapshot used for this run
-    params_used: dict = field(default_factory=dict)
-
+from typing import Literal, TypedDict
 
 # ---------------------------------------------------------------------------
 # Trade records
@@ -102,6 +33,7 @@ class TradeRecord:
     pnl: float = 0.0
     hold_days: int = 0
     is_partial: bool = False
+    archetype: str = ""   # populated when archetype_aware=True
 
 
 # ---------------------------------------------------------------------------
@@ -117,13 +49,13 @@ class SellDecision:
     symbol: str
     should_sell: bool
     reason: str
-    severity: Optional[Literal["hard", "soft"]]
-    exit_type: Optional[Literal["failure_exit", "harvest_exit", "trim_exit", "thesis_exit"]]
-    percent_change: Optional[float]
-    value_metric: Optional[float]
-    quality_score: Optional[float]
-    yield_trap_flag: Optional[bool]
-    trim_fraction: Optional[float] = None
+    severity: Literal["hard", "soft"] | None
+    exit_type: Literal["failure_exit", "harvest_exit", "trim_exit", "thesis_exit"] | None
+    percent_change: float | None
+    value_metric: float | None
+    quality_score: float | None
+    yield_trap_flag: bool | None
+    trim_fraction: float | None = None
 
 
 # ---------------------------------------------------------------------------

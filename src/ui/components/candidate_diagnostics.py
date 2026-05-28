@@ -12,7 +12,7 @@ import pandas as pd
 import streamlit as st
 
 
-def _load_agg() -> "pd.DataFrame | None":
+def _load_agg() -> pd.DataFrame | None:
     try:
         from data.cache import read_data_as_pd
         df = read_data_as_pd("agg_data")

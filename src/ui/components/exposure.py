@@ -14,7 +14,6 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-
 # ---------------------------------------------------------------------------
 # Data loaders
 # ---------------------------------------------------------------------------
@@ -57,6 +56,7 @@ def _load_portfolio() -> tuple[dict, float, float]:
     """
     try:
         import robin_stocks.robinhood as rb
+
         from util import ETFS
 
         holdings  = rb.account.build_holdings() or {}

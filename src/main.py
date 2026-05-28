@@ -14,13 +14,12 @@ import sys
 
 from dotenv import load_dotenv
 
+from data.market import get_data as generate_daily_undervalued_stocks
 from execution.robinhood import RobinhoodBroker
 from portfolio.harvest import HarvestManager
 from portfolio.manager import PortfolioManager
 from portfolio.risk import RiskManager
 from strategy.regimes.detector import get_current_regime
-
-from data.market import get_data as generate_daily_undervalued_stocks
 from util import (
     AUTO_APPROVE,
     CONFIDENCE_THRESHOLD,
@@ -125,6 +124,7 @@ def _fetch_and_save_dividends() -> None:
 def _maybe_fill_outcomes() -> None:
     """Backfill realized return outcomes for past decisions if config flag is set."""
     import yaml
+
     from core.paths import CONFIG_FILE
     try:
         with open(CONFIG_FILE) as f:
@@ -136,8 +136,10 @@ def _maybe_fill_outcomes() -> None:
 
     try:
         import datetime
+
         import yfinance as yf
-        from portfolio.outcome_tracker import load_outcomes, fill_future_returns
+
+        from portfolio.outcome_tracker import fill_future_returns, load_outcomes
 
         df = load_outcomes()
         if df.empty:
@@ -262,8 +264,8 @@ def _run_auto_tune_cli(
     force_apply: bool = False,
     llm_review: bool = False,
 ) -> None:
-    from tuning.tuner import run_auto_tune
     from tuning.reports import _diff_table
+    from tuning.tuner import run_auto_tune
     try:
         avg_params, sharpe_result, calmar_result, avg_result, sharpe_params, calmar_params = run_auto_tune(
             n_days=n_days,

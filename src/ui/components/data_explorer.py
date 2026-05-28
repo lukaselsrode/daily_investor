@@ -5,10 +5,10 @@ Read-only. Never places orders or mutates config.
 
 from __future__ import annotations
 
-import streamlit as st
 import pandas as pd
+import streamlit as st
 
-from ui.utils import DATA_DIR, list_csv_files, fmt_bin_index
+from ui.utils import DATA_DIR, fmt_bin_index, list_csv_files
 
 _PRESET_VIEWS = [
     "— custom —",

@@ -5,20 +5,25 @@ All tests mock the underlying engines/analyzers at the class-method level
 so no real backtest, optimizer, or file I/O runs.
 """
 
-import sys
 import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-import pytest
+from unittest.mock import patch
+
 import numpy as np
-from unittest.mock import MagicMock, patch
+import pytest
 
 import tuning.reports as _t
 from cli.commands import (
-    cmd_backtest, cmd_tune, cmd_auto_tune, cmd_stability_scan, cmd_report,
+    cmd_auto_tune,
+    cmd_backtest,
+    cmd_report,
+    cmd_stability_scan,
+    cmd_tune,
 )
 from cli.main import main as cli_main
-
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -34,8 +39,9 @@ def _sim(total_return=0.12, sharpe=0.80, calmar=1.2, max_drawdown=-0.08, trades=
 
 
 def _bt_result():
-    from backtesting.types import BacktestReport, SimResult as BtSim
     from backtesting.results import BacktestResult
+    from backtesting.types import BacktestReport
+    from backtesting.types import SimResult as BtSim
     sim = BtSim(
         final_value=12_000.0, total_return=0.20, sharpe=1.2,
         calmar=0.8, max_drawdown=-0.08, trades_made=20,

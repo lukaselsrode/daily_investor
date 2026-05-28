@@ -17,7 +17,6 @@ from __future__ import annotations
 import datetime
 import logging
 from dataclasses import dataclass, field
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -80,7 +79,7 @@ class ExposureReport:
     top5_pct: float = 0.0   # fraction of equity in top-5 holdings
 
     # Beta vs. SPY (computed separately; None if data unavailable)
-    beta_spy: Optional[float] = None
+    beta_spy: float | None = None
 
     positions: list[PositionExposure] = field(default_factory=list)
 
@@ -170,8 +169,8 @@ class ExposureAnalyzer:
             sector = str(pos.get("sector") or "Unknown")
             is_etf = bool(pos.get("is_etf", False))
 
-            def _lookup(col: str) -> float:
-                return float(universe_factor_lookup.get(col, {}).get(sym, 0.0))
+            def _lookup(col: str, _sym: str = sym) -> float:
+                return float(universe_factor_lookup.get(col, {}).get(_sym, 0.0))
 
             positions.append(
                 PositionExposure(

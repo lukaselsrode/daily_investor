@@ -14,8 +14,8 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from ui.components.common import empty_state, metric_row, section
 from ui.utils import DATA_DIR
-from ui.components.common import metric_row, section, empty_state
 
 
 def _file_size(p: Path) -> str:

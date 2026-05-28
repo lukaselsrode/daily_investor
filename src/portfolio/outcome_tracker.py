@@ -30,7 +30,6 @@ import datetime
 import json
 import logging
 from pathlib import Path
-from typing import Optional
 
 import pandas as pd
 
@@ -145,7 +144,7 @@ _JOURNAL_COLS = [
 
 def _data_dir() -> Path:
     try:
-        from ui.utils import DATA_DIR
+        from core.paths import DATA_DIR
         return DATA_DIR
     except Exception:
         return Path(__file__).parent.parent.parent / "data"
@@ -188,7 +187,7 @@ def _save_outcomes(df: pd.DataFrame) -> None:
         logger.warning("Could not write decision_outcomes.parquet: %s", exc)
 
 
-def _sf(v) -> Optional[float]:
+def _sf(v) -> float | None:
     import math
     try:
         f = float(v)
@@ -208,47 +207,47 @@ def record_decision_holding(
     final_action: str,
     executed_bool: bool,
     *,
-    timestamp: Optional[str]   = None,
-    company_name: Optional[str] = None,
-    sleeve: Optional[str]       = None,
-    order_id: Optional[str]     = None,
-    price: Optional[float]      = None,
-    equity: Optional[float]     = None,
-    percent_change: Optional[float] = None,
-    equity_change: Optional[float]  = None,
-    holding_days: Optional[int]     = None,
-    buy_date: Optional[str]         = None,
-    entry_price: Optional[float]    = None,
-    current_value_metric: Optional[float] = None,
-    score_at_buy: Optional[float]   = None,
-    score_delta: Optional[float]    = None,
-    value_score: Optional[float]    = None,
-    quality_score: Optional[float]  = None,
-    income_score: Optional[float]   = None,
-    momentum_score: Optional[float] = None,
-    conditional_momentum_score: Optional[float] = None,
-    rank_percentile: Optional[float] = None,
-    rank_at_buy: Optional[float]    = None,
-    rank_delta: Optional[float]     = None,
-    thesis_intact_score: Optional[float]       = None,
-    exit_confidence: Optional[str]             = None,
-    premature_exit_probability: Optional[float] = None,
-    primary_exit_driver: Optional[str]         = None,
-    secondary_exit_driver: Optional[str]       = None,
-    exit_reason_weights: Optional[dict]        = None,
-    rationale_text: Optional[str]              = None,
-    regime: Optional[str]     = None,
-    sector: Optional[str]     = None,
-    industry: Optional[str]   = None,
-    reliability_score: Optional[float] = None,
-    yield_trap_flag: Optional[bool]    = None,
-    trim_fraction: Optional[float]     = None,
-    quantity_sold: Optional[float]     = None,
-    quantity_remaining: Optional[float] = None,
-    cluster: Optional[str]             = None,
-    archetype: Optional[str]           = None,
-    archetype_confidence: Optional[float] = None,
-    archetype_drivers: Optional[list]  = None,
+    timestamp: str | None   = None,
+    company_name: str | None = None,
+    sleeve: str | None       = None,
+    order_id: str | None     = None,
+    price: float | None      = None,
+    equity: float | None     = None,
+    percent_change: float | None = None,
+    equity_change: float | None  = None,
+    holding_days: int | None     = None,
+    buy_date: str | None         = None,
+    entry_price: float | None    = None,
+    current_value_metric: float | None = None,
+    score_at_buy: float | None   = None,
+    score_delta: float | None    = None,
+    value_score: float | None    = None,
+    quality_score: float | None  = None,
+    income_score: float | None   = None,
+    momentum_score: float | None = None,
+    conditional_momentum_score: float | None = None,
+    rank_percentile: float | None = None,
+    rank_at_buy: float | None    = None,
+    rank_delta: float | None     = None,
+    thesis_intact_score: float | None       = None,
+    exit_confidence: str | None             = None,
+    premature_exit_probability: float | None = None,
+    primary_exit_driver: str | None         = None,
+    secondary_exit_driver: str | None       = None,
+    exit_reason_weights: dict | None        = None,
+    rationale_text: str | None              = None,
+    regime: str | None     = None,
+    sector: str | None     = None,
+    industry: str | None   = None,
+    reliability_score: float | None = None,
+    yield_trap_flag: bool | None    = None,
+    trim_fraction: float | None     = None,
+    quantity_sold: float | None     = None,
+    quantity_remaining: float | None = None,
+    cluster: str | None             = None,
+    archetype: str | None           = None,
+    archetype_confidence: float | None = None,
+    archetype_drivers: list | None  = None,
 ) -> None:
     """Append one holding-evaluation record to decision_outcomes.parquet."""
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -321,23 +320,23 @@ def record_decision_candidate(
     selected_bool: bool,
     skipped_bool: bool,
     *,
-    timestamp: Optional[str]     = None,
-    skip_reason: Optional[str]   = None,
-    current_value_metric: Optional[float] = None,
-    value_score: Optional[float] = None,
-    quality_score: Optional[float] = None,
-    income_score: Optional[float]  = None,
-    momentum_score: Optional[float] = None,
-    rank_percentile: Optional[float] = None,
-    candidate_rank: Optional[int]   = None,
-    sentiment_result: Optional[str] = None,
-    sentiment_confidence: Optional[float] = None,
-    risk_check_passed: Optional[bool]      = None,
-    risk_check_fail_reason: Optional[str]  = None,
-    proposed_allocation: Optional[float]   = None,
-    final_allocation: Optional[float]      = None,
-    regime: Optional[str]          = None,
-    reliability_score: Optional[float] = None,
+    timestamp: str | None     = None,
+    skip_reason: str | None   = None,
+    current_value_metric: float | None = None,
+    value_score: float | None = None,
+    quality_score: float | None = None,
+    income_score: float | None  = None,
+    momentum_score: float | None = None,
+    rank_percentile: float | None = None,
+    candidate_rank: int | None   = None,
+    sentiment_result: str | None = None,
+    sentiment_confidence: float | None = None,
+    risk_check_passed: bool | None      = None,
+    risk_check_fail_reason: str | None  = None,
+    proposed_allocation: float | None   = None,
+    final_allocation: float | None      = None,
+    regime: str | None          = None,
+    reliability_score: float | None = None,
 ) -> None:
     """Append one candidate-evaluation record to decision_outcomes.parquet."""
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -415,10 +414,10 @@ def record_decision(
     ticker: str,
     decision_output,
     metrics,
-    holding_days: Optional[int],
-    portfolio_pnl: Optional[float],
+    holding_days: int | None,
+    portfolio_pnl: float | None,
     regime_cluster: str = "unknown",
-    price_at_decision: Optional[float] = None,
+    price_at_decision: float | None = None,
 ) -> None:
     """
     Legacy wrapper — kept for any existing callers.
@@ -450,8 +449,8 @@ def record_decision(
 
 def fill_future_returns(
     current_prices: dict[str, float],
-    spy_current_price: Optional[float] = None,
-    spy_price_history: Optional[dict[str, float]] = None,
+    spy_current_price: float | None = None,
+    spy_price_history: dict[str, float] | None = None,
 ) -> int:
     """
     Fill in realized outcome columns for past decisions.
@@ -510,7 +509,7 @@ def fill_future_returns(
             ret_30d = _sf(df.at[idx, "future_30d_return"])
             if ret_30d is None:
                 continue
-            spy_30d_vs: Optional[float] = _sf(df.at[idx, "future_30d_vs_spy"])
+            spy_30d_vs: float | None = _sf(df.at[idx, "future_30d_vs_spy"])
 
             # outperformed_hold: did this holding beat SPY?
             if pd.isna(row.get("outperformed_hold")) and spy_30d_vs is not None:
@@ -548,7 +547,7 @@ def fill_future_returns(
 # NEVER fed back into live scoring or factor weights.
 # ---------------------------------------------------------------------------
 
-def get_calibration_summary(df: Optional[pd.DataFrame] = None) -> dict:
+def get_calibration_summary(df: pd.DataFrame | None = None) -> dict:
     """
     Compute calibration metrics from recorded decision outcomes.
 
@@ -574,7 +573,7 @@ def get_calibration_summary(df: Optional[pd.DataFrame] = None) -> dict:
             "n_exit": 0, "n_trim": 0, "n_harvest": 0, "n_hold": 0,
         }
 
-    def _rate(mask_state: str, bool_col: str, invert: bool = False) -> tuple[Optional[float], int]:
+    def _rate(mask_state: str, bool_col: str, invert: bool = False) -> tuple[float | None, int]:
         subset = df[df["decision_state"] == mask_state]
         resolved = subset[bool_col].dropna()
         if resolved.empty:
@@ -607,7 +606,7 @@ def get_calibration_summary(df: Optional[pd.DataFrame] = None) -> dict:
     }
 
 
-def get_archetype_calibration_summary(df: Optional[pd.DataFrame] = None) -> dict:
+def get_archetype_calibration_summary(df: pd.DataFrame | None = None) -> dict:
     """
     Break down calibration metrics by archetype label.
 
@@ -632,8 +631,8 @@ def get_archetype_calibration_summary(df: Optional[pd.DataFrame] = None) -> dict
         if sub.empty:
             continue
 
-        def _rate(state: str, bool_col: str) -> tuple[Optional[float], int]:
-            s = sub[sub["decision_state"] == state]
+        def _rate(state: str, bool_col: str, _sub=sub) -> tuple[float | None, int]:
+            s = _sub[_sub["decision_state"] == state]
             resolved = s[bool_col].dropna() if bool_col in s.columns else pd.Series(dtype=float)
             if resolved.empty:
                 return None, 0
@@ -651,13 +650,13 @@ def get_archetype_calibration_summary(df: Optional[pd.DataFrame] = None) -> dict
         else:
             harvest_regret, n_harvest = None, 0
 
-        avg_return: Optional[float] = None
+        avg_return: float | None = None
         if "future_30d_return" in sub.columns:
             ret_vals = sub["future_30d_return"].dropna()
             if not ret_vals.empty:
                 avg_return = round(float(ret_vals.mean()), 5)
 
-        avg_hold_days: Optional[float] = None
+        avg_hold_days: float | None = None
         if "holding_days" in sub.columns:
             hd_vals = pd.to_numeric(sub["holding_days"], errors="coerce").dropna()
             if not hd_vals.empty:

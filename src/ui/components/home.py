@@ -10,7 +10,12 @@ from pathlib import Path
 import streamlit as st
 
 from ui.utils import (
-    DATA_DIR, CFG_PATH, LOG_PATH, data_date, load_config_raw, load_latest_csv,
+    CFG_PATH,
+    DATA_DIR,
+    LOG_PATH,
+    data_date,
+    load_config_raw,
+    load_latest_csv,
 )
 
 

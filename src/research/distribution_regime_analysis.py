@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -97,7 +96,7 @@ class DistributionAnalyzer:
             return {}
         percentiles = [1, 5, 10, 25, 50, 75, 90, 95, 99]
         result: dict = {
-            "n": int(len(s)),
+            "n": len(s),
             "mean": round(float(s.mean()), 4),
             "std": round(float(s.std()), 4),
             "skew": round(float(s.skew()), 4),
@@ -175,7 +174,7 @@ class DistributionAnalyzer:
         self,
         score_col: str = "value_metric",
         return_col: str = "return_1m",
-        buckets: Optional[list[tuple[str, float, float]]] = None,
+        buckets: list[tuple[str, float, float]] | None = None,
     ) -> list[BucketStats]:
         """Compute return statistics for each percentile bucket of score_col."""
         use_buckets = buckets or TAIL_BUCKETS
@@ -206,7 +205,7 @@ class DistributionAnalyzer:
                 label=label,
                 lo_pct=lo_pct,
                 hi_pct=hi_pct,
-                count=int(len(sub)),
+                count=len(sub),
                 mean_return=round(mean_r, 4),
                 median_return=round(float(rets.median()), 4),
                 hit_rate=round(float((rets > 0).mean()), 4),
@@ -317,7 +316,7 @@ class DistributionAnalyzer:
                 "center_score": round(float(window[score_col].median()), 4),
                 "local_ic":     round(float(ic), 4),
                 "p_value":      round(float(pv), 4),
-                "n":            int(len(window)),
+                "n":            len(window),
             })
 
         return pd.DataFrame(rows)
@@ -326,7 +325,7 @@ class DistributionAnalyzer:
 
     def compute_clusters(
         self,
-        features: Optional[list[str]] = None,
+        features: list[str] | None = None,
         n_clusters: int = 2,
         method: str = "gmm",
         return_col: str = "return_1m",
@@ -350,7 +349,7 @@ class DistributionAnalyzer:
         X = cluster_df[use_features].values
         X_std = (X - X.mean(axis=0)) / np.maximum(X.std(axis=0), 1e-9)
 
-        labels: Optional[np.ndarray] = None
+        labels: np.ndarray | None = None
         try:
             if method == "gmm":
                 from sklearn.mixture import GaussianMixture
@@ -376,7 +375,7 @@ class DistributionAnalyzer:
         rows: list[dict] = []
         for c in sorted(cluster_df["cluster"].unique()):
             sub = cluster_df[cluster_df["cluster"] == c]
-            row: dict = {"cluster": int(c), "count": int(len(sub))}
+            row: dict = {"cluster": int(c), "count": len(sub)}
             for f in use_features:
                 row[f"mean_{f}"] = round(float(sub[f].mean()), 4)
             if return_col in sub.columns:
@@ -391,7 +390,7 @@ class DistributionAnalyzer:
 
     def compute_cluster_labels(
         self,
-        features: Optional[list[str]] = None,
+        features: list[str] | None = None,
         n_clusters: int = 2,
         method: str = "gmm",
     ) -> pd.Series:
@@ -466,7 +465,7 @@ class DistributionAnalyzer:
             rows.append({
                 "quartile":    q,
                 "cond_label":  f"Q{q} [{lo:.3f}, {hi:.3f}]",
-                "n_stocks":    int(len(sub)),
+                "n_stocks":    len(sub),
                 "ic":          round(float(ic), 4),
                 "p_value":     round(float(pv), 4),
                 "significant": bool(pv < 0.05),
@@ -476,7 +475,7 @@ class DistributionAnalyzer:
 
     def compute_interaction_matrix(
         self,
-        score_cols: Optional[list[str]] = None,
+        score_cols: list[str] | None = None,
         return_col: str = "return_1m",
         n_quartiles: int = 4,
     ) -> pd.DataFrame:
@@ -512,7 +511,7 @@ class DistributionAnalyzer:
         self,
         score_col: str = "value_metric",
         return_col: str = "return_1m",
-        thresholds: Optional[list[float]] = None,
+        thresholds: list[float] | None = None,
     ) -> pd.DataFrame:
         """
         Simulate threshold-gated selection vs full-universe ranking.
@@ -549,7 +548,7 @@ class DistributionAnalyzer:
             rows.append({
                 "mode":           f"score ≥ {thresh}",
                 "threshold":      thresh,
-                "n_selected":     int(len(above)),
+                "n_selected":     len(above),
                 "pct_universe":   round(len(above) / total, 3),
                 "mean_return":    round(float(rets.mean()), 4),
                 "median_return":  round(float(rets.median()), 4),
@@ -602,7 +601,7 @@ class DistributionAnalyzer:
                 "mean_ic":           round(mean_ic, 4),
                 "icir":              round(icir, 3),
                 "hit_rate":          round(hit_rate, 3),
-                "n_periods":         int(len(ics)),
+                "n_periods":         len(ics),
                 "confidence":        round(confidence, 3),
                 "weight_adj":        weight_adj,
             })
@@ -641,7 +640,7 @@ class DistributionAnalyzer:
                 bc = (skew_val ** 2 + 1) / bc_den if abs(bc_den) > 1e-9 else 0.0
                 rows.append({
                     "date":               snap_date,
-                    "n":                  int(len(s)),
+                    "n":                  len(s),
                     "mean":               round(float(s.mean()), 4),
                     "std":                round(float(s.std()), 4),
                     "skew":               round(skew_val, 4),

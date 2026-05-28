@@ -4,22 +4,20 @@ tests/test_backtest.py — Backtest engine tests.
 Migrated / adapted from src/tests.py (backtest-specific tests).
 """
 
-import sys
 import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-import pytest
 import numpy as np
+import pytest
 
 try:
-    from backtesting.types import SimResult
     from backtesting.simulator import (
         compute_performance_metrics,
-        run_simulation,
-        score_stocks_at_day,
         split_price_window,
     )
-    from backtesting.data_loader import select_backtest_universe
+    from backtesting.types import SimResult
     _HAS_BACKTEST = True
 except Exception as e:
     _HAS_BACKTEST = False
@@ -87,13 +85,13 @@ class TestSimResultDefaults:
         assert r.stopout_count == 0
 
     def test_core_sim_result_extended_fields(self):
-        from core.types import SimResult as CoreSimResult
+        from backtesting.types import SimResult as CoreSimResult
         r = CoreSimResult(
             final_value=10000.0, total_return=0.10, sharpe=0.5, calmar=0.3,
             max_drawdown=-0.05, trades_made=10,
         )
-        assert r.etf_return == 0.0
-        assert r.trailing_stop_count == 0
+        assert r.stopout_count == 0
+        assert r.trim_count == 0
 
 
 class TestConfigConsistencyBacktest:

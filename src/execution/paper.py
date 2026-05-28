@@ -11,6 +11,7 @@ Useful for:
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 
 from .base import BrokerAdapter, OrderResult
 
@@ -29,7 +30,7 @@ class PaperBroker(BrokerAdapter):
     def __init__(
         self,
         starting_cash: float = 10_000.0,
-        price_lookup: "callable | None" = None,
+        price_lookup: Callable[[str], float] | None = None,
     ) -> None:
         self._cash = starting_cash
         self._holdings: dict[str, dict] = {}

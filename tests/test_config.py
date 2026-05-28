@@ -7,7 +7,6 @@ These tests use ConfigManager.from_dict() — no filesystem access.
 import pytest
 
 from config.manager import ConfigManager
-from config.schema import ScoreWeightsConfig
 
 
 class TestConfigManagerScalars:

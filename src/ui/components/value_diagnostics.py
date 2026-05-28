@@ -13,11 +13,10 @@ Sections
 
 from __future__ import annotations
 
-import streamlit as st
 import pandas as pd
+import streamlit as st
 
-from ui.utils import data_date, load_latest_csv, no_data_msg, fmt_bin_index
-
+from ui.utils import data_date, fmt_bin_index, load_latest_csv, no_data_msg
 
 _SCORE_COLS = ["value_score", "quality_score", "income_score", "momentum_score"]
 _RETURN_COLS = ["return_1m", "return_3m", "return_6m"]

@@ -16,9 +16,8 @@ SAFE: this module is read-only — it never writes factor scores or weights.
 
 from __future__ import annotations
 
-import streamlit as st
 import pandas as pd
-
+import streamlit as st
 
 # ---------------------------------------------------------------------------
 # Cache wrappers

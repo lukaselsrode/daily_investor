@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Optional
 
 import pandas as pd
 
@@ -48,7 +47,7 @@ class CompositeScore:
     momentum_contribution: float = 0.0
 
 
-def compute_composite_score(features: dict, score_weights: Optional[dict] = None) -> CompositeScore:
+def compute_composite_score(features: dict, score_weights: dict | None = None) -> CompositeScore:
     """
     Compute the full composite score for one stock's feature dict.
 
@@ -112,7 +111,7 @@ def compute_composite_score(features: dict, score_weights: Optional[dict] = None
     )
 
 
-def recompute_dataframe_metrics(df: pd.DataFrame, score_weights: Optional[dict] = None) -> None:
+def recompute_dataframe_metrics(df: pd.DataFrame, score_weights: dict | None = None) -> None:
     """
     Recompute value_metric for an existing scored DataFrame after score_weights change.
     Called by backtest and tuner after parameter updates.
@@ -153,7 +152,7 @@ class CompositeScorer:
     def score_features(
         self,
         features: dict,
-        score_weights: Optional[dict] = None,
+        score_weights: dict | None = None,
     ) -> CompositeScore:
         """Compute composite score for a single stock's feature dict."""
         return compute_composite_score(features, score_weights)
@@ -161,7 +160,7 @@ class CompositeScorer:
     def score_dataframe(
         self,
         df: pd.DataFrame,
-        score_weights: Optional[dict] = None,
+        score_weights: dict | None = None,
         apply_cross_sectional: bool = True,
     ) -> None:
         """

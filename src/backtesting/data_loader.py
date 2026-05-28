@@ -51,7 +51,7 @@ def select_backtest_universe(
     max_symbols: int,
     min_volume: float,
     random_seed: int,
-) -> "tuple[pd.DataFrame, str]":
+) -> tuple[pd.DataFrame, str]:
     """
     Select the universe of symbols for backtesting.
 

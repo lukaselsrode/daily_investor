@@ -19,11 +19,11 @@ Sections
 
 from __future__ import annotations
 
-import streamlit as st
-import pandas as pd
 import numpy as np
+import pandas as pd
+import streamlit as st
 
-from ui.utils import data_date, load_latest_csv, load_config_raw, no_data_msg, fmt_bin_index
+from ui.utils import data_date, fmt_bin_index, load_config_raw, load_latest_csv, no_data_msg
 
 _FACTOR_COLS = ["value_score", "momentum_score", "quality_score", "income_score"]
 _FACTOR_LABELS = {

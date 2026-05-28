@@ -6,14 +6,12 @@ Migrated from source_data._quality_score.
 
 from __future__ import annotations
 
-from typing import Optional
-
 from .base import ScoreBreakdown, ScorerBase
 
 
 def compute_quality_score(
-    pe_ratio: Optional[float],
-    pb_ratio: Optional[float],
+    pe_ratio: float | None,
+    pb_ratio: float | None,
     volume: float,
     dividend_yield: float,
 ) -> float:

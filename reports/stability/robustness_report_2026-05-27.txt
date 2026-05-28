@@ -1,0 +1,60 @@
+================================================================
+ROBUSTNESS REPORT — 2026-05-27
+================================================================
+RESEARCH / DIAGNOSTIC ONLY — not a trading signal.
+Purpose: understand which parameters are stable vs overfit.
+
+----------------------------------------------------------------
+WINDOWS ANALYZED
+----------------------------------------------------------------
+    30d  val_excess=+1.95%  val_sharpe=+4.824  drawdown=-2.49%  trades=6  validation=PASS
+    60d  val_excess=+6.69%  val_sharpe=+7.062  drawdown=-2.76%  trades=8  validation=PASS
+    90d  val_excess=+8.21%  val_sharpe=+6.562  drawdown=-2.95%  trades=13  validation=PASS
+   120d  val_excess=+11.16%  val_sharpe=+7.996  drawdown=-3.14%  trades=15  validation=PASS
+
+----------------------------------------------------------------
+PARAMETER STABILITY SUMMARY
+----------------------------------------------------------------
+   sw_value                              mean=+0.0500  stddev=0.0000  cv=0.000  spread=0.0000  conv=100%  [STABLE]
+   sw_quality                            mean=+0.4517  stddev=0.0000  cv=0.000  spread=0.0000  conv=100%  [STABLE]
+   sw_income                             mean=+0.1000  stddev=0.0000  cv=0.000  spread=0.0000  conv=100%  [STABLE]
+   sw_momentum                           mean=+0.3908  stddev=0.0000  cv=0.000  spread=0.0000  conv=100%  [STABLE]
+   index_pct                             mean=+0.8348  stddev=0.0000  cv=0.000  spread=0.0000  conv=100%  [STABLE]
+   metric_threshold                      mean=+0.7500  stddev=0.0000  cv=0.000  spread=0.0000  conv=100%  [STABLE]
+   take_profit_pct                       mean=+0.6000  stddev=0.0000  cv=0.000  spread=0.0000  conv=100%  [STABLE]
+   sell_weak_below                       mean=+0.4500  stddev=0.0000  cv=0.000  spread=0.0000  conv=100%  [STABLE]
+   trailing_stop                         mean=-0.0800  stddev=0.0000  cv=0.000  spread=0.0000  conv=100%  [STABLE]
+   value_pe_weight                       mean=+0.6000  stddev=0.0000  cv=0.000  spread=0.0000  conv=100%  [STABLE]
+   mom_rs3m                              mean=+0.2500  stddev=0.0000  cv=0.000  spread=0.0000  conv=100%  [STABLE]
+   mom_rs6m                              mean=+0.2500  stddev=0.0000  cv=0.000  spread=0.0000  conv=100%  [STABLE]
+   mom_radj                              mean=+0.2000  stddev=0.0000  cv=0.000  spread=0.0000  conv=100%  [STABLE]
+   mom_trend                             mean=+0.1500  stddev=0.0000  cv=0.000  spread=0.0000  conv=100%  [STABLE]
+   mom_r1m                               mean=+0.1000  stddev=0.0000  cv=0.000  spread=0.0000  conv=100%  [STABLE]
+
+----------------------------------------------------------------
+FINDINGS
+----------------------------------------------------------------
+  ✓ No UNSTABLE parameters detected.
+
+
+  Validation passed in 4/4 windows.
+  ✓ Validation passed in all windows — strategy shows consistent out-of-sample performance.
+
+----------------------------------------------------------------
+INTERPRETATION GUIDE
+----------------------------------------------------------------
+  cv (coefficient of variation) = stddev / |mean| across windows.
+  High cv → parameter value changes substantially with window length.
+
+  sharpe_calmar_spread = mean |sharpe_opt - calmar_opt| per window.
+  High spread → objectives fundamentally disagree on this parameter.
+
+  convergence_frequency = fraction of windows within 1 stddev of mean.
+  Low frequency → optimizer rarely lands in the same region.
+
+  instability_score = composite (0=stable, 1=unstable).
+  Use this to rank parameters by robustness concern.
+
+================================================================
+END OF REPORT
+================================================================

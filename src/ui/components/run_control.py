@@ -15,7 +15,7 @@ import time
 
 import streamlit as st
 
-from ui.utils import BACKTEST_MODES, LOOKAHEAD_LABELS, MODES, _SRC_DIR, ui_config
+from ui.utils import _SRC_DIR, BACKTEST_MODES, LOOKAHEAD_LABELS, MODES, ui_config
 
 
 def _build_command(run_type: str, op_mode: str | None, skip_data: bool,

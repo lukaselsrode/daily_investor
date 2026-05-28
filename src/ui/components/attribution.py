@@ -7,11 +7,10 @@ Two sub-sections:
 """
 from __future__ import annotations
 
-import streamlit as st
 import pandas as pd
+import streamlit as st
 
-from ui.components.common import empty_state, section, df_download, warn_banner
-
+from ui.components.common import df_download, empty_state, section, warn_banner
 
 # ---------------------------------------------------------------------------
 # Parameter stability attribution
@@ -26,8 +25,8 @@ def _render_stability_attribution() -> None:
 
     reports_dir = None
     try:
-        from pathlib import Path
         import sys
+        from pathlib import Path
         src = Path(__file__).resolve().parents[2]
         if str(src) not in sys.path:
             sys.path.insert(0, str(src))

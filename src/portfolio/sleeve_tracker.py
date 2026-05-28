@@ -31,7 +31,7 @@ from __future__ import annotations
 import datetime
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import pandas as pd
 
@@ -60,7 +60,7 @@ _SCHEMA: list[str] = [
 
 def _data_dir() -> Path:
     try:
-        from ui.utils import DATA_DIR
+        from core.paths import DATA_DIR
         return DATA_DIR
     except Exception:
         return Path(__file__).parent.parent.parent / "data"
@@ -107,11 +107,11 @@ def record_event(
     event_type: str,
     amount: float,
     *,
-    source_symbol: Optional[str] = None,
-    destination: Optional[str]   = None,
-    etf_pct_routed: Optional[float]    = None,
-    active_pct_routed: Optional[float] = None,
-    notes: Optional[str]               = None,
+    source_symbol: str | None = None,
+    destination: str | None   = None,
+    etf_pct_routed: float | None    = None,
+    active_pct_routed: float | None = None,
+    notes: str | None               = None,
 ) -> None:
     """Append one sleeve capital event to sleeve_events.parquet."""
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -135,7 +135,7 @@ def record_event(
 # Allocation state snapshot
 # ---------------------------------------------------------------------------
 
-def get_allocation_state(broker: "BrokerAdapter") -> dict:
+def get_allocation_state(broker: BrokerAdapter) -> dict:
     """
     Return a point-in-time view of sleeve allocation.
 
@@ -193,7 +193,7 @@ def get_allocation_state(broker: "BrokerAdapter") -> dict:
 # Convenience wrappers — call these from manager.py / harvest.py
 # ---------------------------------------------------------------------------
 
-def log_contribution(amount: float, notes: Optional[str] = None) -> None:
+def log_contribution(amount: float, notes: str | None = None) -> None:
     record_event(
         "weekly_contribution", amount,
         destination="mixed",
@@ -207,7 +207,7 @@ def log_exit_proceeds(
     symbol: str,
     amount: float,
     etf_pct: float = 0.0,
-    notes: Optional[str] = None,
+    notes: str | None = None,
 ) -> None:
     record_event(
         "exit_proceeds", amount,
@@ -223,7 +223,7 @@ def log_trim_proceeds(
     symbol: str,
     amount: float,
     etf_pct: float,
-    notes: Optional[str] = None,
+    notes: str | None = None,
 ) -> None:
     record_event(
         "trim_proceeds", amount,
@@ -239,7 +239,7 @@ def log_harvest_proceeds(
     symbol: str,
     amount: float,
     etf_pct: float,
-    notes: Optional[str] = None,
+    notes: str | None = None,
 ) -> None:
     record_event(
         "harvest_proceeds", amount,
@@ -251,7 +251,7 @@ def log_harvest_proceeds(
     )
 
 
-def log_cash_sweep(amount: float, notes: Optional[str] = None) -> None:
+def log_cash_sweep(amount: float, notes: str | None = None) -> None:
     record_event(
         "cash_sweep", amount,
         destination="etf_sleeve",

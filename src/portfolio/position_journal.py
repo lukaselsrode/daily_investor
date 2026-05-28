@@ -10,7 +10,6 @@ from __future__ import annotations
 import datetime
 import logging
 from pathlib import Path
-from typing import Optional
 
 import pandas as pd
 
@@ -42,11 +41,11 @@ _EVENT_TYPES = frozenset([
 
 
 def _journal_path() -> Path:
-    from ui.utils import DATA_DIR
+    from core.paths import DATA_DIR
     return DATA_DIR / "position_journal.csv"
 
 
-def load_journal(symbol: Optional[str] = None, limit: int = 200) -> pd.DataFrame:
+def load_journal(symbol: str | None = None, limit: int = 200) -> pd.DataFrame:
     """
     Load journal entries. If symbol is given, filter to that symbol.
     Returns empty DataFrame (with correct columns) if journal does not exist.
@@ -69,9 +68,9 @@ def log_event(
     event_type: str,
     sleeve: str = "",
     status: str = "",
-    price: Optional[float] = None,
-    composite_score: Optional[float] = None,
-    rank_pct: Optional[float] = None,
+    price: float | None = None,
+    composite_score: float | None = None,
+    rank_pct: float | None = None,
     rationale: str = "",
 ) -> None:
     """Append one event to position_journal.csv."""

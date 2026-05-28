@@ -8,17 +8,19 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import pandas as pd
 
 from .attribution import (
-    _MODERATELY_STABLE, _UNSTABLE,
-    _ensure_dir, _date_str,
+    _MODERATELY_STABLE,
+    _UNSTABLE,
+    _date_str,
+    _ensure_dir,
 )
 from .plots import (
-    generate_param_heatmap,
     generate_objective_heatmap,
+    generate_param_heatmap,
     generate_validation_heatmap,
 )
 
@@ -214,7 +216,7 @@ class DiagnosticsReporter:
         stability_df: pd.DataFrame,
         window_results: list[dict],
         output_dir: str,
-        date: Optional[str] = None,
+        date: str | None = None,
     ) -> str:
         return write_stability_summary_csv(stability_df, window_results, output_dir, date)
 
@@ -224,7 +226,7 @@ class DiagnosticsReporter:
         window_results: list[dict],
         param_names: list[str],
         output_dir: str,
-        date: Optional[str] = None,
+        date: str | None = None,
     ) -> str:
         return write_robustness_report_txt(
             stability_df, window_results, param_names, output_dir, date

@@ -29,17 +29,8 @@ _NAMED_CONFIGS = [
     ("Quality anchor",            "config_quality_anchor.yaml"),
 ]
 
-BACKTEST_MODES = [
-    "liquid_universe_sanity_test",
-    "walk_forward_price_only_test",
-    "current_universe_stress_test",
-]
-LOOKAHEAD = {
-    "liquid_universe_sanity_test":  ("MEDIUM", "🟡"),
-    "walk_forward_price_only_test": ("LOW",    "🟢"),
-    "current_universe_stress_test": ("HIGH",   "🔴"),
-}
-
+from ui.utils import BACKTEST_MODES
+from ui.utils import LOOKAHEAD_LEVELS as LOOKAHEAD
 
 # ---------------------------------------------------------------------------
 # Config loading + param extraction

@@ -14,8 +14,8 @@ from backtesting.types import SimResult
 from util import CONFIG_FILE, RISK_LIMITS
 
 from .constants import (
-    _current_params,
     PARAM_NAMES,
+    _current_params,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,7 +35,7 @@ _LLM_FORBIDDEN_PARAMS = frozenset([
 
 def apply_config_params(params: np.ndarray) -> None:
     """Write tuned parameters back to config.yaml, preserving all other keys."""
-    with open(CONFIG_FILE, "r") as f:
+    with open(CONFIG_FILE) as f:
         cfg = yaml.safe_load(f)
 
     raw_sw = params[:4]
@@ -77,10 +77,10 @@ def apply_config_params(params: np.ndarray) -> None:
 def _diff_table(
     best_params: np.ndarray,
     label: str = "",
-    sharpe_ref: "SimResult | None" = None,
-    calmar_ref: "SimResult | None" = None,
-    sharpe_params: "np.ndarray | None" = None,
-    calmar_params: "np.ndarray | None" = None,
+    sharpe_ref: SimResult | None = None,
+    calmar_ref: SimResult | None = None,
+    sharpe_params: np.ndarray | None = None,
+    calmar_params: np.ndarray | None = None,
 ) -> None:
     cur = _current_params()
     raw_sw = best_params[:4]
@@ -252,8 +252,8 @@ def request_llm_tune_review(payload: dict) -> dict:
 
     try:
         import anthropic
-    except ImportError:
-        raise RuntimeError("anthropic package required. Install: pip install anthropic")
+    except ImportError as exc:
+        raise RuntimeError("anthropic package required. Install: pip install anthropic") from exc
 
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
@@ -287,7 +287,8 @@ def request_llm_tune_review(payload: dict) -> dict:
         ],
     )
 
-    raw = message.content[0].text.strip()
+    block = message.content[0]
+    raw = block.text.strip() if hasattr(block, "text") else ""
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
@@ -295,7 +296,7 @@ def request_llm_tune_review(payload: dict) -> dict:
     try:
         return json.loads(raw)
     except json.JSONDecodeError as e:
-        raise RuntimeError(f"LLM returned invalid JSON: {e}\nRaw: {raw[:500]}")
+        raise RuntimeError(f"LLM returned invalid JSON: {e}\nRaw: {raw[:500]}") from e
 
 
 def validate_llm_review_response(

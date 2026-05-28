@@ -16,7 +16,6 @@ from __future__ import annotations
 import datetime
 import logging
 from pathlib import Path
-from typing import Optional
 
 import pandas as pd
 
@@ -45,12 +44,12 @@ _SCORE_COLS = {
 
 
 def _context_path() -> Path:
-    from ui.utils import DATA_DIR
+    from core.paths import DATA_DIR
     return DATA_DIR / "buy_context.csv"
 
 
 def _buy_history_path() -> Path:
-    from ui.utils import DATA_DIR
+    from core.paths import DATA_DIR
     return DATA_DIR / "buy_history.csv"
 
 
@@ -86,8 +85,8 @@ def _load_buy_history() -> pd.DataFrame:
 def _load_buy_prices() -> dict[str, float]:
     """Attempt to get average_buy_price from latest holdings CSV."""
     try:
-        from ui.utils import load_latest_csv
-        df = load_latest_csv("holdings")
+        from data.cache import read_data_as_pd
+        df = read_data_as_pd("holdings")
         if df is not None and "symbol" in df.columns and "average_buy_price" in df.columns:
             df["average_buy_price"] = pd.to_numeric(df["average_buy_price"], errors="coerce")
             return df.dropna(subset=["average_buy_price"]).set_index("symbol")["average_buy_price"].to_dict()
@@ -115,11 +114,11 @@ def _nearest_snapshot(
     target_date: datetime.date,
     snaps: dict[datetime.date, pd.DataFrame],
     max_days: int = 30,
-) -> Optional[pd.DataFrame]:
+) -> pd.DataFrame | None:
     """Return snapshot closest to target_date within max_days."""
     if not snaps:
         return None
-    best: Optional[datetime.date] = None
+    best: datetime.date | None = None
     best_diff = 9999
     for d in snaps:
         diff = abs((d - target_date).days)
@@ -149,7 +148,7 @@ def backfill_buy_context() -> pd.DataFrame:
             continue
 
         buy_date_str = str(row.get("bought_date", "")).strip()
-        buy_date: Optional[datetime.date] = None
+        buy_date: datetime.date | None = None
         try:
             buy_date = datetime.date.fromisoformat(buy_date_str)
         except Exception:

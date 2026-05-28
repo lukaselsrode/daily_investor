@@ -15,7 +15,6 @@ Responsibilities:
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 import numpy as np
 
@@ -46,14 +45,14 @@ class WalkForwardValidator:
             write_config(result.report)
     """
 
-    def __init__(self, config: Optional[dict] = None) -> None:
+    def __init__(self, config: dict | None = None) -> None:
         self._cfg = config
 
     # ------------------------------------------------------------------
     # Split helpers
     # ------------------------------------------------------------------
 
-    def split(self, n_days: int, train_pct: Optional[float] = None) -> tuple[slice, slice]:
+    def split(self, n_days: int, train_pct: float | None = None) -> tuple[slice, slice]:
         """Return (train_slice, val_slice) for a window of n_days."""
         pct = train_pct if train_pct is not None else BACKTEST_PARAMS.get("train_pct", 0.70)
         return split_price_window(n_days, pct)
@@ -65,7 +64,7 @@ class WalkForwardValidator:
     def validate_report(
         self,
         report: BacktestReport,
-        backtest_cfg: Optional[dict] = None,
+        backtest_cfg: dict | None = None,
     ) -> tuple[bool, list[str]]:
         """
         Check a BacktestReport against validation gates.
@@ -108,10 +107,10 @@ class WalkForwardValidator:
     def split_and_validate(
         self,
         precomp: PrecomputedData,
-        params: "np.ndarray",
+        params: np.ndarray,
         n_days: int,
-        train_pct: Optional[float] = None,
-        backtest_cfg: Optional[dict] = None,
+        train_pct: float | None = None,
+        backtest_cfg: dict | None = None,
         use_validation: bool = True,
     ) -> ValidationResult:
         """
@@ -156,7 +155,7 @@ class WalkForwardValidator:
         result: ValidationResult,
         apply_flag: bool = False,
         force_apply: bool = False,
-        backtest_cfg: Optional[dict] = None,
+        backtest_cfg: dict | None = None,
     ) -> bool:
         """
         Return True if validated params should be written to config.

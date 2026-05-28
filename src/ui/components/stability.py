@@ -6,8 +6,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import streamlit as st
 import pandas as pd
+import streamlit as st
 
 from ui.utils import BACKTEST_MODES, LOOKAHEAD_LABELS, ROOT
 

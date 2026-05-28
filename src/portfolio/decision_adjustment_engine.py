@@ -34,8 +34,6 @@ import json
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
-
 
 # ---------------------------------------------------------------------------
 # IO helpers
@@ -43,7 +41,7 @@ from typing import Optional
 
 def _data_dir() -> Path:
     try:
-        from ui.utils import DATA_DIR
+        from core.paths import DATA_DIR
         return DATA_DIR
     except Exception:
         return Path(__file__).parent.parent.parent / "data"
@@ -61,7 +59,7 @@ def _load_calibration_state() -> dict:
 
 def _dae_config() -> dict:
     try:
-        from ui.utils import load_config_raw
+        from core.utils import load_config_raw
         raw = load_config_raw()
         return raw.get("decision_adjustment", {})
     except Exception:
@@ -70,7 +68,7 @@ def _dae_config() -> dict:
 
 def _exit_config() -> dict:
     try:
-        from ui.utils import load_config_raw
+        from core.utils import load_config_raw
         raw = load_config_raw()
         return raw.get("exit_decision", {})
     except Exception:
@@ -89,34 +87,34 @@ class DecisionInput:
     """
 
     # ── Factor scores (alpha engine outputs — read-only) ─────────────────────
-    composite_score: Optional[float] = None
-    value_score: Optional[float]     = None
-    quality_score: Optional[float]   = None
-    momentum_score: Optional[float]  = None
-    income_score: Optional[float]    = None
-    percentile_rank: Optional[float] = None
+    composite_score: float | None = None
+    value_score: float | None     = None
+    quality_score: float | None   = None
+    momentum_score: float | None  = None
+    income_score: float | None    = None
+    percentile_rank: float | None = None
 
     # ── Raw action from classify_state / SellDecisionEngine ──────────────────
     raw_action: str              = "HOLD"
     raw_reason: str              = ""
-    exit_severity: Optional[str] = None   # "hard" / "soft" / None
-    exit_type: Optional[str]     = None   # "stop_loss" / "trailing_stop" / "soft_thesis" / etc.
+    exit_severity: str | None = None   # "hard" / "soft" / None
+    exit_type: str | None     = None   # "stop_loss" / "trailing_stop" / "soft_thesis" / etc.
 
     # ── Holding context ───────────────────────────────────────────────────────
-    pct_change: Optional[float]  = None
-    holding_days: Optional[int]  = None
+    pct_change: float | None  = None
+    holding_days: int | None  = None
 
     # ── Diagnostic features (from ExitAnalysis — observations, not alpha) ────
-    thesis_intact_score: Optional[float]       = None
-    exit_confidence: Optional[str]             = None
+    thesis_intact_score: float | None       = None
+    exit_confidence: str | None             = None
     is_premature: bool                         = False
-    confidence_collapse_weight: Optional[float] = None
+    confidence_collapse_weight: float | None = None
 
     # ── Score trajectory ──────────────────────────────────────────────────────
-    score_at_buy: Optional[float]   = None
-    score_now: Optional[float]      = None
-    rank_pct_at_buy: Optional[float] = None
-    rank_pct_now: Optional[float]    = None
+    score_at_buy: float | None   = None
+    score_now: float | None      = None
+    rank_pct_at_buy: float | None = None
+    rank_pct_now: float | None    = None
 
 
 @dataclass
@@ -136,8 +134,8 @@ class DecisionOutput:
     is_trim_harvest: bool            = False
     premature_exit_probability: float          = 0.0
     thesis_intact_score: float                 = 0.5
-    signal_deterioration_velocity: Optional[float] = None
-    rank_decay: Optional[float]                    = None
+    signal_deterioration_velocity: float | None = None
+    rank_decay: float | None                    = None
     badges: list[str]                = field(default_factory=list)
     diagnostic_summary: str          = ""
 
@@ -157,7 +155,7 @@ class DecisionAdjustmentEngine:
       4. Calibration adjusts thresholds only — not factor params.
     """
 
-    def __init__(self, calibration_overrides: Optional[dict] = None) -> None:
+    def __init__(self, calibration_overrides: dict | None = None) -> None:
         self._cfg  = _dae_config()
         self._ecfg = _exit_config()
         self._cal  = calibration_overrides if calibration_overrides is not None else _load_calibration_state()
@@ -231,8 +229,8 @@ class DecisionAdjustmentEngine:
         inp: DecisionInput,
         pep: float,
         tis: float,
-        sdv: Optional[float],
-        rdec: Optional[float],
+        sdv: float | None,
+        rdec: float | None,
     ) -> DecisionOutput:
         ec = self._ecfg
         enabled = ec.get("enabled", True)
@@ -433,8 +431,8 @@ class DecisionAdjustmentEngine:
         inp: DecisionInput,
         pep: float,
         tis: float,
-        sdv: Optional[float],
-        rdec: Optional[float],
+        sdv: float | None,
+        rdec: float | None,
     ) -> DecisionOutput:
         """Original premature-exit-based logic for non-score-threshold exits."""
         pet = float(self._cal.get("premature_exit_threshold",
@@ -501,8 +499,8 @@ class DecisionAdjustmentEngine:
         inp: DecisionInput,
         pep: float,
         tis: float,
-        sdv: Optional[float],
-        rdec: Optional[float],
+        sdv: float | None,
+        rdec: float | None,
     ) -> DecisionOutput:
         escalate = bool(self._cfg.get("escalate_watch_to_review", False))
         if escalate:
@@ -578,7 +576,7 @@ class DecisionAdjustmentEngine:
 
         return round(max(0.0, min(1.0, base)), 3)
 
-    def _signal_deterioration_velocity(self, inp: DecisionInput) -> Optional[float]:
+    def _signal_deterioration_velocity(self, inp: DecisionInput) -> float | None:
         if (
             inp.score_at_buy is not None
             and inp.score_now is not None
@@ -588,7 +586,7 @@ class DecisionAdjustmentEngine:
             return round((inp.score_now - inp.score_at_buy) / inp.holding_days, 5)
         return None
 
-    def _rank_decay(self, inp: DecisionInput) -> Optional[float]:
+    def _rank_decay(self, inp: DecisionInput) -> float | None:
         if inp.rank_pct_at_buy is not None and inp.rank_pct_now is not None:
             return round(inp.rank_pct_at_buy - inp.rank_pct_now, 3)
         return None
@@ -605,14 +603,14 @@ def build_decision_input(
     metrics,             # pd.Series or None
     buy_context: dict | None,
     exit_analysis,       # ExitAnalysis or None
-    exit_severity: Optional[str] = None,
-    exit_type: Optional[str]     = None,
+    exit_severity: str | None = None,
+    exit_type: str | None     = None,
 ) -> DecisionInput:
     """
     Build a DecisionInput from the objects already produced by position_rationale.py.
     One-way adapter — reads factor outputs, never writes back.
     """
-    def _sf(v) -> Optional[float]:
+    def _sf(v) -> float | None:
         try:
             f = float(v)
             return None if math.isnan(f) else f
@@ -628,7 +626,7 @@ def build_decision_input(
             pct_change = (cur / avg) - 1.0
 
     import datetime
-    holding_days: Optional[int] = None
+    holding_days: int | None = None
     if buy_context:
         try:
             bd = datetime.date.fromisoformat(str(buy_context.get("buy_date", "")).strip())

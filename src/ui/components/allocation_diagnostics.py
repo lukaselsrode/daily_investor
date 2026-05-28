@@ -16,11 +16,10 @@ from __future__ import annotations
 import glob
 import os
 
-import streamlit as st
 import pandas as pd
+import streamlit as st
 
-from ui.utils import load_latest_csv, load_config_raw, DATA_DIR
-
+from ui.utils import DATA_DIR, load_config_raw, load_latest_csv
 
 _DRIFT_WARN_PCT = 0.05  # warn if ETF drift exceeds ±5%
 
@@ -473,6 +472,162 @@ def _render_capital_sources(events: pd.DataFrame) -> None:
         st.dataframe(show, use_container_width=True, hide_index=True)
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_concentration_report() -> tuple[object | None, str]:
+    """Run concentration check and return (report, error_msg)."""
+    try:
+        from portfolio.exposure.cluster_concentration import run_concentration_check
+        report = run_concentration_check()
+        return report, ""
+    except Exception as exc:
+        return None, str(exc)
+
+
+def _render_concentration_diagnostics() -> None:
+    import plotly.graph_objects as go
+
+    st.subheader("Factor-Cluster Concentration")
+    st.caption(
+        "Checks whether the active sleeve is over-concentrated in any PCA/KMeans "
+        "factor-space cluster or sector.  Thresholds from `concentration_limits` in config.yaml."
+    )
+
+    cfg = load_config_raw()
+    params = cfg.get("concentration_limits", {})
+    if not params.get("enabled", True):
+        st.info("Concentration diagnostics disabled (`concentration_limits.enabled: false`).")
+        return
+
+    max_cluster = float(params.get("max_cluster_weight", 0.35))
+    max_sector  = float(params.get("max_sector_weight",  0.40))
+    n_clusters  = int(params.get("n_clusters", 6))
+    method      = str(params.get("cluster_method", "pca"))
+
+    with st.spinner(f"Running {method.upper()} + KMeans({n_clusters}) concentration check…"):
+        report, err = _load_concentration_report()
+
+    if err:
+        st.warning(f"Concentration check unavailable: {err}")
+        return
+    if report is None:
+        st.info("Concentration diagnostics are disabled in config.")
+        return
+
+    # ── Violation banner ──────────────────────────────────────────────────────
+    if report.has_violations:
+        lines = report.summary_lines()
+        st.error(
+            "⚠️ **Active sleeve concentration violations detected**\n\n"
+            + "\n\n".join(lines)
+        )
+    else:
+        st.success(
+            f"✅ No concentration violations  "
+            f"(cluster limit {max_cluster:.0%}, sector limit {max_sector:.0%})"
+        )
+
+    st.caption(
+        f"Active sleeve: **{report.n_active_positions}** positions, "
+        f"${report.total_active_equity:,.0f} equity  |  "
+        f"method: {report.method.upper()}  |  clusters: {report.n_clusters}"
+    )
+
+    # ── Charts side by side ───────────────────────────────────────────────────
+    cc1, cc2 = st.columns(2)
+
+    with cc1:
+        st.markdown("**Cluster concentration** (active sleeve)")
+        if report.cluster_weights:
+            labels  = [f"Cluster {k}" for k in report.cluster_weights]
+            weights = list(report.cluster_weights.values())
+            colors  = [
+                "#e74c3c" if w > max_cluster else "#3498db"
+                for w in weights
+            ]
+            fig = go.Figure(go.Bar(
+                x=labels, y=[w * 100 for w in weights],
+                marker_color=colors,
+                text=[f"{w:.1%}" for w in weights],
+                textposition="outside",
+            ))
+            fig.add_hline(
+                y=max_cluster * 100, line_dash="dash",
+                line_color="#f39c12",
+                annotation_text=f"limit {max_cluster:.0%}",
+                annotation_position="top right",
+            )
+            fig.update_layout(
+                height=300, margin=dict(l=10, r=10, t=20, b=40),
+                yaxis=dict(title="%", gridcolor="#2d3436"),
+                xaxis=dict(gridcolor="#2d3436"),
+                paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+                font=dict(color="#cdd6f4", size=10),
+                showlegend=False,
+            )
+            st.plotly_chart(fig, use_container_width=True, key="conc_cluster_bar")
+        else:
+            st.caption("No cluster data available.")
+
+    with cc2:
+        st.markdown("**Sector concentration** (active sleeve)")
+        if report.sector_weights:
+            # Top 10 sectors only to keep chart readable
+            top_sec = dict(list(report.sector_weights.items())[:10])
+            s_labels  = list(top_sec.keys())
+            s_weights = list(top_sec.values())
+            s_colors  = [
+                "#e74c3c" if w > max_sector else "#2ecc71"
+                for w in s_weights
+            ]
+            fig2 = go.Figure(go.Bar(
+                x=[w * 100 for w in s_weights], y=s_labels,
+                orientation="h",
+                marker_color=s_colors,
+                text=[f"{w:.1%}" for w in s_weights],
+                textposition="outside",
+            ))
+            fig2.add_vline(
+                x=max_sector * 100, line_dash="dash",
+                line_color="#f39c12",
+                annotation_text=f"limit {max_sector:.0%}",
+                annotation_position="top right",
+            )
+            fig2.update_layout(
+                height=300, margin=dict(l=10, r=60, t=20, b=20),
+                xaxis=dict(title="%", gridcolor="#2d3436", showticklabels=False),
+                yaxis=dict(gridcolor="#2d3436"),
+                paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+                font=dict(color="#cdd6f4", size=10),
+                showlegend=False,
+            )
+            st.plotly_chart(fig2, use_container_width=True, key="conc_sector_bar")
+        else:
+            st.caption("No sector data available.")
+
+    # ── Drill-down: which symbols are in each violated cluster ────────────────
+    cluster_violations = [v for v in report.violations if v.kind == "cluster"]
+    if cluster_violations:
+        st.divider()
+        st.markdown("**Cluster violation detail**")
+        for v in cluster_violations:
+            with st.expander(
+                f"Cluster {v.label} — {v.weight:.1%} of active sleeve "
+                f"(${v.equity:,.0f}, {len(v.symbols)} positions)",
+                expanded=True,
+            ):
+                st.markdown(
+                    f"**{v.weight:.1%}** of active equity in one cluster "
+                    f"(limit **{v.threshold:.0%}**)  \n"
+                    f"Positions: `{', '.join(v.symbols)}`"
+                )
+
+    if report.unmatched_symbols and not report.unmatched_symbols[0].startswith("ERROR"):
+        st.caption(
+            f"ℹ️ {len(report.unmatched_symbols)} owned symbol(s) not found in universe map "
+            f"(delisted / recently added): {', '.join(report.unmatched_symbols[:10])}"
+        )
+
+
 def render() -> None:
     st.subheader("Sleeve Allocation Diagnostics")
     st.caption(
@@ -516,3 +671,6 @@ def render() -> None:
     st.markdown("---")
     events = _load_sleeve_events()
     _render_capital_sources(events)
+
+    st.markdown("---")
+    _render_concentration_diagnostics()

@@ -6,11 +6,10 @@ decision_outcomes.parquet. Read-only — never feeds back into scoring.
 """
 from __future__ import annotations
 
-import streamlit as st
 import pandas as pd
+import streamlit as st
 
-from ui.components.common import empty_state, section, df_download
-
+from ui.components.common import df_download, empty_state, section
 
 _DECISION_COLS = [
     "decision_date", "symbol", "record_type", "decision_state", "final_action",

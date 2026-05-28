@@ -9,7 +9,6 @@ import yaml
 
 from ui.utils import CFG_PATH, load_config_raw, ui_config
 
-
 _SECTIONS = [
     ("scoring",              "Scoring & Weights"),
     ("score_weights",        "Score Weights"),

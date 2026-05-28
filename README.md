@@ -4,6 +4,39 @@ A systematic investment platform built on Robinhood. Combines multi-factor funda
 
 ---
 
+## Quickstart
+
+```bash
+# 1. Clone and install
+git clone https://github.com/lukaselsrode/daily_investor.git
+cd daily_investor
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[ui,dev]"
+
+# 2. Add credentials (.env at project root)
+cat > .env <<EOF
+RB_ACCT=your_robinhood_email
+RB_CREDS=your_robinhood_password
+RB_MFA_SECRET=your_totp_secret        # optional — skips interactive MFA prompt
+ANTHROPIC_API_KEY=your_anthropic_key  # required for sentiment + LLM tune review
+EOF
+
+# 3. Verify setup — fetch data and save first snapshot (no trades placed)
+make fetch-data
+
+# 4. Run a quick backtest to confirm everything works
+make backtest DAYS=90
+
+# 5. Launch the dashboard
+make ui
+```
+
+That's it. The dashboard opens at `http://localhost:8501`.
+
+**No Robinhood account?** The backtester and research tools work on historical CSV data — skip steps 2–3 and run `make backtest` or `make ui` directly after seeding `data/` with your own CSV files.
+
+---
+
 ## Key Features
 
 - **Multi-Factor Scoring** — Value (P/E + P/B, sector-relative v2), quality, income, and momentum → single `value_metric`
@@ -182,6 +215,7 @@ daily-investor COMMAND [OPTIONS]
 | `stability-scan` | Parameter stability scan across multiple windows — research only, no writes |
 | `report` | Run a quick 90-day backtest and print results |
 | `update-outcomes` | Backfill realized future returns for past decisions — calibration only, never touches live scoring |
+| `factor-map` | 3-D PCA/UMAP factor-space scatter of the scored universe |
 
 **Key options:**
 
@@ -249,6 +283,28 @@ make test-watch            # Re-run tests on file changes (requires pytest-watch
 make lint                  # Run ruff linter over src/
 make format                # Auto-format src/ with ruff
 ```
+
+---
+
+## Architecture
+
+```
+ui/          renders
+ui/services/ orchestrates
+cli/         dispatches
+backtesting/ simulates
+tuning/      searches parameters
+portfolio/   decides buys/sells
+strategy/    scores stocks
+research/    evaluates offline (read-only)
+reporting/   summarizes results
+config/      loads and validates config
+core/        shared types, paths, utils
+execution/   broker adapters
+```
+
+Import rules: no `streamlit` in core packages; no `ui/` imports in core packages.
+See `AGENTS.md` for the full architecture contract.
 
 ---
 
@@ -550,7 +606,7 @@ ui:
 **Requirements:** Python 3.10+, Robinhood account, Anthropic API key
 
 ```bash
-git clone https://github.com/yourusername/daily_investor.git
+git clone https://github.com/lukaselsrode/daily_investor.git
 cd daily_investor
 
 python -m venv .venv

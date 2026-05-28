@@ -14,7 +14,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 
-from core.types import BacktestReport, TradeRecord
+from backtesting.types import BacktestReport
+from core.types import TradeRecord
 
 if TYPE_CHECKING:
     pass
@@ -56,10 +57,10 @@ def _try_matplotlib():
         except ImportError:
             sns = None
         return plt, sns
-    except ImportError:
+    except ImportError as exc:
         raise RuntimeError(
             "matplotlib is required for heatmaps. Install: pip install matplotlib"
-        )
+        ) from exc
 
 
 # ---------------------------------------------------------------------------

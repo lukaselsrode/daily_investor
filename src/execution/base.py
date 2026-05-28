@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import Literal
 
 
 @dataclass
@@ -20,7 +20,7 @@ class OrderResult:
     amount: float
     quantity: float
     success: bool
-    order_id: Optional[str]
+    order_id: str | None
     state: str
     detail: str = ""
 
@@ -57,3 +57,9 @@ class BrokerAdapter(ABC):
     @abstractmethod
     def get_open_orders(self) -> list[dict]:
         """Return all open (not filled) orders."""
+
+    def enrich_holdings_created_at(self, holdings: dict) -> None:  # noqa: B027
+        """Backfill initiation dates from order history (no-op for non-live brokers)."""
+
+    def clear_orders_cache(self) -> None:  # noqa: B027
+        """Clear any cached order data (no-op for non-live brokers)."""

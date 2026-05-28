@@ -14,8 +14,8 @@ SAFE: read-only calibration display. Never writes factor scores or config.
 
 from __future__ import annotations
 
-import streamlit as st
 import pandas as pd
+import streamlit as st
 
 
 @st.cache_data(ttl=300)

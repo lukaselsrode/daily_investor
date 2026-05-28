@@ -13,10 +13,9 @@ Research-grade factor validation:
 
 from __future__ import annotations
 
-import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-
+import streamlit as st
 
 # ---------------------------------------------------------------------------
 # Cached data helpers
@@ -25,7 +24,7 @@ import plotly.graph_objects as go
 
 @st.cache_data(ttl=600)
 def _compute_ic_data(factors: tuple, horizons: tuple, ic_type: str) -> dict:
-    from strategy.research.ic_engine import FactorResearchEngine
+    from research.ic_engine import FactorResearchEngine
 
     engine  = FactorResearchEngine(factors=list(factors), horizons=list(horizons))
     ic_df   = engine.compute_multi_horizon_ic(ic_type=ic_type)
@@ -36,19 +35,19 @@ def _compute_ic_data(factors: tuple, horizons: tuple, ic_type: str) -> dict:
 
 @st.cache_data(ttl=600)
 def _compute_decile_spread(factor: str, horizon: int, n_deciles: int) -> pd.DataFrame:
-    from strategy.research.ic_engine import FactorResearchEngine
+    from research.ic_engine import FactorResearchEngine
     return FactorResearchEngine().compute_decile_spread(factor, horizon_days=horizon, n_deciles=n_deciles)
 
 
 @st.cache_data(ttl=600)
 def _compute_rolling_icir(factor: str, horizon: int, window: int) -> pd.DataFrame:
-    from strategy.research.ic_engine import FactorResearchEngine
+    from research.ic_engine import FactorResearchEngine
     return FactorResearchEngine().compute_rolling_icir(factor, horizon_days=horizon, window=window)
 
 
 @st.cache_data(ttl=600)
 def _compute_cumulative_ic(factors: tuple, horizon: int, ic_type: str) -> pd.DataFrame:
-    from strategy.research.ic_engine import FactorResearchEngine
+    from research.ic_engine import FactorResearchEngine
     return FactorResearchEngine(factors=list(factors)).compute_cumulative_ic(
         list(factors), horizon_days=horizon, ic_type=ic_type,
     )
@@ -56,7 +55,7 @@ def _compute_cumulative_ic(factors: tuple, horizon: int, ic_type: str) -> pd.Dat
 
 @st.cache_data(ttl=3600)
 def _compute_regime_ic(factors: tuple, horizon: int, ic_type: str) -> pd.DataFrame:
-    from strategy.research.ic_engine import FactorResearchEngine
+    from research.ic_engine import FactorResearchEngine
     return FactorResearchEngine(factors=list(factors)).compute_regime_conditioned_ic(
         factors=list(factors), horizon_days=horizon, ic_type=ic_type,
     )

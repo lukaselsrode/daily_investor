@@ -1,21 +1,18 @@
 """core — Shared infrastructure: types, logging."""
+# SimResult and BacktestReport moved to backtesting.types (canonical, extended schema)
+from .logging import configure_logging, get_logger
 from .types import (
-    SimResult,
-    BacktestReport,
-    TradeRecord,
+    PortfolioSnapshot,
     SellDecision,
     SentimentResult,
-    PortfolioSnapshot,
+    TradeRecord,
 )
-from .logging import configure_logging, get_logger
 
 __all__ = [
-    "SimResult",
-    "BacktestReport",
-    "TradeRecord",
+    "PortfolioSnapshot",
     "SellDecision",
     "SentimentResult",
-    "PortfolioSnapshot",
+    "TradeRecord",
     "configure_logging",
     "get_logger",
 ]

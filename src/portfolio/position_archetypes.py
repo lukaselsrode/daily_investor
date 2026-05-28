@@ -38,9 +38,7 @@ Usage:
 
 from __future__ import annotations
 
-import re
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -179,7 +177,7 @@ _DEFAULT_POLICIES: dict[str, dict] = {
 }
 
 
-def get_archetype_policy(archetype: str, cfg: Optional[dict] = None) -> ArchetypePolicy:
+def get_archetype_policy(archetype: str, cfg: dict | None = None) -> ArchetypePolicy:
     """
     Return management policy for *archetype*, with optional config override.
 
@@ -212,7 +210,7 @@ def get_archetype_policy(archetype: str, cfg: Optional[dict] = None) -> Archetyp
 # Description feature extraction
 # ---------------------------------------------------------------------------
 
-def _desc_features(description: Optional[str]) -> dict[str, bool]:
+def _desc_features(description: str | None) -> dict[str, bool]:
     """Return {compounder, legacy, defensive} term-hit flags from company description."""
     if not description or not isinstance(description, str):
         return {"compounder": False, "legacy": False, "defensive": False}
@@ -224,7 +222,7 @@ def _desc_features(description: Optional[str]) -> dict[str, bool]:
     }
 
 
-def _desc_matched_terms(description: Optional[str]) -> dict[str, list[str]]:
+def _desc_matched_terms(description: str | None) -> dict[str, list[str]]:
     """Return lists of matched terms per category — used for driver explanations."""
     if not description or not isinstance(description, str):
         return {"compounder": [], "legacy": [], "defensive": []}
@@ -251,7 +249,7 @@ def _sf(signals: dict, key: str, default=None):
         return default
 
 
-def _analyst_buy_pct(signals: dict) -> Optional[float]:
+def _analyst_buy_pct(signals: dict) -> float | None:
     """
     Derive analyst buy percentage from available signals.
     Prefers analyst_buy_pct if present; falls back to buy_to_sell_ratio heuristic.
@@ -274,12 +272,18 @@ def _analyst_buy_pct(signals: dict) -> Optional[float]:
     # Conservative lookup: buys / (buys + holds + sells)
     # With many more holds than buys+sells in practice, buy_pct is much lower than
     # buy_to_sell_ratio alone suggests.
-    if ratio <= 0.5:   return 0.15
-    if ratio <= 1.5:   return 0.28
-    if ratio <= 3.0:   return 0.40
-    if ratio <= 6.0:   return 0.57
-    if ratio <= 12.0:  return 0.72
-    if ratio <= 20.0:  return 0.82
+    if ratio <= 0.5:
+        return 0.15
+    if ratio <= 1.5:
+        return 0.28
+    if ratio <= 3.0:
+        return 0.40
+    if ratio <= 6.0:
+        return 0.57
+    if ratio <= 12.0:
+        return 0.72
+    if ratio <= 20.0:
+        return 0.82
     return 0.88
 
 
@@ -363,7 +367,7 @@ def _score_quality_compounder(signals: dict, desc_feats: dict, desc_terms: dict)
         drivers.append(f"description: {', '.join(terms)}")
     if desc_feats["legacy"]:
         score -= 0.12
-        drivers.append(f"description: legacy/patent/restructuring language (−)")
+        drivers.append("description: legacy/patent/restructuring language (−)")
 
     return max(score, 0.0), drivers
 
@@ -375,13 +379,13 @@ def _score_legacy_turnaround(signals: dict, desc_feats: dict, desc_terms: dict) 
     maint = _sf(signals, "maintenance_ratio")
     day_trade = _sf(signals, "day_trade_ratio")
     market_cap = _sf(signals, "market_cap")
-    quality = _sf(signals, "quality_score", 0.0)
+    _quality = _sf(signals, "quality_score", 0.0)
     momentum = _sf(signals, "momentum_score", 0.0)
     buy_pct = _analyst_buy_pct(signals)
     inst_type = str(signals.get("instrument_type", "") or "").lower()
     country = str(signals.get("country", "") or "").upper()
-    sector = str(signals.get("sector", "") or "")
-    industry = str(signals.get("industry", "") or "")
+    _sector = str(signals.get("sector", "") or "")
+    _industry = str(signals.get("industry", "") or "")
 
     # Margin/risk ratios — strongest discriminators
     if maint is not None:
@@ -408,7 +412,7 @@ def _score_legacy_turnaround(signals: dict, desc_feats: dict, desc_terms: dict) 
             score += 0.08
         elif market_cap >= _MEGA_CAP:
             score -= 0.30
-            drivers.append(f"mega-cap disqualifies legacy archetype (−)")
+            drivers.append("mega-cap disqualifies legacy archetype (−)")
 
     # Analyst consensus
     if buy_pct is not None:
@@ -615,7 +619,7 @@ def _score_defensive_income(signals: dict, desc_feats: dict, desc_terms: dict) -
 # Main classifier
 # ---------------------------------------------------------------------------
 
-def classify_archetype(signals: dict, archetype_cfg: Optional[dict] = None) -> ArchetypeResult:
+def classify_archetype(signals: dict, archetype_cfg: dict | None = None) -> ArchetypeResult:
     """
     Classify a position into a behavioral archetype.
 
@@ -703,7 +707,7 @@ def classify_archetype_from_scores(
     momentum_score: float,
     income_score: float,
     yield_trap: bool = False,
-    archetype_cfg: Optional[dict] = None,
+    archetype_cfg: dict | None = None,
 ) -> ArchetypePolicy:
     """
     Lightweight archetype classification for backtesting — uses only precomputed

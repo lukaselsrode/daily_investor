@@ -16,7 +16,6 @@ Commands:
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 import tuning.reports as _t
 
@@ -37,9 +36,15 @@ def cmd_fetch_data() -> None:
 
     Requires Robinhood login.
     """
-    from main import login, _broker, _fetch_and_save_dividends, save_holdings_csv, _maybe_fill_outcomes
-    from data.valuation import update_industry_valuations
     from data.market import get_data as generate_daily_undervalued_stocks
+    from data.valuation import update_industry_valuations
+    from main import (
+        _broker,
+        _fetch_and_save_dividends,
+        _maybe_fill_outcomes,
+        login,
+        save_holdings_csv,
+    )
 
     login()
     logger.info("=== Fetch-Data run (no trades) ===")
@@ -72,7 +77,7 @@ def cmd_fetch_data() -> None:
 
 def cmd_run(
     skip_data: bool = False,
-    op_mode: Optional[str] = None,
+    op_mode: str | None = None,
 ) -> None:
     """Live trading run."""
     if op_mode:
@@ -85,16 +90,27 @@ def cmd_run(
 
 def cmd_backtest(
     n_days: int,
-    mode: Optional[str] = None,
-    params: Optional[dict] = None,
+    mode: str | None = None,
+    params: dict | None = None,
     compare: bool = False,
     archetype_compare: bool = False,
+    scope: str = "overall_strategy",
 ) -> None:
-    """Run a single backtest and print results."""
-    from backtesting.engine import BacktestEngine
+    """Run a single backtest and print results.
+
+    --scope overall_strategy        Tests the full deployed ETF + active portfolio,
+                                    including harvest-to-ETF routing and total drawdown.
+    --scope active_sleeve_compounding  Tests whether the stock-picking engine compounds
+                                    when all active proceeds are recycled into future picks.
+    """
     from backtesting.data_loader import load_and_precompute
-    from backtesting.simulator import get_default_params, compare_candidate_selection_modes, compare_archetype_modes
+    from backtesting.engine import BacktestEngine
     from backtesting.reports import print_backtest_report, print_comparison_report
+    from backtesting.simulator import (
+        compare_archetype_modes,
+        compare_candidate_selection_modes,
+        get_default_params,
+    )
 
     engine = BacktestEngine()
 
@@ -109,7 +125,7 @@ def cmd_backtest(
         comparison = compare_candidate_selection_modes(precomp, default_params)
         print_comparison_report(comparison)
     else:
-        result = engine.run(n_days=n_days, params=params, mode=mode)
+        result = engine.run(n_days=n_days, params=params, mode=mode, scope=scope)
         print_backtest_report(result.report)
 
 
@@ -148,23 +164,29 @@ def _print_archetype_comparison(result: dict, n_days: int) -> None:
 def cmd_tune(
     n_days: int,
     objective: str = "sharpe",
-    mode: Optional[str] = None,
+    mode: str | None = None,
+    scope: str = "overall_strategy",
 ) -> None:
     """Single-objective tune — prints diff, does NOT write config."""
     from tuning.tuner import ParameterTuner
     tuner = ParameterTuner()
-    result = tuner.tune(n_days=n_days, objective=objective, mode=mode)
+    result = tuner.tune(n_days=n_days, objective=objective, mode=mode, scope=scope)
     _t.print_config_diff(result.params, result.sim)
 
 
 def cmd_auto_tune(
     n_days: int = 90,
-    mode: Optional[str] = None,
+    mode: str | None = None,
     apply: bool = False,
     force_apply: bool = False,
     llm_review: bool = False,
+    scope: str = "overall_strategy",
 ) -> None:
-    """Dual-objective auto-tune with walk-forward validation."""
+    """Dual-objective auto-tune with walk-forward validation.
+
+    --scope active_sleeve_compounding  freezes index_pct and ETF routing params,
+    optimizes only stock-picking parameters, ranks by active sleeve metrics.
+    """
     from tuning.tuner import ParameterTuner
     tuner = ParameterTuner()
     result = tuner.auto_tune(
@@ -173,6 +195,7 @@ def cmd_auto_tune(
         force_apply=force_apply,
         mode=mode,
         llm_review=llm_review,
+        scope=scope,
     )
     _t._diff_table(
         result.avg_params,
@@ -192,9 +215,9 @@ def cmd_auto_tune(
 
 
 def cmd_stability_scan(
-    windows: Optional[list[int]] = None,
-    mode: Optional[str] = None,
-    output_dir: Optional[str] = None,
+    windows: list[int] | None = None,
+    mode: str | None = None,
+    output_dir: str | None = None,
 ) -> None:
     """Stability scan — RESEARCH ONLY, never writes config."""
     from tuning.stability import StabilityAnalyzer
@@ -229,7 +252,7 @@ def cmd_update_outcomes() -> None:
 
     import yfinance as yf
 
-    from portfolio.outcome_tracker import load_outcomes, fill_future_returns
+    from portfolio.outcome_tracker import fill_future_returns, load_outcomes
 
     log = logging.getLogger(__name__)
     log.info("=== update-outcomes: backfilling realized outcomes ===")
@@ -289,3 +312,52 @@ def cmd_update_outcomes() -> None:
 
     print(f"update-outcomes complete: {n_updated} outcome cells filled across {len(df)} recorded decisions.")
     log.info("update-outcomes: %d cells updated", n_updated)
+
+
+def cmd_factor_map(
+    method: str = "pca",
+    color_by: str | None = None,
+    kmeans_clusters: int | None = None,
+    output: str | None = None,
+    owned_only: bool = False,
+    actions: list[str] | None = None,
+    sectors: list[str] | None = None,
+    show: bool = False,
+) -> None:
+    """
+    Build a 3-D factor-map of the scored universe and save to HTML.
+
+    Loads today's agg_data, merges owned/equity from holdings, then runs
+    PCA (or UMAP) dimensionality reduction and optional KMeans clustering.
+
+    SAFE: read-only.  Never modifies config, factor scores, or portfolio state.
+    """
+    from portfolio.visualization.factor_map import build_factor_map, load_universe_with_holdings
+
+    df = load_universe_with_holdings()
+    logger.info("factor-map: loaded %d symbols", len(df))
+
+    out_path = output or "reports/factor_map.html"
+    color    = "cluster" if kmeans_clusters else color_by
+
+    fig, df_out, diags = build_factor_map(
+        df,
+        method=method,
+        color_by=color,
+        kmeans_clusters=kmeans_clusters,
+        owned_only=owned_only,
+        actions=actions,
+        sectors=sectors,
+        output_html=out_path,
+        show=show,
+    )
+
+    if "cluster_summary" in diags:
+        print("\n── Cluster Summary ─────────────────────────────────────────────")
+        print(diags["cluster_summary"].to_string(index=False))
+
+    if "sector_exposure" in diags:
+        print("\n── Sector Exposure (owned) ──────────────────────────────────────")
+        print(diags["sector_exposure"].to_string(index=False))
+
+    print(f"\nFactor map saved → {out_path}")

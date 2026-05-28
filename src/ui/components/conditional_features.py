@@ -7,10 +7,9 @@ All engineered features are research instruments; nothing here alters live scori
 
 from __future__ import annotations
 
-import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-
+import streamlit as st
 
 # ---------------------------------------------------------------------------
 # Cached compute helpers
@@ -18,13 +17,13 @@ import plotly.graph_objects as go
 
 @st.cache_data(ttl=600)
 def _load_summary(horizon: int, ic_type: str) -> pd.DataFrame:
-    from strategy.research.ic_engine import FactorResearchEngine
+    from research.ic_engine import FactorResearchEngine
     return FactorResearchEngine().compute_conditional_ic(horizon_days=horizon, ic_type=ic_type)
 
 
 @st.cache_data(ttl=600)
 def _load_timeseries(horizon: int, ic_type: str) -> pd.DataFrame:
-    from strategy.research.ic_engine import FactorResearchEngine
+    from research.ic_engine import FactorResearchEngine
     return FactorResearchEngine().compute_conditional_ic_timeseries(horizon_days=horizon, ic_type=ic_type)
 
 
@@ -174,7 +173,7 @@ def _render_timeseries(ts: pd.DataFrame, selected_features: list[str]) -> None:
 # ---------------------------------------------------------------------------
 
 def _render_decile_comparison(best_feature: str, horizon: int) -> None:
-    from strategy.research.ic_engine import FactorResearchEngine
+    from research.ic_engine import FactorResearchEngine
 
     @st.cache_data(ttl=600)
     def _decile(feat: str, h: int) -> pd.DataFrame:

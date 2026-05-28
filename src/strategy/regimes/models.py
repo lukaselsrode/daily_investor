@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import datetime
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from typing import Literal
 
 RegimeLabel = Literal["bullish", "neutral", "defensive"]
 
@@ -19,12 +19,12 @@ class RegimeState:
 
     regime: RegimeLabel
     confidence: float                         # 0.0–1.0
-    vix: Optional[float]
-    spy_price: Optional[float]
-    spy_ma200: Optional[float]
-    spy_vs_200dma_pct: Optional[float]        # (price/ma200) - 1
+    vix: float | None
+    spy_price: float | None
+    spy_ma200: float | None
+    spy_vs_200dma_pct: float | None        # (price/ma200) - 1
     detected_at: datetime.datetime = field(default_factory=datetime.datetime.utcnow)
-    previous_regime: Optional[RegimeLabel] = None
+    previous_regime: RegimeLabel | None = None
     transition_count: int = 0
     notes: list[str] = field(default_factory=list)
 

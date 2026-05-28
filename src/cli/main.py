@@ -33,6 +33,7 @@ def main(argv: list[str] | None = None) -> None:
     from cli.commands import (
         cmd_auto_tune,
         cmd_backtest,
+        cmd_factor_map,
         cmd_fetch_data,
         cmd_report,
         cmd_run,
@@ -85,6 +86,23 @@ def main(argv: list[str] | None = None) -> None:
     elif cmd == "update-outcomes":
         cmd_update_outcomes()
 
+    elif cmd == "factor-map":
+        method   = _flag_value(rest, "--method") or "pca"
+        color    = _flag_value(rest, "--color")
+        clusters_str = _flag_value(rest, "--clusters")
+        clusters = int(clusters_str) if clusters_str and clusters_str.isdigit() else None
+        out      = _flag_value(rest, "--output")
+        owned    = "--owned-only" in rest
+        show     = "--show" in rest
+        cmd_factor_map(
+            method=method,
+            color_by=color,
+            kmeans_clusters=clusters,
+            output=out,
+            owned_only=owned,
+            show=show,
+        )
+
     else:
         print(f"Unknown command: {cmd!r}")
         _print_help()
@@ -114,6 +132,7 @@ COMMANDS
   stability-scan           Parameter stability scan (research only, no writes)
   report                   Generate diagnostics report
   update-outcomes          Backfill future returns for past decisions (calibration only)
+  factor-map               3-D PCA/UMAP factor-space scatter of the scored universe
 
 OPTIONS (run)
   --skip-data              Reuse existing CSV data

@@ -8,7 +8,6 @@ ValidationResult: output of WalkForwardValidator.split_and_validate().
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 from .types import BacktestReport, SimResult
 
@@ -79,10 +78,10 @@ class ValidationResult:
     reasons: list[str]
     report: BacktestReport
     train_slice: slice
-    val_slice: Optional[slice]
+    val_slice: slice | None
 
     @property
-    def val_result(self) -> Optional[SimResult]:
+    def val_result(self) -> SimResult | None:
         return self.report.validation_result
 
     @property

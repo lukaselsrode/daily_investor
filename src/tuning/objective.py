@@ -7,12 +7,13 @@ _run_single():     runs differential_evolution for one objective
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Literal
 
 import numpy as np
 
 from backtesting.simulator import run_simulation
-from backtesting.types import PrecomputedData, SimResult
+from backtesting.types import BacktestScope, PrecomputedData, SimResult
 from util import BACKTEST_PARAMS
 
 from .constants import (
@@ -33,7 +34,8 @@ def make_objective(
     commission_per_trade: float = 0.0,
     weekly_contribution: float = 0.0,
     rebalance_frequency_days: int = 5,
-) -> callable:
+    scope: BacktestScope = "overall_strategy",
+) -> Callable[[np.ndarray], float]:
     """Return the function scipy minimizes (−metric + diversification penalty)."""
     call_count = [0]
 
@@ -45,12 +47,18 @@ def make_objective(
             commission_per_trade=commission_per_trade,
             weekly_contribution=weekly_contribution,
             rebalance_frequency_days=rebalance_frequency_days,
+            scope=scope,
         )
 
         if result.total_return < -0.95:
             return 10.0
 
-        score = result.sharpe if objective == "sharpe" else result.calmar
+        if scope == "active_sleeve_compounding":
+            score_val = result.active_sharpe if objective == "sharpe" else result.active_calmar
+            score = float(score_val) if score_val is not None else 0.0
+        else:
+            score = result.sharpe if objective == "sharpe" else result.calmar
+
         if not np.isfinite(score):
             return 10.0
 
@@ -70,8 +78,9 @@ def make_objective(
         diversity_penalty = max(0.0, 5.0 - result.average_positions) * 0.4
 
         if call_count[0] % 50 == 0:
+            _display = "active_" + objective if scope == "active_sleeve_compounding" else objective
             print(
-                f"  [{call_count[0]} evals] {objective}={score:.3f} "
+                f"  [{call_count[0]} evals] {_display}={score:.3f} "
                 f"ret={result.total_return:.1%} trades={result.trades_made} "
                 f"avg_pos={result.average_positions:.1f}"
             )
@@ -86,13 +95,14 @@ def _run_single(
     starting_capital: float,
     maxiter: int,
     popsize: int,
+    scope: BacktestScope = "overall_strategy",
 ) -> tuple[np.ndarray, SimResult]:
     from scipy.optimize import differential_evolution
 
     bp = BACKTEST_PARAMS
-    active = _get_active_indices()
+    active = _get_active_indices(scope)
     frozen_vals = _current_params()
-    eff_bounds = _effective_bounds()
+    eff_bounds = _effective_bounds(scope)
     active_bounds = [eff_bounds[i] for i in active]
 
     obj_fn_full = make_objective(
@@ -101,6 +111,7 @@ def _run_single(
         commission_per_trade=bp["commission_per_trade"],
         weekly_contribution=bp["weekly_contribution"],
         rebalance_frequency_days=bp["rebalance_frequency_days"],
+        scope=scope,
     )
 
     def _obj(reduced: np.ndarray) -> float:
@@ -114,6 +125,7 @@ def _run_single(
             commission_per_trade=bp["commission_per_trade"],
             weekly_contribution=bp["weekly_contribution"],
             rebalance_frequency_days=bp["rebalance_frequency_days"],
+            scope=scope,
         )
         return frozen_vals, best_result
 
@@ -135,5 +147,6 @@ def _run_single(
         commission_per_trade=bp["commission_per_trade"],
         weekly_contribution=bp["weekly_contribution"],
         rebalance_frequency_days=bp["rebalance_frequency_days"],
+        scope=scope,
     )
     return best_full, best_result

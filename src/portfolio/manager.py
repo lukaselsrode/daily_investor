@@ -15,20 +15,20 @@ import json
 import logging
 import os
 import time
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import pandas as pd
 
+from portfolio.position_archetypes import classify_archetype
 from portfolio.sell_engine import evaluate_sell_candidate
-from portfolio.position_archetypes import classify_archetype, get_archetype_policy
 from strategy.regimes.detector import get_current_regime
 from util import (
     ARCHETYPE_PARAMS,
     AUTO_APPROVE,
     CANDIDATE_ROTATION_PARAMS,
     CANDIDATE_SELECTION_PARAMS,
-    CONTRARIAN_PENALTY_PARAMS,
     CONFIDENCE_THRESHOLD,
+    CONTRARIAN_PENALTY_PARAMS,
     DATA_DIRECTORY,
     DIVIDEND_PARAMS,
     ETF_RISK_PARAMS,
@@ -52,8 +52,8 @@ from util import (
 
 if TYPE_CHECKING:
     from execution.base import BrokerAdapter
-    from portfolio.risk import RiskManager
     from portfolio.harvest import HarvestManager
+    from portfolio.risk import RiskManager
 
 logger = logging.getLogger(__name__)
 
@@ -78,11 +78,11 @@ class PortfolioManager:
 
     def __init__(
         self,
-        broker: "BrokerAdapter",
-        risk: "RiskManager",
-        harvest: "HarvestManager",
-        auto_approve: Optional[bool] = None,
-        use_sentiment: Optional[bool] = None,
+        broker: BrokerAdapter,
+        risk: RiskManager,
+        harvest: HarvestManager,
+        auto_approve: bool | None = None,
+        use_sentiment: bool | None = None,
     ) -> None:
         self._broker = broker
         self._risk = risk
@@ -172,7 +172,7 @@ class PortfolioManager:
         except Exception as e:
             logger.warning(f"Could not record sell history for {symbol}: {e}")
 
-    def _check_wash_sale_risk(self, symbol: str) -> Optional[str]:
+    def _check_wash_sale_risk(self, symbol: str) -> str | None:
         if not DIVIDEND_PARAMS.get("wash_sale_warning"):
             return None
         try:
@@ -195,7 +195,7 @@ class PortfolioManager:
     # Data helpers
     # ------------------------------------------------------------------
 
-    def _load_news_for_symbol(self, symbol: str, news_df: Optional[pd.DataFrame]) -> dict:
+    def _load_news_for_symbol(self, symbol: str, news_df: pd.DataFrame | None) -> dict:
         try:
             if news_df is not None and not news_df.empty:
                 rows = news_df[news_df["symbol"] == symbol]["news"]
@@ -251,7 +251,7 @@ class PortfolioManager:
         self,
         symbol: str,
         allocation: float,
-        agg_df: Optional[pd.DataFrame],
+        agg_df: pd.DataFrame | None,
         sector_exposure: dict[str, float],
     ) -> None:
         if agg_df is None or agg_df.empty or "symbol" not in agg_df.columns:
@@ -265,12 +265,12 @@ class PortfolioManager:
     def _process_whole_share_queue(
         self,
         queue: list[tuple[str, float]],
-        agg_df: Optional[pd.DataFrame],
+        agg_df: pd.DataFrame | None,
         sector_exposure: dict[str, float],
         purchased: list[str],
         failed: list[str],
         skipped: list[str],
-        holdings: Optional[dict] = None,
+        holdings: dict | None = None,
         portfolio_value: float = 0.0,
     ) -> None:
         max_ws = RISK_LIMITS["max_whole_share_buys_per_run"]
@@ -283,7 +283,7 @@ class PortfolioManager:
                 skipped.extend(sym for sym, _ in queue[idx:])
                 break
 
-            current_price: Optional[float] = None
+            current_price: float | None = None
             if agg_df is not None and not agg_df.empty and "symbol" in agg_df.columns:
                 row = agg_df[agg_df["symbol"] == symbol]
                 if not row.empty:
@@ -332,7 +332,7 @@ class PortfolioManager:
         state: str,
         selected: bool,
         skip_reason: str,
-        sentiment: Optional[dict],
+        sentiment: dict | None,
         risk_ok: bool,
         risk_reason: str,
         proposed_alloc: float,
@@ -379,7 +379,7 @@ class PortfolioManager:
 
         for symbol, info in all_evaluated.items():
             try:
-                bc_row: Optional[dict] = None
+                bc_row: dict | None = None
                 if bc_df is not None and not bc_df.empty and "symbol" in bc_df.columns:
                     match = bc_df[bc_df["symbol"] == symbol]
                     if not match.empty:
@@ -777,7 +777,7 @@ class PortfolioManager:
             portfolio_equity = self._broker.get_portfolio_value()
             if portfolio_equity > 0:
                 current_etf = sum(
-                    safe_float(holdings.get(etf, {}).get("equity"), 0.0)
+                    safe_float(holdings.get(etf, {}).get("equity")) or 0.0
                     for etf in ETFS
                 )
                 current_etf_pct = current_etf / portfolio_equity
@@ -833,7 +833,7 @@ class PortfolioManager:
         df: pd.DataFrame,
         is_first_iteration: bool = True,
         regime: str = "bullish",
-        effective_index_pct: Optional[float] = None,
+        effective_index_pct: float | None = None,
     ) -> tuple[list, list, list]:
         """
         Execute buy orders. Returns (purchased, skipped, failed).
@@ -962,7 +962,7 @@ class PortfolioManager:
                 _pv   = self._broker.get_portfolio_value()
                 _cash = self._broker.get_cash()
                 _etf_val = sum(
-                    safe_float(_early_holdings.get(e, {}).get("equity"), 0.0) for e in ETFS
+                    safe_float(_early_holdings.get(e, {}).get("equity")) or 0.0 for e in ETFS
                 )
                 _active_pct = (_pv - _cash - _etf_val) / max(_pv, 1.0)
                 active_is_underweight = _active_pct < (1.0 - effective_index_pct)
@@ -1110,7 +1110,9 @@ class PortfolioManager:
             self._risk.get_sector_exposure(holdings, agg_df) if portfolio_value > 0 else {}
         )
 
-        purchased, skipped, failed = [], [], []
+        purchased: list[str] = []
+        skipped: list[str] = []
+        failed: list[str] = []
         whole_share_queue: list[tuple[str, float]] = []
         allow_ws_fallback = RISK_LIMITS["allow_whole_share_fallback"]
         total_value  = candidates["value_metric"].sum()
@@ -1145,16 +1147,16 @@ class PortfolioManager:
             alloc = min(max(_raw_alloc, _min_floor), remaining_stock)
 
             if sentiment_results:
-                result = sentiment_results.get(
+                _sent: dict = sentiment_results.get(
                     symbol,
                     {"action": "HOLD", "sentiment": "neutral", "confidence": 0.0, "reasoning": "No result"},
                 )
                 logger.info(
-                    f"{'='*60}\nBUY {symbol} | action={result.get('action')} "
-                    f"sentiment={result.get('sentiment')} {result['confidence']:.1f}% | "
-                    f"{result['reasoning']}\n{'='*60}"
+                    f"{'='*60}\nBUY {symbol} | action={_sent.get('action')} "
+                    f"sentiment={_sent.get('sentiment')} {_sent['confidence']:.1f}% | "
+                    f"{_sent['reasoning']}\n{'='*60}"
                 )
-                if result.get("action") != "BUY" or result["confidence"] < CONFIDENCE_THRESHOLD:
+                if _sent.get("action") != "BUY" or _sent["confidence"] < CONFIDENCE_THRESHOLD:
                     logger.info(f"Skipping {symbol}")
                     self._log_candidate(
                         symbol, row, "SKIP", False, "sentiment_gate",
@@ -1291,7 +1293,7 @@ class PortfolioManager:
                 return remaining_cash * effective_index_pct
 
             current_etf_equity = sum(
-                safe_float(holdings.get(etf, {}).get("equity"), 0.0)
+                safe_float(holdings.get(etf, {}).get("equity")) or 0.0
                 for etf in ETFS
             )
             target_etf = portfolio_equity * effective_index_pct
@@ -1325,7 +1327,7 @@ class PortfolioManager:
             _start_pv    = self._broker.get_portfolio_value()
             _start_cash  = self._broker.get_cash()
             _start_etf   = sum(
-                safe_float(self._broker.get_holdings().get(etf, {}).get("equity"), 0.0)
+                safe_float(self._broker.get_holdings().get(etf, {}).get("equity")) or 0.0
                 for etf in ETFS
             )
             _start_active = _start_pv - _start_cash - _start_etf
@@ -1345,6 +1347,29 @@ class PortfolioManager:
             )
         except Exception:
             _start_pv = 0.0
+
+        # ── Concentration diagnostic (non-blocking) ───────────────────────────
+        try:
+            from util import CONCENTRATION_LIMIT_PARAMS as _clp
+            if _clp["enabled"]:
+                from portfolio.exposure.cluster_concentration import run_concentration_check
+                _agg_for_conc = read_data_as_pd("agg_data")
+                _hold_for_conc = read_data_as_pd("holdings")
+                _conc = run_concentration_check(
+                    holdings_df=_hold_for_conc,
+                    agg_df=_agg_for_conc,
+                    etfs=ETFS,
+                )
+                if _conc is not None and _conc.has_violations:
+                    logger.warning(
+                        "=== CONCENTRATION WARNINGS ===\n%s",
+                        "\n".join(_conc.summary_lines()),
+                    )
+                    _conc.log_warnings()
+                else:
+                    logger.info("Concentration check: no violations")
+        except Exception as _ce:
+            logger.debug("Concentration check skipped: %s", _ce)
 
         permanently_skipped: set[str] = set()
 
@@ -1437,7 +1462,7 @@ class PortfolioManager:
             _end_pv   = self._broker.get_portfolio_value()
             _end_cash = self._broker.get_cash()
             _end_etf  = sum(
-                safe_float(self._broker.get_holdings().get(etf, {}).get("equity"), 0.0)
+                safe_float(self._broker.get_holdings().get(etf, {}).get("equity")) or 0.0
                 for etf in ETFS
             )
             _end_active = _end_pv - _end_cash - _end_etf

@@ -9,7 +9,6 @@ unstable or overfit parameters.
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 import numpy as np
 
@@ -26,11 +25,11 @@ logger = logging.getLogger(__name__)
 
 
 def run_stability_scan(
-    windows: "list[int] | None" = None,
-    objectives: "list[str] | None" = None,
-    mode: "str | None" = None,
+    windows: list[int] | None = None,
+    objectives: list[str] | None = None,
+    mode: str | None = None,
     starting_capital: float = 10_000.0,
-    output_dir: "str | None" = None,
+    output_dir: str | None = None,
 ) -> dict:
     """
     Run the optimizer across multiple time windows and objectives to assess
@@ -45,8 +44,8 @@ def run_stability_scan(
     """
     try:
         from scipy.optimize import differential_evolution  # noqa: F401
-    except ImportError:
-        raise RuntimeError("scipy is required. Install: pip install scipy")
+    except ImportError as exc:
+        raise RuntimeError("scipy is required. Install: pip install scipy") from exc
 
     from reporting import compute_parameter_stability, generate_all_reports
 
@@ -83,8 +82,8 @@ def run_stability_scan(
 
         train_sl, val_sl = split_price_window(n_days, bp.get("train_pct", 0.70))
 
-        def _opt_sl(arr):
-            return arr[train_sl] if arr is not None else None
+        def _opt_sl(arr, _train_sl=train_sl):
+            return arr[_train_sl] if arr is not None else None
 
         tune_precomp = precomp._replace(
             prices=precomp.prices[train_sl],
@@ -109,7 +108,7 @@ def run_stability_scan(
             print(f"  Optimizing {obj} …", end=" ", flush=True)
             try:
                 params, result = _run_single(
-                    tune_precomp, obj, starting_capital, maxiter, popsize
+                    tune_precomp, obj, starting_capital, maxiter, popsize  # type: ignore[arg-type]
                 )
                 per_obj[obj] = {"params": params, "result": result}
                 print(
@@ -233,9 +232,9 @@ class StabilityAnalyzer:
 
     def scan(
         self,
-        windows: Optional[list[int]] = None,
-        mode: Optional[str] = None,
-        output_dir: Optional[str] = None,
+        windows: list[int] | None = None,
+        mode: str | None = None,
+        output_dir: str | None = None,
     ) -> StabilityReport:
         raw = run_stability_scan(
             windows=windows,

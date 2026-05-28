@@ -2,20 +2,19 @@
 tests/test_risk.py — RiskManager and portfolio sizing tests.
 """
 
-import sys
 import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-import pytest
 import pandas as pd
-
-from util import RISK_LIMITS
+import pytest
 
 # ---------------------------------------------------------------------------
 # RiskManager tests
 # ---------------------------------------------------------------------------
-
 from portfolio.risk import BuyDecision, RiskManager
+from util import RISK_LIMITS
 
 
 class TestRiskManagerCanBuy:

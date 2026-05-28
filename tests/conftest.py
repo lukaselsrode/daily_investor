@@ -5,8 +5,8 @@ All tests use ConfigManager.from_dict() so they never touch the filesystem.
 The singleton is reset between tests via the config_manager fixture.
 """
 
-import sys
 import os
+import sys
 
 # Ensure src/ is on path so both old and new modules are importable
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))

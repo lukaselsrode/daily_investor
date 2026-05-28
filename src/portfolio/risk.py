@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Optional
 
 import pandas as pd
 
@@ -49,11 +48,11 @@ class RiskManager:
         symbol: str,
         allocation: float,
         holdings: dict,
-        agg_df: Optional[pd.DataFrame],
+        agg_df: pd.DataFrame | None,
         portfolio_value: float,
         available_cash: float,
-        sector_exposure: Optional[dict] = None,
-        n_remaining_candidates: Optional[int] = None,
+        sector_exposure: dict | None = None,
+        n_remaining_candidates: int | None = None,
     ) -> BuyDecision:
         max_single    = RISK_LIMITS["max_single_position_pct"]
         max_sector    = RISK_LIMITS["max_sector_pct"]
@@ -143,11 +142,11 @@ class RiskManager:
     def get_sector_exposure(
         self,
         holdings: dict,
-        agg_df: Optional[pd.DataFrame],
+        agg_df: pd.DataFrame | None,
     ) -> dict[str, float]:
         totals: dict[str, float] = {}
         for symbol, data in holdings.items():
-            equity = safe_float(data.get("equity"), 0.0)
+            equity = safe_float(data.get("equity")) or 0.0
             sector = "Unknown"
             if agg_df is not None and not agg_df.empty and "symbol" in agg_df.columns:
                 row = agg_df[agg_df["symbol"] == symbol]

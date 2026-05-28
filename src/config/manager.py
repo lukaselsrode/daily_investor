@@ -17,13 +17,16 @@ from __future__ import annotations
 
 import os
 from functools import cached_property
-from typing import Any, ClassVar, Optional
+from typing import Any, ClassVar
 
 import yaml
 
 from .schema import (
     AnalystConfig,
+    ArchetypeEntryConfig,
+    ArchetypeManagementConfig,
     BacktestConfig,
+    ConcentrationLimitsConfig,
     EtfRiskConfig,
     HarvestConfig,
     MomentumConfig,
@@ -57,7 +60,7 @@ class ConfigManager:
     dataclass instances. Callers never parse YAML directly.
     """
 
-    _instance: ClassVar[Optional["ConfigManager"]] = None
+    _instance: ClassVar[ConfigManager | None] = None
 
     def __init__(
         self,
@@ -66,25 +69,41 @@ class ConfigManager:
         _data: dict | None = None,
         _ratios: dict | None = None,
     ) -> None:
+        self._raw: dict[str, Any]
         if _data is not None:
             self._raw = _data
         else:
             with open(config_path) as f:
-                self._raw: dict[str, Any] = yaml.safe_load(f) or {}
+                self._raw = yaml.safe_load(f) or {}
 
+        self._ratios_raw: dict
         if _ratios is not None:
             self._ratios_raw = _ratios
         else:
             try:
                 with open(ratios_path) as f:
-                    self._ratios_raw: dict = yaml.safe_load(f) or {}
+                    self._ratios_raw = yaml.safe_load(f) or {}
             except FileNotFoundError:
                 self._ratios_raw = {}
+
+        self._warn_deprecated()
+
+    # ── Deprecation warnings ─────────────────────────────────────────────────
+
+    def _warn_deprecated(self) -> None:
+        if "bear_market" in self._raw:
+            import warnings
+            warnings.warn(
+                "Config key 'bear_market' is deprecated — use 'regime' instead. "
+                "The bear_market section is ignored.",
+                DeprecationWarning,
+                stacklevel=3,
+            )
 
     # ── Singleton lifecycle ───────────────────────────────────────────────────
 
     @classmethod
-    def get(cls, *, reload: bool = False) -> "ConfigManager":
+    def get(cls, *, reload: bool = False) -> ConfigManager:
         """Return the singleton, creating it from disk on first call."""
         if cls._instance is None or reload:
             cls._instance = cls()
@@ -95,7 +114,7 @@ class ConfigManager:
         cls,
         data: dict,
         ratios: dict | None = None,
-    ) -> "ConfigManager":
+    ) -> ConfigManager:
         """Create a ConfigManager from a plain dict — for testing."""
         return cls(_data=data, _ratios=ratios or {})
 
@@ -417,6 +436,43 @@ class ConfigManager:
             min_snapshots_for_high_confidence=int(
                 rc.get("min_snapshots_for_high_confidence", 60)
             ),
+        )
+
+    @cached_property
+    def archetype_management(self) -> ArchetypeManagementConfig:
+        am = self._raw.get("archetype_management", {})
+
+        def _entry(key: str) -> ArchetypeEntryConfig:
+            sub = am.get(key, {}) or {}
+            return ArchetypeEntryConfig(
+                trim_profit_threshold=float(sub.get("trim_profit_threshold", 0.20)),
+                harvest_profit_threshold=float(sub.get("harvest_profit_threshold", 0.30)),
+                trailing_stop_pct=float(sub.get("trailing_stop_pct", -0.08)),
+                minimum_hold_days=int(sub.get("minimum_hold_days", 10)),
+                thesis_exit_requires_confirmation=bool(sub.get("thesis_exit_requires_confirmation", False)),
+                allow_deeper_drawdown=bool(sub.get("allow_deeper_drawdown", False)),
+            )
+
+        return ArchetypeManagementConfig(
+            enabled=bool(am.get("enabled", True)),
+            quality_compounder=_entry("quality_compounder"),
+            legacy_turnaround=_entry("legacy_turnaround"),
+            speculative_momentum=_entry("speculative_momentum"),
+            value_recovery=_entry("value_recovery"),
+            defensive_income=_entry("defensive_income"),
+            core_default=_entry("core_default"),
+        )
+
+    @cached_property
+    def concentration_limits(self) -> ConcentrationLimitsConfig:
+        cl = self._raw.get("concentration_limits", {})
+        return ConcentrationLimitsConfig(
+            enabled=bool(cl.get("enabled", True)),
+            max_cluster_weight=float(cl.get("max_cluster_weight", 0.35)),
+            max_sector_weight=float(cl.get("max_sector_weight", 0.40)),
+            cluster_method=str(cl.get("cluster_method", "pca")),
+            n_clusters=int(cl.get("n_clusters", 6)),
+            warn_only=bool(cl.get("warn_only", True)),
         )
 
     # ── Raw access (backward compat / tuner writes) ───────────────────────────

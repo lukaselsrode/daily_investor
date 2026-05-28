@@ -9,8 +9,6 @@ Migrated from:
 
 from __future__ import annotations
 
-from typing import Optional
-
 import numpy as np
 import pandas as pd
 
@@ -18,8 +16,8 @@ from .base import ScoreBreakdown, ScorerBase
 
 
 def compute_momentum_score_v1(
-    position_52w: Optional[float],
-    return_1m: Optional[float] = None,
+    position_52w: float | None,
+    return_1m: float | None = None,
 ) -> float:
     """
     Map 52-week position and 1-month return to a bin-based momentum score.
@@ -168,8 +166,8 @@ class MomentumEngine(ScorerBase):
             symbol=symbol,
             score=score,
             components={
-                "position_52w": features.get("position_52w"),
-                "return_1m": features.get("return_1m"),
+                "position_52w": float(features["position_52w"]) if features.get("position_52w") is not None else 0.0,
+                "return_1m": float(features["return_1m"]) if features.get("return_1m") is not None else 0.0,
             },
             flags={
                 "has_52w_position": features.get("position_52w") is not None,

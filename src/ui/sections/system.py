@@ -1,5 +1,6 @@
 """ui/sections/system.py — System: config, data health, logs, introspection."""
 from __future__ import annotations
+
 import streamlit as st
 
 

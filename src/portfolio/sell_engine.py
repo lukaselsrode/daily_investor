@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import datetime
 import logging
-from typing import Optional
+from typing import Any
 
 import pandas as pd
 
@@ -40,9 +40,9 @@ class SellDecisionEngine:
         self,
         symbol: str,
         holding: dict,
-        metrics_row: Optional[pd.Series],
-        peak_price: Optional[float] = None,
-        archetype_policy: Optional[ArchetypePolicy] = None,
+        metrics_row: pd.Series | None,
+        peak_price: float | None = None,
+        archetype_policy: ArchetypePolicy | None = None,
     ) -> SellDecision:
         # Derive percent_change — Robinhood returns it as a percentage string e.g. "-15.3"
         percent_change: float | None = None
@@ -92,7 +92,7 @@ class SellDecisionEngine:
             take_profit = archetype_policy.harvest_profit_threshold
             min_days    = max(min_days, archetype_policy.minimum_hold_days)
 
-        base = dict(
+        base: Any = dict(
             percent_change=percent_change,
             value_metric=value_metric,
             quality_score=quality_score,
@@ -228,7 +228,7 @@ class SellDecisionEngine:
     def evaluate_holdings(
         self,
         holdings: dict,
-        agg_df: Optional[pd.DataFrame],
+        agg_df: pd.DataFrame | None,
         peak_prices: dict[str, float],
         etfs: set[str],
     ) -> tuple[dict[str, SellDecision], dict[str, SellDecision]]:
@@ -272,9 +272,9 @@ _engine = SellDecisionEngine()
 def evaluate_sell_candidate(
     symbol: str,
     holding: dict,
-    metrics_row: "Optional[pd.Series]",
-    peak_price: "Optional[float]" = None,
-    archetype_policy: "Optional[ArchetypePolicy]" = None,
+    metrics_row: pd.Series | None,
+    peak_price: float | None = None,
+    archetype_policy: ArchetypePolicy | None = None,
 ) -> dict:
     """
     Module-level wrapper around SellDecisionEngine.evaluate() that returns a

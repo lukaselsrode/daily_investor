@@ -14,24 +14,22 @@ Rules under test:
   - policy lookup: config overrides respected
 """
 
-import sys
 import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-import pytest
 import pandas as pd
 
 from portfolio.position_archetypes import (
+    ARCHETYPE_LABELS,
+    ArchetypePolicy,
     classify_archetype,
     classify_archetype_from_scores,
     get_archetype_policy,
-    ArchetypePolicy,
-    ArchetypeResult,
-    ARCHETYPE_LABELS,
 )
 from portfolio.sell_engine import SellDecisionEngine
 from util import SELL_RULES
-
 
 # ---------------------------------------------------------------------------
 # Fixtures: archetypal signal sets

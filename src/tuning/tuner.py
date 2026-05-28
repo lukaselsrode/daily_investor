@@ -9,7 +9,7 @@ is a thin typed wrapper over them.
 from __future__ import annotations
 
 import logging
-from typing import Literal, Optional
+from typing import Literal
 
 import numpy as np
 
@@ -89,21 +89,22 @@ def run_tuner(
     maxiter: int = 25,
     popsize: int = 8,
     mode: str | None = None,
+    scope: str = "overall_strategy",
 ) -> tuple[np.ndarray, SimResult]:
     """Optimize a single objective. Returns (best_params, SimResult)."""
     try:
         from scipy.optimize import differential_evolution  # noqa: F401
-    except ImportError:
-        raise RuntimeError("scipy is required. Install: pip install scipy")
+    except ImportError as exc:
+        raise RuntimeError("scipy is required. Install: pip install scipy") from exc
 
     precomp = load_and_precompute(n_days, mode=mode)
     print(
         f"\nOptimizing {len(PARAM_NAMES)} parameters over {n_days} trading days "
-        f"(objective: {objective}, mode={precomp.mode})."
+        f"(objective: {objective}, mode={precomp.mode}, scope={scope})."
     )
     print(f"scipy differential_evolution: popsize={popsize}, maxiter={maxiter}")
     print("This may take several minutes …\n")
-    return _run_single(precomp, objective, starting_capital, maxiter, popsize)
+    return _run_single(precomp, objective, starting_capital, maxiter, popsize, scope=scope)
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +120,7 @@ def run_auto_tune(
     apply: bool = False,
     force_apply: bool = False,
     llm_review: bool = False,
+    scope: str = "overall_strategy",
 ) -> tuple:
     """
     Run Sharpe + Calmar optimizations, average the results.
@@ -129,8 +131,8 @@ def run_auto_tune(
     """
     try:
         from scipy.optimize import differential_evolution  # noqa: F401
-    except ImportError:
-        raise RuntimeError("scipy is required. Install: pip install scipy")
+    except ImportError as exc:
+        raise RuntimeError("scipy is required. Install: pip install scipy") from exc
 
     bp = BACKTEST_PARAMS
     use_val  = bp.get("use_out_of_sample_validation", True)
@@ -170,11 +172,11 @@ def run_auto_tune(
     )
     print(f"scipy differential_evolution: popsize={popsize}, maxiter={maxiter}")
 
-    print("\n[1/2] Optimizing for Sharpe …\n")
-    sharpe_params, sharpe_result = _run_single(tune_precomp, "sharpe", starting_capital, maxiter, popsize)
+    print(f"\n[1/2] Optimizing for Sharpe (scope={scope}) …\n")
+    sharpe_params, sharpe_result = _run_single(tune_precomp, "sharpe", starting_capital, maxiter, popsize, scope=scope)
 
-    print("\n[2/2] Optimizing for Calmar …\n")
-    calmar_params, calmar_result = _run_single(tune_precomp, "calmar", starting_capital, maxiter, popsize)
+    print(f"\n[2/2] Optimizing for Calmar (scope={scope}) …\n")
+    calmar_params, calmar_result = _run_single(tune_precomp, "calmar", starting_capital, maxiter, popsize, scope=scope)
 
     avg_params = (sharpe_params + calmar_params) / 2.0
     avg_result = run_simulation(
@@ -299,6 +301,7 @@ def run_auto_tune(
                         print(f"  ⚠ {w}")
                 if llm_apply and response.get("apply_candidate_as_is") and response.get("proposed_adjustments"):
                     import yaml as _yaml
+
                     from util import CONFIG_FILE
                     with open(CONFIG_FILE) as f:
                         cfg = _yaml.safe_load(f)
@@ -359,13 +362,15 @@ class ParameterTuner:
         n_days: int,
         objective: str = "sharpe",
         starting_capital: float = 10_000.0,
-        mode: Optional[str] = None,
+        mode: str | None = None,
+        scope: str = "overall_strategy",
     ) -> TuneResult:
         params, sim = run_tuner(
             n_days=n_days,
-            objective=objective,
+            objective=objective,  # type: ignore[arg-type]
             starting_capital=starting_capital,
             mode=mode,
+            scope=scope,
         )
         return TuneResult(
             params=params,
@@ -380,9 +385,10 @@ class ParameterTuner:
         n_days: int,
         apply: bool = False,
         force_apply: bool = False,
-        mode: Optional[str] = None,
+        mode: str | None = None,
         llm_review: bool = False,
         starting_capital: float = 10_000.0,
+        scope: str = "overall_strategy",
     ) -> AutoTuneResult:
         raw = run_auto_tune(
             n_days=n_days,
@@ -391,6 +397,7 @@ class ParameterTuner:
             apply=apply,
             force_apply=force_apply,
             llm_review=llm_review,
+            scope=scope,
         )
         avg_params, sharpe_result, calmar_result, avg_result, sharpe_params, calmar_params = raw
 
@@ -417,7 +424,7 @@ class ParameterTuner:
         else:
             validation_passed = True
 
-        config_written = apply and validation_passed or force_apply
+        config_written = (apply and validation_passed) or force_apply
 
         return AutoTuneResult(
             avg_params=avg_params,

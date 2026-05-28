@@ -17,14 +17,13 @@ from __future__ import annotations
 import datetime
 import logging
 import math
-from typing import Optional
 
 import pandas as pd
 
 logger = logging.getLogger(__name__)
 
 
-def _sf(v) -> Optional[float]:
+def _sf(v) -> float | None:
     try:
         f = float(v)
         return None if math.isnan(f) else f
@@ -37,9 +36,9 @@ def _get_dae_action(
     raw_reason: str,
     holding: dict,
     metrics_row,
-    buy_context_row: Optional[dict],
-    exit_severity: Optional[str],
-    exit_type: Optional[str],
+    buy_context_row: dict | None,
+    exit_severity: str | None,
+    exit_type: str | None,
 ) -> tuple[str, object]:
     """
     Call the Decision Adjustment Engine and return (final_action, decision_output).
@@ -47,8 +46,8 @@ def _get_dae_action(
     """
     try:
         from portfolio.decision_adjustment_engine import (
-            build_decision_input,
             DecisionAdjustmentEngine,
+            build_decision_input,
         )
         inp = build_decision_input(
             raw_action=raw_action,
@@ -67,7 +66,7 @@ def _get_dae_action(
         return raw_action, None
 
 
-def _universe_rank_pct(symbol: str, agg_df) -> Optional[float]:
+def _universe_rank_pct(symbol: str, agg_df) -> float | None:
     """Compute symbol's value_metric percentile in today's universe."""
     if agg_df is None or agg_df.empty or "value_metric" not in agg_df.columns:
         return None
@@ -94,9 +93,9 @@ def log_holding_decision(
     metrics_row,
     raw_decision: dict,
     executed: bool,
-    order_id: Optional[str],
+    order_id: str | None,
     regime: str,
-    buy_context_row: Optional[dict],
+    buy_context_row: dict | None,
     agg_df=None,
     soft_sell_held: bool = False,
     archetype_result=None,
@@ -174,8 +173,8 @@ def _log_holding_inner(
     rank_delta    = (rank_at_buy - rank_now) if (rank_at_buy is not None and rank_now is not None) else None
 
     # ── Holding context ───────────────────────────────────────────────────────
-    holding_days: Optional[int] = None
-    buy_date_str: Optional[str] = None
+    holding_days: int | None = None
+    buy_date_str: str | None = None
     try:
         created = holding.get("created_at") or holding.get("initiation_date")
         if created:
@@ -247,12 +246,12 @@ def _log_holding_inner(
 
 def log_candidate_decision(
     symbol: str,
-    row: "pd.Series",
+    row: pd.Series,
     decision_state: str,
     selected_bool: bool,
     skipped_bool: bool,
     skip_reason: str,
-    sentiment_result_dict: Optional[dict],
+    sentiment_result_dict: dict | None,
     risk_check_passed: bool,
     risk_check_fail_reason: str,
     proposed_allocation: float,

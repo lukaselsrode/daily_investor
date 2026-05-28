@@ -5,16 +5,17 @@ PaperBroker: fully testable in-process.
 RobinhoodBroker: tested via a lightweight mock of robin_stocks so no credentials needed.
 """
 
-import sys
 import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import types
+
 import pytest
 
 from execution.base import OrderResult
 from execution.paper import PaperBroker
-
 
 # ---------------------------------------------------------------------------
 # PaperBroker tests
@@ -239,7 +240,6 @@ class TestRobinhoodBrokerBuyFractional:
         assert "insufficient funds" in res.detail
 
     def test_exception_returns_error_result(self):
-        import types as _types
 
         def boom(symbol, amount):
             raise ConnectionError("network error")

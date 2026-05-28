@@ -16,7 +16,6 @@ Design:
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 import pandas as pd
 import yfinance as yf
@@ -50,9 +49,9 @@ class RegimeDetector:
 
     def detect(self) -> RegimeState:
         """Fetch live SPY + VIX data and classify the current regime."""
-        spy_price: Optional[float] = None
-        spy_ma200: Optional[float] = None
-        vix_val:   Optional[float] = None
+        spy_price: float | None = None
+        spy_ma200: float | None = None
+        vix_val:   float | None = None
 
         try:
             spy_df = yf.download(
@@ -95,9 +94,9 @@ class RegimeDetector:
 
     def detect_from_data(
         self,
-        spy_price: Optional[float],
-        spy_ma200: Optional[float],
-        vix: Optional[float],
+        spy_price: float | None,
+        spy_ma200: float | None,
+        vix: float | None,
     ) -> RegimeState:
         """
         Classify regime from pre-fetched signals.
@@ -109,7 +108,7 @@ class RegimeDetector:
         vix_neut = rc.vix_neutral_threshold      # e.g. 20.0
         notes: list[str] = []
 
-        spy_vs_200dma: Optional[float] = None
+        spy_vs_200dma: float | None = None
         spy_above_200 = False
         if spy_price is not None and spy_ma200 is not None and spy_ma200 > 0:
             spy_vs_200dma = round((spy_price / spy_ma200) - 1.0, 4)
@@ -157,7 +156,7 @@ class RegimeDetector:
             confidence = 0.50
             notes.append("Insufficient data — defaulting to neutral")
 
-        prev: Optional[RegimeLabel] = (
+        prev: RegimeLabel | None = (
             self._history[-1].regime if self._history else None
         )
 

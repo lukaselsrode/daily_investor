@@ -6,17 +6,16 @@ Import these helpers instead of repeating display patterns in every component.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import pandas as pd
 import streamlit as st
-
 
 # ---------------------------------------------------------------------------
 # Metric display
 # ---------------------------------------------------------------------------
 
-def metric_row(metrics: list[tuple[str, Any, Optional[str]]], cols: int = 4) -> None:
+def metric_row(metrics: list[tuple[str, Any, str | None]], cols: int = 4) -> None:
     """Render a row of st.metric cards. Each tuple: (label, value, delta)."""
     chunks = [metrics[i : i + cols] for i in range(0, len(metrics), cols)]
     for chunk in chunks:
@@ -172,7 +171,7 @@ def section(title: str, caption: str = "") -> None:
 # Freshness label
 # ---------------------------------------------------------------------------
 
-def freshness_label(path: Optional[Path]) -> str:
+def freshness_label(path: Path | None) -> str:
     """Return a human-readable freshness string from a dated filename."""
     if path is None:
         return "no data"

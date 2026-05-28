@@ -28,7 +28,6 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import pandas as pd
 
@@ -59,11 +58,11 @@ class CalibrationResult:
     suggested_review_confidence_threshold: float  # default 0.50
 
     # Raw DataFrames for UI display
-    by_state: Optional[pd.DataFrame] = None         # accuracy broken down by state
-    by_exit_driver: Optional[pd.DataFrame] = None   # returns by primary_exit_driver
-    by_regime: Optional[pd.DataFrame] = None        # returns by regime
-    confusion_matrix: Optional[pd.DataFrame] = None
-    calibration_curve: Optional[pd.DataFrame] = None  # confidence vs actual accuracy
+    by_state: pd.DataFrame | None = None         # accuracy broken down by state
+    by_exit_driver: pd.DataFrame | None = None   # returns by primary_exit_driver
+    by_regime: pd.DataFrame | None = None        # returns by regime
+    confusion_matrix: pd.DataFrame | None = None
+    calibration_curve: pd.DataFrame | None = None  # confidence vs actual accuracy
 
     @property
     def is_reliable(self) -> bool:
@@ -86,7 +85,7 @@ class CalibrationResult:
 
 def _data_dir() -> Path:
     try:
-        from ui.utils import DATA_DIR
+        from core.paths import DATA_DIR
         return DATA_DIR
     except Exception:
         return Path(__file__).parent.parent.parent / "data"
@@ -276,7 +275,7 @@ def _suggest_review_confidence_threshold(review_precision: float) -> float:
 # Confusion matrix and calibration curve
 # ---------------------------------------------------------------------------
 
-def _compute_by_group(df: pd.DataFrame, group_col: str) -> Optional[pd.DataFrame]:
+def _compute_by_group(df: pd.DataFrame, group_col: str) -> pd.DataFrame | None:
     """
     Return mean 30d return and % positive/negative broken down by group_col.
     Used for by_exit_driver and by_regime reports.
@@ -304,7 +303,7 @@ def _compute_by_group(df: pd.DataFrame, group_col: str) -> Optional[pd.DataFrame
         return None
 
 
-def _compute_confusion_matrix(df: pd.DataFrame) -> Optional[pd.DataFrame]:
+def _compute_confusion_matrix(df: pd.DataFrame) -> pd.DataFrame | None:
     """
     Predicted state vs actual outcome (positive = stock rose, negative = fell).
     Simple 2-class: "up" (>0) vs "down" (≤0) in 30d.
@@ -322,7 +321,7 @@ def _compute_confusion_matrix(df: pd.DataFrame) -> Optional[pd.DataFrame]:
         return None
 
 
-def _compute_calibration_curve(df: pd.DataFrame) -> Optional[pd.DataFrame]:
+def _compute_calibration_curve(df: pd.DataFrame) -> pd.DataFrame | None:
     """
     Bin decisions by confidence level (HIGH/MEDIUM/LOW) and compute
     mean realized 30d return per bin.

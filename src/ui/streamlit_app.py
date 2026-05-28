@@ -13,7 +13,7 @@ _SRC = Path(__file__).resolve().parent.parent
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-import streamlit as st  # noqa: E402
+import streamlit as st
 
 st.set_page_config(
     page_title="Daily Investor",
@@ -22,8 +22,9 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-from ui.layout.sidebar import render_sidebar  # noqa: E402
-from ui.sections import operations, portfolio, research, validation, system as system_page  # noqa: E402
+from ui.layout.sidebar import render_sidebar
+from ui.sections import operations, portfolio, research, validation
+from ui.sections import system as system_page
 
 _SECTION_MAP = {
     "operations": operations.render,

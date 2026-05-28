@@ -9,19 +9,19 @@ Verifies that:
   5. PBR.A-style symbol edge-cases do not crash buy logic.
 """
 
-import sys
 import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-import pytest
 import pandas as pd
+import pytest
 
 from execution.paper import PaperBroker
+from portfolio.harvest import HarvestManager
 from portfolio.manager import PortfolioManager
 from portfolio.risk import RiskManager
-from portfolio.harvest import HarvestManager
-from util import INDEX_PCT, ETFS, RISK_LIMITS
-
+from util import ETFS, INDEX_PCT, RISK_LIMITS
 
 # ---------------------------------------------------------------------------
 # Helpers

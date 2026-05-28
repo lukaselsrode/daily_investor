@@ -27,6 +27,17 @@ from util import (
 _MIN_TRADES_HARD = 20
 _MIN_TRADES_SOFT = 40
 
+# Params unconditionally frozen when scope == "active_sleeve_compounding".
+# These control passive/index allocation and must not be tuned by the active optimizer.
+ACTIVE_SLEEVE_FROZEN: frozenset[str] = frozenset({
+    "index_pct",
+    "risk.min_index_pct",
+    "regime.defensive.index_pct_override",
+    "regime.neutral.index_pct_override",
+    "harvest.harvest_to_etfs_pct",
+    "exit_decision.trim_to_etfs_pct",
+})
+
 PARAM_NAMES: list[str] = [
     "sw_value",
     "sw_quality",
@@ -82,7 +93,7 @@ _CONFIG_PATH_TO_PARAM_IDX: dict[str, int] = {
 }
 
 
-def _effective_bounds() -> list[tuple[float, float]]:
+def _effective_bounds(scope: str = "overall_strategy") -> list[tuple[float, float]]:
     bounds = list(BOUNDS)
     for path, rng in TUNING_PARAMS.get("parameter_bounds", {}).items():
         idx = _CONFIG_PATH_TO_PARAM_IDX.get(path)
@@ -94,12 +105,18 @@ def _effective_bounds() -> list[tuple[float, float]]:
     return bounds
 
 
-def _get_active_indices() -> list[int]:
+def _get_active_indices(scope: str = "overall_strategy") -> list[int]:
     frozen = {
         _CONFIG_PATH_TO_PARAM_IDX[p]
         for p in TUNING_PARAMS.get("frozen_parameters", [])
         if p in _CONFIG_PATH_TO_PARAM_IDX
     }
+    if scope == "active_sleeve_compounding":
+        frozen |= {
+            _CONFIG_PATH_TO_PARAM_IDX[p]
+            for p in ACTIVE_SLEEVE_FROZEN
+            if p in _CONFIG_PATH_TO_PARAM_IDX
+        }
     return [i for i in range(len(PARAM_NAMES)) if i not in frozen]
 
 

@@ -8,11 +8,10 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Optional
 
 import numpy as np
 
-from .attribution import _ensure_dir, _date_str, _try_matplotlib
+from .attribution import _date_str, _ensure_dir, _try_matplotlib
 
 logger = logging.getLogger(__name__)
 
@@ -217,7 +216,7 @@ class PlotManager:
         window_results: list[dict],
         param_names: list[str],
         output_dir: str,
-        date: Optional[str] = None,
+        date: str | None = None,
     ) -> str:
         return generate_param_heatmap(window_results, param_names, output_dir, date)
 
@@ -226,7 +225,7 @@ class PlotManager:
         window_results: list[dict],
         param_names: list[str],
         output_dir: str,
-        date: Optional[str] = None,
+        date: str | None = None,
     ) -> str:
         return generate_objective_heatmap(window_results, param_names, output_dir, date)
 
@@ -234,6 +233,6 @@ class PlotManager:
         self,
         window_results: list[dict],
         output_dir: str,
-        date: Optional[str] = None,
+        date: str | None = None,
     ) -> str:
         return generate_validation_heatmap(window_results, output_dir, date)

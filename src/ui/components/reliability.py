@@ -4,11 +4,10 @@ ui/components/reliability.py — Data quality and reliability diagnostics.
 
 from __future__ import annotations
 
-import streamlit as st
 import pandas as pd
+import streamlit as st
 
-from ui.utils import data_date, load_latest_csv, no_data_msg, fmt_bin_index
-
+from ui.utils import data_date, fmt_bin_index, load_latest_csv, no_data_msg
 
 _SCORE_COLS    = ["value_metric", "value_score", "quality_score", "income_score", "momentum_score"]
 _FUND_COLS     = ["pe_ratio", "pb_ratio", "dividend_yield", "volume"]

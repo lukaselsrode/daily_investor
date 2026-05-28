@@ -14,8 +14,8 @@ SAFE: read-only. Never writes factor scores, weights, or config.
 
 from __future__ import annotations
 
-import streamlit as st
 import pandas as pd
+import streamlit as st
 
 _ARCHETYPE_LABELS = {
     "quality_compounder":   ("Quality Compounder",   "#1e88e5"),

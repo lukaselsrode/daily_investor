@@ -15,10 +15,16 @@ import logging
 
 import yaml
 
-from core.paths import ROOT_DIR, CFG_DIRECTORY, DATA_DIRECTORY, CONFIG_FILE, RATIOS_FILE  # noqa: F401
-from core.utils import safe_float, run_async  # noqa: F401
-from data.cache import store_data_as_csv, read_data_as_pd  # noqa: F401
-from data.valuation import get_investment_ratios, update_industry_valuations  # noqa: F401
+from core.paths import (
+    CFG_DIRECTORY,
+    CONFIG_FILE,
+    DATA_DIRECTORY,
+    RATIOS_FILE,
+    ROOT_DIR,
+)
+from core.utils import run_async, safe_float
+from data.cache import read_data_as_pd, store_data_as_csv
+from data.valuation import get_investment_ratios, update_industry_valuations
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +33,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _load_config() -> dict:
-    with open(CONFIG_FILE, "r") as f:
+    with open(CONFIG_FILE) as f:
         return yaml.safe_load(f)
 
 
@@ -317,6 +323,16 @@ CONTRARIAN_PENALTY_PARAMS: dict = {
     "archetype_bias":         str(_cp.get("archetype_bias", "speculative_momentum")),
 }
 
+_cl = _app.get("concentration_limits", {})
+CONCENTRATION_LIMIT_PARAMS: dict = {
+    "enabled":            bool(_cl.get("enabled", True)),
+    "max_cluster_weight": float(_cl.get("max_cluster_weight", 0.35)),
+    "max_sector_weight":  float(_cl.get("max_sector_weight", 0.40)),
+    "cluster_method":     str(_cl.get("cluster_method", "pca")),
+    "n_clusters":         int(_cl.get("n_clusters", 6)),
+    "warn_only":          bool(_cl.get("warn_only", True)),
+}
+
 # ---------------------------------------------------------------------------
 # Momentum v2 parameters
 # ---------------------------------------------------------------------------
@@ -526,5 +542,8 @@ EXIT_DECISION_PARAMS: dict = {
     "trim_to_etfs_pct":            float(_ed.get("trim_to_etfs_pct",           0.85)),
     "trim_profit_threshold":       float(_ed.get("trim_profit_threshold",      0.15)),
     "harvest_profit_threshold":    float(_ed.get("harvest_profit_threshold",   0.25)),
+    "harvest_fraction":            float(_ed.get("harvest_fraction",           0.40)),
+    "review_score_below":          float(_ed.get("review_score_below",         0.45)),
+    "positive_pnl_exit_downgrade": bool(_ed.get("positive_pnl_exit_downgrade", True)),
 }
 

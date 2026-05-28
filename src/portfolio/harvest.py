@@ -23,7 +23,7 @@ class HarvestManager:
     def __init__(self, config=None) -> None:
         self._cfg = config
 
-    def route_proceeds(self, amount: float, broker: "BrokerAdapter") -> None:
+    def route_proceeds(self, amount: float, broker: BrokerAdapter) -> None:
         """Reinvest take-profit proceeds into harvest ETFs.
 
         Only `harvest_to_etfs_pct` of proceeds is deployed to ETFs; the remainder

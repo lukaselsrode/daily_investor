@@ -151,7 +151,7 @@ def _frozen_params(cfg: dict) -> str:
 # ---------------------------------------------------------------------------
 
 def _build_section_df(
-    section_name: str,
+    _section_name: str,
     configs: list[tuple[str, dict]],
     extractor,
     as_pct_keys: set[str] | None = None,

@@ -2,16 +2,17 @@
 tests/test_sell_engine.py — SellDecisionEngine tests (Phase 4, no main.py dependency).
 """
 
-import sys
 import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-import pytest
 import pandas as pd
+import pytest
 
 from core.types import SellDecision
 from portfolio.sell_engine import SellDecisionEngine
-from util import SELL_RULES, METRIC_THRESHOLD
+from util import METRIC_THRESHOLD, SELL_RULES
 
 
 def _engine() -> SellDecisionEngine:

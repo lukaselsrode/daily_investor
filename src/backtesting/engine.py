@@ -10,7 +10,6 @@ BacktestEngine is intentionally thin — all heavy numerics live in backtest.py.
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 import numpy as np
 
@@ -37,7 +36,7 @@ class BacktestEngine:
             write_config(result.report)
     """
 
-    def __init__(self, config: Optional[dict] = None) -> None:
+    def __init__(self, config: dict | None = None) -> None:
         self._cfg = config
         self._validator = WalkForwardValidator(config)
 
@@ -48,11 +47,11 @@ class BacktestEngine:
     def simulate(
         self,
         precomp: PrecomputedData,
-        params: Optional["np.ndarray"] = None,
+        params: np.ndarray | None = None,
         **kwargs,
     ) -> SimResult:
         """Run one simulation pass. Returns a raw SimResult."""
-        return run_simulation(precomp, params, **kwargs)
+        return run_simulation(precomp, params, **kwargs)  # type: ignore[arg-type]
 
     # ------------------------------------------------------------------
     # Mid-level: train + optional validation report
@@ -61,9 +60,9 @@ class BacktestEngine:
     def run_report(
         self,
         precomp: PrecomputedData,
-        params: "np.ndarray",
+        params: np.ndarray,
         train_slice: slice,
-        val_slice: Optional[slice] = None,
+        val_slice: slice | None = None,
     ) -> BacktestReport:
         """
         Run train (and optionally validation) simulation on an existing
@@ -78,10 +77,14 @@ class BacktestEngine:
     def run(
         self,
         n_days: int = 90,
-        params: Optional["np.ndarray"] = None,
-        mode: Optional[str] = None,
+        params: np.ndarray | None = None,
+        mode: str | None = None,
         train_pct: float = 0.70,
         with_validation: bool = True,
+        save_artifacts: bool = False,
+        run_label: str | None = None,
+        cluster_tracking: bool = False,
+        scope: str = "overall_strategy",
     ) -> BacktestResult:
         """
         Load data, split window, run train + optional validation, return BacktestResult.
@@ -92,6 +95,8 @@ class BacktestEngine:
             mode:            Universe selection mode (see backtest.select_backtest_universe).
             train_pct:       Fraction of window used for training (rest = validation).
             with_validation: Whether to run the out-of-sample validation pass.
+            save_artifacts:  If True, persist CSV/JSON artifacts to reports/backtests/.
+            run_label:       Optional human-readable tag appended to artifact file names.
         """
         precomp  = load_and_precompute(n_days, mode=mode)
         actual_n = precomp.prices.shape[0]
@@ -99,7 +104,16 @@ class BacktestEngine:
         train_slice, val_slice = split_price_window(actual_n, train_pct)
         effective_val = val_slice if with_validation else None
 
-        report = run_backtest_report(precomp, params, train_slice, effective_val)
+        report = run_backtest_report(precomp, params, train_slice, effective_val,
+                                     cluster_tracking=cluster_tracking, scope=scope)
+
+        if save_artifacts:
+            try:
+                from .artifacts import save_backtest_result
+                saved_paths = save_backtest_result(report, run_label=run_label, scope=scope)
+                logger.info("Backtest artifacts saved: %s", list(saved_paths.values()))
+            except Exception as exc:
+                logger.warning("Could not save backtest artifacts: %s", exc)
 
         return BacktestResult(
             report=report,
@@ -114,10 +128,10 @@ class BacktestEngine:
     def run_walk_forward(
         self,
         n_days: int = 90,
-        params: Optional["np.ndarray"] = None,
-        mode: Optional[str] = None,
+        params: np.ndarray | None = None,
+        mode: str | None = None,
         train_pct: float = 0.70,
-        backtest_cfg: Optional[dict] = None,
+        backtest_cfg: dict | None = None,
         apply_flag: bool = False,
         force_apply: bool = False,
     ) -> ValidationResult:
@@ -133,7 +147,7 @@ class BacktestEngine:
 
         return self._validator.split_and_validate(
             precomp=precomp,
-            params=params,
+            params=params,  # type: ignore[arg-type]
             n_days=actual_n,
             train_pct=train_pct,
             backtest_cfg=backtest_cfg,

@@ -1,5 +1,6 @@
 """ui/layout/sidebar.py — Section navigation and sidebar status panel."""
 from __future__ import annotations
+
 import streamlit as st
 
 SECTIONS = [
@@ -35,7 +36,7 @@ def render_sidebar() -> str:
 
 def _render_status_panel() -> None:
     """Lightweight status strip — no heavy computation."""
-    from ui.utils import load_latest_csv, load_config_raw, latest_csv_path, DATA_DIR
+    from ui.utils import DATA_DIR, latest_csv_path, load_config_raw, load_latest_csv
 
     # Data freshness
     snap_path = latest_csv_path("agg_data")

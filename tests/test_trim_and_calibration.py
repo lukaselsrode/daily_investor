@@ -15,20 +15,18 @@ Covers:
   8. sleeve_tracker: get_allocation_state correctly separates ETF vs active equity
 """
 
-import sys
 import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-import pytest
-import pandas as pd
-import tempfile
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from core.types import SellDecision
-from portfolio.sell_engine import SellDecisionEngine
-from util import SELL_RULES, METRIC_THRESHOLD, EXIT_DECISION_PARAMS, ETFS
+import pandas as pd
+import pytest
 
+from portfolio.sell_engine import SellDecisionEngine
+from util import ETFS, EXIT_DECISION_PARAMS, METRIC_THRESHOLD, SELL_RULES
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -272,8 +270,7 @@ class TestCalibrationSummary:
         assert result["harvest_regret_rate"] is None
 
     def test_no_resolved_outcomes_returns_none(self):
-        from portfolio.outcome_tracker import get_calibration_summary
-        from portfolio.outcome_tracker import _SCHEMA
+        from portfolio.outcome_tracker import _SCHEMA, get_calibration_summary
         df = pd.DataFrame([{col: None for col in _SCHEMA}])
         result = get_calibration_summary(df)
         assert result["premature_exit_rate"] is None

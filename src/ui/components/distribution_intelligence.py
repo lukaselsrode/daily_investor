@@ -17,11 +17,11 @@ Subtabs:
 
 from __future__ import annotations
 
-import streamlit as st
-import pandas as pd
 import numpy as np
+import pandas as pd
+import streamlit as st
 
-from ui.utils import data_date, load_latest_csv, no_data_msg, fmt_bin_index
+from ui.utils import data_date, fmt_bin_index, load_latest_csv, no_data_msg
 
 _SCORE_COLS = ["value_score", "quality_score", "income_score", "momentum_score", "value_metric"]
 _RETURN_COLS = ["return_1m", "return_3m", "return_6m"]
@@ -44,6 +44,7 @@ _FRIENDLY = {
 @st.cache_data(ttl=600)
 def _get_analyzer(_df_hash, df_json: str):
     import io
+
     from research.distribution_regime_analysis import DistributionAnalyzer
     df = pd.read_json(io.StringIO(df_json))
     return DistributionAnalyzer(df)
@@ -52,6 +53,7 @@ def _get_analyzer(_df_hash, df_json: str):
 @st.cache_data(ttl=600)
 def _cached_bimodality(df_json: str, score_col: str):
     import io
+
     from research.distribution_regime_analysis import DistributionAnalyzer
     df = pd.read_json(io.StringIO(df_json))
     return DistributionAnalyzer(df).test_bimodality(score_col)
@@ -60,6 +62,7 @@ def _cached_bimodality(df_json: str, score_col: str):
 @st.cache_data(ttl=600)
 def _cached_tail_buckets(df_json: str, score_col: str, return_col: str):
     import io
+
     from research.distribution_regime_analysis import DistributionAnalyzer
     df = pd.read_json(io.StringIO(df_json))
     ana = DistributionAnalyzer(df)
@@ -70,6 +73,7 @@ def _cached_tail_buckets(df_json: str, score_col: str, return_col: str):
 @st.cache_data(ttl=600)
 def _cached_monotonicity(df_json: str, score_col: str, return_col: str, n_deciles: int):
     import io
+
     from research.distribution_regime_analysis import DistributionAnalyzer
     df = pd.read_json(io.StringIO(df_json))
     return DistributionAnalyzer(df).compute_monotonicity(score_col, return_col, n_deciles)
@@ -78,6 +82,7 @@ def _cached_monotonicity(df_json: str, score_col: str, return_col: str, n_decile
 @st.cache_data(ttl=600)
 def _cached_local_ic(df_json: str, score_col: str, return_col: str, window_pct: float, step_pct: float):
     import io
+
     from research.distribution_regime_analysis import DistributionAnalyzer
     df = pd.read_json(io.StringIO(df_json))
     return DistributionAnalyzer(df).compute_local_ic(score_col, return_col, window_pct, step_pct)
@@ -87,6 +92,7 @@ def _cached_local_ic(df_json: str, score_col: str, return_col: str, window_pct: 
 def _cached_clusters(df_json: str, features_key: str, features: list, n_clusters: int,
                      method: str, return_col: str):
     import io
+
     from research.distribution_regime_analysis import DistributionAnalyzer
     df = pd.read_json(io.StringIO(df_json))
     return DistributionAnalyzer(df).compute_clusters(features, n_clusters, method, return_col)
@@ -95,6 +101,7 @@ def _cached_clusters(df_json: str, features_key: str, features: list, n_clusters
 @st.cache_data(ttl=600)
 def _cached_conditional_ic(df_json: str, primary: str, cond: str, return_col: str, n_q: int):
     import io
+
     from research.distribution_regime_analysis import DistributionAnalyzer
     df = pd.read_json(io.StringIO(df_json))
     return DistributionAnalyzer(df).compute_conditional_ic(primary, cond, return_col, n_q)
@@ -103,6 +110,7 @@ def _cached_conditional_ic(df_json: str, primary: str, cond: str, return_col: st
 @st.cache_data(ttl=600)
 def _cached_interaction_matrix(df_json: str, score_cols_key: str, score_cols: list, return_col: str):
     import io
+
     from research.distribution_regime_analysis import DistributionAnalyzer
     df = pd.read_json(io.StringIO(df_json))
     return DistributionAnalyzer(df).compute_interaction_matrix(score_cols, return_col)
@@ -111,6 +119,7 @@ def _cached_interaction_matrix(df_json: str, score_cols_key: str, score_cols: li
 @st.cache_data(ttl=600)
 def _cached_threshold_sim(df_json: str, score_col: str, return_col: str):
     import io
+
     from research.distribution_regime_analysis import DistributionAnalyzer
     df = pd.read_json(io.StringIO(df_json))
     return DistributionAnalyzer(df).simulate_threshold_modes(score_col, return_col)

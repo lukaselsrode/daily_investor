@@ -14,10 +14,8 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Optional
 
 import pandas as pd
-
 
 # ---------------------------------------------------------------------------
 # ETF role map
@@ -61,7 +59,7 @@ def etf_role(symbol: str) -> str:
 # Data helpers
 # ---------------------------------------------------------------------------
 
-def _safe_float(val) -> Optional[float]:
+def _safe_float(val) -> float | None:
     try:
         f = float(val)
         return None if math.isnan(f) else f
@@ -69,11 +67,11 @@ def _safe_float(val) -> Optional[float]:
         return None
 
 
-def _pct(val: Optional[float]) -> str:
+def _pct(val: float | None) -> str:
     return f"{val:+.1%}" if val is not None else "—"
 
 
-def _score(val: Optional[float]) -> str:
+def _score(val: float | None) -> str:
     return f"{val:.3f}" if val is not None else "—"
 
 
@@ -95,13 +93,13 @@ class PositionRationale:
     exit_reason: str                         # non-empty for EXIT/REVIEW
     factor_contributions: dict[str, float]   # {factor_name: contribution}
     thesis_intact: bool
-    score_at_buy: Optional[float]
-    score_now: Optional[float]
-    score_delta: Optional[float]
-    rank_pct_at_buy: Optional[float]
-    rank_pct_now: Optional[float]
-    exit_analysis: Optional[object] = None   # ExitAnalysis (populated for EXIT/WATCH/REVIEW)
-    decision_output: Optional[object] = None # DecisionOutput from DecisionAdjustmentEngine
+    score_at_buy: float | None
+    score_now: float | None
+    score_delta: float | None
+    rank_pct_at_buy: float | None
+    rank_pct_now: float | None
+    exit_analysis: object | None = None   # ExitAnalysis (populated for EXIT/WATCH/REVIEW)
+    decision_output: object | None = None # DecisionOutput from DecisionAdjustmentEngine
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +114,7 @@ def _pi_config() -> dict:
     except Exception:
         pass
     try:
-        from ui.utils import load_config_raw
+        from core.utils import load_config_raw
         return load_config_raw().get("portfolio_intelligence", {})
     except Exception:
         return {}
@@ -146,10 +144,10 @@ def _metric_threshold() -> float:
 
 
 def _should_downgrade_to_watch(
-    reliability: Optional[float],
-    quality_score: Optional[float],
-    momentum_score: Optional[float],
-    pct_change: Optional[float],
+    reliability: float | None,
+    quality_score: float | None,
+    momentum_score: float | None,
+    pct_change: float | None,
 ) -> bool:
     """
     Return True if a soft (thesis-based) exit should be downgraded to WATCH.
@@ -181,10 +179,10 @@ def _should_downgrade_to_watch(
 def classify_state(
     symbol: str,
     holding: dict,
-    metrics: Optional[pd.Series],
-    buy_context: Optional[dict],
-    peak_price: Optional[float],
-    universe_rank_pct: Optional[float] = None,
+    metrics: pd.Series | None,
+    buy_context: dict | None,
+    peak_price: float | None,
+    universe_rank_pct: float | None = None,
 ) -> tuple[str, str]:
     """
     Returns (state, reason) where state ∈ {BUY, HOLD, WATCH, EXIT}.
@@ -216,7 +214,7 @@ def classify_state(
 
     # Holding days
     import datetime
-    days_held: Optional[int] = None
+    days_held: int | None = None
     if buy_context:
         buy_date_str = str(buy_context.get("buy_date", "")).strip()
         try:
@@ -305,7 +303,7 @@ def classify_state(
 # Factor decomposition
 # ---------------------------------------------------------------------------
 
-def factor_contributions(metrics: Optional[pd.Series]) -> dict[str, float]:
+def factor_contributions(metrics: pd.Series | None) -> dict[str, float]:
     """Return {factor_label: contribution} from current agg_data row."""
     if metrics is None:
         return {}
@@ -347,10 +345,10 @@ def _top_negative(contribs: dict[str, float]) -> str:
 # ---------------------------------------------------------------------------
 
 def build_risk_flags(
-    metrics: Optional[pd.Series],
+    metrics: pd.Series | None,
     holding: dict,
-    pct_change: Optional[float],
-    peak_price: Optional[float],
+    pct_change: float | None,
+    peak_price: float | None,
 ) -> list[str]:
     flags: list[str] = []
     sr = _sell_rules()
@@ -396,9 +394,9 @@ def build_risk_flags(
 def _build_prose(
     symbol: str,
     state: str,
-    metrics: Optional[pd.Series],
-    buy_context: Optional[dict],
-    rank_pct: Optional[float],
+    metrics: pd.Series | None,
+    buy_context: dict | None,
+    rank_pct: float | None,
     contribs: dict[str, float],
     risk_flags: list[str],
 ) -> str:
@@ -467,10 +465,10 @@ def build_position_rationale(
     symbol: str,
     sleeve: str,
     holding: dict,
-    metrics: Optional[pd.Series],
-    buy_context: Optional[dict],
-    peak_price: Optional[float],
-    universe_rank_pct: Optional[float],
+    metrics: pd.Series | None,
+    buy_context: dict | None,
+    peak_price: float | None,
+    universe_rank_pct: float | None,
 ) -> PositionRationale:
     """
     Build a complete PositionRationale for one holding.

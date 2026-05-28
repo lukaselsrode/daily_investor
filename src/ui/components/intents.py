@@ -6,13 +6,12 @@ if available, or shows instructions for generating one.
 
 from __future__ import annotations
 
+import sys
 
 import pandas as pd
 import streamlit as st
 
-from ui.utils import DATA_DIR, MODES, _SRC_DIR
-import sys
-
+from ui.utils import _SRC_DIR, DATA_DIR, MODES
 
 _INTENT_COLS = [
     "symbol", "side", "sleeve", "amount", "quantity",

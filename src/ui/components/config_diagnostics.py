@@ -45,6 +45,18 @@ class Finding:
 def audit_config(cfg: dict) -> list[Finding]:
     findings: list[Finding] = []
 
+    # ── 0. Deprecated keys ────────────────────────────────────────────────
+    if "bear_market" in cfg:
+        findings.append(Finding(
+            category="Deprecated keys",
+            field="bear_market",
+            current_value=str(cfg["bear_market"]),
+            problem="The 'bear_market' section is deprecated and ignored at runtime. "
+                    "All regime detection now uses the 'regime' section.",
+            severity="LOW",
+            recommendation="Remove bear_market from config.yaml to reduce confusion.",
+        ))
+
     index_pct     = float(cfg.get("index_pct", 0.85))
     sw            = cfg.get("score_weights", {})
     sw_income     = float(sw.get("income", 0.15))

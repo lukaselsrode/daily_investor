@@ -1,6 +1,6 @@
 """portfolio — Risk management, sell decisions, harvest."""
+from .harvest import HarvestManager
 from .risk import RiskManager
 from .sell_engine import SellDecisionEngine
-from .harvest import HarvestManager
 
-__all__ = ["RiskManager", "SellDecisionEngine", "HarvestManager"]
+__all__ = ["HarvestManager", "RiskManager", "SellDecisionEngine"]

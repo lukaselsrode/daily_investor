@@ -6,19 +6,20 @@ covered in src/tests.py. This file tests the new typed wrappers only, using
 patch.object to avoid running scipy.optimize.
 """
 
-import sys
 import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-import pytest
-import numpy as np
 from unittest.mock import MagicMock, patch
+
+import numpy as np
+import pytest
 
 from backtesting.types import SimResult
 from tuning.results import AutoTuneResult, StabilityReport, TuneResult
-from tuning.tuner import ParameterTuner
 from tuning.stability import StabilityAnalyzer
-
+from tuning.tuner import ParameterTuner
 
 # ---------------------------------------------------------------------------
 # Helpers

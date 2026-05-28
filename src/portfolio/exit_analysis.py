@@ -14,10 +14,8 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Optional
 
 import pandas as pd
-
 
 # ---------------------------------------------------------------------------
 # Driver labels (display + weight key)
@@ -64,9 +62,9 @@ class ExitAnalysis:
 class PrematureExitFlag:
     symbol: str
     thesis_intact_score: float
-    quality_score: Optional[float]
-    momentum_score: Optional[float]
-    pct_change: Optional[float]
+    quality_score: float | None
+    momentum_score: float | None
+    pct_change: float | None
     primary_exit_driver: str
     reason: str
 
@@ -92,13 +90,13 @@ def _sell_rules() -> dict:
 
 def _pi_config() -> dict:
     try:
-        from ui.utils import load_config_raw
+        from core.utils import load_config_raw
         return load_config_raw().get("portfolio_intelligence", {})
     except Exception:
         return {}
 
 
-def _safe_float(val) -> Optional[float]:
+def _safe_float(val) -> float | None:
     try:
         f = float(val)
         return None if math.isnan(f) else f
@@ -111,16 +109,16 @@ def _safe_float(val) -> Optional[float]:
 # ---------------------------------------------------------------------------
 
 def _compute_raw_weights(
-    pct_change: Optional[float],
-    current_price: Optional[float],
-    peak_price: Optional[float],
-    momentum_score: Optional[float],
-    quality_score: Optional[float],
-    value_metric: Optional[float],
-    score_at_buy: Optional[float],
-    rank_pct_now: Optional[float],
-    rank_pct_at_buy: Optional[float],
-    reliability_score: Optional[float],
+    pct_change: float | None,
+    current_price: float | None,
+    peak_price: float | None,
+    momentum_score: float | None,
+    quality_score: float | None,
+    value_metric: float | None,
+    score_at_buy: float | None,
+    rank_pct_now: float | None,
+    rank_pct_at_buy: float | None,
+    reliability_score: float | None,
     yield_trap: bool,
     sr: dict,
 ) -> dict[str, float]:
@@ -210,10 +208,10 @@ def _top_two(weights: dict[str, float]) -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 
 def _thesis_intact_score(
-    quality_score: Optional[float],
-    momentum_score: Optional[float],
-    pct_change: Optional[float],
-    rank_pct_now: Optional[float],
+    quality_score: float | None,
+    momentum_score: float | None,
+    pct_change: float | None,
+    rank_pct_now: float | None,
 ) -> float:
     """
     0–1 score measuring how intact the original thesis looks despite the exit signal.
@@ -250,9 +248,9 @@ def _detect_premature(
     symbol: str,
     thesis_score: float,
     weights: dict[str, float],
-    quality_score: Optional[float],
-    momentum_score: Optional[float],
-    pct_change: Optional[float],
+    quality_score: float | None,
+    momentum_score: float | None,
+    pct_change: float | None,
     primary_driver: str,
 ) -> tuple[bool, str]:
     """
@@ -364,10 +362,10 @@ def _confidence(
 def compute_exit_analysis(
     symbol: str,
     holding: dict,
-    metrics: Optional[pd.Series],
-    buy_context: Optional[dict],
-    peak_price: Optional[float],
-    universe_rank_pct: Optional[float],
+    metrics: pd.Series | None,
+    buy_context: dict | None,
+    peak_price: float | None,
+    universe_rank_pct: float | None,
 ) -> ExitAnalysis:
     """
     Compute full exit attribution for one position.

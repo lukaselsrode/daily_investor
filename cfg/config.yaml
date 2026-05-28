@@ -108,6 +108,13 @@ contrarian_penalty:
   score_multiplier: 0.92
   max_position_multiplier: 0.60
   archetype_bias: speculative_momentum
+concentration_limits:
+  enabled: true
+  max_cluster_weight: 0.35
+  max_sector_weight: 0.40
+  cluster_method: pca
+  n_clusters: 6
+  warn_only: true
 bear_market:
   spy_ma_period: 200
   vix_threshold: 25.0

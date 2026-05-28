@@ -15,13 +15,11 @@ Tabs:
 from __future__ import annotations
 
 import datetime
-from typing import Optional
 
 import pandas as pd
 import streamlit as st
 
 from ui.utils import DATA_DIR, data_date, load_config_raw, load_latest_csv, no_data_msg
-
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -58,7 +56,7 @@ _STATE_ICON: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 @st.cache_data(ttl=120)
-def _load_holdings() -> Optional[pd.DataFrame]:
+def _load_holdings() -> pd.DataFrame | None:
     df = load_latest_csv("holdings")
     if df is None:
         return None
@@ -69,7 +67,7 @@ def _load_holdings() -> Optional[pd.DataFrame]:
 
 
 @st.cache_data(ttl=120)
-def _load_agg() -> Optional[pd.DataFrame]:
+def _load_agg() -> pd.DataFrame | None:
     return load_latest_csv("agg_data")
 
 
@@ -138,7 +136,7 @@ def _compute_universe_ranks(agg: pd.DataFrame) -> dict[str, float]:
 
 def _enrich_holdings(
     holdings: pd.DataFrame,
-    agg: Optional[pd.DataFrame],
+    agg: pd.DataFrame | None,
     buy_ctx_df: pd.DataFrame,
     peak_prices: dict[str, float],
     etfs: list[str],
@@ -173,7 +171,7 @@ def _enrich_holdings(
                 ctx_by_sym[s] = r.to_dict()
 
     # Holding days from buy_context
-    def _holding_days(sym: str) -> Optional[int]:
+    def _holding_days(sym: str) -> int | None:
         ctx = ctx_by_sym.get(sym, {})
         bd_str = str(ctx.get("buy_date", "")).strip()
         try:
@@ -546,6 +544,85 @@ def _tab_holdings_intel(df: pd.DataFrame) -> None:
     if not watches.empty:
         st.warning(f"🟡 WATCH: **{', '.join(watches['symbol'].tolist())}** — thesis weakening.")
 
+    _sector_breakdown(df)
+
+
+# ---------------------------------------------------------------------------
+# Sector / industry breakdown (used by Holdings Intel tab)
+# ---------------------------------------------------------------------------
+
+def _sector_breakdown(df: pd.DataFrame) -> None:
+    import plotly.graph_objects as go
+
+    active = df[df["sleeve"] == "active"].copy()
+    if active.empty or "sector" not in active.columns:
+        return
+
+    active["equity"] = pd.to_numeric(active["equity"], errors="coerce")
+    active = active[active["equity"].notna() & (active["equity"] > 0)]
+    if active.empty:
+        return
+
+    st.divider()
+    st.markdown("**Sector & Industry Breakdown** (active sleeve, equity-weighted)")
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        sector_data = (
+            active.groupby("sector")["equity"].sum()
+            .sort_values(ascending=False)
+            .dropna()
+        )
+        if not sector_data.empty:
+            fig = go.Figure(go.Pie(
+                labels=sector_data.index,
+                values=sector_data.values,
+                hole=0.45,
+                textinfo="label+percent",
+                insidetextorientation="radial",
+                textfont=dict(size=11),
+                marker=dict(line=dict(color="#0e1117", width=1.5)),
+            ))
+            fig.update_layout(
+                height=320,
+                margin=dict(l=10, r=10, t=10, b=10),
+                paper_bgcolor="#0e1117",
+                font=dict(color="#cdd6f4"),
+                legend=dict(font=dict(size=10), bgcolor="rgba(0,0,0,0)"),
+                showlegend=False,
+            )
+            st.plotly_chart(fig, use_container_width=True, key="sector_pie")
+
+    with c2:
+        if "industry" in active.columns:
+            ind_data = (
+                active.groupby("industry")["equity"].sum()
+                .sort_values(ascending=True)
+                .dropna()
+                .tail(12)
+            )
+            if not ind_data.empty:
+                fig = go.Figure(go.Bar(
+                    x=ind_data.values,
+                    y=ind_data.index,
+                    orientation="h",
+                    marker_color="#3498db",
+                    text=[f"${v:,.0f}" for v in ind_data.values],
+                    textposition="outside",
+                    textfont=dict(size=10),
+                ))
+                fig.update_layout(
+                    height=320,
+                    margin=dict(l=10, r=60, t=10, b=10),
+                    paper_bgcolor="#0e1117",
+                    plot_bgcolor="#0e1117",
+                    font=dict(color="#cdd6f4", size=10),
+                    xaxis=dict(gridcolor="#2d3436", showticklabels=False),
+                    yaxis=dict(gridcolor="#2d3436"),
+                )
+                st.plotly_chart(fig, use_container_width=True, key="industry_bar")
+
 
 # ---------------------------------------------------------------------------
 # Tab: Active Sleeve (expandable per-position detail)
@@ -587,6 +664,7 @@ def _position_score_chart(history: pd.DataFrame, key_prefix: str = "") -> None:
 def _render_exit_analysis(ea, key_prefix: str = "") -> None:
     """Render the exit root-cause analysis block for one EXIT/WATCH position."""
     import plotly.graph_objects as go
+
     from portfolio.exit_analysis import DRIVER_LABELS, DRIVER_ORDER
 
     if ea is None:
@@ -892,7 +970,7 @@ def _tab_etf_sleeve(df: pd.DataFrame) -> None:
 # Tab: Attribution (factor tilt + sleeve P/L)
 # ---------------------------------------------------------------------------
 
-def _tab_attribution(df: pd.DataFrame, agg: Optional[pd.DataFrame]) -> None:
+def _tab_attribution(df: pd.DataFrame, agg: pd.DataFrame | None) -> None:
     import plotly.graph_objects as go
 
     active = df[df["sleeve"] == "active"]
@@ -1007,8 +1085,9 @@ def _tab_attribution(df: pd.DataFrame, agg: Optional[pd.DataFrame]) -> None:
 # ---------------------------------------------------------------------------
 
 def _tab_journal(df: pd.DataFrame) -> None:
-    from portfolio.position_journal import load_journal, log_portfolio_review
     import datetime
+
+    from portfolio.position_journal import load_journal, log_portfolio_review
 
     journal = load_journal()
 
@@ -1082,7 +1161,7 @@ def _live_section(etfs: list[str]) -> None:
     if st.button("Fetch live holdings from Robinhood"):
         with st.spinner("Connecting to Robinhood…"):
             try:
-                from main import login, _broker, save_holdings_csv
+                from main import _broker, login, save_holdings_csv
                 login()
                 holdings = _broker.get_holdings()
                 save_holdings_csv(holdings)
@@ -1134,6 +1213,7 @@ def render() -> None:
         "🏦 ETF Sleeve",
         "📐 Attribution",
         "📔 Journal",
+        "🗺️ Factor Lens",
     ])
 
     with tabs[0]:
@@ -1154,5 +1234,9 @@ def render() -> None:
 
     with tabs[5]:
         _tab_journal(df)
+
+    with tabs[6]:
+        from ui.components.factor_map import render_portfolio_lens
+        render_portfolio_lens()
 
     _live_section(etfs)

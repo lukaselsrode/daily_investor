@@ -8,7 +8,6 @@ source_data.py imports compute_value_components() from here instead of computing
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from .base import ScoreBreakdown, ScorerBase
 
@@ -16,8 +15,8 @@ logger = logging.getLogger(__name__)
 
 
 def compute_value_components(
-    pe_ratio: Optional[float],
-    pb_ratio: Optional[float],
+    pe_ratio: float | None,
+    pb_ratio: float | None,
     sector: str,
     industry: str,
 ) -> tuple[float, float, float, bool]:
@@ -30,10 +29,10 @@ def compute_value_components(
                    (or -0.25 if both PE and PB are missing)
     """
     from util import (
-        MAX_PE_COMPONENT,
         MAX_PB_COMPONENT,
-        MIN_PE_RATIO,
+        MAX_PE_COMPONENT,
         MIN_PB_RATIO,
+        MIN_PE_RATIO,
         SCORING_PARAMS,
         get_investment_ratios,
     )

@@ -6,18 +6,19 @@ This file tests the new layer: results containers, validator gate logic,
 and BacktestEngine orchestration — without loading real market data.
 """
 
-import sys
 import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-import pytest
-import numpy as np
 from unittest.mock import MagicMock, patch
 
-from backtesting.types import BacktestReport, SimResult
-from backtesting.results import BacktestResult, ValidationResult
-from backtesting.validator import WalkForwardValidator
+import numpy as np
+import pytest
 
+from backtesting.results import BacktestResult, ValidationResult
+from backtesting.types import BacktestReport, SimResult
+from backtesting.validator import WalkForwardValidator
 
 # ---------------------------------------------------------------------------
 # Fixtures

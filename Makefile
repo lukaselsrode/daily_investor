@@ -1,12 +1,16 @@
 # Auto-detect venv; fall back to system tools if no venv present
 ifneq ($(wildcard .venv/bin/python),)
-  PYTHON    := .venv/bin/python
-  DI        := .venv/bin/daily-investor
-  STREAMLIT := .venv/bin/streamlit
+  PYTHON       := .venv/bin/python
+  DI           := .venv/bin/daily-investor
+  STREAMLIT    := .venv/bin/streamlit
+  LINT_IMPORTS := PYTHONPATH=$(SRC) .venv/bin/lint-imports
+  RADON        := .venv/bin/radon
 else
-  PYTHON    := python3
-  DI        := daily-investor
-  STREAMLIT := streamlit
+  PYTHON       := python3
+  DI           := daily-investor
+  STREAMLIT    := streamlit
+  LINT_IMPORTS := PYTHONPATH=$(SRC) lint-imports
+  RADON        := radon
 endif
 
 SRC := src
@@ -132,12 +136,37 @@ test-watch:                  ## Re-run tests on file changes  (requires pytest-w
 	$(PYTHON) -m ptw tests/ -- -q
 
 .PHONY: lint
-lint:                        ## Run ruff linter over src/
-	$(PYTHON) -m ruff check $(SRC)/ --select E,W,F --ignore E501
+lint:                        ## Ruff lint over src/ and tests/  (config from pyproject.toml)
+	$(PYTHON) -m ruff check $(SRC)/ tests/
 
 .PHONY: format
 format:                      ## Auto-format src/ with ruff
 	$(PYTHON) -m ruff format $(SRC)/
+
+.PHONY: type-check
+type-check:                  ## MyPy type check  (non-strict; excludes ui/ and util.py)
+	$(PYTHON) -m mypy src/core src/backtesting src/strategy src/portfolio src/reporting src/tuning src/config src/execution src/research
+
+.PHONY: dead-code
+dead-code:                   ## Vulture dead-code scan  (advisory — review before deleting)
+	$(PYTHON) -m vulture src/ vulture_whitelist.py --min-confidence 80
+
+.PHONY: complexity
+complexity:                  ## Radon cyclomatic complexity + maintainability index
+	$(RADON) cc $(SRC)/ -a -nb --total-average
+	$(RADON) mi $(SRC)/ -nb
+
+.PHONY: arch-check
+arch-check:                  ## Import-linter layer boundary contracts
+	$(LINT_IMPORTS)
+
+.PHONY: pre-commit-install
+pre-commit-install:          ## Install pre-commit hooks into .git/hooks
+	$(PYTHON) -m pre_commit install
+
+.PHONY: hygiene
+hygiene: lint arch-check             ## Blocking hygiene suite  (lint + architecture; type-check is separate)
+	@echo "Hygiene checks passed."
 
 # ── Help ──────────────────────────────────────────────────────────────────────
 

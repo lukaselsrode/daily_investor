@@ -4,24 +4,25 @@ tests/test_tuner.py — Tuner tests.
 Migrated / adapted from src/tests.py (tuner-specific tests).
 """
 
-import sys
 import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import pytest
 
 try:
+    import numpy as np
+
     from tuning.constants import (
         PARAM_NAMES,
-        _get_active_indices,
+        _current_params,
         _effective_bounds,
         _expand_params,
-        _current_params,
+        _get_active_indices,
     )
-    from tuning.tuner import should_apply_tuned_config
-    import numpy as np
     _HAS_TUNER = True
-except Exception as e:
+except Exception:
     _HAS_TUNER = False
 
 from util import TUNING_PARAMS

@@ -1,17 +1,26 @@
 """
 strategy/snapshots.py — Historical scored-universe snapshot store.
 
-Saves each scored universe as a dated Parquet file in data/snapshots/.
-Enables rolling IC analysis and regime-conditioned factor diagnostics.
+Saves each scored universe as a datetime-stamped Parquet file in data/snapshots/
+so that multiple fetch-data runs on the same calendar day are all preserved.
+
+Filename format: YYYY_MM_DD_HH_MM.parquet  (e.g. 2026_05_27_14_30.parquet)
+Old date-only files (YYYY_MM_DD.parquet) are still read correctly.
 
 Public API
 ----------
 save_snapshot(df, date, overwrite)         → Path
 list_snapshots()                           → list[tuple[date, Path]]
-load_snapshots(start, end, columns)        → pd.DataFrame  (snapshot_date col added)
+load_snapshots(start, end, columns)        → pd.DataFrame  (snapshot_date + snapshot_datetime cols)
 prune_snapshots(keep_days)                 → int (files removed)
 compute_forward_ic(horizon_days, factors)  → pd.DataFrame  (date, factor, ic, n, p_value)
 backfill_from_csvs()                       → int (files written)
+
+IC note
+-------
+IC and other 30-day metrics deduplicate to ONE snapshot per calendar day (the
+latest intraday run) before computing forward returns.  Multiple intraday runs
+on the same date therefore count as one observation, not N observations.
 """
 
 from __future__ import annotations
@@ -26,28 +35,41 @@ logger = logging.getLogger(__name__)
 
 _FACTOR_COLS_DEFAULT = ["value_score", "momentum_score", "quality_score", "income_score"]
 
+# Stem formats, newest first — used for parsing existing files
+_STEM_FORMATS = ["%Y_%m_%d_%H_%M", "%Y_%m_%d"]
+
 
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
 
 def _snapshot_dir() -> Path:
-    from util import DATA_DIRECTORY, SNAPSHOT_PARAMS  # noqa: PLC0415
+    from util import DATA_DIRECTORY, SNAPSHOT_PARAMS
     d = Path(DATA_DIRECTORY) / SNAPSHOT_PARAMS.get("subdir", "snapshots")
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
-def _date_to_stem(d: datetime.date) -> str:
-    return d.strftime("%Y_%m_%d")
+def _dt_to_stem(dt: datetime.datetime) -> str:
+    return dt.strftime("%Y_%m_%d_%H_%M")
+
+
+def _stem_to_datetime(stem: str) -> datetime.datetime:
+    """Parse both new YYYY_MM_DD_HH_MM and legacy YYYY_MM_DD stems."""
+    for fmt in _STEM_FORMATS:
+        try:
+            return datetime.datetime.strptime(stem, fmt)
+        except ValueError:
+            continue
+    raise ValueError(f"Cannot parse snapshot stem: {stem!r}")
 
 
 def _stem_to_date(stem: str) -> datetime.date:
-    return datetime.datetime.strptime(stem, "%Y_%m_%d").date()
+    return _stem_to_datetime(stem).date()
 
 
-def _snapshot_path(d: datetime.date) -> Path:
-    return _snapshot_dir() / f"{_date_to_stem(d)}.parquet"
+def _snapshot_path(dt: datetime.datetime) -> Path:
+    return _snapshot_dir() / f"{_dt_to_stem(dt)}.parquet"
 
 
 # ---------------------------------------------------------------------------
@@ -56,33 +78,43 @@ def _snapshot_path(d: datetime.date) -> Path:
 
 def save_snapshot(
     df: pd.DataFrame,
-    date: datetime.date | None = None,
+    date: datetime.date | datetime.datetime | None = None,
     overwrite: bool = False,
 ) -> Path:
-    """Save the scored universe as a dated Parquet snapshot.
+    """Save the scored universe as a datetime-stamped Parquet snapshot.
 
-    Returns the path written. If today's snapshot already exists and
-    overwrite=False the existing path is returned without re-writing.
+    Multiple calls on the same calendar day each produce a distinct file
+    (e.g. 2026_05_27_09_00.parquet, 2026_05_27_14_30.parquet).
+
+    The `snapshot_date` column stored inside the file is always the calendar
+    date so IC computation and date-range queries remain unchanged.
+
     Returns an empty Path if snapshots are disabled in config.
     """
-    from util import SNAPSHOT_PARAMS  # noqa: PLC0415
+    from util import SNAPSHOT_PARAMS
 
     if not SNAPSHOT_PARAMS.get("enabled", True):
         return Path()
 
     if date is None:
-        date = datetime.date.today()
+        dt = datetime.datetime.now()
+    elif isinstance(date, datetime.datetime):
+        dt = date
+    else:
+        # Legacy callers (backfill) pass a datetime.date → treat as midnight
+        dt = datetime.datetime.combine(date, datetime.time(0, 0))
 
-    path = _snapshot_path(date)
+    path = _snapshot_path(dt)
 
     if path.exists() and not overwrite:
-        logger.debug("Snapshot for %s already exists — skipping (%s)", date, path.name)
+        logger.debug("Snapshot %s already exists — skipping", path.name)
         return path
 
     compression = SNAPSHOT_PARAMS.get("compression", "snappy")
 
     out = df.copy()
-    out["snapshot_date"] = date.isoformat()
+    out["snapshot_date"] = dt.date().isoformat()      # calendar date for IC / queries
+    out["snapshot_datetime"] = dt.isoformat(timespec="minutes")  # full timestamp
 
     try:
         out.to_parquet(path, index=False, compression=compression)
@@ -91,7 +123,6 @@ def save_snapshot(
         logger.error("Failed to save snapshot %s: %s", path.name, exc)
         raise
 
-    # Auto-prune after successful write
     retention = SNAPSHOT_PARAMS.get("retention_days", 365)
     prune_snapshots(retention)
 
@@ -103,7 +134,12 @@ def save_snapshot(
 # ---------------------------------------------------------------------------
 
 def list_snapshots() -> list[tuple[datetime.date, Path]]:
-    """Return sorted (ascending) list of (date, path) tuples for all snapshots."""
+    """Return sorted (ascending) list of (calendar_date, path) tuples.
+
+    Multiple intraday files for the same calendar date appear as separate
+    entries — callers that build a date → DataFrame dict will naturally
+    keep the last (latest) run of each day.
+    """
     result: list[tuple[datetime.date, Path]] = []
     for f in sorted(_snapshot_dir().glob("*.parquet")):
         try:
@@ -120,8 +156,9 @@ def load_snapshots(
 ) -> pd.DataFrame:
     """Load and concatenate all snapshots within [start, end].
 
-    The returned DataFrame always contains a `snapshot_date` column (datetime.date).
-    Returns an empty DataFrame when no snapshots match.
+    Columns always present in the result:
+        snapshot_date     datetime.date  — calendar date of the run
+        snapshot_datetime str            — full ISO timestamp (HH:MM precision)
     """
     snaps = list_snapshots()
     if start:
@@ -135,18 +172,18 @@ def load_snapshots(
     frames: list[pd.DataFrame] = []
     for date, path in snaps:
         try:
-            # parquet may already have snapshot_date col from save_snapshot
             read_cols = None
             if columns is not None:
-                # ensure snapshot_date is always present
-                read_cols = list(set(columns + ["snapshot_date"]))
-                # trim to columns that actually exist in the file
+                read_cols = list(set(columns + ["snapshot_date", "snapshot_datetime"]))
                 import pyarrow.parquet as pq
                 file_cols = set(pq.read_schema(path).names)
                 read_cols = [c for c in read_cols if c in file_cols]
 
             frame = pd.read_parquet(path, columns=read_cols)
-            frame["snapshot_date"] = date  # overwrite string col with date object
+            frame["snapshot_date"] = date  # always a date object
+            # Preserve snapshot_datetime from file when present; fall back to date
+            if "snapshot_datetime" not in frame.columns:
+                frame["snapshot_datetime"] = date.isoformat()
             frames.append(frame)
         except Exception as exc:
             logger.warning("Failed to load snapshot %s: %s", path.name, exc)
@@ -181,10 +218,11 @@ def prune_snapshots(keep_days: int) -> int:
 def backfill_from_csvs() -> int:
     """Convert existing agg_data_*.csv files to Parquet snapshots.
 
-    Skips dates that already have a Parquet snapshot.
+    Handles both legacy YYYY_MM_DD and new YYYY_MM_DD_HH_MM filename formats.
+    Skips CSV files whose corresponding snapshot already exists.
     Returns the number of new snapshots written.
     """
-    from util import DATA_DIRECTORY, SNAPSHOT_PARAMS  # noqa: PLC0415
+    from util import DATA_DIRECTORY, SNAPSHOT_PARAMS
 
     if not SNAPSHOT_PARAMS.get("enabled", True):
         return 0
@@ -193,18 +231,18 @@ def backfill_from_csvs() -> int:
     written = 0
 
     for csv_path in sorted(data_dir.glob("agg_data_*.csv")):
-        date_part = csv_path.stem.replace("agg_data_", "")
+        stem_part = csv_path.stem.replace("agg_data_", "")
         try:
-            date = _stem_to_date(date_part)
+            dt = _stem_to_datetime(stem_part)
         except ValueError:
             continue
 
-        if _snapshot_path(date).exists():
+        if _snapshot_path(dt).exists():
             continue
 
         try:
             df = pd.read_csv(csv_path)
-            save_snapshot(df, date=date, overwrite=False)
+            save_snapshot(df, date=dt, overwrite=False)
             written += 1
         except Exception as exc:
             logger.warning("backfill failed for %s: %s", csv_path.name, exc)
@@ -239,13 +277,13 @@ def compute_forward_ic(
     DataFrame with columns: date, factor, ic, n_stocks, p_value
     Empty DataFrame if fewer than 2 snapshots exist.
     """
-    from scipy.stats import spearmanr  # noqa: PLC0415
+    from scipy.stats import spearmanr
 
     if factor_cols is None:
         factor_cols = _FACTOR_COLS_DEFAULT
 
     # Load everything we need in one pass
-    needed_cols = list({"symbol", "current_price", "return_1m"} | set(factor_cols))
+    needed_cols = list({"symbol", "current_price", "return_1m", "snapshot_datetime"} | set(factor_cols))
     all_df = load_snapshots(columns=needed_cols)
 
     if all_df.empty or "snapshot_date" not in all_df.columns:
@@ -255,6 +293,17 @@ def compute_forward_ic(
     for col in ["current_price", "return_1m"] + factor_cols:
         if col in all_df.columns:
             all_df[col] = pd.to_numeric(all_df[col], errors="coerce")
+
+    # Deduplicate: multiple intraday runs on the same calendar day count as ONE
+    # observation for IC purposes.  Keep the latest run per (symbol, date).
+    # Files are loaded in chronological order so the last row per group is newest.
+    if "snapshot_datetime" in all_df.columns:
+        all_df = (
+            all_df.sort_values("snapshot_datetime")
+            .groupby(["symbol", "snapshot_date"], sort=False)
+            .last()
+            .reset_index()
+        )
 
     dates = sorted(all_df["snapshot_date"].unique())
     if len(dates) < 2:

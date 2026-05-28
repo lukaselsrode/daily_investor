@@ -5,13 +5,15 @@ Migrated / adapted from src/tests.py. These tests import from source_data
 directly until Phase 3 (strategy layer migration).
 """
 
-import sys
 import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import pytest
+
 from data.fundamentals import _position_52w, get_momentum_score
-from util import MOMENTUM_PARAMS, SELL_RULES, RISK_LIMITS
+from util import MOMENTUM_PARAMS, RISK_LIMITS, SELL_RULES
 
 
 class TestPosition52w:

@@ -8,7 +8,6 @@ immutability — config is loaded once and never mutated at runtime.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -173,15 +172,15 @@ class AnalystConfig:
 
 @dataclass(frozen=True)
 class RegimeDefensiveConfig:
-    index_pct_override: Optional[float] = 0.85
-    max_buys_override: Optional[int] = 3
+    index_pct_override: float | None = 0.85
+    max_buys_override: int | None = 3
     stop_loss_tighten: float = 0.05
 
 
 @dataclass(frozen=True)
 class RegimeNeutralConfig:
-    index_pct_override: Optional[float] = None
-    max_buys_override: Optional[int] = None
+    index_pct_override: float | None = None
+    max_buys_override: int | None = None
 
 
 @dataclass(frozen=True)
@@ -258,7 +257,7 @@ class TuningConfig:
     def is_frozen(self, param_path: str) -> bool:
         return param_path in self.frozen_parameters
 
-    def bounds_for(self, param_path: str) -> Optional[tuple[float, float]]:
+    def bounds_for(self, param_path: str) -> tuple[float, float] | None:
         b = self.parameter_bounds.get(param_path)
         if b is None:
             return None
@@ -288,3 +287,50 @@ class StabilityConfig:
 class ResearchConfig:
     min_snapshots_for_weight_recommendations: int = 20
     min_snapshots_for_high_confidence: int = 60
+
+
+@dataclass(frozen=True)
+class ArchetypeEntryConfig:
+    trim_profit_threshold: float = 0.20
+    harvest_profit_threshold: float = 0.30
+    trailing_stop_pct: float = -0.08
+    minimum_hold_days: int = 10
+    thesis_exit_requires_confirmation: bool = False
+    allow_deeper_drawdown: bool = False
+
+
+@dataclass(frozen=True)
+class ArchetypeManagementConfig:
+    enabled: bool = True
+    quality_compounder: ArchetypeEntryConfig = field(default_factory=ArchetypeEntryConfig)
+    legacy_turnaround: ArchetypeEntryConfig = field(default_factory=ArchetypeEntryConfig)
+    speculative_momentum: ArchetypeEntryConfig = field(default_factory=ArchetypeEntryConfig)
+    value_recovery: ArchetypeEntryConfig = field(default_factory=ArchetypeEntryConfig)
+    defensive_income: ArchetypeEntryConfig = field(default_factory=ArchetypeEntryConfig)
+    core_default: ArchetypeEntryConfig = field(default_factory=ArchetypeEntryConfig)
+
+    def as_legacy_dict(self) -> dict:
+        """Emit the raw dict format that classify_archetype_from_scores() expects."""
+        result: dict = {"enabled": self.enabled}
+        for name in ("quality_compounder", "legacy_turnaround", "speculative_momentum",
+                     "value_recovery", "defensive_income", "core_default"):
+            entry: ArchetypeEntryConfig = getattr(self, name)
+            result[name] = {
+                "trim_profit_threshold": entry.trim_profit_threshold,
+                "harvest_profit_threshold": entry.harvest_profit_threshold,
+                "trailing_stop_pct": entry.trailing_stop_pct,
+                "minimum_hold_days": entry.minimum_hold_days,
+                "thesis_exit_requires_confirmation": entry.thesis_exit_requires_confirmation,
+                "allow_deeper_drawdown": entry.allow_deeper_drawdown,
+            }
+        return result
+
+
+@dataclass(frozen=True)
+class ConcentrationLimitsConfig:
+    enabled: bool = True
+    max_cluster_weight: float = 0.35
+    max_sector_weight: float = 0.40
+    cluster_method: str = "pca"
+    n_clusters: int = 6
+    warn_only: bool = True

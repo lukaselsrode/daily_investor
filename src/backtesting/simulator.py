@@ -10,6 +10,7 @@ import logging
 import numpy as np
 import pandas as pd
 
+from core.types import TradeRecord
 from util import (
     ARCHETYPE_PARAMS,
     BACKTEST_PARAMS,
@@ -25,7 +26,6 @@ from util import (
     SELL_RULES,
 )
 
-from core.types import TradeRecord
 from .types import BacktestReport, CandidatePoolDiagnostics, PrecomputedData, SimResult
 
 logger = logging.getLogger(__name__)
@@ -35,10 +35,19 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _TAKE_PROFIT_FLOOR_MULTIPLIER = 1.2
-_STOP_LOSS_PCT = -0.20
+# Read stop-loss from config so live and backtest always stay in sync
+_STOP_LOSS_PCT = float(SELL_RULES.get("stop_loss_pct", -0.20))
 _MIN_DAYS_HELD_BEFORE_VALUE_EXIT = SELL_RULES.get("min_days_held_before_value_exit", 21)
 _MIN_HOLD_DAYS = RISK_LIMITS.get("minimum_hold_days", 0)
 _MIN_DAYS_BEFORE_TAKE_PROFIT = SELL_RULES.get("minimum_days_before_take_profit", 0)
+
+# Harvest partial exit — mirrors live HARVEST action (partial profit-taking)
+_HARVEST_PROFIT_THRESHOLD = float(EXIT_DECISION_PARAMS.get("harvest_profit_threshold", 0.30))
+_HARVEST_FRACTION         = float(EXIT_DECISION_PARAMS.get("harvest_fraction",          0.40))
+
+# WATCH/REVIEW suppression — if profitable and score above this floor, hold rather than exit
+_REVIEW_SCORE_FLOOR    = float(EXIT_DECISION_PARAMS.get("review_score_below",         0.45))
+_POSITIVE_PNL_DOWNGRADE = bool(EXIT_DECISION_PARAMS.get("positive_pnl_exit_downgrade", True))
 
 
 # ---------------------------------------------------------------------------
@@ -289,8 +298,8 @@ def select_candidates(
     composite_scores: np.ndarray,
     precomp: PrecomputedData,
     params: np.ndarray,
-    cs_params: "dict | None" = None,
-) -> "tuple[np.ndarray, CandidatePoolDiagnostics]":
+    cs_params: dict | None = None,
+) -> tuple[np.ndarray, CandidatePoolDiagnostics]:
     """
     Choose the buy-eligible candidate mask.
     Returns (candidate_mask, diagnostics).
@@ -420,6 +429,29 @@ def _bench_twr(
     return compute_performance_metrics(ca)["total_return"]
 
 
+def _bench_daily_equity(
+    bench_prices: np.ndarray,
+    starting_capital: float,
+    weekly_contribution: float,
+    rebalance_freq: int,
+) -> np.ndarray:
+    """Daily benchmark portfolio values matching the same contribution schedule as the strategy."""
+    n      = len(bench_prices)
+    shares = 0.0
+    vals   = np.zeros(n)
+    for d in range(n):
+        p = bench_prices[d]
+        if not np.isfinite(p) or p <= 0:
+            vals[d] = vals[d - 1] if d > 0 else starting_capital
+            continue
+        if d == 0:
+            shares = starting_capital / p
+        elif d % rebalance_freq == 0:
+            shares += weekly_contribution / p
+        vals[d] = shares * p
+    return vals
+
+
 # ---------------------------------------------------------------------------
 # Main simulation
 # ---------------------------------------------------------------------------
@@ -428,10 +460,10 @@ def _build_archetype_thresholds(
     precomp: PrecomputedData,
     default_take_profit: float,
     default_trailing_stop: float,
-) -> "tuple[np.ndarray, np.ndarray]":
+) -> tuple[np.ndarray, np.ndarray, list[str]]:
     """
     Classify each stock archetype from precomp quality/income/momentum scores.
-    Returns (take_profit_arr, trailing_stop_arr) of shape (n_stocks,).
+    Returns (take_profit_arr, trailing_stop_arr, archetype_labels) of shape (n_stocks,).
     Falls back to defaults when archetype management is disabled or signals missing.
     """
     from portfolio.position_archetypes import classify_archetype_from_scores
@@ -439,10 +471,11 @@ def _build_archetype_thresholds(
     n = precomp.quality_scores.shape[0]
     tp_arr   = np.full(n, default_take_profit,  dtype=np.float64)
     stop_arr = np.full(n, default_trailing_stop, dtype=np.float64)
+    labels   = [""] * n
 
     arch_cfg = ARCHETYPE_PARAMS if ARCHETYPE_PARAMS.get("enabled", False) else None
     if arch_cfg is None:
-        return tp_arr, stop_arr
+        return tp_arr, stop_arr, labels
 
     yt_mask = precomp.yield_trap_mask if precomp.yield_trap_mask is not None else np.zeros(n, dtype=bool)
 
@@ -457,10 +490,11 @@ def _build_archetype_thresholds(
             )
             tp_arr[i]   = policy.harvest_profit_threshold
             stop_arr[i] = policy.trailing_stop_pct
+            labels[i]   = policy.archetype
         except Exception:
             pass
 
-    return tp_arr, stop_arr
+    return tp_arr, stop_arr, labels
 
 
 def run_simulation(
@@ -471,8 +505,10 @@ def run_simulation(
     commission_per_trade: float = 0.0,
     weekly_contribution: float = 0.0,
     rebalance_frequency_days: int = 5,
-    cs_params: "dict | None" = None,
+    cs_params: dict | None = None,
     archetype_aware: bool = False,
+    cluster_tracking: bool = False,
+    scope: str = "overall_strategy",
 ) -> SimResult:
     """
     Simulate the strategy over the precomputed price history.
@@ -498,6 +534,8 @@ def run_simulation(
     _trim_min_gain       = float(_trim_cfg.get("trim_min_gain_pct", 0.08))
     _trim_score_delta    = float(_trim_cfg.get("trim_score_delta_threshold", -0.15))
     _trim_to_etfs_pct    = float(_trim_cfg.get("trim_to_etfs_pct", 0.85))
+    if scope == "active_sleeve_compounding":
+        _trim_to_etfs_pct = 0.0
     _trim_weak_threshold = metric_threshold * (1.0 + _trim_score_delta)
 
     base_slippage   = slippage_bps / 10_000.0
@@ -515,11 +553,38 @@ def run_simulation(
     max_buys       = RISK_LIMITS["max_buys_per_rebalance"]
 
     # Per-stock archetype thresholds (used when archetype_aware=True)
-    _arch_take_profit_arr, _arch_trailing_stop_arr = (
+    _arch_take_profit_arr, _arch_trailing_stop_arr, _arch_labels = (
         _build_archetype_thresholds(precomp, take_profit_pct, trailing_stop)
         if archetype_aware
-        else (None, None)
+        else (None, None, [])
     )
+    _arch_pnl: dict = {}
+    _arch_trade_counts: dict = {}
+    _arch_exit_breakdown: dict = {}
+
+    # Cluster concentration tracking (walk-forward, diagnostics only)
+    _cluster_snapshots: list = []
+    _cluster_labels_by_day: np.ndarray | None = None
+    _conc_limits = ARCHETYPE_PARAMS  # fallback; we use concentration_limits separately
+    try:
+        from util import CONCENTRATION_LIMIT_PARAMS as _CLP
+    except Exception:
+        _CLP = {}
+    _max_cluster_w = float(_CLP.get("max_cluster_weight", 0.35))
+    _max_sector_w  = float(_CLP.get("max_sector_weight", 0.40))
+    _n_clusters_ct = int(_CLP.get("n_clusters", 6))
+
+    if cluster_tracking:
+        try:
+            from .cluster_tracker import precompute_cluster_labels
+            _rebal_days_for_ct = [d for d in range(0, n_days, rebalance_frequency_days)]
+            _cluster_labels_by_day = precompute_cluster_labels(
+                precomp, _rebal_days_for_ct, n_clusters=_n_clusters_ct,
+            )
+            logger.debug("Cluster labels precomputed for %d rebalance days", len(_rebal_days_for_ct))
+        except Exception as exc:
+            logger.warning("Cluster precomputation failed — tracking disabled: %s", exc)
+            cluster_tracking = False
 
     _cs_params     = cs_params if cs_params is not None else CANDIDATE_SELECTION_PARAMS
     current_scores = score_stocks_at_day(precomp, params, 0)
@@ -536,11 +601,13 @@ def run_simulation(
     cash                = float(starting_capital)
     daily_values        = np.zeros(n_days)
     ca_daily_values     = np.zeros(n_days)
+    _active_daily       = np.zeros(n_days) if scope == "active_sleeve_compounding" else None
     total_contributions = float(starting_capital)
 
     trades_made          = 0
     sells_made           = 0
     trim_count           = 0
+    harvest_count        = 0
     skipped_buys         = 0
     cap_reductions       = 0
     cooldown_skips       = 0
@@ -663,9 +730,11 @@ def run_simulation(
                 trades_made       += 1
                 trades_this_week  += 1
                 sym = precomp.symbols[i] if i < len(precomp.symbols) else str(i)
+                _al = _arch_labels[i] if _arch_labels and i < len(_arch_labels) else ""
                 trade_log.append(TradeRecord(
                     date=str(day), symbol=sym, side="buy",
                     quantity=shares, price=effective_price, amount=alloc, reason="buy",
+                    archetype=_al,
                 ))
             stock_shares[i] += shares
             stock_peak[i]    = max(stock_peak[i], p)
@@ -723,7 +792,24 @@ def run_simulation(
         stop_loss_mask = held & (pct_from_avg  <= _STOP_LOSS_PCT)
         trail_mask     = held & (pct_from_peak <= _eff_stop)        & (days_held >= _MIN_HOLD_DAYS)
         tp_mask        = held & (pct_from_avg  >= _eff_tp)          & take_profit_ok & (days_held >= _MIN_DAYS_BEFORE_TAKE_PROFIT)
-        weak_val_mask  = held & (current_scores < sell_weak_below)  & (days_held >= _MIN_DAYS_HELD_BEFORE_VALUE_EXIT)
+        # WATCH/REVIEW logic: live holds positions that are still profitable and
+        # not fully collapsed — don't exit on score alone when pnl > 0 and score
+        # is above the review floor (mirrors decision_adjustment_engine behaviour).
+        _watch_suppressed = (
+            _POSITIVE_PNL_DOWNGRADE
+            and _REVIEW_SCORE_FLOOR > 0
+        )
+        if _watch_suppressed:
+            _hold_not_exit = (pct_from_avg > 0) & (current_scores >= _REVIEW_SCORE_FLOOR)
+        else:
+            _hold_not_exit = np.zeros(len(held), dtype=bool)
+
+        weak_val_mask  = (
+            held
+            & (current_scores < sell_weak_below)
+            & (days_held >= _MIN_DAYS_HELD_BEFORE_VALUE_EXIT)
+            & ~_hold_not_exit
+        )
         sell_mask      = stop_loss_mask | trail_mask | tp_mask | weak_val_mask
 
         if sell_mask.any():
@@ -750,12 +836,20 @@ def run_simulation(
                 else:
                     _exit = "weak_value"
                 sym = precomp.symbols[i] if i < len(precomp.symbols) else str(i)
+                _al = _arch_labels[i] if _arch_labels and i < len(_arch_labels) else ""
+                _pnl_i = proceeds_i - cost_basis
                 trade_log.append(TradeRecord(
                     date=str(d), symbol=sym, side="sell",
                     quantity=float(stock_shares[i]), price=float(sell_prices[i]),
-                    amount=proceeds_i, exit_type=_exit,
-                    pnl=proceeds_i - cost_basis, hold_days=int(days_held[i]),
+                    amount=proceeds_i, exit_type=_exit,  # type: ignore[arg-type]
+                    pnl=_pnl_i, hold_days=int(days_held[i]),
+                    archetype=_al,
                 ))
+                if _al:
+                    _arch_pnl[_al] = _arch_pnl.get(_al, 0.0) + _pnl_i
+                    _arch_trade_counts[_al] = _arch_trade_counts.get(_al, 0) + 1
+                    _arch_exit_breakdown.setdefault(_al, {})
+                    _arch_exit_breakdown[_al][_exit] = _arch_exit_breakdown[_al].get(_exit, 0) + 1
             total_traded_notional += sell_notional
             sells_made            += int(sell_mask.sum())
             stock_shares[sell_mask]    = 0.0
@@ -763,11 +857,67 @@ def run_simulation(
             stock_peak[sell_mask]      = 0.0
             stock_day_bought[sell_mask]= -1
 
+        # ── Harvest exits (partial profit-taking — mirrors live HARVEST action) ─
+        # Triggered when pct_from_avg >= harvest_profit_threshold.
+        # Sells harvest_fraction (default 40%) of the position and routes
+        # proceeds to ETFs, matching the live HarvestManager behaviour.
+        harvest_mask = (
+            held
+            & ~sell_mask
+            & (pct_from_avg >= _HARVEST_PROFIT_THRESHOLD)
+            & (days_held >= _MIN_HOLD_DAYS)
+        )
+        if harvest_mask.any():
+            harv_prices   = np.where(valid_price, prices, stock_avg_cost)
+            harv_indices  = np.where(harvest_mask)[0]
+            harv_notional = 0.0
+            for i in harv_indices:
+                shares_to_sell = stock_shares[i] * _HARVEST_FRACTION
+                if shares_to_sell <= 0:
+                    continue
+                slip       = _effective_slippage(i)
+                proceeds_i = float(shares_to_sell * harv_prices[i] * (1.0 - slip))
+                total_friction += float(shares_to_sell * harv_prices[i] * slip) + commission_per_trade
+                harv_notional  += proceeds_i
+                cash           += proceeds_i
+                stock_shares[i] -= shares_to_sell
+                sym = precomp.symbols[i] if i < len(precomp.symbols) else str(i)
+                cost_basis_i = float(stock_avg_cost[i] * shares_to_sell)
+                _al = _arch_labels[i] if _arch_labels and i < len(_arch_labels) else ""
+                _pnl_i = proceeds_i - cost_basis_i
+                trade_log.append(TradeRecord(
+                    date=str(d), symbol=sym, side="sell",
+                    quantity=shares_to_sell, price=float(harv_prices[i]),
+                    amount=proceeds_i, exit_type="harvest_exit",
+                    pnl=_pnl_i, hold_days=int(days_held[i]), is_partial=True,
+                    archetype=_al,
+                ))
+                if _al:
+                    _arch_pnl[_al] = _arch_pnl.get(_al, 0.0) + _pnl_i
+                    _arch_trade_counts[_al] = _arch_trade_counts.get(_al, 0) + 1
+                    _arch_exit_breakdown.setdefault(_al, {})
+                    _arch_exit_breakdown[_al]["harvest_exit"] = _arch_exit_breakdown[_al].get("harvest_exit", 0) + 1
+            harvest_count         += int(harvest_mask.sum())
+            total_traded_notional += harv_notional
+            sells_made            += int(harvest_mask.sum())
+            # Route harvest proceeds to ETF sleeve (same as live HarvestManager)
+            etf_portion = harv_notional * _trim_to_etfs_pct
+            if n_etfs > 0 and etf_portion > 0:
+                p_etf     = precomp.etf_prices[d]
+                valid_etfs = np.isfinite(p_etf) & (p_etf > 0)
+                n_valid_e  = int(valid_etfs.sum())
+                if n_valid_e > 0:
+                    per_etf = etf_portion / n_valid_e
+                    if per_etf >= min_order:
+                        for j in np.where(valid_etfs)[0]:
+                            etf_shares[j] += per_etf / p_etf[j]
+
         # ── Trim exits (partial position reduction) ──────────────────────────
         if _trim_enabled:
             trim_mask = (
                 held
                 & ~sell_mask
+                & ~harvest_mask
                 & (pct_from_avg >= _trim_min_gain)
                 & (current_scores < metric_threshold)
                 & (current_scores >= sell_weak_below)
@@ -789,13 +939,20 @@ def run_simulation(
                     stock_shares[i] -= shares_to_sell
                     sym = precomp.symbols[i] if i < len(precomp.symbols) else str(i)
                     cost_basis_i = float(stock_avg_cost[i] * shares_to_sell)
+                    _al = _arch_labels[i] if _arch_labels and i < len(_arch_labels) else ""
+                    _pnl_i = proceeds_i - cost_basis_i
                     trade_log.append(TradeRecord(
                         date=str(d), symbol=sym, side="sell",
                         quantity=shares_to_sell, price=float(sell_prices_t[i]),
                         amount=proceeds_i, exit_type="trim_exit",
-                        pnl=proceeds_i - cost_basis_i,
-                        hold_days=int(days_held[i]), is_partial=True,
+                        pnl=_pnl_i, hold_days=int(days_held[i]), is_partial=True,
+                        archetype=_al,
                     ))
+                    if _al:
+                        _arch_pnl[_al] = _arch_pnl.get(_al, 0.0) + _pnl_i
+                        _arch_trade_counts[_al] = _arch_trade_counts.get(_al, 0) + 1
+                        _arch_exit_breakdown.setdefault(_al, {})
+                        _arch_exit_breakdown[_al]["trim_exit"] = _arch_exit_breakdown[_al].get("trim_exit", 0) + 1
                 trim_count            += int(trim_mask.sum())
                 total_traded_notional += trim_notional
                 sells_made            += int(trim_mask.sum())
@@ -814,6 +971,24 @@ def run_simulation(
 
         is_contrib_day = d > 0 and d % rebalance_frequency_days == 0
         contrib_today  = weekly_contribution if is_contrib_day else 0.0
+        if cluster_tracking and is_contrib_day and _cluster_labels_by_day is not None:
+            try:
+                from .cluster_tracker import record_cluster_snapshot
+                _rebal_idx = d // rebalance_frequency_days
+                if _rebal_idx < _cluster_labels_by_day.shape[0]:
+                    _cls_labels_d = _cluster_labels_by_day[_rebal_idx]
+                    _snap = record_cluster_snapshot(
+                        day=d,
+                        stock_shares=stock_shares,
+                        prices=np.where(valid_price, precomp.prices[d], stock_avg_cost),
+                        cluster_labels=_cls_labels_d,
+                        sector_labels=precomp.sector_labels,
+                        max_cluster_weight_threshold=_max_cluster_w,
+                        max_sector_weight_threshold=_max_sector_w,
+                    )
+                    _cluster_snapshots.append(_snap)
+            except Exception as exc:
+                logger.debug("Cluster snapshot failed at day %d: %s", d, exc)
         if is_contrib_day:
             current_scores = score_stocks_at_day(precomp, params, d)
             candidate_mask, _ = select_candidates(d, current_scores, precomp, params, _cs_params)
@@ -839,6 +1014,8 @@ def run_simulation(
         stock_value = float(np.sum(stock_shares * np.where(valid_price, prices, stock_avg_cost)))
         port_val    = cash + stock_value + etf_value
         daily_values[d] = port_val
+        if _active_daily is not None:
+            _active_daily[d] = port_val - etf_value
 
         if d == 0:
             ca_daily_values[0] = port_val
@@ -871,11 +1048,31 @@ def run_simulation(
     profit      = final_value - total_contributions
 
     bench_twr_val = 0.0
+    bench_equity  = np.array([])
     if np.isfinite(precomp.benchmark_prices).all() and precomp.benchmark_prices[0] > 0:
         bench_twr_val = _bench_twr(
             precomp.benchmark_prices, starting_capital,
             weekly_contribution, rebalance_frequency_days,
         )
+        bench_equity = _bench_daily_equity(
+            precomp.benchmark_prices, starting_capital,
+            weekly_contribution, rebalance_frequency_days,
+        )
+
+    _active_total_return: float | None = None
+    _active_sharpe:       float | None = None
+    _active_calmar:       float | None = None
+    _active_max_drawdown: float | None = None
+    _active_excess_return: float | None = None
+    _active_equity_curve: np.ndarray | None = None
+    if _active_daily is not None and _active_daily[0] > 0:
+        _am = compute_performance_metrics(_active_daily)
+        _active_equity_curve  = _active_daily.copy()
+        _active_total_return  = _am["total_return"]
+        _active_sharpe        = _am["sharpe"]
+        _active_calmar        = _am["calmar"]
+        _active_max_drawdown  = _am["max_drawdown"]
+        _active_excess_return = _active_total_return - bench_twr_val
 
     return SimResult(
         final_value=final_value,
@@ -896,12 +1093,38 @@ def run_simulation(
         profit=profit,
         stopout_count=stopout_count,
         trim_count=trim_count,
+        harvest_count=harvest_count,
         cooldown_skips=cooldown_skips,
         regime_days=regime_days,
         benchmark_twr=bench_twr_val,
         pool_diagnostics=_init_diag,
         trade_log=trade_log,
+        equity_curve=daily_values.copy(),
+        benchmark_equity=bench_equity,
+        archetype_pnl=_arch_pnl,
+        archetype_trade_counts=_arch_trade_counts,
+        archetype_exit_breakdown=_arch_exit_breakdown,
+        cluster_result=_build_cluster_result_if_needed(
+            _cluster_snapshots, _n_clusters_ct
+        ) if cluster_tracking else None,
+        scope=scope,
+        active_equity_curve=_active_equity_curve,
+        active_total_return=_active_total_return,
+        active_sharpe=_active_sharpe,
+        active_calmar=_active_calmar,
+        active_max_drawdown=_active_max_drawdown,
+        active_excess_return=_active_excess_return,
     )
+
+
+def _build_cluster_result_if_needed(snapshots, n_clusters):
+    if not snapshots:
+        return None
+    try:
+        from .cluster_tracker import build_cluster_result
+        return build_cluster_result(snapshots, n_clusters=n_clusters)
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -910,9 +1133,11 @@ def run_simulation(
 
 def run_backtest_report(
     precomp: PrecomputedData,
-    params: "np.ndarray | None",
+    params: np.ndarray | None,
     train_slice: slice,
-    val_slice: "slice | None",
+    val_slice: slice | None,
+    cluster_tracking: bool = False,
+    scope: str = "overall_strategy",
 ) -> BacktestReport:
     """
     Run strategy on train window, optionally evaluate on validation window.
@@ -921,6 +1146,7 @@ def run_backtest_report(
     if params is None:
         params = get_default_params()
     bp = BACKTEST_PARAMS
+    _arch_enabled = bool(ARCHETYPE_PARAMS.get("enabled", False))
 
     def _slice_precomp(s: slice) -> PrecomputedData:
         def _opt(arr):
@@ -945,27 +1171,23 @@ def run_backtest_report(
 
     train_precomp = _slice_precomp(train_slice)
     train_n       = train_precomp.prices.shape[0]
-    train_result  = run_simulation(
-        train_precomp, params,
+    _sim_kwargs = dict(
         starting_capital=bp["starting_capital"],
         slippage_bps=bp["slippage_bps"],
         commission_per_trade=bp["commission_per_trade"],
         weekly_contribution=bp["weekly_contribution"],
         rebalance_frequency_days=bp["rebalance_frequency_days"],
+        archetype_aware=_arch_enabled,
+        cluster_tracking=cluster_tracking,
+        scope=scope,
     )
+    train_result  = run_simulation(train_precomp, params, **_sim_kwargs)
 
-    val_result: "SimResult | None" = None
+    val_result: SimResult | None = None
     if val_slice is not None:
         val_precomp = _slice_precomp(val_slice)
         if val_precomp.prices.shape[0] >= 5:
-            val_result = run_simulation(
-                val_precomp, params,
-                starting_capital=bp["starting_capital"],
-                slippage_bps=bp["slippage_bps"],
-                commission_per_trade=bp["commission_per_trade"],
-                weekly_contribution=bp["weekly_contribution"],
-                rebalance_frequency_days=bp["rebalance_frequency_days"],
-            )
+            val_result = run_simulation(val_precomp, params, **_sim_kwargs)
 
     def _bench_metrics(price_slice: slice) -> dict:
         vals = precomp.benchmark_prices[price_slice]
@@ -993,6 +1215,20 @@ def run_backtest_report(
     notes: list[str] = [f"Lookahead bias: {precomp.lookahead_bias_level}"]
     if precomp.lookahead_bias_level == "HIGH":
         notes.append("WARNING: universe selected by current value_metric — results not predictive")
+    if _arch_enabled:
+        notes.append("Archetype-aware exit thresholds active")
+
+    import datetime
+    import hashlib
+    import json
+    try:
+        from util import _app as _cfg_dict
+        _cfg_hash = hashlib.sha256(
+            json.dumps(_cfg_dict, sort_keys=True, default=str).encode()
+        ).hexdigest()[:12]
+    except Exception:
+        _cfg_hash = ""
+    _ts = datetime.datetime.utcnow().isoformat(timespec="seconds")
 
     return BacktestReport(
         mode=precomp.mode,
@@ -1011,12 +1247,14 @@ def run_backtest_report(
         train_benchmark_twr=train_bench_twr,
         val_benchmark_twr=val_bench_twr,
         trade_log=train_result.trade_log,
+        config_hash=_cfg_hash,
+        run_timestamp=_ts,
     )
 
 
 def compare_archetype_modes(
     precomp: PrecomputedData,
-    params: "np.ndarray | None" = None,
+    params: np.ndarray | None = None,
 ) -> dict:
     """
     Run the same precomputed window twice — uniform thresholds vs archetype-aware —
@@ -1088,7 +1326,7 @@ def compare_archetype_modes(
 
 def compare_candidate_selection_modes(
     precomp: PrecomputedData,
-    params: "np.ndarray | None" = None,
+    params: np.ndarray | None = None,
 ) -> dict:
     """
     Run the same precomputed data through three candidate selection modes and

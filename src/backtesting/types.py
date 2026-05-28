@@ -5,9 +5,11 @@ backtesting/types.py — Shared data types for the backtesting package.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 import numpy as np
+
+BacktestScope = Literal["overall_strategy", "active_sleeve_compounding"]
 
 
 class PrecomputedData(NamedTuple):
@@ -38,15 +40,15 @@ class PrecomputedData(NamedTuple):
     bin_indices_daily: np.ndarray       # (n_days, n_stocks) int
     has_position_52w_daily: np.ndarray  # (n_days, n_stocks) bool
     # Momentum v2 daily rolling features — None when not computed (v1 fallback activates)
-    ret_5d_daily: "np.ndarray | None" = None    # (n_days, n_stocks) 5-day return
-    ret_3m_daily: "np.ndarray | None" = None    # (n_days, n_stocks) 63-day return
-    ret_6m_daily: "np.ndarray | None" = None    # (n_days, n_stocks) 126-day return
-    rs_3m_daily: "np.ndarray | None" = None     # (n_days, n_stocks) relative strength vs SPY
-    rs_6m_daily: "np.ndarray | None" = None     # (n_days, n_stocks) relative strength vs SPY
-    vol_3m_daily: "np.ndarray | None" = None    # (n_days, n_stocks) annualized realized vol
-    above_50dma_daily: "np.ndarray | None" = None   # (n_days, n_stocks) bool
-    above_200dma_daily: "np.ndarray | None" = None  # (n_days, n_stocks) bool
-    spy_prices: "np.ndarray | None" = None      # (n_days,) SPY closes for RS computation
+    ret_5d_daily: np.ndarray | None = None    # (n_days, n_stocks) 5-day return
+    ret_3m_daily: np.ndarray | None = None    # (n_days, n_stocks) 63-day return
+    ret_6m_daily: np.ndarray | None = None    # (n_days, n_stocks) 126-day return
+    rs_3m_daily: np.ndarray | None = None     # (n_days, n_stocks) relative strength vs SPY
+    rs_6m_daily: np.ndarray | None = None     # (n_days, n_stocks) relative strength vs SPY
+    vol_3m_daily: np.ndarray | None = None    # (n_days, n_stocks) annualized realized vol
+    above_50dma_daily: np.ndarray | None = None   # (n_days, n_stocks) bool
+    above_200dma_daily: np.ndarray | None = None  # (n_days, n_stocks) bool
+    spy_prices: np.ndarray | None = None      # (n_days,) SPY closes for RS computation
 
 
 @dataclass
@@ -71,11 +73,29 @@ class SimResult:
     # attribution & regime diagnostics
     stopout_count: int = 0          # hard stop-loss triggered
     trim_count: int = 0             # partial exits (trim_exit)
+    harvest_count: int = 0          # partial profit-harvest exits
     cooldown_skips: int = 0         # buys skipped due to post-sell cooldown
-    regime_days: "dict | None" = None  # {"bullish": N, "neutral": N, "defensive": N}
+    regime_days: dict | None = None  # {"bullish": N, "neutral": N, "defensive": N}
     benchmark_twr: float = 0.0     # contribution-adjusted benchmark TWR for comparison
-    pool_diagnostics: "CandidatePoolDiagnostics | None" = None  # day-0 candidate pool
+    pool_diagnostics: CandidatePoolDiagnostics | None = None  # day-0 candidate pool
     trade_log: list = field(default_factory=list)  # list[TradeRecord] for attribution
+    # Daily equity curves for charting (empty when not requested)
+    equity_curve: np.ndarray = field(default_factory=lambda: np.array([]))
+    benchmark_equity: np.ndarray = field(default_factory=lambda: np.array([]))
+    # Archetype breakdown (populated when archetype_aware=True)
+    archetype_pnl: dict[str, float] = field(default_factory=dict)
+    archetype_trade_counts: dict[str, int] = field(default_factory=dict)
+    archetype_exit_breakdown: dict[str, dict] = field(default_factory=dict)
+    # Walk-forward cluster concentration result (None when cluster_tracking=False)
+    cluster_result: object | None = None
+    # Backtest scope and active sleeve metrics (None when scope == "overall_strategy")
+    scope: BacktestScope = "overall_strategy"
+    active_equity_curve: np.ndarray | None = None
+    active_total_return: float | None = None
+    active_sharpe: float | None = None
+    active_calmar: float | None = None
+    active_max_drawdown: float | None = None
+    active_excess_return: float | None = None
 
 
 @dataclass
@@ -86,7 +106,7 @@ class BacktestReport:
     n_symbols: int
     n_days: int
     train_result: SimResult
-    validation_result: "SimResult | None"
+    validation_result: SimResult | None
     benchmark_return: float            # train-window benchmark (simple price return)
     benchmark_sharpe: float
     benchmark_max_drawdown: float
@@ -97,6 +117,8 @@ class BacktestReport:
     train_benchmark_twr: float = 0.0   # contribution-adjusted benchmark TWR
     val_benchmark_twr: float = 0.0
     trade_log: list = field(default_factory=list)  # list[TradeRecord] from train window
+    config_hash: str = ""              # SHA-256[:12] of config at run time
+    run_timestamp: str = ""            # ISO datetime string
 
 
 @dataclass

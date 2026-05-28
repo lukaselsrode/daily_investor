@@ -2,22 +2,25 @@
 tests/test_reporting.py — Reporting and attribution tests (Phase 8).
 """
 
-import sys
 import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-import pytest
-import numpy as np
-import pandas as pd
 from unittest.mock import MagicMock, patch
 
-from core.types import SimResult, BacktestReport, TradeRecord
-from backtesting.types import BacktestReport as BtReport, SimResult as BtSim
+import numpy as np
+import pandas as pd
+import pytest
+
 from backtesting.results import BacktestResult as BtResult
+from backtesting.types import BacktestReport as BtReport
+from backtesting.types import SimResult
+from backtesting.types import SimResult as BtSim
+from core.types import TradeRecord
 from reporting.attribution import AttributionReporter
 from reporting.diagnostics import DiagnosticsReporter
 from reporting.plots import PlotManager
-
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -92,13 +95,13 @@ class TestSimResultExtended:
             max_drawdown=-0.08,
             trades_made=25,
             stopout_count=2,
-            trailing_stop_count=3,
-            take_profit_count=5,
+            trim_count=3,
+            harvest_count=5,
         )
         assert r.stopout_count == 2
-        assert r.trailing_stop_count == 3
-        assert r.take_profit_count == 5
-        assert r.etf_return == 0.0  # default
+        assert r.trim_count == 3
+        assert r.harvest_count == 5
+        assert r.sells_made == 0  # default
 
 
 class TestBacktestResult:
@@ -185,7 +188,6 @@ class TestAttributionReporter:
         assert AttributionReporter().classify(0.20, 0.05) == "MODERATELY_STABLE"
 
     def _sell_trades(self) -> list:
-        from core.types import TradeRecord
         return [
             TradeRecord(date="1", symbol="AAPL", side="sell", quantity=10, price=100,
                         amount=1000, exit_type="stop_loss", pnl=-50.0, hold_days=5),
