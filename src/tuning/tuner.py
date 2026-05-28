@@ -90,21 +90,27 @@ def run_tuner(
     popsize: int = 8,
     mode: str | None = None,
     scope: str = "overall_strategy",
+    preset: str | None = None,
 ) -> tuple[np.ndarray, SimResult]:
     """Optimize a single objective. Returns (best_params, SimResult)."""
+    if preset is not None:
+        from .presets import validate_preset
+        validate_preset(preset)
+
     try:
         from scipy.optimize import differential_evolution  # noqa: F401
     except ImportError as exc:
         raise RuntimeError("scipy is required. Install: pip install scipy") from exc
 
     precomp = load_and_precompute(n_days, mode=mode)
+    _preset_label = f", preset={preset}" if preset else ""
     print(
         f"\nOptimizing {len(PARAM_NAMES)} parameters over {n_days} trading days "
-        f"(objective: {objective}, mode={precomp.mode}, scope={scope})."
+        f"(objective: {objective}, mode={precomp.mode}, scope={scope}{_preset_label})."
     )
     print(f"scipy differential_evolution: popsize={popsize}, maxiter={maxiter}")
     print("This may take several minutes …\n")
-    return _run_single(precomp, objective, starting_capital, maxiter, popsize, scope=scope)
+    return _run_single(precomp, objective, starting_capital, maxiter, popsize, scope=scope, preset=preset)
 
 
 # ---------------------------------------------------------------------------
@@ -121,6 +127,7 @@ def run_auto_tune(
     force_apply: bool = False,
     llm_review: bool = False,
     scope: str = "overall_strategy",
+    preset: str | None = None,
 ) -> tuple:
     """
     Run Sharpe + Calmar optimizations, average the results.
@@ -129,6 +136,10 @@ def run_auto_tune(
 
     Returns (avg_params, sharpe_result, calmar_result, avg_result, sharpe_params, calmar_params).
     """
+    if preset is not None:
+        from .presets import validate_preset
+        validate_preset(preset)
+
     try:
         from scipy.optimize import differential_evolution  # noqa: F401
     except ImportError as exc:
@@ -171,12 +182,13 @@ def run_auto_tune(
         f"mode={precomp.mode}, bias={precomp.lookahead_bias_level}."
     )
     print(f"scipy differential_evolution: popsize={popsize}, maxiter={maxiter}")
+    _preset_label = f", preset={preset}" if preset else ""
 
-    print(f"\n[1/2] Optimizing for Sharpe (scope={scope}) …\n")
-    sharpe_params, sharpe_result = _run_single(tune_precomp, "sharpe", starting_capital, maxiter, popsize, scope=scope)
+    print(f"\n[1/2] Optimizing for Sharpe (scope={scope}{_preset_label}) …\n")
+    sharpe_params, sharpe_result = _run_single(tune_precomp, "sharpe", starting_capital, maxiter, popsize, scope=scope, preset=preset)
 
-    print(f"\n[2/2] Optimizing for Calmar (scope={scope}) …\n")
-    calmar_params, calmar_result = _run_single(tune_precomp, "calmar", starting_capital, maxiter, popsize, scope=scope)
+    print(f"\n[2/2] Optimizing for Calmar (scope={scope}{_preset_label}) …\n")
+    calmar_params, calmar_result = _run_single(tune_precomp, "calmar", starting_capital, maxiter, popsize, scope=scope, preset=preset)
 
     avg_params = (sharpe_params + calmar_params) / 2.0
     avg_result = run_simulation(
@@ -364,6 +376,7 @@ class ParameterTuner:
         starting_capital: float = 10_000.0,
         mode: str | None = None,
         scope: str = "overall_strategy",
+        preset: str | None = None,
     ) -> TuneResult:
         params, sim = run_tuner(
             n_days=n_days,
@@ -371,6 +384,7 @@ class ParameterTuner:
             starting_capital=starting_capital,
             mode=mode,
             scope=scope,
+            preset=preset,
         )
         return TuneResult(
             params=params,
@@ -389,6 +403,7 @@ class ParameterTuner:
         llm_review: bool = False,
         starting_capital: float = 10_000.0,
         scope: str = "overall_strategy",
+        preset: str | None = None,
     ) -> AutoTuneResult:
         raw = run_auto_tune(
             n_days=n_days,
@@ -398,6 +413,7 @@ class ParameterTuner:
             force_apply=force_apply,
             llm_review=llm_review,
             scope=scope,
+            preset=preset,
         )
         avg_params, sharpe_result, calmar_result, avg_result, sharpe_params, calmar_params = raw
 

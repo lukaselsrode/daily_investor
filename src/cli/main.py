@@ -35,6 +35,7 @@ def main(argv: list[str] | None = None) -> None:
         cmd_backtest,
         cmd_factor_map,
         cmd_fetch_data,
+        cmd_list_presets,
         cmd_report,
         cmd_run,
         cmd_stability_scan,
@@ -42,7 +43,10 @@ def main(argv: list[str] | None = None) -> None:
         cmd_update_outcomes,
     )
 
-    if cmd == "fetch-data":
+    if cmd == "list-presets":
+        cmd_list_presets()
+
+    elif cmd == "fetch-data":
         cmd_fetch_data()
 
     elif cmd == "run":
@@ -55,16 +59,20 @@ def main(argv: list[str] | None = None) -> None:
         mode = _flag_value(rest, "--mode")
         compare = "--compare" in rest
         archetype_compare = "--archetype-compare" in rest
-        cmd_backtest(n_days=n_days, mode=mode, compare=compare, archetype_compare=archetype_compare)
+        scope = _flag_value(rest, "--scope") or "overall_strategy"
+        cmd_backtest(n_days=n_days, mode=mode, compare=compare,
+                     archetype_compare=archetype_compare, scope=scope)
 
     elif cmd == "tune":
         if not rest or not rest[0].isdigit():
-            print("Usage: tune DAYS [--objective sharpe|calmar]")
+            print("Usage: tune DAYS [--objective sharpe|calmar] [--scope ...] [--preset ...]")
             sys.exit(1)
         n_days = int(rest[0])
         objective = _flag_value(rest, "--objective") or "sharpe"
         mode = _flag_value(rest, "--mode")
-        cmd_tune(n_days=n_days, objective=objective, mode=mode)
+        scope = _flag_value(rest, "--scope") or "overall_strategy"
+        preset = _flag_value(rest, "--preset")
+        cmd_tune(n_days=n_days, objective=objective, mode=mode, scope=scope, preset=preset)
 
     elif cmd == "auto-tune":
         n_days = int(rest[0]) if rest and rest[0].isdigit() else 90
@@ -72,7 +80,9 @@ def main(argv: list[str] | None = None) -> None:
         apply = "--apply" in rest
         force_apply = "--force-apply" in rest
         llm_review = "--llm-review" in rest
-        cmd_auto_tune(n_days=n_days, mode=mode, apply=apply, force_apply=force_apply, llm_review=llm_review)
+        scope = _flag_value(rest, "--scope") or "overall_strategy"
+        preset = _flag_value(rest, "--preset")
+        cmd_auto_tune(n_days=n_days, mode=mode, apply=apply, force_apply=force_apply, llm_review=llm_review, scope=scope, preset=preset)
 
     elif cmd == "stability-scan":
         mode = _flag_value(rest, "--mode")
@@ -129,6 +139,7 @@ COMMANDS
   backtest DAYS            Run backtest simulation (--archetype-compare for A/B vs uniform)
   tune DAYS                Single-objective parameter tune (prints diff, no write)
   auto-tune [DAYS]         Dual-objective tune with walk-forward validation (default: 90d)
+  list-presets             Print available tuning presets and exit
   stability-scan           Parameter stability scan (research only, no writes)
   report                   Generate diagnostics report
   update-outcomes          Backfill future returns for past decisions (calibration only)
@@ -138,11 +149,12 @@ OPTIONS (run)
   --skip-data              Reuse existing CSV data
   --op-mode safe|automated|no-sentiment
 
-OPTIONS (auto-tune)
+OPTIONS (tune / auto-tune)
   --apply                  Write config.yaml if validation passes
   --force-apply            Write config.yaml unconditionally
   --llm-review             Add Claude second-opinion review
-  --mode MODE              Backtest universe mode
+  --scope SCOPE            overall_strategy (default) or active_sleeve_compounding
+  --preset NAME            Restrict tunable params to a named preset (see list-presets)
 
 OPTIONS (all)
   --objective sharpe|calmar  Optimization target (default: sharpe)

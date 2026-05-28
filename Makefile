@@ -89,6 +89,22 @@ auto-tune-apply:             ## auto-tune + write config.yaml if validation gate
 auto-tune-llm:               ## auto-tune + Claude second-opinion + apply
 	$(DI) auto-tune $(AUTO_DAYS) $(if $(MODE),--mode $(MODE),) --apply --llm-review
 
+.PHONY: auto-tune-active
+auto-tune-active:            ## Active sleeve tune — score weights preset  (AUTO_DAYS=N)
+	$(DI) auto-tune $(AUTO_DAYS) --scope active_sleeve_compounding --preset active_core_weights $(if $(MODE),--mode $(MODE),)
+
+.PHONY: auto-tune-active-exits
+auto-tune-active-exits:      ## Active sleeve tune — exit rules preset  (AUTO_DAYS=N)
+	$(DI) auto-tune $(AUTO_DAYS) --scope active_sleeve_compounding --preset active_exits $(if $(MODE),--mode $(MODE),)
+
+.PHONY: auto-tune-active-full
+auto-tune-active-full:       ## Active sleeve tune — weights + exits preset  (AUTO_DAYS=N)
+	$(DI) auto-tune $(AUTO_DAYS) --scope active_sleeve_compounding --preset active_full_safe $(if $(MODE),--mode $(MODE),)
+
+.PHONY: auto-tune-active-factors
+auto-tune-active-factors:    ## Active sleeve tune — factor internals preset  (AUTO_DAYS=N)
+	$(DI) auto-tune $(AUTO_DAYS) --scope active_sleeve_compounding --preset active_factor_internals $(if $(MODE),--mode $(MODE),)
+
 # ── Research / diagnostics ────────────────────────────────────────────────────
 
 OUTPUT_DIR ?= reports

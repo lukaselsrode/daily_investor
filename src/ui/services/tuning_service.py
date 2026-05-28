@@ -13,6 +13,7 @@ def run_weight_tune(
     respect_config_bounds: bool = True,
     progress_callback=None,
     scope: str = "overall_strategy",
+    preset: str | None = None,
 ):
     """Sample random score-weight combinations on a pre-loaded precomp, rank by robust_score."""
     from tuning.random_tune import run_random_weight_tune
@@ -25,6 +26,7 @@ def run_weight_tune(
         respect_config_bounds=respect_config_bounds,
         progress_callback=progress_callback,
         scope=scope,
+        preset=preset,
     )
 
 

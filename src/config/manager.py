@@ -99,6 +99,31 @@ class ConfigManager:
                 DeprecationWarning,
                 stacklevel=3,
             )
+        self._validate_exit_thresholds()
+
+    def _validate_exit_thresholds(self) -> None:
+        """Emit warnings for any exit-threshold ordering violations at load time."""
+        from .validation import warn_if_invalid
+
+        mt   = float(self._raw.get("metric_threshold", 0.75))
+        sw   = float(self._raw.get("sell_rules", {}).get("sell_weak_value_below", 0.45))
+        ed   = self._raw.get("exit_decision", {})
+        hard = float(ed.get("hard_exit_score_below", 0.20))
+        rev  = float(ed.get("review_score_below",    0.45))
+
+        if "trim_score_below" in ed:
+            trim = float(ed["trim_score_below"])
+        else:
+            delta = float(ed.get("trim_score_delta_threshold", -0.15))
+            trim  = mt * (1.0 + delta)
+
+        warn_if_invalid(
+            metric_threshold=mt,
+            sell_weak_value_below=sw,
+            trim_score_below=trim,
+            hard_exit_score_below=hard,
+            review_score_below=rev,
+        )
 
     # ── Singleton lifecycle ───────────────────────────────────────────────────
 

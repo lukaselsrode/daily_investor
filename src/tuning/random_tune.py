@@ -1,23 +1,20 @@
 """
-tuning/random_tune.py — Random score-weight sampling + ranking by robustness.
+tuning/random_tune.py — Random parameter sampling + ranking by robustness.
 
-Samples N random combinations of (value, quality, income, momentum) score weights
-uniformly from the 4-simplex, runs randomized walk-forward backtests for each
-combination, and ranks candidates by robust_score.
+Default behaviour (no preset): samples N random (value/quality/income/momentum)
+score-weight combinations from the 4-simplex.
+
+Preset behaviour: determines which params are active via _get_active_indices(), then:
+  - If active set == {0,1,2,3} (score weights only): Dirichlet simplex sampling.
+  - Otherwise: independent uniform sampling within each param's effective bounds.
+
+This means active_exits, active_factor_internals, etc. correctly vary their own
+parameters rather than always varying score weights.
 
 Public API
 ----------
 sample_weight_simplex(n_samples, n_dims, seed) -> np.ndarray  shape (n_samples, n_dims)
-run_random_weight_tune(precomp, base_params, ...) -> RandomTuneResult
-
-Design notes
-------------
-- Weights are sampled via Dirichlet(alpha=1), which is the uniform distribution
-  on the simplex.  Each row sums to 1.0.
-- Only the four top-level score weights (params[0:4]) are varied; all other
-  parameters stay at base_params values (current config defaults).
-- Existing config bounds are respected: samples outside [lo, hi] for a weight
-  are clipped and renormalized before evaluation.
+run_random_weight_tune(precomp, base_params, ..., preset=None) -> RandomTuneResult
 """
 from __future__ import annotations
 
@@ -30,12 +27,34 @@ import pandas as pd
 
 from backtesting.random_walk import RandomWindowSummary, random_window_backtest
 from backtesting.types import PrecomputedData
+from tuning.robust_scan import RobustScanResult
 
 logger = logging.getLogger(__name__)
 
 # Score-weight positions in the 15-element params vector
 _WEIGHT_SLICE = slice(0, 4)  # [value, quality, income, momentum]
 _WEIGHT_NAMES = ["value", "quality", "income", "momentum"]
+
+# Inverted config-path → param-name display labels (used for YAML export)
+_IDX_TO_CONFIG_PATH: dict[int, str] = {
+    0:  "score_weights.value",
+    1:  "score_weights.quality",
+    2:  "score_weights.income",
+    3:  "score_weights.momentum",
+    4:  "index_pct",
+    5:  "metric_threshold",
+    6:  "sell_rules.take_profit_pct",
+    7:  "sell_rules.sell_weak_value_below",
+    8:  "sell_rules.trailing_stop_pct",
+    9:  "scoring.value_pe_weight",
+    10: "momentum_v2.weights.rs_3m",
+    11: "momentum_v2.weights.rs_6m",
+    12: "momentum_v2.weights.risk_adj_3m",
+    13: "momentum_v2.weights.trend_structure",
+    14: "momentum_v2.weights.return_1m",
+}
+
+_SCORE_WEIGHT_IDXS: frozenset[int] = frozenset({0, 1, 2, 3})
 
 
 # ---------------------------------------------------------------------------
@@ -104,28 +123,36 @@ def _weight_bounds_from_config() -> list[tuple[float, float]]:
 
 @dataclass
 class WeightCandidate:
-    """A single sampled weight combination and its robustness evaluation."""
+    """A single sampled parameter combination and its robustness evaluation."""
     sample_id: int
-    weights: np.ndarray               # shape (4,) — [value, quality, income, momentum]
-    summary: RandomWindowSummary
+    active_values: np.ndarray       # shape (n_active,) — values for active params
+    active_names: list[str]         # PARAM_NAMES for each active value
+    full_params: np.ndarray         # shape (15,) — complete params vector
+    summary: RandomWindowSummary    # representative summary for display
     robust_score: float
     rank: int = 0
+    scan_result: "RobustScanResult | None" = None  # populated when run_matrix used
+
+    # Backward-compat alias
+    @property
+    def weights(self) -> np.ndarray:
+        return self.active_values
 
     def weights_dict(self) -> dict[str, float]:
-        return {n: float(self.weights[i]) for i, n in enumerate(_WEIGHT_NAMES)}
+        return {name: float(v) for name, v in zip(self.active_names, self.active_values)}
 
     def to_row(self) -> dict:
         d = self.weights_dict()
         d.update({
-            "rank":             self.rank,
-            "robust_score":     round(self.robust_score, 4),
-            "median_excess":    round(self.summary.median_excess_return, 4),
-            "median_sharpe":    round(self.summary.median_sharpe, 3),
-            "median_drawdown":  round(self.summary.median_drawdown, 4),
-            "pct_beating":      round(self.summary.pct_beating_benchmark, 3),
-            "worst_decile_dd":  round(self.summary.worst_decile_drawdown, 4),
-            "std_excess":       round(self.summary.std_excess_return, 4),
-            "n_windows":        self.summary.n_windows,
+            "rank":            self.rank,
+            "robust_score":    round(self.robust_score, 4),
+            "median_excess":   round(self.summary.median_excess_return, 4),
+            "median_sharpe":   round(self.summary.median_sharpe, 3),
+            "median_drawdown": round(self.summary.median_drawdown, 4),
+            "pct_beating":     round(self.summary.pct_beating_benchmark, 3),
+            "worst_decile_dd": round(self.summary.worst_decile_drawdown, 4),
+            "std_excess":      round(self.summary.std_excess_return, 4),
+            "n_windows":       self.summary.n_windows,
         })
         return d
 
@@ -137,9 +164,10 @@ class RandomTuneResult:
     n_windows: int
     window_days: int
     seed: int
+    active_param_names: list[str] = field(default_factory=list)
     candidates: list[WeightCandidate] = field(default_factory=list)
     best_candidate: WeightCandidate | None = None
-    current_weights: np.ndarray | None = None
+    current_weights: np.ndarray | None = None   # active param values for current config
     current_summary: RandomWindowSummary | None = None
     warnings: list[str] = field(default_factory=list)
 
@@ -155,59 +183,89 @@ class RandomTuneResult:
         return pd.DataFrame([c.to_row() for c in self.candidates])
 
     def best_vs_current_df(self) -> pd.DataFrame | None:
-        """Side-by-side comparison of best candidate vs current config."""
+        """Side-by-side comparison of best candidate vs current config (active params only)."""
         if self.best_candidate is None:
             return None
 
-        rows: list[dict] = []
-        best_w   = self.best_candidate.weights_dict()
-        curr_w   = {n: float(self.current_weights[i]) for i, n in enumerate(_WEIGHT_NAMES)} \
-                   if self.current_weights is not None else {}
+        _PARAM_DISPLAY: dict[str, str] = {
+            "sw_value": "Value", "sw_quality": "Quality",
+            "sw_income": "Income", "sw_momentum": "Momentum",
+            "index_pct": "Index %", "metric_threshold": "Metric threshold",
+            "take_profit_pct": "Take-profit %", "sell_weak_below": "Sell-weak below",
+            "trailing_stop": "Trailing stop", "value_pe_weight": "P/E weight",
+            "mom_rs3m": "RS 3m", "mom_rs6m": "RS 6m",
+            "mom_radj": "Risk-adj 3m", "mom_trend": "Trend", "mom_r1m": "Return 1m",
+        }
+
+        best_d   = self.best_candidate.weights_dict()
+        curr_arr = self.current_weights
         curr_sum = self.current_summary
 
-        metrics = [
-            ("value weight",       best_w.get("value", 0),         curr_w.get("value", 0),        "{:.3f}"),
-            ("quality weight",     best_w.get("quality", 0),       curr_w.get("quality", 0),      "{:.3f}"),
-            ("income weight",      best_w.get("income", 0),        curr_w.get("income", 0),       "{:.3f}"),
-            ("momentum weight",    best_w.get("momentum", 0),      curr_w.get("momentum", 0),     "{:.3f}"),
-            ("robust_score",       self.best_candidate.robust_score,
-                                   curr_sum.robust_score if curr_sum else float("nan"),              "{:+.4f}"),
-            ("median excess",      self.best_candidate.summary.median_excess_return,
-                                   curr_sum.median_excess_return if curr_sum else float("nan"),      "{:+.1%}"),
-            ("median Sharpe",      self.best_candidate.summary.median_sharpe,
-                                   curr_sum.median_sharpe if curr_sum else float("nan"),             "{:.3f}"),
-            ("median drawdown",    self.best_candidate.summary.median_drawdown,
-                                   curr_sum.median_drawdown if curr_sum else float("nan"),           "{:.1%}"),
-            ("% beating benchmark",self.best_candidate.summary.pct_beating_benchmark,
-                                   curr_sum.pct_beating_benchmark if curr_sum else float("nan"),     "{:.0%}"),
-            ("worst-decile DD",    self.best_candidate.summary.worst_decile_drawdown,
-                                   curr_sum.worst_decile_drawdown if curr_sum else float("nan"),     "{:.1%}"),
-        ]
-
         rows = []
-        for label, best_val, curr_val, fmt in metrics:
+        for i, name in enumerate(self.active_param_names):
+            label = _PARAM_DISPLAY.get(name, name)
+            bval  = best_d.get(name, float("nan"))
+            cval  = float(curr_arr[i]) if curr_arr is not None and i < len(curr_arr) else float("nan")
+
+            # Format: percentage for most, small decimal for sub-weights
+            if "pct" in name or "stop" in name or "weak" in name:
+                fmt = "{:+.1%}"
+            elif "weight" in name or name.startswith("sw_") or name.startswith("mom_"):
+                fmt = "{:.3f}"
+            else:
+                fmt = "{:.4f}"
+
             try:
-                b_str = fmt.format(best_val)
-                c_str = fmt.format(curr_val) if not (isinstance(curr_val, float) and np.isnan(curr_val)) else "—"
+                b_str = fmt.format(bval)
+                c_str = fmt.format(cval) if not (isinstance(cval, float) and np.isnan(cval)) else "—"
             except Exception:
-                b_str = str(best_val)
-                c_str = str(curr_val)
+                b_str, c_str = str(bval), str(cval)
+
             rows.append({"metric": label, "best_config": b_str, "current_config": c_str})
+
+        # Append robustness metrics
+        best_sum = self.best_candidate.summary
+        robustness_rows = [
+            ("robust_score",        f"{self.best_candidate.robust_score:+.4f}",
+             f"{curr_sum.robust_score:+.4f}" if curr_sum else "—"),
+            ("median excess",       f"{best_sum.median_excess_return:+.1%}",
+             f"{curr_sum.median_excess_return:+.1%}" if curr_sum else "—"),
+            ("median Sharpe",       f"{best_sum.median_sharpe:.3f}",
+             f"{curr_sum.median_sharpe:.3f}" if curr_sum else "—"),
+            ("median drawdown",     f"{best_sum.median_drawdown:.1%}",
+             f"{curr_sum.median_drawdown:.1%}" if curr_sum else "—"),
+            ("% beating benchmark", f"{best_sum.pct_beating_benchmark:.0%}",
+             f"{curr_sum.pct_beating_benchmark:.0%}" if curr_sum else "—"),
+            ("worst-decile DD",     f"{best_sum.worst_decile_drawdown:.1%}",
+             f"{curr_sum.worst_decile_drawdown:.1%}" if curr_sum else "—"),
+        ]
+        rows.extend({"metric": m, "best_config": b, "current_config": c}
+                    for m, b, c in robustness_rows)
 
         return pd.DataFrame(rows)
 
     def best_weights_yaml(self) -> str:
-        """Formatted YAML snippet for the best score_weights section."""
+        """YAML snippet for the best active parameters, structured as nested config keys."""
         if self.best_candidate is None:
             return ""
-        w = self.best_candidate.weights_dict()
-        return (
-            "score_weights:\n"
-            f"  value:    {w['value']:.4f}\n"
-            f"  quality:  {w['quality']:.4f}\n"
-            f"  income:   {w['income']:.4f}\n"
-            f"  momentum: {w['momentum']:.4f}\n"
-        )
+
+        from tuning.constants import PARAM_NAMES
+        d = self.best_candidate.weights_dict()
+
+        # Map PARAM_NAMES → config path via IDX_TO_CONFIG_PATH
+        name_to_path = {n: _IDX_TO_CONFIG_PATH.get(i, n) for i, n in enumerate(PARAM_NAMES)}
+
+        nested: dict = {}
+        for name, val in d.items():
+            path  = name_to_path.get(name, name)
+            parts = path.split(".")
+            cur   = nested
+            for p in parts[:-1]:
+                cur = cur.setdefault(p, {})
+            cur[parts[-1]] = round(float(val), 4)
+
+        import yaml
+        return yaml.dump(nested, default_flow_style=False, sort_keys=False)
 
 
 # ---------------------------------------------------------------------------
@@ -228,45 +286,45 @@ def run_random_weight_tune(
     respect_config_bounds: bool = True,
     progress_callback: Callable[[int, int], None] | None = None,
     scope: str = "overall_strategy",
+    preset: str | None = None,
 ) -> RandomTuneResult:
     """
-    Sample n_samples random score-weight combinations, evaluate each on n_windows
+    Sample n_samples random parameter combinations, evaluate each on n_windows
     random windows of window_days, and return candidates ranked by robust_score.
 
-    Only params[0:4] (value/quality/income/momentum) are varied.  All other
-    parameters remain at base_params values (current config defaults).
+    When preset is None or active set is exactly {0,1,2,3}: uses Dirichlet simplex
+    sampling for score weights (original behaviour).
 
-    Args:
-        precomp:               Precomputed dataset (should have ≥ window_days * 2 rows
-                               to allow meaningful window sampling).
-        base_params:           Base parameter vector (15 elements). None = current config.
-        n_samples:             Number of random weight combos to evaluate.
-        n_windows:             Random windows per weight combo.
-        window_days:           Trading days per window.
-        seed:                  Master random seed.
-        starting_capital:      Capital per window.
-        weekly_contribution:   Cash per rebalance cycle.
-        slippage_bps:          Slippage per trade in bps.
-        rebalance_frequency_days: Days between rebalance cycles.
-        respect_config_bounds: If True, clip weight samples to bounds from config.
-        progress_callback:     Optional callable(sample_id, n_samples) for UI.
-
-    Returns:
-        RandomTuneResult with candidates sorted by robust_score (best first).
+    When a preset selects other params (e.g. active_exits, active_factor_internals):
+    samples each active param independently from its effective bounds via uniform
+    distribution.
     """
     from backtesting.simulator import get_default_params
+    from tuning.constants import PARAM_NAMES, _effective_bounds, _get_active_indices
 
     if base_params is None:
         base_params = get_default_params()
 
-    bounds = _weight_bounds_from_config() if respect_config_bounds else None
-    weight_samples = sample_weight_simplex(n_samples, n_dims=4, seed=seed, bounds=bounds)
+    active_idxs  = _get_active_indices(scope=scope, preset=preset)
+    eff_bounds   = _effective_bounds(scope=scope, preset=preset)
+    active_names = [PARAM_NAMES[i] for i in active_idxs]
+    active_bnds  = [eff_bounds[i] for i in active_idxs]
 
-    # Current config weights (also evaluated as a baseline)
-    current_w = base_params[:4].copy()
-    s = current_w.sum()
-    if s > 1e-9:
-        current_w = current_w / s
+    # Decide sampling strategy
+    use_simplex = (set(active_idxs) == _SCORE_WEIGHT_IDXS)
+
+    if use_simplex:
+        simplex_bounds = _weight_bounds_from_config() if respect_config_bounds else None
+        raw_samples = sample_weight_simplex(n_samples, n_dims=4, seed=seed, bounds=simplex_bounds)
+    else:
+        # Independent uniform sampling within each active param's effective bounds
+        rng = np.random.default_rng(seed)
+        raw_samples = np.zeros((n_samples, len(active_idxs)), dtype=float)
+        for j, (lo, hi) in enumerate(active_bnds):
+            raw_samples[:, j] = rng.uniform(lo, hi, n_samples)
+
+    # Current active param values as baseline
+    current_active = base_params[np.array(active_idxs)].copy()
 
     warnings: list[str] = []
     n_total = precomp.prices.shape[0]
@@ -278,15 +336,13 @@ def run_random_weight_tune(
 
     candidates: list[WeightCandidate] = []
 
-    for idx, w in enumerate(weight_samples):
+    for idx, active_vals in enumerate(raw_samples):
         if progress_callback is not None:
             progress_callback(idx, n_samples)
 
         params_i = base_params.copy()
-        params_i[0] = float(w[0])  # value
-        params_i[1] = float(w[1])  # quality
-        params_i[2] = float(w[2])  # income
-        params_i[3] = float(w[3])  # momentum
+        for j, aidx in enumerate(active_idxs):
+            params_i[aidx] = float(active_vals[j])
 
         try:
             summary = random_window_backtest(
@@ -307,7 +363,9 @@ def run_random_weight_tune(
             )
             candidates.append(WeightCandidate(
                 sample_id=idx,
-                weights=w.copy(),
+                active_values=active_vals.copy(),
+                active_names=active_names,
+                full_params=params_i.copy(),
                 summary=summary,
                 robust_score=rank_score,
             ))
@@ -315,19 +373,17 @@ def run_random_weight_tune(
             logger.warning("Sample %d failed: %s", idx, exc)
             warnings.append(f"Sample {idx} failed: {exc}")
 
-    # Sort descending by robust_score and assign ranks
     candidates.sort(key=lambda c: c.robust_score, reverse=True)
     for rank, c in enumerate(candidates, 1):
         c.rank = rank
 
     if not candidates:
-        warnings.append("All weight samples failed. Check data and window_days.")
+        warnings.append("All parameter samples failed. Check data and window_days.")
 
-    # Evaluate current config weights as baseline
+    # Evaluate current config as baseline
     current_summary: RandomWindowSummary | None = None
     try:
         current_params = base_params.copy()
-        current_params[:4] = current_w
         current_summary = random_window_backtest(
             precomp, current_params,
             n_windows=n_windows,
@@ -340,7 +396,7 @@ def run_random_weight_tune(
             scope=scope,
         )
     except Exception as exc:
-        logger.warning("Current-weights baseline evaluation failed: %s", exc)
+        logger.warning("Current-config baseline evaluation failed: %s", exc)
         warnings.append(f"Current config evaluation failed: {exc}")
 
     best = candidates[0] if candidates else None
@@ -350,9 +406,10 @@ def run_random_weight_tune(
         n_windows=n_windows,
         window_days=window_days,
         seed=seed,
+        active_param_names=active_names,
         candidates=candidates,
         best_candidate=best,
-        current_weights=current_w,
+        current_weights=current_active,
         current_summary=current_summary,
         warnings=warnings,
     )

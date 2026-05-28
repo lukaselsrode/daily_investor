@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
@@ -58,11 +59,15 @@ class WindowResult:
     trades: int
     avg_positions: float
     wins_benchmark: bool
+    # Equity curves — stored for fan chart visualization
+    equity_curve: np.ndarray | None = None
+    benchmark_equity: np.ndarray | None = None
     # Active sleeve metrics — populated when scope == "active_sleeve_compounding"
     active_return: float | None = None
     active_excess_return: float | None = None
     active_sharpe: float | None = None
     active_drawdown: float | None = None
+    active_equity_curve: np.ndarray | None = None
     wins_benchmark_active: bool | None = None
 
 
@@ -285,6 +290,10 @@ def random_window_backtest(
 
             excess = sim.total_return - bench_ret
 
+            # Build indexed benchmark equity for this window
+            bench_win = precomp.benchmark_prices[s]
+            bench_eq = (bench_win / max(bench_win[0], 1e-9)) if len(bench_win) > 0 else None
+
             results.append(WindowResult(
                 window_id=wid,
                 start_day=start,
@@ -299,10 +308,17 @@ def random_window_backtest(
                 trades=sim.trades_made,
                 avg_positions=sim.average_positions,
                 wins_benchmark=excess > 0,
+                equity_curve=sim.equity_curve.copy() if len(sim.equity_curve) > 0 else None,
+                benchmark_equity=bench_eq,
                 active_return=sim.active_total_return,
                 active_excess_return=sim.active_excess_return,
                 active_sharpe=sim.active_sharpe,
                 active_drawdown=sim.active_max_drawdown,
+                active_equity_curve=(
+                    sim.active_equity_curve.copy()
+                    if sim.active_equity_curve is not None and len(sim.active_equity_curve) > 0
+                    else None
+                ),
                 wins_benchmark_active=(
                     sim.active_excess_return > 0 if sim.active_excess_return is not None else None
                 ),

@@ -53,6 +53,22 @@ def run_random_windows(
     )
 
 
+def run_robust_scan(
+    n_days: int,
+    run_matrix: list[dict],
+    mode: str | None = None,
+    params=None,
+    scope: str = "overall_strategy",
+    progress_callback=None,
+):
+    """Load precomp for n_days then run the multi-cell robust scan. Returns RobustScanResult."""
+    from backtesting.data_loader import load_and_precompute
+    from tuning.robust_scan import run_robust_scan as _run
+    precomp = load_and_precompute(n_days, mode=mode)
+    return _run(precomp, params=params, run_matrix=run_matrix, scope=scope,
+                progress_callback=progress_callback)
+
+
 def list_saved_runs():
     """Return metadata list of saved backtest artifact runs."""
     from backtesting.artifacts import list_saved_runs as _list

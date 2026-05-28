@@ -225,7 +225,8 @@ class TestParameterTunerTune:
         with patch("tuning.tuner.run_tuner", return_value=(p, s)) as mock_rt:
             ParameterTuner().tune(n_days=60, objective="calmar")
         mock_rt.assert_called_once_with(
-            n_days=60, objective="calmar", starting_capital=10_000.0, mode=None
+            n_days=60, objective="calmar", starting_capital=10_000.0, mode=None,
+            scope="overall_strategy", preset=None,
         )
 
     def test_result_params_matches_tuner_output(self):
@@ -252,14 +253,81 @@ class TestParameterTunerTune:
             ParameterTuner().tune(n_days=90, mode="liquid_universe_sanity_test")
         mock_rt.assert_called_once_with(
             n_days=90, objective="sharpe", starting_capital=10_000.0,
-            mode="liquid_universe_sanity_test"
+            mode="liquid_universe_sanity_test",
+            scope="overall_strategy", preset=None,
         )
+
+    def test_passes_scope_active_sleeve(self):
+        p, s = _params(), _sim()
+        with patch("tuning.tuner.run_tuner", return_value=(p, s)) as mock_rt:
+            ParameterTuner().tune(n_days=90, scope="active_sleeve_compounding")
+        assert mock_rt.call_args.kwargs["scope"] == "active_sleeve_compounding"
+
+    def test_passes_preset(self):
+        p, s = _params(), _sim()
+        with patch("tuning.tuner.run_tuner", return_value=(p, s)) as mock_rt:
+            ParameterTuner().tune(n_days=90, preset="active_factor_internals")
+        assert mock_rt.call_args.kwargs["preset"] == "active_factor_internals"
+
+    def test_default_scope_is_overall_strategy(self):
+        p, s = _params(), _sim()
+        with patch("tuning.tuner.run_tuner", return_value=(p, s)) as mock_rt:
+            ParameterTuner().tune(n_days=90)
+        assert mock_rt.call_args.kwargs["scope"] == "overall_strategy"
+
+    def test_default_preset_is_none(self):
+        p, s = _params(), _sim()
+        with patch("tuning.tuner.run_tuner", return_value=(p, s)) as mock_rt:
+            ParameterTuner().tune(n_days=90)
+        assert mock_rt.call_args.kwargs["preset"] is None
 
     def test_calmar_objective_score(self):
         p, s = _params(), _sim(calmar=2.5)
         with patch("tuning.tuner.run_tuner", return_value=(p, s)):
             result = ParameterTuner().tune(n_days=90, objective="calmar")
         assert result.score == pytest.approx(2.5)
+
+
+# ---------------------------------------------------------------------------
+# ParameterTuner.auto_tune() — mocked run_auto_tune
+# ---------------------------------------------------------------------------
+
+def _auto_tune_raw(p, s):
+    """6-tuple returned by run_auto_tune: (avg_params, sharpe_result, calmar_result, avg_result, sharpe_params, calmar_params)."""
+    return (p, s, s, s, p, p + 0.01)
+
+
+class TestParameterTunerAutoTune:
+    """Test that ParameterTuner.auto_tune threads scope and preset to run_auto_tune."""
+
+    def _call(self, **kwargs):
+        """Call auto_tune with run_auto_tune and load_and_precompute both mocked."""
+        p, s = _params(), _sim()
+        with patch("tuning.tuner.run_auto_tune", return_value=_auto_tune_raw(p, s)) as mock_ra, \
+             patch("tuning.tuner.load_and_precompute"):
+            ParameterTuner().auto_tune(n_days=90, **kwargs)
+        return mock_ra
+
+    def test_passes_scope_overall_strategy_by_default(self):
+        mock_ra = self._call()
+        assert mock_ra.call_args.kwargs.get("scope") == "overall_strategy"
+
+    def test_passes_scope_active_sleeve(self):
+        mock_ra = self._call(scope="active_sleeve_compounding")
+        assert mock_ra.call_args.kwargs.get("scope") == "active_sleeve_compounding"
+
+    def test_passes_preset(self):
+        mock_ra = self._call(preset="active_core_weights")
+        assert mock_ra.call_args.kwargs.get("preset") == "active_core_weights"
+
+    def test_default_preset_is_none(self):
+        mock_ra = self._call()
+        assert mock_ra.call_args.kwargs.get("preset") is None
+
+    def test_scope_and_preset_together(self):
+        mock_ra = self._call(scope="active_sleeve_compounding", preset="active_core_weights")
+        assert mock_ra.call_args.kwargs.get("scope") == "active_sleeve_compounding"
+        assert mock_ra.call_args.kwargs.get("preset") == "active_core_weights"
 
 
 # ---------------------------------------------------------------------------

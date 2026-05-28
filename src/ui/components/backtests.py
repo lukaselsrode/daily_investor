@@ -24,7 +24,7 @@ def _run_backtest(n_days: int, mode: str, save_artifacts: bool = False,
                                scope=scope)
 
 
-def _equity_chart(train_result, val_result=None, equity_override=None):
+def _equity_chart(train_result, val_result=None, equity_override=None, bench_override=None):
     """Render Plotly equity-vs-benchmark chart + drawdown panel."""
     try:
         import plotly.graph_objects as go
@@ -33,8 +33,10 @@ def _equity_chart(train_result, val_result=None, equity_override=None):
         st.warning("plotly not installed — install with `pip install plotly`.")
         return
 
-    eq  = equity_override if equity_override is not None else train_result.equity_curve
-    ben = train_result.benchmark_equity
+    is_active_view = equity_override is not None
+    eq  = equity_override if is_active_view else train_result.equity_curve
+    ben = (bench_override if (bench_override is not None and len(bench_override) > 0)
+           else train_result.benchmark_equity)
 
     if len(eq) == 0:
         st.info("No equity curve data available for this result.")
@@ -46,7 +48,7 @@ def _equity_chart(train_result, val_result=None, equity_override=None):
     eq_idx  = eq  / max(eq[0],  1e-9) * 100.0
     ben_idx = ben / max(ben[0], 1e-9) * 100.0 if len(ben) == len(eq) else None
 
-    # Drawdown from peak
+    # Drawdown from the same CA curve used for Sharpe/Calmar
     cum_max = np.maximum.accumulate(eq_idx)
     dd = np.where(cum_max > 0, eq_idx / cum_max - 1.0, 0.0)
 
@@ -73,12 +75,21 @@ def _equity_chart(train_result, val_result=None, equity_override=None):
             hovertemplate="Day %{x}<br>Benchmark: %{y:.1f}<extra></extra>",
         ), row=1, col=1)
 
-    # Validation region shading
-    if val_result is not None and len(val_result.equity_curve) > 0:
+    # Validation region — use active curves when in active view
+    val_eq_raw = None
+    if val_result is not None:
+        if is_active_view and val_result.active_equity_curve is not None and len(val_result.active_equity_curve) > 0:
+            val_eq_raw = val_result.active_equity_curve
+            val_ben_raw = (val_result.benchmark_ca_equity
+                           if len(val_result.benchmark_ca_equity) > 0
+                           else val_result.benchmark_equity)
+        elif not is_active_view and len(val_result.equity_curve) > 0:
+            val_eq_raw = val_result.equity_curve
+            val_ben_raw = val_result.benchmark_equity
+    if val_eq_raw is not None and len(val_eq_raw) > 0:
         val_start = len(eq)
-        val_eq  = val_result.equity_curve
-        val_idx = val_eq / max(val_eq[0], 1e-9) * 100.0
-        val_days = np.arange(val_start, val_start + len(val_eq))
+        val_idx = val_eq_raw / max(val_eq_raw[0], 1e-9) * 100.0
+        val_days = np.arange(val_start, val_start + len(val_eq_raw))
 
         fig.add_trace(go.Scatter(
             x=val_days, y=val_idx,
@@ -86,8 +97,8 @@ def _equity_chart(train_result, val_result=None, equity_override=None):
             line=dict(color="#f5a623", width=2, dash="dash"),
         ), row=1, col=1)
 
-        if len(val_result.benchmark_equity) == len(val_eq):
-            vb_idx = val_result.benchmark_equity / max(val_result.benchmark_equity[0], 1e-9) * 100.0
+        if len(val_ben_raw) == len(val_eq_raw):
+            vb_idx = val_ben_raw / max(val_ben_raw[0], 1e-9) * 100.0
             fig.add_trace(go.Scatter(
                 x=val_days, y=vb_idx,
                 name="Benchmark (validation)",
@@ -95,7 +106,7 @@ def _equity_chart(train_result, val_result=None, equity_override=None):
             ), row=1, col=1)
 
         fig.add_vrect(
-            x0=val_start, x1=val_start + len(val_eq) - 1,
+            x0=val_start, x1=val_start + len(val_eq_raw) - 1,
             fillcolor="orange", opacity=0.05,
             layer="below", line_width=0,
             row=1, col=1,
@@ -354,8 +365,12 @@ def render() -> None:
         with st.expander("Total portfolio (including ETF sleeve)"):
             _metric_cards(train, rpt, val)
 
-        st.subheader("Active Equity Curve vs Benchmark")
-        _equity_chart(train, val, equity_override=train.active_equity_curve)
+        st.subheader("Active Equity Curve vs Benchmark (contribution-adjusted)")
+        _equity_chart(
+            train, val,
+            equity_override=train.active_equity_curve,
+            bench_override=train.benchmark_ca_equity,
+        )
     else:
         _metric_cards(train, rpt, val)
         st.subheader("Equity Curve vs Benchmark")

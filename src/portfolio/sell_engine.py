@@ -177,16 +177,14 @@ class SellDecisionEngine:
                 if _arch_enabled and archetype_policy is not None
                 else _trim["trim_min_gain_pct"]
             )
-            _trim_fraction  = _trim["trim_fraction"]
-            _trim_delta_thr = _trim["trim_score_delta_threshold"]  # e.g. -0.15
+            _trim_fraction     = _trim["trim_fraction"]
+            _trim_score_below  = float(_trim["trim_score_below"])
 
-            _weakening_threshold = METRIC_THRESHOLD * (1.0 + _trim_delta_thr)  # e.g. 0.8 * 0.85 = 0.68
-            _profitable           = percent_change >= _trim_min_gain
-            _thesis_weakening     = (
+            _profitable       = percent_change >= _trim_min_gain
+            _thesis_weakening = (
                 value_metric is not None
-                and value_metric < METRIC_THRESHOLD
-                and value_metric >= sell_weak  # not yet thesis_exit territory
-                and value_metric < _weakening_threshold
+                and value_metric >= sell_weak       # not yet thesis_exit territory
+                and value_metric < _trim_score_below  # weakened enough → trim
             )
 
             if _profitable and _thesis_weakening:
@@ -195,8 +193,8 @@ class SellDecisionEngine:
                     should_sell=True,
                     reason=(
                         f"trim: profit {percent_change:.1%} ≥ {_trim_min_gain:.0%}, "
-                        f"value_metric={value_metric:.3f} below buy threshold "
-                        f"({_weakening_threshold:.2f}) — partial exit"
+                        f"value_metric={value_metric:.3f} in trim zone "
+                        f"[{sell_weak:.2f}, {_trim_score_below:.2f}) — partial exit"
                     ),
                     severity="soft",
                     exit_type="trim_exit",

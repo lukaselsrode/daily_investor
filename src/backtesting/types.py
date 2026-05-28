@@ -82,6 +82,7 @@ class SimResult:
     # Daily equity curves for charting (empty when not requested)
     equity_curve: np.ndarray = field(default_factory=lambda: np.array([]))
     benchmark_equity: np.ndarray = field(default_factory=lambda: np.array([]))
+    benchmark_ca_equity: np.ndarray = field(default_factory=lambda: np.array([]))
     # Archetype breakdown (populated when archetype_aware=True)
     archetype_pnl: dict[str, float] = field(default_factory=dict)
     archetype_trade_counts: dict[str, int] = field(default_factory=dict)

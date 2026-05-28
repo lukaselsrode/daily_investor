@@ -161,16 +161,30 @@ def _print_archetype_comparison(result: dict, n_days: int) -> None:
     print(f"{'='*60}\n")
 
 
+def cmd_list_presets() -> None:
+    """Print available tuning presets and exit."""
+    from tuning.presets import list_presets
+    print("\nAvailable tuning presets:\n")
+    for name, desc in list_presets():
+        print(f"  {name:<30}  {desc}")
+    print()
+
+
 def cmd_tune(
     n_days: int,
     objective: str = "sharpe",
     mode: str | None = None,
     scope: str = "overall_strategy",
+    preset: str | None = None,
 ) -> None:
-    """Single-objective tune — prints diff, does NOT write config."""
+    """Single-objective tune — prints diff, does NOT write config.
+
+    --preset <name>  Restrict tunable parameters to a named preset.
+                     Use --list-presets to see available presets.
+    """
     from tuning.tuner import ParameterTuner
     tuner = ParameterTuner()
-    result = tuner.tune(n_days=n_days, objective=objective, mode=mode, scope=scope)
+    result = tuner.tune(n_days=n_days, objective=objective, mode=mode, scope=scope, preset=preset)
     _t.print_config_diff(result.params, result.sim)
 
 
@@ -181,11 +195,14 @@ def cmd_auto_tune(
     force_apply: bool = False,
     llm_review: bool = False,
     scope: str = "overall_strategy",
+    preset: str | None = None,
 ) -> None:
     """Dual-objective auto-tune with walk-forward validation.
 
     --scope active_sleeve_compounding  freezes index_pct and ETF routing params,
     optimizes only stock-picking parameters, ranks by active sleeve metrics.
+    --preset <name>  Restrict tunable parameters to a named preset.
+                     Use --list-presets to see available presets.
     """
     from tuning.tuner import ParameterTuner
     tuner = ParameterTuner()
@@ -196,6 +213,7 @@ def cmd_auto_tune(
         mode=mode,
         llm_review=llm_review,
         scope=scope,
+        preset=preset,
     )
     _t._diff_table(
         result.avg_params,

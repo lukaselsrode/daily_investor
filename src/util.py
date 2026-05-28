@@ -533,11 +533,21 @@ REBALANCE_PARAMS: dict = {
 # ---------------------------------------------------------------------------
 
 _ed = _app.get("exit_decision", {})
+_mt = float(_app.get("metric_threshold", 0.75))
+_sw = float(_app.get("sell_rules", {}).get("sell_weak_value_below", 0.45))
+
+def _resolve_trim_score_below(ed: dict, metric_threshold: float) -> float:
+    """Return explicit trim_score_below, falling back to legacy delta derivation."""
+    if "trim_score_below" in ed:
+        return float(ed["trim_score_below"])
+    delta = float(ed.get("trim_score_delta_threshold", -0.15))
+    return metric_threshold * (1.0 + delta)
+
 EXIT_DECISION_PARAMS: dict = {
     "trim_enabled":                bool(_ed.get("trim_enabled",                True)),
     "trim_fraction":               float(_ed.get("trim_fraction",              0.33)),
     "trim_min_gain_pct":           float(_ed.get("trim_min_gain_pct",          0.08)),
-    "trim_score_delta_threshold":  float(_ed.get("trim_score_delta_threshold", -0.15)),
+    "trim_score_below":            _resolve_trim_score_below(_ed, _mt),
     "trim_requires_positive_momentum": bool(_ed.get("trim_requires_positive_momentum", True)),
     "trim_to_etfs_pct":            float(_ed.get("trim_to_etfs_pct",           0.85)),
     "trim_profit_threshold":       float(_ed.get("trim_profit_threshold",      0.15)),

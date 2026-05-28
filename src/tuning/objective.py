@@ -19,6 +19,7 @@ from util import BACKTEST_PARAMS
 from .constants import (
     _MIN_TRADES_HARD,
     _MIN_TRADES_SOFT,
+    _MIN_TRADES_SOFT_ACTIVE,
     _current_params,
     _effective_bounds,
     _expand_params,
@@ -38,6 +39,7 @@ def make_objective(
 ) -> Callable[[np.ndarray], float]:
     """Return the function scipy minimizes (−metric + diversification penalty)."""
     call_count = [0]
+    _min_soft = _MIN_TRADES_SOFT_ACTIVE if scope == "active_sleeve_compounding" else _MIN_TRADES_SOFT
 
     def _obj(params: np.ndarray) -> float:
         call_count[0] += 1
@@ -66,9 +68,9 @@ def make_objective(
             return 10.0
 
         penalty = 0.0
-        if result.trades_made < _MIN_TRADES_SOFT:
-            shortfall = _MIN_TRADES_SOFT - result.trades_made
-            penalty = shortfall / _MIN_TRADES_SOFT * 2.0
+        if result.trades_made < _min_soft:
+            shortfall = _min_soft - result.trades_made
+            penalty = shortfall / _min_soft * 2.0
 
         bp = BACKTEST_PARAMS
         tp_threshold = bp.get("turnover_penalty_trade_count", 80)
@@ -96,13 +98,14 @@ def _run_single(
     maxiter: int,
     popsize: int,
     scope: BacktestScope = "overall_strategy",
+    preset: str | None = None,
 ) -> tuple[np.ndarray, SimResult]:
     from scipy.optimize import differential_evolution
 
     bp = BACKTEST_PARAMS
-    active = _get_active_indices(scope)
+    active = _get_active_indices(scope, preset=preset)
     frozen_vals = _current_params()
-    eff_bounds = _effective_bounds(scope)
+    eff_bounds = _effective_bounds(scope, preset=preset)
     active_bounds = [eff_bounds[i] for i in active]
 
     obj_fn_full = make_objective(

@@ -101,19 +101,30 @@ def _equity_chart_simple(equity_curve: np.ndarray, bench_equity: np.ndarray):
     st.plotly_chart(fig, use_container_width=True)
 
 
-def _robust_score_bar_chart(df):
+def _robust_score_bar_chart(df, active_param_names: list[str] | None = None):
     """Horizontal bar of top-N candidates by robust_score."""
     try:
         import plotly.graph_objects as go
     except ImportError:
         return
 
+    # Determine which columns to show in labels dynamically
+    _param_cols = active_param_names or [n for n in _WEIGHT_NAMES if n in df.columns]
+    # Fall back to whatever non-metric columns exist if nothing matched
+    if not _param_cols:
+        _skip = {"rank", "robust_score", "median_excess", "median_sharpe",
+                 "median_drawdown", "pct_beating", "worst_decile_dd", "std_excess", "n_windows"}
+        _param_cols = [c for c in df.columns if c not in _skip]
+
     top = df.head(20)
-    labels = [
-        f"v={row['value']:.2f} q={row['quality']:.2f} "
-        f"i={row['income']:.2f} m={row['momentum']:.2f}"
-        for _, row in top.iterrows()
-    ]
+    labels = []
+    for _, row in top.iterrows():
+        parts = []
+        for col in _param_cols[:6]:  # cap at 6 to avoid label overflow
+            if col in row:
+                short = col[:4]
+                parts.append(f"{short}={float(row[col]):.2f}")
+        labels.append(" ".join(parts))
     colors = ["#4c8ef5" if i == 0 else "#91b4f5" for i in range(len(top))]
 
     fig = go.Figure(go.Bar(
@@ -409,39 +420,99 @@ def _render_manual_mode():
 # Random search mode
 # ---------------------------------------------------------------------------
 
-def _run_full_history_weight_search(precomp, n_samples: int, seed: int, respect_bounds: bool, progress_callback, scope: str = "overall_strategy") -> list[dict]:
-    """Evaluate N weight combos on full history, rank by Sharpe."""
+def _run_full_history_weight_search(precomp, n_samples: int, seed: int, respect_bounds: bool, progress_callback, scope: str = "overall_strategy", preset: str | None = None) -> list[dict]:
+    """Evaluate N parameter combos on full history, rank by Sharpe. Respects preset active indices."""
     from backtesting.simulator import get_default_params, run_simulation
+    from tuning.constants import PARAM_NAMES, _effective_bounds, _get_active_indices
     from tuning.random_tune import _weight_bounds_from_config, sample_weight_simplex
 
-    base = get_default_params()
-    bounds = _weight_bounds_from_config() if respect_bounds else None
-    samples = sample_weight_simplex(n_samples, seed=seed, bounds=bounds)
+    base        = get_default_params()
+    active_idxs = _get_active_indices(scope=scope, preset=preset)
+    eff_bounds  = _effective_bounds(scope=scope, preset=preset)
+
+    _SCORE_WEIGHT_IDXS = {0, 1, 2, 3}
+    use_simplex = (set(active_idxs) == _SCORE_WEIGHT_IDXS)
+
+    if use_simplex:
+        simplex_bounds = _weight_bounds_from_config() if respect_bounds else None
+        raw_samples = sample_weight_simplex(n_samples, seed=seed, bounds=simplex_bounds)
+    else:
+        import numpy as _np
+        rng = _np.random.default_rng(seed)
+        raw_samples = _np.zeros((n_samples, len(active_idxs)))
+        for j, aidx in enumerate(active_idxs):
+            lo, hi = eff_bounds[aidx]
+            raw_samples[:, j] = rng.uniform(lo, hi, n_samples)
+
+    active_names = [PARAM_NAMES[i] for i in active_idxs]
 
     results = []
-    for i, weights in enumerate(samples):
+    for i, active_vals in enumerate(raw_samples):
         if progress_callback:
             progress_callback(i, n_samples)
         params = base.copy()
-        params[0:4] = weights
+        for j, aidx in enumerate(active_idxs):
+            params[aidx] = float(active_vals[j])
         try:
             sim = run_simulation(precomp, params, scope=scope)
             sharpe_val = (sim.active_sharpe if scope == "active_sleeve_compounding" and sim.active_sharpe is not None else sim.sharpe)
-            results.append({
-                "value": float(weights[0]), "quality": float(weights[1]),
-                "income": float(weights[2]), "momentum": float(weights[3]),
+            row: dict = {n: float(active_vals[j]) for j, n in enumerate(active_names)}
+            row.update({
                 "sharpe": sharpe_val, "total_return": sim.total_return,
                 "max_drawdown": sim.max_drawdown, "calmar": sim.calmar,
             })
+            results.append(row)
         except Exception:
             pass
     results.sort(key=lambda r: -r["sharpe"])
     return results
 
 
-def _render_random_search_mode(scope: str = "overall_strategy"):
+def _classify_signals(result) -> dict[str, str]:
+    """
+    Classify each tuned parameter delta as strong / weak / do_not_apply.
+    Returns {param_name: "strong" | "weak" | "do_not_apply"}.
+    """
+    if result is None or result.best_candidate is None or result.current_weights is None:
+        return {}
+    best_score   = result.best_candidate.robust_score
+    curr_summary = result.current_summary
+    curr_score   = curr_summary.robust_score if curr_summary is not None else 0.0
+    delta        = best_score - curr_score
+    signals: dict[str, str] = {}
+    for name in (result.active_param_names or []):
+        bval = result.best_candidate.weights_dict().get(name, 0.0)
+        cidx = (result.active_param_names or []).index(name)
+        cval = float(result.current_weights[cidx]) if result.current_weights is not None and cidx < len(result.current_weights) else 0.0
+        changed = abs(bval - cval) > 1e-4
+        if not changed:
+            signals[name] = "do_not_apply"
+        elif delta > 0.05 and best_score > 0.0:
+            signals[name] = "strong"
+        elif delta > 0.0:
+            signals[name] = "weak"
+        else:
+            signals[name] = "do_not_apply"
+    return signals
+
+
+_SIGNAL_CHIP: dict[str, str] = {
+    "strong":       "🟢 Strong signal",
+    "weak":         "🟡 Weak signal",
+    "do_not_apply": "🔴 Do not apply",
+}
+
+
+def _render_random_search_mode(scope: str = "overall_strategy", preset: str | None = None):
+    from tuning.profiles import (
+        HORIZON_PROFILES,
+        ROBUSTNESS_PROFILES,
+        effort_caption,
+        expand_run_matrix,
+    )
+
     st.subheader("Random Search")
-    st.caption("Sample N weight combinations and rank by performance.")
+    st.caption("Sample N parameter combinations and rank by robustness across multiple horizons and seeds.")
 
     optimize_over = st.radio(
         "Optimize over",
@@ -457,9 +528,9 @@ def _render_random_search_mode(scope: str = "overall_strategy"):
             """
 Random Search **does not use gradient descent**.  Instead:
 
-1. Samples N random weight combinations from the 4-weight simplex (Dirichlet).
-2. **Random Windows:** evaluates each combo on M random historical windows, ranks
-   by **robust_score** (rewards consistent outperformance across many market conditions).
+1. Samples N random parameter combinations (Dirichlet simplex for score weights; uniform for other presets).
+2. **Random Windows:** evaluates each combo across multiple horizons and seeds, ranks
+   by **robust_score** (rewards consistent outperformance).
 3. **Full History:** evaluates each combo on the full loaded window, ranks by Sharpe.
    Faster but more likely to find a result that only works in that specific period.
 
@@ -467,37 +538,100 @@ Config bounds from `tuning.parameter_bounds` are respected when enabled.
             """
         )
 
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        n_samples = st.number_input("Weight samples", min_value=10, max_value=200,
-                                     value=40, step=10, key="at_n_samples")
-    with c2:
-        n_windows = st.number_input("Windows / sample", min_value=5, max_value=50,
-                                     value=15, step=5, key="at_n_windows",
-                                     disabled=not use_random_windows)
-    with c3:
-        window_days = st.number_input("Window length (days)", min_value=20, max_value=180,
-                                       value=60, step=10, key="at_window_days",
-                                       disabled=not use_random_windows)
-    with c4:
-        n_days_load = st.number_input("History to load (days)", min_value=120, max_value=1500,
-                                       value=365, step=60, key="at_n_days")
-
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        mode = st.selectbox("Backtest mode", BACKTEST_MODES, key="at_mode")
-    with c2:
-        seed = st.number_input("Random seed", min_value=0, max_value=9999, value=42, key="at_seed")
-    with c3:
-        respect_bounds = st.checkbox("Respect config weight bounds", value=True, key="at_bounds")
-
+    # ── Profile selectors (primary inputs) ────────────────────────────────
     if use_random_windows:
-        total_runs = n_samples * n_windows
-        st.caption(f"~{n_samples} × {n_windows} = {total_runs} simulation runs (~{total_runs * 0.05:.0f}s)")
-        if window_days * 2 > n_days_load:
-            st.warning("Window length > half loaded history. Load more days for better diversity.")
+        pcol1, pcol2 = st.columns(2)
+        with pcol1:
+            robustness = st.selectbox(
+                "Robustness",
+                list(ROBUSTNESS_PROFILES),
+                index=1,
+                format_func=lambda k: {
+                    "quick":      "Quick — fast sanity check",
+                    "standard":   "Standard — normal research",
+                    "deep":       "Deep — stronger robustness",
+                    "exhaustive": "Exhaustive — overnight",
+                }[k],
+                key="at_robustness",
+            )
+        with pcol2:
+            horizon = st.selectbox(
+                "Horizon profile",
+                list(HORIZON_PROFILES),
+                index=3,
+                format_func=lambda k: {
+                    "short":  "Short-term (30–90d)",
+                    "medium": "Medium-term (90–180d)",
+                    "long":   "Long-term (180–365d)",
+                    "mixed":  "Mixed (30–365d)",
+                }[k],
+                key="at_horizon",
+            )
+
+    # ── Advanced expander (manual overrides) ──────────────────────────────
+    adv_n_samples    = None
+    adv_n_windows    = None
+    adv_window_days  = None
+    adv_seed         = None
+    n_days_load      = 730
+    mode             = BACKTEST_MODES[0]
+    respect_bounds   = True
+
+    with st.expander("Advanced options", expanded=False):
+        adv_c1, adv_c2, adv_c3, adv_c4 = st.columns(4)
+        with adv_c1:
+            _ns = st.number_input("Weight samples override (0=profile)", min_value=0, max_value=500,
+                                  value=0, step=10, key="at_adv_n_samples")
+            adv_n_samples = int(_ns) if _ns > 0 else None
+        with adv_c2:
+            _nw = st.number_input("Windows/sample override (0=profile)", min_value=0, max_value=100,
+                                  value=0, step=5, key="at_adv_n_windows",
+                                  disabled=not use_random_windows)
+            adv_n_windows = int(_nw) if _nw > 0 else None
+        with adv_c3:
+            _wd = st.number_input("Window length override (days, 0=profile)", min_value=0, max_value=365,
+                                  value=0, step=10, key="at_adv_window_days",
+                                  disabled=not use_random_windows)
+            adv_window_days = int(_wd) if _wd > 0 else None
+        with adv_c4:
+            _sd = st.number_input("Seed override (0=profile)", min_value=0, max_value=9999,
+                                  value=0, key="at_adv_seed")
+            adv_seed = int(_sd) if _sd > 0 else None
+
+        adv_c5, adv_c6, adv_c7 = st.columns(3)
+        with adv_c5:
+            n_days_load = st.number_input("History to load (days)", min_value=120, max_value=1500,
+                                          value=730, step=60, key="at_n_days")
+        with adv_c6:
+            mode = st.selectbox("Backtest mode", BACKTEST_MODES, key="at_mode")
+        with adv_c7:
+            respect_bounds = st.checkbox("Respect config weight bounds", value=True, key="at_bounds")
+
+    # ── Resolve effective params from profile + overrides ─────────────────
+    if use_random_windows:
+        rp = ROBUSTNESS_PROFILES[robustness]
+        hp = HORIZON_PROFILES[horizon]
+        # dominant horizon = longest in profile
+        _dominant_horizon = max(hp)
+        effective_window_days = adv_window_days if adv_window_days is not None else _dominant_horizon
+        effective_n_windows   = adv_n_windows   if adv_n_windows   is not None else rp["windows_per_horizon"] * len(hp)
+        effective_n_samples   = adv_n_samples   if adv_n_samples   is not None else rp["weight_samples"]
+        effective_seed        = adv_seed         if adv_seed         is not None else rp["seeds"][0]
+
+        total_evals = effective_n_samples * effective_n_windows
+        cap = effort_caption(robustness, horizon) if adv_window_days is None and adv_n_windows is None else (
+            f"Advanced override: {effective_n_samples} samples × {effective_n_windows} windows = "
+            f"**{total_evals} simulations**"
+        )
+        st.caption(cap)
+        if effective_window_days * 2 > n_days_load:
+            st.warning("Dominant horizon > half loaded history. Increase history days in Advanced.")
     else:
-        st.caption(f"~{n_samples} simulation runs on full {n_days_load}d history")
+        effective_window_days = 90
+        effective_n_windows   = 15
+        effective_n_samples   = adv_n_samples or 40
+        effective_seed        = adv_seed or 42
+        st.caption(f"~{effective_n_samples} simulation runs on full {n_days_load}d history")
 
     if st.button("▶ Run Random Search", type="primary", key="at_run"):
         bar = st.progress(0, text="Loading data…")
@@ -519,13 +653,14 @@ Config bounds from `tuning.parameter_bounds` are respected when enabled.
                     from ui.services.tuning_service import run_weight_tune
                     tune_result = run_weight_tune(
                         precomp,
-                        n_samples=int(n_samples),
-                        n_windows=int(n_windows),
-                        window_days=int(window_days),
-                        seed=int(seed),
+                        n_samples=int(effective_n_samples),
+                        n_windows=int(effective_n_windows),
+                        window_days=int(effective_window_days),
+                        seed=int(effective_seed),
                         respect_config_bounds=respect_bounds,
                         progress_callback=_cb,
                         scope=scope,
+                        preset=preset,
                     )
                     bar.empty()
                     st.session_state["at_result"] = tune_result
@@ -540,7 +675,8 @@ Config bounds from `tuning.parameter_bounds` are respected when enabled.
             with st.spinner("Running full-history weight search…"):
                 try:
                     rows = _run_full_history_weight_search(
-                        precomp, int(n_samples), int(seed), respect_bounds, _cb, scope=scope,
+                        precomp, int(effective_n_samples), int(effective_seed),
+                        respect_bounds, _cb, scope=scope, preset=preset,
                     )
                     bar.empty()
                     st.session_state["at_fh_rows"] = rows
@@ -566,10 +702,14 @@ Config bounds from `tuning.parameter_bounds` are respected when enabled.
         import pandas as pd
         st.subheader("Top combos by Sharpe (Full History)")
         df = pd.DataFrame(rows[:20])
-        fmt_cols = {
-            "value": "{:.3f}", "quality": "{:.3f}", "income": "{:.3f}", "momentum": "{:.3f}",
-            "sharpe": "{:+.3f}", "total_return": "{:+.1%}", "max_drawdown": "{:.1%}", "calmar": "{:+.3f}",
+        _metric_cols = {"sharpe", "total_return", "max_drawdown", "calmar"}
+        _param_display_cols = [c for c in df.columns if c not in _metric_cols]
+        fmt_cols: dict[str, str] = {
+            "sharpe": "{:+.3f}", "total_return": "{:+.1%}",
+            "max_drawdown": "{:.1%}", "calmar": "{:+.3f}",
         }
+        for c in _param_display_cols:
+            fmt_cols[c] = "{:.3f}"
         disp = df.copy()
         for col, f in fmt_cols.items():
             if col in disp.columns:
@@ -577,17 +717,36 @@ Config bounds from `tuning.parameter_bounds` are respected when enabled.
         st.dataframe(disp, use_container_width=True, hide_index=True)
         best = rows[0] if rows else None
         if best:
-            yaml_snippet = (
-                "score_weights:\n"
-                f"  value:    {best['value']:.4f}\n"
-                f"  quality:  {best['quality']:.4f}\n"
-                f"  income:   {best['income']:.4f}\n"
-                f"  momentum: {best['momentum']:.4f}\n"
-            )
-            with st.expander("Best weights YAML"):
+            import yaml as _yaml
+            # Build nested config YAML from active param values
+            from tuning.constants import _CONFIG_PATH_TO_PARAM_IDX, PARAM_NAMES
+            _path_inv = {v: k for k, v in _CONFIG_PATH_TO_PARAM_IDX.items()}
+            _name_to_path = {n: _path_inv.get(n, n) for i, n in enumerate(PARAM_NAMES) for _path_inv_k in [_CONFIG_PATH_TO_PARAM_IDX] if True}
+            # Simpler: directly map param name to config path
+            _n2p = {
+                "sw_value": "score_weights.value", "sw_quality": "score_weights.quality",
+                "sw_income": "score_weights.income", "sw_momentum": "score_weights.momentum",
+                "index_pct": "index_pct", "metric_threshold": "metric_threshold",
+                "take_profit_pct": "sell_rules.take_profit_pct",
+                "sell_weak_below": "sell_rules.sell_weak_value_below",
+                "trailing_stop": "sell_rules.trailing_stop_pct",
+                "value_pe_weight": "scoring.value_pe_weight",
+            }
+            nested: dict = {}
+            for pname in _param_display_cols:
+                if pname not in best:
+                    continue
+                path = _n2p.get(pname, pname)
+                parts = path.split(".")
+                cur = nested
+                for p in parts[:-1]:
+                    cur = cur.setdefault(p, {})
+                cur[parts[-1]] = round(float(best[pname]), 4)
+            yaml_snippet = _yaml.dump(nested, default_flow_style=False, sort_keys=False)
+            with st.expander("Best params YAML"):
                 st.code(yaml_snippet, language="yaml")
                 st.download_button("⬇️ Download", data=yaml_snippet,
-                                   file_name="best_weights_fh.yaml", mime="text/yaml")
+                                   file_name="best_params_fh.yaml", mime="text/yaml")
         return
 
     # random_windows result
@@ -599,6 +758,14 @@ Config bounds from `tuning.parameter_bounds` are respected when enabled.
         st.warning(w)
 
     st.subheader("Best vs Current Config")
+    signals = _classify_signals(result)
+    if signals:
+        sig_cols = st.columns(len(signals))
+        for idx, (pname, sig) in enumerate(signals.items()):
+            sig_cols[idx].caption(
+                f"**{_PARAM_DISPLAY.get(pname, pname)}**  \n{_SIGNAL_CHIP.get(sig, sig)}"
+            )
+
     cmp_df = result.best_vs_current_df()
     if cmp_df is not None:
         col1, col2 = st.columns([1, 2])
@@ -606,28 +773,33 @@ Config bounds from `tuning.parameter_bounds` are respected when enabled.
             st.dataframe(cmp_df, use_container_width=True, hide_index=True)
         with col2:
             if result.best_candidate:
-                bw = result.best_candidate.weights_dict()
-                cw = {n: float(result.current_weights[i]) for i, n in enumerate(_WEIGHT_NAMES)} \
-                     if result.current_weights is not None else {}
                 import plotly.graph_objects as go
+                bw   = result.best_candidate.weights_dict()
+                anames = result.active_param_names or _WEIGHT_NAMES
+                labels = [_PARAM_DISPLAY.get(n, n) for n in anames]
+                best_vals = [bw.get(n, 0.0) for n in anames]
+                curr_vals = (
+                    [float(result.current_weights[j]) for j in range(len(anames))]
+                    if result.current_weights is not None else []
+                )
                 fig = go.Figure()
-                fig.add_trace(go.Bar(name="Best config",
-                                     x=[n.capitalize() for n in _WEIGHT_NAMES],
-                                     y=[bw[n] for n in _WEIGHT_NAMES],
-                                     marker_color="#4c8ef5"))
-                if cw:
-                    fig.add_trace(go.Bar(name="Current config",
-                                         x=[n.capitalize() for n in _WEIGHT_NAMES],
-                                         y=[cw.get(n, 0) for n in _WEIGHT_NAMES],
-                                         marker_color="#aaaaaa"))
+                fig.add_trace(go.Bar(name="Best config", x=labels, y=best_vals,
+                                     marker_color="#4c8ef5",
+                                     text=[f"{v:.3f}" for v in best_vals],
+                                     textposition="outside"))
+                if curr_vals:
+                    fig.add_trace(go.Bar(name="Current config", x=labels, y=curr_vals,
+                                         marker_color="#aaaaaa",
+                                         text=[f"{v:.3f}" for v in curr_vals],
+                                         textposition="outside"))
                 fig.update_layout(barmode="group", height=260, margin=dict(l=0, r=0, t=10, b=0),
-                                  yaxis_title="Weight", yaxis_tickformat=".0%")
+                                  yaxis_title="Value", legend=dict(orientation="h"))
                 st.plotly_chart(fig, use_container_width=True)
 
     st.subheader("Top candidates by robust score")
     df = result.to_dataframe()
     if not df.empty:
-        _robust_score_bar_chart(df)
+        _robust_score_bar_chart(df, active_param_names=result.active_param_names)
         with st.expander("Full ranked table"):
             fmt = {
                 "value": "{:.3f}", "quality": "{:.3f}", "income": "{:.3f}", "momentum": "{:.3f}",
@@ -684,7 +856,7 @@ Config bounds from `tuning.parameter_bounds` are respected when enabled.
 # scipy optimizer mode
 # ---------------------------------------------------------------------------
 
-def _render_scipy_mode(scope: str = "overall_strategy"):
+def _render_scipy_mode(scope: str = "overall_strategy", preset: str | None = None):
     st.subheader("scipy Optimizer")
     st.caption("Differential evolution over all 15 parameters. Slower but explores the full param space.")
 
@@ -745,7 +917,7 @@ def _render_scipy_mode(scope: str = "overall_strategy"):
                     from backtesting.random_walk import random_window_backtest
                     from tuning.constants import _effective_bounds
 
-                    bounds = _effective_bounds(scope=scope)
+                    bounds = _effective_bounds(scope=scope, preset=preset)
                     call_count = [0]
 
                     def _obj(params_arr):
@@ -774,7 +946,7 @@ def _render_scipy_mode(scope: str = "overall_strategy"):
                                                  seed=42, workers=1, tol=0.005)
                     bar.empty()
                     from tuning.constants import PARAM_NAMES, _get_active_indices
-                    active_idxs = _get_active_indices(scope=scope)
+                    active_idxs = _get_active_indices(scope=scope, preset=preset)
                     st.session_state["sp_result"] = {
                         "params": opt.x, "score": -opt.fun,
                         "n_evals": call_count[0], "mode": "random_windows",
@@ -796,6 +968,7 @@ def _render_scipy_mode(scope: str = "overall_strategy"):
                         apply=apply_cfg, force_apply=force_apply,
                         llm_review=llm_review,
                         scope=scope,
+                        preset=preset,
                     )
                     st.session_state["sp_tuner_result"] = result
                     st.session_state["sp_result"] = {"mode": "full_history"}
@@ -941,8 +1114,29 @@ def render() -> None:
         horizontal=True,
         key="wt_scope",
     )
+
+    preset: str | None = None
     if scope == "active_sleeve_compounding":
-        st.info("index_pct is frozen in Active Sleeve scope — optimizer tunes stock-picking params only.")
+        from tuning.presets import list_presets
+        _preset_names = [name for name, _ in list_presets() if not name.endswith("_filters")
+                         and not name.endswith("_cooldown") and not name.endswith("_sizing")]
+        _preset_opts = ["(none — use config frozen_parameters)"] + _preset_names
+        _sel = st.selectbox(
+            "Tuning preset",
+            _preset_opts,
+            key="wt_preset",
+            help="Presets override which parameters are tunable for this run. "
+                 "Phase 2 presets (candidate filters, cooldown, sizing) are not yet available.",
+        )
+        if _sel != _preset_opts[0]:
+            preset = _sel
+            from tuning.presets import _PRESETS
+            st.caption(f"**{preset}** — {_PRESETS[preset]['description']}")
+
+        st.info(
+            "Active Sleeve: `index_pct` and ETF routing params are always frozen. "
+            "Optimizer ranks by active sleeve metrics (active Sharpe / Calmar)."
+        )
 
     mode = st.radio(
         "Mode",
@@ -958,9 +1152,9 @@ def render() -> None:
     if mode.startswith("🎛️"):
         _render_manual_mode()
     elif mode.startswith("🎲"):
-        _render_random_search_mode(scope=scope)
+        _render_random_search_mode(scope=scope, preset=preset)
     else:
-        _render_scipy_mode(scope=scope)
+        _render_scipy_mode(scope=scope, preset=preset)
 
     st.divider()
     from ui.components.config_variants import render_config_variants

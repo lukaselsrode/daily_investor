@@ -68,16 +68,12 @@ def _metrics(
 
 def _trim_value_metric() -> float:
     """
-    A value_metric that is below METRIC_THRESHOLD (weakening) but above
-    sell_weak_value_below (not full exit territory), and below the trim threshold
-    (METRIC_THRESHOLD * (1 + trim_score_delta)).
+    A value_metric in the trim zone: above sell_weak_value_below and below trim_score_below.
     """
     sell_weak  = SELL_RULES["sell_weak_value_below"]
-    threshold  = METRIC_THRESHOLD
-    delta      = EXIT_DECISION_PARAMS["trim_score_delta_threshold"]
-    weak_thr   = threshold * (1.0 + delta)
-    # Place mid-way between sell_weak and weak_threshold
-    return (sell_weak + weak_thr) / 2.0
+    trim_below = float(EXIT_DECISION_PARAMS["trim_score_below"])
+    # Place mid-way between sell_weak and trim_score_below
+    return (sell_weak + trim_below) / 2.0
 
 
 def _trim_min_gain() -> float:

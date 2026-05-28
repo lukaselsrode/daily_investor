@@ -26,10 +26,10 @@ etfs:
 - IWM
 - DRAM
 score_weights:
-  value: 0.05
-  quality: 0.45
-  income: 0.1
-  momentum: 0.4
+  value: 0.06
+  quality: 0.43
+  income: 0.08
+  momentum: 0.43
 valuation_guardrails:
   max_pe_component: 5.0
   max_pb_component: 5.45
@@ -51,10 +51,10 @@ risk:
   min_candidate_allocation_pct: 0.1
 sell_rules:
   stop_loss_pct: -0.2
-  trailing_stop_pct: -0.08
-  take_profit_pct: 0.6
+  trailing_stop_pct: -0.07
+  take_profit_pct: 0.36
   take_profit_value_floor_multiplier: 1.2
-  sell_weak_value_below: 0.45
+  sell_weak_value_below: 0.72
   minimum_days_before_take_profit: 10
   sell_yield_trap: true
   sell_low_quality_below: -0.25
@@ -136,8 +136,8 @@ etf_risk:
   defensive_etf_pct: 0.85
   defensive_cash_pct: 0.1
 scoring:
-  value_pe_weight: 0.6
-  value_pb_weight: 0.4
+  value_pe_weight: 0.70
+  value_pb_weight: 0.30
   income_score_cap: 1.5
   yield_trap_threshold: 0.1
   distress_pe_max: 5.0
@@ -171,12 +171,12 @@ momentum:
   return_1m_falling_knife_penalty: 0.2
 momentum_v2:
   weights:
-    rs_3m: 0.25
-    rs_6m: 0.25
-    risk_adj_3m: 0.2
-    trend_structure: 0.15
-    return_1m: 0.1
-    return_5d: 0.05
+    rs_3m: 0.36
+    rs_6m: 0.10
+    risk_adj_3m: 0.22
+    trend_structure: 0.12
+    return_1m: 0.18
+    return_5d: 0.02
   penalties:
     falling_knife_3m_threshold: -0.15
     falling_knife_penalty: 0.25
@@ -304,8 +304,8 @@ value_v2:
     pe_penalty: 0.3
     negative_eps_penalty: 0.25
   composite:
-    pe_weight: 0.6
-    pb_weight: 0.4
+    pe_weight: 0.7
+    pb_weight: 0.3
 snapshots:
   enabled: true
   subdir: snapshots
@@ -356,7 +356,10 @@ exit_decision:
   trim_enabled: true
   trim_fraction: 0.33
   trim_min_gain_pct: 0.08
-  trim_score_delta_threshold: -0.15
+  # trim_score_below is the explicit absolute threshold for the trim zone.
+  # Trim fires when: sell_weak_value_below <= score < trim_score_below (and profitable).
+  # Must satisfy: sell_weak_value_below < trim_score_below <= metric_threshold.
+  trim_score_below: 0.74
   trim_requires_positive_momentum: true
   trim_to_etfs_pct: 0.85
 decision_adjustment:

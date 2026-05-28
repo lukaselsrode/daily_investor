@@ -416,14 +416,17 @@ def _bench_twr(
             shares = cash / p
             cash   = 0.0
         elif d > 0 and d % rebalance_freq == 0 and p > 0:
-            contrib = weekly_contribution
-            shares += contrib / p
-            cash    = 0.0
+            contrib      = weekly_contribution
+            prev_shares  = shares          # capture pre-contribution shares for TWR
+            shares      += contrib / p
+            cash         = 0.0
+        else:
+            prev_shares = shares
         val = shares * p + cash
         if d == 0:
             ca[0] = val
         else:
-            prev   = shares * bench_prices[d - 1] + cash
+            prev   = prev_shares * bench_prices[d - 1]
             factor = (val - contrib) / max(prev, 1e-9)
             ca[d]  = ca[d - 1] * factor
     return compute_performance_metrics(ca)["total_return"]
@@ -450,6 +453,40 @@ def _bench_daily_equity(
             shares += weekly_contribution / p
         vals[d] = shares * p
     return vals
+
+
+def _bench_daily_ca_equity(
+    bench_prices: np.ndarray,
+    starting_capital: float,
+    weekly_contribution: float,
+    rebalance_freq: int,
+) -> np.ndarray:
+    """Contribution-adjusted daily benchmark series (same TWR basis as _bench_twr)."""
+    n      = len(bench_prices)
+    shares = 0.0
+    cash   = starting_capital
+    ca     = np.zeros(n)
+    for d in range(n):
+        p      = bench_prices[d]
+        contrib = 0.0
+        if d == 0 and p > 0:
+            shares = cash / p
+            cash   = 0.0
+        elif d > 0 and d % rebalance_freq == 0 and p > 0:
+            contrib     = weekly_contribution
+            prev_shares = shares
+            shares     += contrib / p
+            cash        = 0.0
+        else:
+            prev_shares = shares
+        val = shares * p + cash
+        if d == 0:
+            ca[0] = val
+        else:
+            prev   = prev_shares * bench_prices[d - 1]
+            factor = (val - contrib) / max(prev, 1e-9)
+            ca[d]  = ca[d - 1] * factor
+    return ca
 
 
 # ---------------------------------------------------------------------------
@@ -509,6 +546,7 @@ def run_simulation(
     archetype_aware: bool = False,
     cluster_tracking: bool = False,
     scope: str = "overall_strategy",
+    accounting_trace: list | None = None,
 ) -> SimResult:
     """
     Simulate the strategy over the precomputed price history.
@@ -532,11 +570,11 @@ def run_simulation(
     _trim_enabled        = bool(_trim_cfg.get("trim_enabled", True))
     _trim_fraction       = float(_trim_cfg.get("trim_fraction", 0.33))
     _trim_min_gain       = float(_trim_cfg.get("trim_min_gain_pct", 0.08))
-    _trim_score_delta    = float(_trim_cfg.get("trim_score_delta_threshold", -0.15))
+    _trim_score_below    = float(_trim_cfg.get("trim_score_below",
+                               metric_threshold * (1.0 + float(_trim_cfg.get("trim_score_delta_threshold", -0.15)))))
     _trim_to_etfs_pct    = float(_trim_cfg.get("trim_to_etfs_pct", 0.85))
     if scope == "active_sleeve_compounding":
         _trim_to_etfs_pct = 0.0
-    _trim_weak_threshold = metric_threshold * (1.0 + _trim_score_delta)
 
     base_slippage   = slippage_bps / 10_000.0
     bp_cfg          = BACKTEST_PARAMS
@@ -602,6 +640,7 @@ def run_simulation(
     daily_values        = np.zeros(n_days)
     ca_daily_values     = np.zeros(n_days)
     _active_daily       = np.zeros(n_days) if scope == "active_sleeve_compounding" else None
+    _ca_active_daily    = np.zeros(n_days) if scope == "active_sleeve_compounding" else None
     total_contributions = float(starting_capital)
 
     trades_made          = 0
@@ -911,6 +950,7 @@ def run_simulation(
                     if per_etf >= min_order:
                         for j in np.where(valid_etfs)[0]:
                             etf_shares[j] += per_etf / p_etf[j]
+                            cash           -= per_etf
 
         # ── Trim exits (partial position reduction) ──────────────────────────
         if _trim_enabled:
@@ -919,9 +959,8 @@ def run_simulation(
                 & ~sell_mask
                 & ~harvest_mask
                 & (pct_from_avg >= _trim_min_gain)
-                & (current_scores < metric_threshold)
                 & (current_scores >= sell_weak_below)
-                & (current_scores < _trim_weak_threshold)
+                & (current_scores < _trim_score_below)
             )
             if trim_mask.any():
                 sell_prices_t = np.where(valid_price, prices, stock_avg_cost)
@@ -969,8 +1008,13 @@ def run_simulation(
                                 etf_shares[j] += per_etf / p_etf[j]
                                 cash           -= per_etf
 
-        is_contrib_day = d > 0 and d % rebalance_frequency_days == 0
-        contrib_today  = weekly_contribution if is_contrib_day else 0.0
+        is_contrib_day       = d > 0 and d % rebalance_frequency_days == 0
+        contrib_today        = weekly_contribution if is_contrib_day else 0.0
+        active_contrib_today = (
+            weekly_contribution * (1.0 - index_pct)
+            if (is_contrib_day and _ca_active_daily is not None)
+            else 0.0
+        )
         if cluster_tracking and is_contrib_day and _cluster_labels_by_day is not None:
             try:
                 from .cluster_tracker import record_cluster_snapshot
@@ -1017,12 +1061,29 @@ def run_simulation(
         if _active_daily is not None:
             _active_daily[d] = port_val - etf_value
 
+        if accounting_trace is not None:
+            accounting_trace.append({
+                "d": d,
+                "cash": cash,
+                "stock_value": stock_value,
+                "etf_value": etf_value,
+                "port_val": port_val,
+                "active_equity": port_val - etf_value,
+            })
+
         if d == 0:
             ca_daily_values[0] = port_val
+            if _ca_active_daily is not None:
+                _ca_active_daily[0] = port_val - etf_value
         else:
             prev_port          = daily_values[d - 1]
             factor             = (port_val - contrib_today) / max(prev_port, 1e-9)
             ca_daily_values[d] = ca_daily_values[d - 1] * factor
+            if _ca_active_daily is not None:
+                prev_active        = _active_daily[d - 1]
+                active_equity_d    = port_val - etf_value
+                a_factor           = (active_equity_d - active_contrib_today) / max(prev_active, 1e-9)
+                _ca_active_daily[d] = _ca_active_daily[d - 1] * a_factor
 
         bench_p = precomp.benchmark_prices
         if d >= 200 and np.isfinite(bench_p[d]) and bench_p[d] > 0:
@@ -1047,14 +1108,19 @@ def run_simulation(
     turnover    = total_traded_notional / max(avg_port, 1.0)
     profit      = final_value - total_contributions
 
-    bench_twr_val = 0.0
-    bench_equity  = np.array([])
+    bench_twr_val  = 0.0
+    bench_equity   = np.array([])
+    bench_ca_equity = np.array([])
     if np.isfinite(precomp.benchmark_prices).all() and precomp.benchmark_prices[0] > 0:
         bench_twr_val = _bench_twr(
             precomp.benchmark_prices, starting_capital,
             weekly_contribution, rebalance_frequency_days,
         )
         bench_equity = _bench_daily_equity(
+            precomp.benchmark_prices, starting_capital,
+            weekly_contribution, rebalance_frequency_days,
+        )
+        bench_ca_equity = _bench_daily_ca_equity(
             precomp.benchmark_prices, starting_capital,
             weekly_contribution, rebalance_frequency_days,
         )
@@ -1066,8 +1132,8 @@ def run_simulation(
     _active_excess_return: float | None = None
     _active_equity_curve: np.ndarray | None = None
     if _active_daily is not None and _active_daily[0] > 0:
-        _am = compute_performance_metrics(_active_daily)
-        _active_equity_curve  = _active_daily.copy()
+        _am = compute_performance_metrics(_ca_active_daily)
+        _active_equity_curve  = _ca_active_daily.copy()
         _active_total_return  = _am["total_return"]
         _active_sharpe        = _am["sharpe"]
         _active_calmar        = _am["calmar"]
@@ -1101,6 +1167,7 @@ def run_simulation(
         trade_log=trade_log,
         equity_curve=daily_values.copy(),
         benchmark_equity=bench_equity,
+        benchmark_ca_equity=bench_ca_equity,
         archetype_pnl=_arch_pnl,
         archetype_trade_counts=_arch_trade_counts,
         archetype_exit_breakdown=_arch_exit_breakdown,
