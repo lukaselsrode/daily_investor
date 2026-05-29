@@ -702,6 +702,9 @@ METRIC_KEYS: list[str] = [
     "income_sector_rank",
     "income_fallback_reason",
     "scoring_model_version",
+    # Robinhood instrument type (etp/cef/mlp/stock/adr/reit) — merged onto the
+    # universe at build time by data.market.get_data; drives ETF/fund detection.
+    "instrument_type",
 ]
 
 AGG_DATA_COLUMNS: list[str] = ["symbol"] + METRIC_KEYS

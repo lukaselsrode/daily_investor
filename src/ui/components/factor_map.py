@@ -101,6 +101,70 @@ def _classify(df: pd.DataFrame, metric_threshold: float) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# Scope selection — filter the universe BEFORE embedding / clustering so ETFs
+# do not influence the geometry when stocks-only analysis is requested.
+# ---------------------------------------------------------------------------
+
+SCOPE_OPTIONS = [
+    "Stocks only",
+    "Full universe",
+    "ETFs only",
+    "Owned only",
+    "Candidates only",
+    "Owned + Candidates",
+    "Active sleeve only",
+]
+
+
+def apply_scope(
+    df: pd.DataFrame,
+    scope: str,
+    config: dict | None,
+    metric_threshold: float,
+) -> tuple[pd.DataFrame, dict]:
+    """Classify owned/candidate roles, tag ETFs, then filter to ``scope``.
+
+    Returns ``(scoped_df, meta)`` where ``meta`` carries the counts used in the
+    chart subtitle. All filtering happens here, before any embedding / KMeans /
+    diagnostics, so excluded rows never influence the geometry.
+    """
+    from portfolio.visualization.factor_map import tag_etf
+
+    work = _classify(df, metric_threshold)
+    work = tag_etf(work, config)
+
+    etf_mask = work["is_etf"].astype(bool)
+    role = work["_role"]
+
+    if scope == "Stocks only":
+        out = work[~etf_mask]
+    elif scope == "ETFs only":
+        out = work[etf_mask]
+    elif scope == "Owned only":
+        out = work[role == "owned"]
+    elif scope == "Candidates only":
+        out = work[role == "candidate"]
+    elif scope == "Owned + Candidates":
+        out = work[role.isin(["owned", "candidate"])]
+    elif scope == "Active sleeve only":
+        out = work[role.isin(["owned", "candidate"]) & ~etf_mask]
+    else:  # "Full universe" (and any unknown value — fail open)
+        out = work
+
+    out = out.copy()
+    out_role = out["_role"] if "_role" in out.columns else pd.Series(dtype=str)
+    meta = {
+        "total_universe": len(work),
+        "etf_total": int(etf_mask.sum()),
+        "in_scope": len(out),
+        "owned_in_scope": int((out_role == "owned").sum()),
+        "candidates_in_scope": int((out_role == "candidate").sum()),
+        "etf_in_scope": int(out["is_etf"].astype(bool).sum()) if "is_etf" in out.columns else 0,
+    }
+    return out, meta
+
+
+# ---------------------------------------------------------------------------
 # Shared constants
 # ---------------------------------------------------------------------------
 
@@ -569,8 +633,175 @@ def _render_component_report(diags: dict) -> None:
 # Tab 2: Factor Map 3D
 # ---------------------------------------------------------------------------
 
-def _render_3d_map(df: pd.DataFrame, metric_threshold: float) -> None:
-    st.caption("Best used with Owned + Candidates scope (readable). Full universe = abstract blob.")
+# Minimum rows needed for a meaningful 3-D embedding / KMeans pass.
+_MIN_EMBED_ROWS = 5
+
+
+def _col_or_v3(df: pd.DataFrame, base: str) -> str:
+    """Prefer the scoring_v3 column (``<base>_v3``) when present, else the v2 name."""
+    return f"{base}_v3" if f"{base}_v3" in df.columns else base
+
+
+# Stable archetype colours (mirrors ui/components/archetype_diagnostics.py).
+_ARCHETYPE_COLORS = {
+    "quality_compounder":   "#4c8ef5",
+    "value_recovery":       "#f5a623",
+    "defensive_income":     "#7ed321",
+    "speculative_momentum": "#d0021b",
+    "legacy_turnaround":    "#9b59b6",
+    "core_default":         "#aaaaaa",
+}
+_GROUP_SHELL_COLORS = {"owned": "#3498db", "candidate": "#2ecc71", "universe": "#8895a7"}
+
+
+def _coord_cols_for(method: str) -> list[str]:
+    return ["umap_1", "umap_2", "umap_3"] if method == "umap" else ["pca_1", "pca_2", "pca_3"]
+
+
+def _num(v) -> float:
+    x = pd.to_numeric(v, errors="coerce")
+    return 0.0 if pd.isna(x) else float(x)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _compute_archetypes(df: pd.DataFrame) -> pd.Series:
+    """Score-only archetype label per row (no Robinhood / market-structure calls).
+
+    A consistent universe-wide approximation of the live archetype — uses only
+    agg_data columns so it can colour the whole map.
+    """
+    from portfolio.position_archetypes import classify_archetype_full_from_scores
+    from ui.utils import load_config_raw
+
+    cfg = load_config_raw().get("archetype_management", {})
+
+    def _one(r: pd.Series) -> str:
+        try:
+            return classify_archetype_full_from_scores(
+                quality_score=_num(r.get("quality_score")),
+                momentum_score=_num(r.get("momentum_score")),
+                income_score=_num(r.get("income_score")),
+                yield_trap=bool(r.get("yield_trap_flag", False)),
+                archetype_cfg=cfg,
+                sector=r.get("sector"),
+                industry=r.get("industry"),
+                value_score=_num(r.get("value_score")),
+            ).archetype
+        except Exception:
+            return "core_default"
+
+    return df.apply(_one, axis=1)
+
+
+def _ellipsoid_mesh(points: np.ndarray, color: str, name: str, nsig: float = 2.0):
+    """2σ confidence ellipsoid (solid Mesh3d) for a group of 3-D points."""
+    import plotly.graph_objects as go
+
+    if points.shape[0] < 4:
+        return None
+    mu = points.mean(axis=0)
+    cov = np.cov(points, rowvar=False)
+    try:
+        vals, vecs = np.linalg.eigh(cov)
+    except np.linalg.LinAlgError:
+        return None
+    if np.any(vals <= 1e-9):
+        return None  # degenerate / collinear group
+    radii = nsig * np.sqrt(vals)
+    u = np.linspace(0.0, 2.0 * np.pi, 18)
+    v = np.linspace(0.0, np.pi, 18)
+    sphere = np.stack([
+        np.outer(np.cos(u), np.sin(v)).ravel(),
+        np.outer(np.sin(u), np.sin(v)).ravel(),
+        np.outer(np.ones_like(u), np.cos(v)).ravel(),
+    ], axis=1)
+    ell = (sphere * radii) @ vecs.T + mu
+    return go.Mesh3d(
+        x=ell[:, 0], y=ell[:, 1], z=ell[:, 2],
+        alphahull=0, opacity=0.12, color=color,
+        name=name, showlegend=True, hoverinfo="name",
+    )
+
+
+def _add_group_ellipsoids(fig, df_out: pd.DataFrame, coord_cols: list[str]) -> None:
+    """Overlay 2σ ellipsoids for owned / candidate / universe groups."""
+    if not all(c in df_out.columns for c in coord_cols):
+        return
+    coords = df_out[coord_cols].to_numpy(dtype=float)
+    groups: list[tuple[str, np.ndarray]] = [("universe", coords)]
+    if "_role" in df_out.columns:
+        for role in ("owned", "candidate"):
+            mask = (df_out["_role"] == role).to_numpy()
+            if mask.sum() >= 4:
+                groups.append((role, coords[mask]))
+    for name, pts in groups:
+        mesh = _ellipsoid_mesh(pts, _GROUP_SHELL_COLORS.get(name, "#888"), f"{name} 2σ")
+        if mesh is not None:
+            fig.add_trace(mesh)
+
+
+def _nearest_table(df_out: pd.DataFrame, centroid: np.ndarray, coord_cols: list[str], n: int = 10) -> pd.DataFrame:
+    coords = df_out[coord_cols].to_numpy(dtype=float)
+    dist = np.linalg.norm(coords - np.asarray(centroid, dtype=float), axis=1)
+    out = df_out.assign(distance=dist).nsmallest(n, "distance")
+    cols = [c for c in ["symbol", "sector", "_role", "distance",
+                        "value_metric", "quality_score", "momentum_score"]
+            if c in out.columns]
+    return out[cols]
+
+
+def _render_nearest_tables(fig, df_out, centroids, coord_cols, event) -> None:
+    specs = []
+    if isinstance(centroids, dict):
+        if centroids.get("owned") is not None:
+            specs.append(("owned", "◆ Nearest to owned centroid", centroids["owned"]))
+        if centroids.get("candidate") is not None:
+            specs.append(("candidate", "▲ Nearest to candidate centroid", centroids["candidate"]))
+    if not specs:
+        return
+
+    # Best-effort: did the user click a centroid? Map selection → trace name.
+    focused = None
+    try:
+        pts = []
+        try:
+            pts = event.selection["points"]
+        except Exception:
+            pts = (event or {}).get("selection", {}).get("points", [])
+        for p in pts:
+            cn = p.get("curve_number", p.get("curveNumber"))
+            nm = fig.data[cn].name if (cn is not None and cn < len(fig.data)) else ""
+            if "owned centroid" in str(nm).lower():
+                focused = "owned"
+            elif "candidate centroid" in str(nm).lower():
+                focused = "candidate"
+    except Exception:
+        focused = None
+    if focused:
+        specs.sort(key=lambda s: s[0] != focused)
+
+    st.markdown("**Nearest stocks to centroids**")
+    if focused:
+        st.caption(f"Focused on the **{focused}** centroid (clicked). Click a centroid marker to switch.")
+    else:
+        st.caption("Closest names in embedding space to each centroid. Click a centroid marker to focus.")
+    fmt = {c: "{:.3f}" for c in ("distance", "value_metric", "quality_score", "momentum_score")}
+    cols = st.columns(len(specs))
+    for col, (key, label, centroid) in zip(cols, specs):
+        with col:
+            st.caption(label)
+            tbl = _nearest_table(df_out, centroid, coord_cols)
+            st.dataframe(
+                tbl.style.format({k: v for k, v in fmt.items() if k in tbl.columns}, na_rep="—"),
+                hide_index=True, use_container_width=True,
+            )
+
+
+def _render_3d_map(df: pd.DataFrame, metric_threshold: float, config: dict | None = None) -> None:
+    st.caption(
+        "Stocks-only excludes ETFs so the embedding reflects the active stock universe. "
+        "Full universe shows ETFs vs stocks (the two dominant groups)."
+    )
 
     with st.expander("⚙️ Map settings", expanded=False):
         c1, c2, c3, c4 = st.columns(4)
@@ -578,15 +809,25 @@ def _render_3d_map(df: pd.DataFrame, metric_threshold: float) -> None:
             method = st.selectbox("Method", ["pca", "umap"], key="fm3d_method")
         with c2:
             scope = st.selectbox(
-                "Scope", ["Owned + Candidates", "Owned only", "Full universe"],
-                key="fm3d_scope",
+                "Scope", SCOPE_OPTIONS, index=0, key="fm3d_scope",
             )
         with c3:
-            color_opts = ["(auto)"] + [
-                c for c in ["strategy_bucket", "sector", "_role", "cluster",
-                             "value_metric", "quality_score", "momentum_score"]
-                if c in df.columns or c in ("cluster", "_role")
+            # Color options: only columns actually present (v3 preferred over v2).
+            color_candidates = [
+                "_role", "cluster", "archetype", "sector", "industry",
+                "strategy_bucket",
+                _col_or_v3(df, "value_score"), _col_or_v3(df, "quality_score"),
+                _col_or_v3(df, "momentum_score"), _col_or_v3(df, "income_score"),
+                _col_or_v3(df, "value_metric"), "final_score",
             ]
+            seen: set[str] = set()
+            color_opts = ["(auto)"]
+            for c in color_candidates:
+                if c in seen:
+                    continue
+                if c in df.columns or c in ("cluster", "_role", "archetype"):
+                    color_opts.append(c)
+                    seen.add(c)
             color_choice = st.selectbox("Colour by", color_opts, key="fm3d_color")
             color_by = None if color_choice == "(auto)" else color_choice
         with c4:
@@ -595,15 +836,63 @@ def _render_3d_map(df: pd.DataFrame, metric_threshold: float) -> None:
             if kmeans_clusters:
                 color_by = "cluster"
 
-    df_scope = _classify(df, metric_threshold)
-    if scope == "Owned + Candidates":
-        df_scope = df_scope[df_scope["_role"].isin(["owned", "candidate"])]
-    elif scope == "Owned only":
-        df_scope = df_scope[df_scope["_role"] == "owned"]
+        oc1, oc2 = st.columns(2)
+        with oc1:
+            exclude_outliers = st.checkbox(
+                "Exclude outliers", value=False, key="fm3d_outliers",
+                help="Drop feature-space oddballs (robust MAD z > 5) BEFORE embedding "
+                     "so they don't warp the UMAP/PCA geometry.",
+            )
+        with oc2:
+            show_shells = st.checkbox(
+                "Group shells (2σ)", value=False, key="fm3d_shells",
+                help="Overlay 2σ confidence ellipsoids for owned / candidate / universe groups.",
+            )
+
+    df_scope, meta = apply_scope(df, scope, config, metric_threshold)
+
+    # ── Scope title + counts ──────────────────────────────────────────────────
+    st.markdown(f"#### Factor Map — {scope}")
+    subtitle = (
+        f"{meta['in_scope']:,} in scope · {meta['owned_in_scope']} owned · "
+        f"{meta['candidates_in_scope']} candidates"
+    )
+    if scope in ("Stocks only", "Active sleeve only") and meta["etf_total"]:
+        subtitle += f" · {meta['etf_total']} ETFs excluded"
+    elif scope == "ETFs only":
+        subtitle += f" · {meta['etf_in_scope']} ETFs"
+    st.caption(subtitle)
 
     if df_scope.empty:
-        st.info("No data in selected scope.")
+        if scope == "ETFs only" and meta["etf_total"] == 0:
+            st.info("No ETFs found in the universe for this scope.")
+        elif scope == "Stocks only" and meta["in_scope"] == 0:
+            st.info("No stocks found in the universe for this scope.")
+        else:
+            st.info("No data in selected scope.")
         return
+
+    if len(df_scope) < _MIN_EMBED_ROWS:
+        st.warning(
+            f"Only {len(df_scope)} symbol(s) in scope — need at least "
+            f"{_MIN_EMBED_ROWS} for a meaningful embedding. Widen the scope."
+        )
+        return
+
+    # Guard KMeans against asking for more clusters than points.
+    if kmeans_clusters is not None and kmeans_clusters >= len(df_scope):
+        st.info(
+            f"Reduced KMeans clusters to fit {len(df_scope)} points in scope."
+        )
+        kmeans_clusters = max(2, len(df_scope) - 1)
+
+    # Archetype is computed on demand (score-only) since it's not in agg_data.
+    color_map = None
+    if color_by == "archetype":
+        with st.spinner("Classifying archetypes…"):
+            df_scope = df_scope.copy()
+            df_scope["archetype"] = _compute_archetypes(df_scope)
+        color_map = _ARCHETYPE_COLORS
 
     with st.spinner(f"Building {method.upper()} ({len(df_scope)} pts)…"):
         try:
@@ -611,6 +900,7 @@ def _render_3d_map(df: pd.DataFrame, metric_threshold: float) -> None:
             fig, df_out, diags = build_factor_map(
                 df_scope, method=method, color_by=color_by,
                 kmeans_clusters=kmeans_clusters, output_html=None, show=False,
+                color_map=color_map, exclude_outliers=exclude_outliers,
             )
         except ImportError as exc:
             st.error(str(exc)); return
@@ -619,13 +909,36 @@ def _render_3d_map(df: pd.DataFrame, metric_threshold: float) -> None:
         except Exception as exc:
             st.error(f"Factor map failed: {exc}"); st.exception(exc); return
 
-    st.plotly_chart(fig, use_container_width=True)
+    coord_cols = _coord_cols_for(method)
+    if show_shells:
+        _add_group_ellipsoids(fig, df_out, coord_cols)
+
+    try:
+        event = st.plotly_chart(
+            fig, use_container_width=True, key="fm3d_chart", on_select="rerun",
+        )
+    except TypeError:
+        # Older Streamlit without on_select — fall back to a static chart.
+        st.plotly_chart(fig, use_container_width=True)
+        event = None
+
+    if exclude_outliers:
+        dropped = diags.get("outliers_excluded") or []
+        if dropped:
+            with st.expander(f"⚠️ {len(dropped)} feature-space outlier(s) removed before embedding"):
+                st.caption("Dropped so they don't distort the UMAP/PCA geometry.")
+                st.write(", ".join(map(str, dropped)))
+        else:
+            st.caption("No outliers exceeded the threshold — embedding used all in-scope points.")
+
+    _render_nearest_tables(fig, df_out, diags.get("centroids", {}), coord_cols, event)
 
     _render_component_report(diags)
 
     if "cluster_summary" in diags:
         cs = diags["cluster_summary"]
         st.markdown("**Cluster summary**")
+        st.caption(f"Cluster weights, counts & composition computed within scope: **{scope}**.")
 
         # Equity bar chart when equity data is present
         if "equity_$" in cs.columns and cs["equity_$"].notna().any():
@@ -710,4 +1023,4 @@ def render() -> None:
         _render_portfolio_lens(df, metric_threshold)
 
     with tab2:
-        _render_3d_map(df, metric_threshold)
+        _render_3d_map(df, metric_threshold, config=cfg)

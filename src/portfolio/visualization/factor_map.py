@@ -317,6 +317,7 @@ def _make_figure(
     color_col: str,
     size_col: str | None,
     hover_fields: list[str],
+    color_map: dict[str, str] | None = None,
 ) -> plotly.graph_objects.Figure:
     import plotly.graph_objects as go
 
@@ -389,7 +390,7 @@ def _make_figure(
                     marker=dict(
                         size=sub_sizes,
                         symbol=sub_syms,
-                        color=_PLOTLY_PALETTE[i % len(_PLOTLY_PALETTE)],
+                        color=(color_map or {}).get(str(cat), _PLOTLY_PALETTE[i % len(_PLOTLY_PALETTE)]),
                         line=dict(width=0.3, color="#111"),
                         opacity=0.85,
                     ),
@@ -897,6 +898,9 @@ def build_factor_map(
     output_html: str | None = None,
     show: bool = False,
     hover_fields: list[str] | None = None,
+    color_map: dict[str, str] | None = None,
+    exclude_outliers: bool = False,
+    outlier_mad_z: float = 5.0,
 ) -> tuple[plotly.graph_objects.Figure, pd.DataFrame, dict]:
     """
     Build an interactive 3-D factor-map of the scored universe.
@@ -942,6 +946,28 @@ def build_factor_map(
     # ── Feature selection & preprocessing ────────────────────────────────────
     feat_df, selected_cols = _select_features(df, feature_cols)
     X = _standardize(feat_df)
+
+    # ── Outlier exclusion (before embedding) ──────────────────────────────────
+    # Robust per-feature MAD z-score on the standardized matrix. Dropping oddballs
+    # here (not just hiding them) is what stops UMAP/PCA geometry being distorted.
+    outliers_excluded: list[str] = []
+    if exclude_outliers and len(df) > 0:
+        med = np.median(X, axis=0)
+        mad = np.median(np.abs(X - med), axis=0) * 1.4826
+        mad[mad == 0] = np.inf  # a zero-spread feature can never flag an outlier
+        robust_z = np.abs((X - med) / mad)
+        out_mask = robust_z.max(axis=1) > outlier_mad_z
+        n_out = int(out_mask.sum())
+        max_drop = min(int(0.10 * len(df)), len(df) - 4)  # never gut the embedding
+        if 0 < n_out <= max_drop:
+            if "symbol" in df.columns:
+                outliers_excluded = df.loc[out_mask, "symbol"].astype(str).tolist()
+            keep = ~out_mask
+            df = df.loc[keep].reset_index(drop=True)
+            X = X[keep]
+            logger.info("Excluded %d feature-space outlier(s) before embedding", n_out)
+        elif n_out > max_drop:
+            logger.info("Outlier exclusion skipped: %d exceeds cap %d", n_out, max_drop)
 
     # ── Dimensionality reduction ──────────────────────────────────────────────
     if method == "umap":
@@ -1002,6 +1028,7 @@ def build_factor_map(
         color_col=resolved_color,
         size_col=resolved_size,
         hover_fields=hover_fields,
+        color_map=color_map,
     )
     _add_centroid_traces(fig, centroids, method)
     _add_top_equity_labels(fig, df_filtered, coord_cols)
@@ -1009,6 +1036,7 @@ def build_factor_map(
     # ── Diagnostics ────────────────────────────────────────────────────────────
     diagnostics = _compute_diagnostics(df_filtered)
     diagnostics["centroids"] = centroids
+    diagnostics["outliers_excluded"] = outliers_excluded
     try:
         diagnostics["component_report"] = _build_component_report(
             reduction_model, selected_cols, coords, X, method
@@ -1081,6 +1109,111 @@ def load_universe_with_holdings(agg_path: str | None = None) -> pd.DataFrame:
         logger.warning("Could not merge holdings: %s", exc)
         df["owned"] = False
 
+    return df
+
+
+# ---------------------------------------------------------------------------
+# ETF / asset-type classification
+#
+# ETFs are identified from config (the configured ETF sleeve, harvest ETFs, and
+# the backtest benchmark), from the Robinhood ``instrument_type`` column when
+# agg_data carries it (populated at build time by data.market.get_data), and
+# from any explicit is_etf / asset_type / security_type metadata. We never infer
+# ETF status from sector or missing fundamentals.
+# ---------------------------------------------------------------------------
+
+_ETF_ASSET_VALUES = {"etf", "fund", "etn", "index", "index_fund"}
+
+# Robinhood instrument ``type`` values treated as pooled funds (excluded by the
+# stocks-only / active-sleeve scopes). ADR / REIT remain individual equities.
+_ETF_INSTRUMENT_TYPES = {"etp", "cef", "mlp"}
+
+
+def etf_symbols_from_config(config: dict | None = None) -> set[str]:
+    """Union of configured ETF / benchmark tickers, upper-cased.
+
+    Pulls from ``etfs``, ``harvest.harvest_etfs`` (and a top-level
+    ``harvest_etfs`` fallback), and ``backtest.benchmark_symbol``. Falls back to
+    ``util.ETFS`` when those keys are missing or no config dict is supplied.
+    """
+    config = config or {}
+
+    syms: set[str] = set()
+
+    def _add(value: Any) -> None:
+        if value is None:
+            return
+        if isinstance(value, str):
+            if value.strip():
+                syms.add(value.strip().upper())
+        elif isinstance(value, (list, tuple, set)):
+            for v in value:
+                _add(v)
+
+    _add(config.get("etfs"))
+    harvest = config.get("harvest")
+    if isinstance(harvest, dict):
+        _add(harvest.get("harvest_etfs"))
+    _add(config.get("harvest_etfs"))
+    backtest = config.get("backtest")
+    if isinstance(backtest, dict):
+        _add(backtest.get("benchmark_symbol"))
+    _add(config.get("benchmark_symbol"))
+
+    if not syms:
+        try:
+            from util import ETFS
+            _add(list(ETFS))
+        except Exception:
+            pass
+
+    return syms
+
+
+def is_etf_symbol(symbol: str, config: dict | None = None) -> bool:
+    """True if ``symbol`` is a configured ETF / benchmark ticker (case-insensitive)."""
+    if symbol is None:
+        return False
+    sym = str(symbol).strip().upper()
+    if not sym:
+        return False
+    return sym in etf_symbols_from_config(config)
+
+
+def tag_etf(df: pd.DataFrame, config: dict | None = None) -> pd.DataFrame:
+    """Return ``df`` with a boolean ``is_etf`` column.
+
+    Honours an existing ``is_etf`` column; the Robinhood ``instrument_type``
+    column (``etp`` / ``cef`` / ``mlp`` → ETF); an explicit ``asset_type`` /
+    ``security_type`` field (values like ``etf`` / ``fund``); and config
+    ETF-ticker membership. These signals are OR-ed together. Never infers ETF
+    status from sector or missing fundamentals.
+    """
+    df = df.copy()
+    n = len(df)
+
+    if "is_etf" in df.columns:
+        df["is_etf"] = df["is_etf"].fillna(False).astype(bool)
+        return df
+
+    mask = pd.Series(False, index=df.index)
+
+    for col in ("asset_type", "security_type"):
+        if col in df.columns:
+            vals = df[col].astype(str).str.strip().str.lower()
+            mask = mask | vals.isin(_ETF_ASSET_VALUES)
+
+    if "instrument_type" in df.columns:
+        itype = df["instrument_type"].astype(str).str.strip().str.lower()
+        mask = mask | itype.isin(_ETF_INSTRUMENT_TYPES)
+
+    if "symbol" in df.columns:
+        etfs = etf_symbols_from_config(config)
+        if etfs:
+            sym_upper = df["symbol"].astype(str).str.strip().str.upper()
+            mask = mask | sym_upper.isin(etfs)
+
+    df["is_etf"] = mask.to_numpy() if n else mask
     return df
 
 
