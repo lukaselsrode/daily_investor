@@ -38,7 +38,7 @@ Usage:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -123,8 +123,15 @@ class ArchetypeResult:
     archetype: str
     confidence: float                           # 0.0–1.0
     scores: dict[str, float]                    # raw score per archetype
-    drivers: list[str]                          # human-readable evidence
+    drivers: list[str]                          # human-readable evidence (winner only)
     policy: ArchetypePolicy
+    # ── Extended diagnostics (populated by classify_archetype v2) ──────────
+    confidence_bucket: str = "medium"           # "high" | "medium" | "low"
+    runner_up: str | None = None
+    runner_up_score: float = 0.0
+    reason_codes: dict[str, list[str]] = field(default_factory=dict)
+    missing_signals: list[str] = field(default_factory=list)
+    features_used: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -311,9 +318,16 @@ def _analyst_buy_pct(signals: dict) -> float | None:
 # Per-archetype scorecards
 # ---------------------------------------------------------------------------
 
-def _score_quality_compounder(signals: dict, desc_feats: dict, desc_terms: dict) -> tuple[float, list[str]]:
+def _score_quality_compounder(
+    signals: dict, desc_feats: dict, desc_terms: dict, *, cfg: dict | None = None,
+) -> tuple[float, list[str], list[str]]:
     score = 0.0
     drivers: list[str] = []
+    reason_codes: list[str] = []
+    thr = (cfg or {}).get("quality_compounder", {}) or {}
+    _mega = float(thr.get("market_cap_mega",  _MEGA_CAP))
+    _large = float(thr.get("market_cap_large", _LARGE_CAP))
+    _small = float(thr.get("market_cap_small", _SMALL_CAP))
 
     maint = _sf(signals, "maintenance_ratio")
     day_trade = _sf(signals, "day_trade_ratio")
@@ -324,77 +338,90 @@ def _score_quality_compounder(signals: dict, desc_feats: dict, desc_terms: dict)
 
     # Market cap — strongest size signal
     if market_cap is not None:
-        if market_cap >= _MEGA_CAP:
+        if market_cap >= _mega:
             score += 0.30
             drivers.append(f"mega-cap (${market_cap/1e9:.0f}B)")
-        elif market_cap >= _LARGE_CAP:
+            reason_codes.append("mega_cap")
+        elif market_cap >= _large:
             score += 0.15
             drivers.append(f"large-cap (${market_cap/1e9:.1f}B)")
-        elif market_cap < _SMALL_CAP:
+            reason_codes.append("large_cap")
+        elif market_cap < _small:
             score -= 0.10
             drivers.append(f"small-cap (${market_cap/1e6:.0f}M) — weak compounder signal")
+            reason_codes.append("small_cap_penalty")
 
-    # Margin/risk ratios — strict boundary: only 0.25 standard margin gets full credit
     if maint is not None:
         if maint <= 0.25:
             score += 0.25
             drivers.append(f"maintenance_ratio={maint:.2f} — institution-trusted")
+            reason_codes.append("low_maintenance")
         elif maint <= 0.27:
             score += 0.08
             drivers.append(f"maintenance_ratio={maint:.2f} — low-risk margin profile")
         elif maint >= 1.0:
             score -= 0.30
             drivers.append(f"maintenance_ratio={maint:.2f} — speculative flag (−)")
+            reason_codes.append("high_maintenance_penalty")
 
     if day_trade is not None and day_trade <= 0.25:
         score += 0.08
         drivers.append(f"day_trade_ratio={day_trade:.2f} — normal")
 
-    # Analyst consensus
     if buy_pct is not None:
         if buy_pct > 0.80:
             score += 0.22
             drivers.append(f"analyst buy%={buy_pct:.0%} — very strong consensus")
+            reason_codes.append("analyst_strong")
         elif buy_pct > 0.65:
             score += 0.14
             drivers.append(f"analyst buy%={buy_pct:.0%} — strong consensus")
+            reason_codes.append("analyst_moderate")
         elif buy_pct < 0.40:
             score -= 0.20
             drivers.append(f"analyst buy%={buy_pct:.0%} — weak consensus (−)")
+            reason_codes.append("analyst_weak_penalty")
 
-    # Quality score
     if quality >= 0.60:
         score += 0.15
         drivers.append(f"quality_score={quality:.3f} — high")
+        reason_codes.append("quality_high")
     elif quality >= 0.35:
         score += 0.07
+        reason_codes.append("quality_moderate")
     elif quality < 0.10:
         score -= 0.10
         drivers.append(f"quality_score={quality:.3f} — low (−)")
+        reason_codes.append("quality_low_penalty")
 
-    # Employee count → scaled platform proxy
     if employees is not None:
         if employees >= 50_000:
             score += 0.10
             drivers.append(f"employees={employees:,} — scaled organization")
+            reason_codes.append("scaled_organization")
         elif employees < 2_000:
             score -= 0.05
 
-    # Description terms
     if desc_feats["compounder"]:
         score += 0.12
         terms = desc_terms["compounder"]
         drivers.append(f"description: {', '.join(terms)}")
+        reason_codes.append("compounder_terms")
     if desc_feats["legacy"]:
         score -= 0.12
         drivers.append("description: legacy/patent/restructuring language (−)")
+        reason_codes.append("legacy_terms_penalty")
 
-    return max(score, 0.0), drivers
+    return max(score, 0.0), drivers, reason_codes
 
 
-def _score_legacy_turnaround(signals: dict, desc_feats: dict, desc_terms: dict) -> tuple[float, list[str]]:
+def _score_legacy_turnaround(
+    signals: dict, desc_feats: dict, desc_terms: dict, *, cfg: dict | None = None,
+) -> tuple[float, list[str], list[str]]:
     score = 0.0
     drivers: list[str] = []
+    reason_codes: list[str] = []
+    _ = (cfg or {}).get("legacy_turnaround", {})  # threshold overrides reserved for future
 
     maint = _sf(signals, "maintenance_ratio")
     day_trade = _sf(signals, "day_trade_ratio")
@@ -466,15 +493,28 @@ def _score_legacy_turnaround(signals: dict, desc_feats: dict, desc_terms: dict) 
             score += 0.05
             drivers.append(f"non-US country={country} + elevated margin ratio")
 
-    # Compounder description terms reduce legacy score
     if desc_feats["compounder"]:
         score -= 0.12
+        reason_codes.append("compounder_terms_penalty")
 
-    return max(score, 0.0), drivers
+    if maint is not None and maint >= 1.0:
+        reason_codes.append("high_maintenance")
+    if desc_feats["legacy"]:
+        reason_codes.append("legacy_terms")
+    if buy_pct is not None and buy_pct < 0.35:
+        reason_codes.append("weak_analyst")
+    if market_cap is not None and market_cap >= _MEGA_CAP:
+        reason_codes.append("mega_cap_disqualifies")
+
+    return max(score, 0.0), drivers, reason_codes
 
 
-def _score_speculative_momentum(signals: dict, desc_feats: dict, desc_terms: dict) -> tuple[float, list[str]]:
+def _score_speculative_momentum(
+    signals: dict, desc_feats: dict, desc_terms: dict, *, cfg: dict | None = None,
+) -> tuple[float, list[str], list[str]]:
     score = 0.0
+    reason_codes: list[str] = []
+    _ = (cfg or {}).get("speculative_momentum", {})
     drivers: list[str] = []
 
     maint = _sf(signals, "maintenance_ratio")
@@ -533,16 +573,24 @@ def _score_speculative_momentum(signals: dict, desc_feats: dict, desc_terms: dic
         score += 0.08
         drivers.append("no income/dividend — pure price return play")
 
-    # Compounder terms disqualify
     if desc_feats["compounder"]:
         score -= 0.15
+        reason_codes.append("compounder_terms_penalty")
+    if momentum is not None and momentum > 0.60:
+        reason_codes.append("momentum_very_strong")
+    if quality is not None and quality < 0.10:
+        reason_codes.append("quality_very_low")
 
-    return max(score, 0.0), drivers
+    return max(score, 0.0), drivers, reason_codes
 
 
-def _score_value_recovery(signals: dict, desc_feats: dict, desc_terms: dict) -> tuple[float, list[str]]:
+def _score_value_recovery(
+    signals: dict, desc_feats: dict, desc_terms: dict, *, cfg: dict | None = None,
+) -> tuple[float, list[str], list[str]]:
     score = 0.0
     drivers: list[str] = []
+    reason_codes: list[str] = []
+    _ = (cfg or {}).get("value_recovery", {})
 
     value = _sf(signals, "value_score", 0.0)
     quality = _sf(signals, "quality_score", 0.0)
@@ -577,16 +625,31 @@ def _score_value_recovery(signals: dict, desc_feats: dict, desc_terms: dict) -> 
         score -= 0.15
         drivers.append(f"maintenance_ratio={maint:.2f} — distress risk reduces recovery conviction (−)")
 
-    # Legacy terms can co-exist with value recovery
     if desc_feats["legacy"] and value is not None and value > 0.30:
         score += 0.08
+        reason_codes.append("legacy_value_overlap")
+    if value is not None and value > 0.60:
+        reason_codes.append("value_undervalued")
+    if momentum is not None and 0.0 < momentum <= 0.40:
+        reason_codes.append("momentum_improving")
+    if maint is not None and maint >= 1.0:
+        reason_codes.append("distress_penalty")
 
-    return max(score, 0.0), drivers
+    return max(score, 0.0), drivers, reason_codes
 
 
-def _score_defensive_income(signals: dict, desc_feats: dict, desc_terms: dict) -> tuple[float, list[str]]:
+def _score_defensive_income(
+    signals: dict,
+    desc_feats: dict,
+    desc_terms: dict,
+    *,
+    cfg: dict | None = None,
+) -> tuple[float, list[str], list[str]]:
+    """Score defensive_income. When cfg["defensive_income"]["require_yield"]=true,
+    apply strict eligibility gates that disqualify the label (returns score=0)."""
     score = 0.0
     drivers: list[str] = []
+    reason_codes: list[str] = []
 
     income = _sf(signals, "income_score", 0.0)
     quality = _sf(signals, "quality_score", 0.0)
@@ -595,84 +658,147 @@ def _score_defensive_income(signals: dict, desc_feats: dict, desc_terms: dict) -
     sector = str(signals.get("sector", "") or "")
     industry = str(signals.get("industry", "") or "")
 
+    di_cfg = (cfg or {}).get("defensive_income", {}) or {}
+    # Per-config thresholds (defaults preserve original behavior)
+    yield_high     = float(di_cfg.get("yield_high",     0.80))
+    yield_moderate = float(di_cfg.get("yield_moderate", 0.50))
+    yield_minimal  = float(di_cfg.get("yield_minimal",  0.05))
+    quality_min    = float(di_cfg.get("quality_min_label", 0.25))
+    momentum_disq  = float(di_cfg.get("momentum_disqualify_above", 0.50))
+    sec_defensive  = di_cfg.get("sector_defensive") or list(_DEFENSIVE_SECTORS)
+    ind_defensive  = di_cfg.get("industry_defensive") or list(_DEFENSIVE_INDUSTRIES)
+
+    # ── Strict eligibility gate (config-gated; default-off) ──────────────
+    if di_cfg.get("require_yield", False):
+        if income is None or income < float(di_cfg.get("min_income_score", 0.30)):
+            reason_codes.append("gate_disqualified:income_below_min")
+            drivers.append(f"defensive_income disqualified: income_score={income} < min")
+            return 0.0, drivers, reason_codes
+        if quality is None or quality < float(di_cfg.get("min_quality_score", 0.40)):
+            reason_codes.append("gate_disqualified:quality_below_min")
+            drivers.append(f"defensive_income disqualified: quality_score={quality} < min")
+            return 0.0, drivers, reason_codes
+        if momentum is None or momentum < float(di_cfg.get("min_momentum_score", -0.10)):
+            reason_codes.append("gate_disqualified:momentum_below_min")
+            drivers.append(f"defensive_income disqualified: momentum_score={momentum} < min")
+            return 0.0, drivers, reason_codes
+        if bool(di_cfg.get("reject_falling_knife", True)) and momentum is not None and momentum < -0.20:
+            reason_codes.append("gate_disqualified:falling_knife")
+            drivers.append("defensive_income disqualified: falling knife (momentum < -0.20)")
+            return 0.0, drivers, reason_codes
+        if yield_trap:
+            reason_codes.append("gate_disqualified:yield_trap")
+            drivers.append("defensive_income disqualified: yield_trap_flag=True")
+            return 0.0, drivers, reason_codes
+        reason_codes.append("gate_passed")
+
     # Income is the central signal
     if yield_trap:
         score -= 0.25
         drivers.append("yield_trap_flag=True — income not safe (−)")
+        reason_codes.append("yield_trap_penalty")
     elif income is not None:
-        if income > 0.80:
+        if income > yield_high:
             score += 0.35
             drivers.append(f"income_score={income:.3f} — high dividend income")
-        elif income > 0.50:
+            reason_codes.append("income_high")
+        elif income > yield_moderate:
             score += 0.20
             drivers.append(f"income_score={income:.3f} — moderate income")
-        elif income <= 0.05:
+            reason_codes.append("income_moderate")
+        elif income <= yield_minimal:
             score -= 0.15
             drivers.append(f"income_score={income:.3f} — no income (−)")
+            reason_codes.append("no_income_penalty")
 
-    # Sector classification
-    if sector in _DEFENSIVE_SECTORS:
+    if sector in sec_defensive:
         score += 0.20
         drivers.append(f"sector={sector} — defensive sector")
-    if industry in _DEFENSIVE_INDUSTRIES:
+        reason_codes.append("defensive_sector")
+    if industry in ind_defensive:
         score += 0.15
         drivers.append(f"industry={industry} — regulated/utility industry")
+        reason_codes.append("defensive_industry")
 
-    # Description terms
     if desc_feats["defensive"] and not yield_trap:
         score += 0.12
         terms = desc_terms["defensive"]
         drivers.append(f"description: {', '.join(terms)}")
+        reason_codes.append("defensive_description")
 
-    # Moderate quality (stability, not growth)
-    if quality is not None and quality > 0.25:
+    if quality is not None and quality > quality_min:
         score += 0.08
+        reason_codes.append("quality_acceptable")
 
-    # Low/negative momentum is OK for income; not a penalty
-    if momentum is not None and momentum > 0.50:
-        score -= 0.08  # strong momentum → not a defensive income play
+    if momentum is not None and momentum > momentum_disq:
+        score -= 0.08
+        reason_codes.append("momentum_too_strong")
 
-    return max(score, 0.0), drivers
+    return max(score, 0.0), drivers, reason_codes
 
 
 # ---------------------------------------------------------------------------
 # Main classifier
 # ---------------------------------------------------------------------------
 
+_EXPECTED_SIGNALS: tuple[str, ...] = (
+    "quality_score", "momentum_score", "value_score", "income_score",
+    "market_cap", "maintenance_ratio", "day_trade_ratio",
+    "buy_to_sell_ratio", "analyst_buy_pct",
+    "sector", "industry", "description", "num_employees",
+    "yield_trap_flag", "instrument_type", "country",
+)
+
+
+def _bucket_confidence(confidence: float, winner_score: float, runner_up_score: float,
+                       cfg: dict | None) -> str:
+    """Compute the confidence bucket: high / medium / low."""
+    cb = (cfg or {}).get("confidence_buckets", {}) or {}
+    high_min = float(cb.get("high_min", 0.65))
+    med_min  = float(cb.get("medium_min", 0.45))
+    margin_ok = winner_score >= runner_up_score * 1.5
+    if confidence >= high_min and margin_ok:
+        return "high"
+    if confidence < med_min:
+        return "low"
+    return "medium"
+
+
 def classify_archetype(signals: dict, archetype_cfg: dict | None = None) -> ArchetypeResult:
-    """
-    Classify a position into a behavioral archetype.
+    """Classify a position into a behavioral archetype.
 
-    Parameters
-    ----------
-    signals : dict
-        Any combination of available signals. All keys are optional; the
-        classifier degrades gracefully when signals are missing.
+    Returns an `ArchetypeResult` carrying:
+      - winner archetype + policy
+      - confidence (winner_score / total)
+      - confidence_bucket (high / medium / low) tunable via archetype_classifier.confidence_buckets
+      - runner_up + runner_up_score (second-best archetype)
+      - scores (all 6 raw)
+      - drivers (winner's human-readable evidence)
+      - reason_codes (concise codes per archetype — for diagnostics)
+      - missing_signals (signals the classifier wanted but didn't get)
+      - features_used (signal keys actually consumed)
 
-        Common keys used:
-          quality_score, momentum_score, value_score, income_score
-          market_cap, maintenance_ratio, day_trade_ratio
-          buy_to_sell_ratio, analyst_buy_pct
-          sector, industry, description, num_employees
-          yield_trap_flag, instrument_type, country
-
-    archetype_cfg : dict, optional
-        Parsed archetype_management config section for policy overrides.
-
-    Returns
-    -------
-    ArchetypeResult with .archetype, .confidence, .scores, .drivers, .policy
+    When the new archetype_classifier config block is present (and `enabled=true`),
+    config-driven thresholds + the strict defensive_income gate take effect.
+    Otherwise the existing hardcoded thresholds run unchanged.
     """
     desc = signals.get("description", "")
     desc_feats = _desc_features(desc)
     desc_terms = _desc_matched_terms(desc)
 
-    s_comp,  d_comp  = _score_quality_compounder   (signals, desc_feats, desc_terms)
-    s_leg,   d_leg   = _score_legacy_turnaround     (signals, desc_feats, desc_terms)
-    s_spec,  d_spec  = _score_speculative_momentum  (signals, desc_feats, desc_terms)
-    s_val,   d_val   = _score_value_recovery        (signals, desc_feats, desc_terms)
-    s_def,   d_def   = _score_defensive_income      (signals, desc_feats, desc_terms)
-    s_fallback       = 0.05  # core_default always possible but weakly
+    # Pull the archetype_classifier config (new); fall back to None if absent.
+    try:
+        from util import ARCHETYPE_CLASSIFIER_PARAMS as _ACP
+        classifier_cfg: dict | None = _ACP if _ACP.get("enabled", False) else None
+    except Exception:
+        classifier_cfg = None
+
+    s_comp, d_comp, rc_comp = _score_quality_compounder  (signals, desc_feats, desc_terms, cfg=classifier_cfg)
+    s_leg,  d_leg,  rc_leg  = _score_legacy_turnaround   (signals, desc_feats, desc_terms, cfg=classifier_cfg)
+    s_spec, d_spec, rc_spec = _score_speculative_momentum(signals, desc_feats, desc_terms, cfg=classifier_cfg)
+    s_val,  d_val,  rc_val  = _score_value_recovery      (signals, desc_feats, desc_terms, cfg=classifier_cfg)
+    s_def,  d_def,  rc_def  = _score_defensive_income    (signals, desc_feats, desc_terms, cfg=classifier_cfg)
+    s_fallback = 0.05
 
     raw_scores: dict[str, float] = {
         "quality_compounder":   s_comp,
@@ -690,22 +816,37 @@ def classify_archetype(signals: dict, archetype_cfg: dict | None = None) -> Arch
         "defensive_income":     d_def,
         "core_default":         ["insufficient signals for confident classification"],
     }
+    reason_code_map: dict[str, list[str]] = {
+        "quality_compounder":   rc_comp,
+        "legacy_turnaround":    rc_leg,
+        "speculative_momentum": rc_spec,
+        "value_recovery":       rc_val,
+        "defensive_income":     rc_def,
+        "core_default":         ["fallback"],
+    }
 
     total = sum(raw_scores.values())
-    winner = max(raw_scores, key=lambda k: raw_scores[k])
+    sorted_archetypes = sorted(raw_scores.items(), key=lambda kv: -kv[1])
+    winner, winner_score = sorted_archetypes[0]
+    runner_up, runner_up_score = (sorted_archetypes[1] if len(sorted_archetypes) > 1
+                                  else (None, 0.0))
 
     # If no archetype scored meaningfully, fall back to core_default
-    if raw_scores[winner] < 0.05:
+    if winner_score < 0.05:
         winner = "core_default"
+        winner_score = s_fallback
 
-    confidence: float
     if total > 0.0:
-        confidence = min(raw_scores[winner] / total, 0.99)
+        confidence = min(winner_score / total, 0.99)
     else:
         confidence = 0.50
-
-    # Minimum confidence floor — we are never more than 99% sure
     confidence = max(confidence, 0.30)
+
+    bucket = _bucket_confidence(confidence, winner_score, runner_up_score, classifier_cfg)
+
+    # Diagnostic: which signals were consumed vs missing
+    features_used = [k for k in _EXPECTED_SIGNALS if k in signals and signals.get(k) is not None]
+    missing_signals = [k for k in _EXPECTED_SIGNALS if k not in features_used]
 
     policy = get_archetype_policy(winner, archetype_cfg)
 
@@ -715,6 +856,12 @@ def classify_archetype(signals: dict, archetype_cfg: dict | None = None) -> Arch
         scores={k: round(v, 4) for k, v in raw_scores.items()},
         drivers=driver_map[winner],
         policy=policy,
+        confidence_bucket=bucket,
+        runner_up=runner_up if runner_up != winner else None,
+        runner_up_score=round(float(runner_up_score), 4),
+        reason_codes=reason_code_map,
+        missing_signals=missing_signals,
+        features_used=features_used,
     )
 
 
@@ -728,19 +875,63 @@ def classify_archetype_from_scores(
     income_score: float,
     yield_trap: bool = False,
     archetype_cfg: dict | None = None,
+    *,
+    sector: str | None = None,
+    industry: str | None = None,
+    market_cap: float | None = None,
+    realized_vol: float | None = None,
+    value_score: float | None = None,
 ) -> ArchetypePolicy:
-    """
-    Lightweight archetype classification for backtesting — uses only precomputed
-    factor scores (no market structure API calls). Returns the policy directly.
+    """Lightweight archetype classification for backtesting.
 
-    Used by backtesting/simulator.py to assign per-position exit thresholds
-    without requiring external data fetches.
+    Beyond the 4 base factor scores, accepts sector/industry/market_cap/realized_vol
+    when the simulator has them in precomp — substantially closing the live/backtest
+    label-disagreement gap. Returns the policy directly.
+
+    Used by backtesting/simulator.py to assign per-position exit thresholds without
+    requiring external data fetches.
     """
-    signals = {
+    signals: dict = {
         "quality_score":  quality_score,
         "momentum_score": momentum_score,
         "income_score":   income_score,
         "yield_trap_flag": yield_trap,
     }
+    if sector is not None:
+        signals["sector"] = sector
+    if industry is not None:
+        signals["industry"] = industry
+    if market_cap is not None:
+        signals["market_cap"] = market_cap
+    if realized_vol is not None:
+        signals["realized_vol_3m"] = realized_vol
+    if value_score is not None:
+        signals["value_score"] = value_score
     result = classify_archetype(signals, archetype_cfg)
     return result.policy
+
+
+def classify_archetype_full_from_scores(
+    quality_score: float,
+    momentum_score: float,
+    income_score: float,
+    yield_trap: bool = False,
+    archetype_cfg: dict | None = None,
+    **extra,
+) -> ArchetypeResult:
+    """Same signal-augmented entry point but returns the full ArchetypeResult
+    (with confidence, bucket, runner_up, reason_codes) instead of just the policy.
+
+    The simulator can use this when it needs to populate confidence-bucket
+    attribution rollups.
+    """
+    signals: dict = {
+        "quality_score":  quality_score,
+        "momentum_score": momentum_score,
+        "income_score":   income_score,
+        "yield_trap_flag": yield_trap,
+    }
+    for k in ("sector", "industry", "market_cap", "realized_vol_3m", "value_score"):
+        if extra.get(k) is not None:
+            signals[k] = extra[k]
+    return classify_archetype(signals, archetype_cfg)

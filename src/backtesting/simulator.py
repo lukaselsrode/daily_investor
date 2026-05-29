@@ -18,8 +18,6 @@ from util import (
     EXIT_DECISION_PARAMS,
     INDEX_PCT,
     METRIC_THRESHOLD,
-    MOMENTUM_PARAMS,
-    MOMENTUM_V2_PARAMS,
     RISK_LIMITS,
     SCORE_WEIGHTS,
     SCORING_PARAMS,
@@ -27,6 +25,10 @@ from util import (
 )
 
 from .types import BacktestReport, CandidatePoolDiagnostics, PrecomputedData, SimResult
+
+# Local aliases for nested scoring sub-blocks.
+MOMENTUM_WARMUP_PARAMS = SCORING_PARAMS["momentum_warmup"]
+MOMENTUM_INPUT_PARAMS = SCORING_PARAMS["momentum_inputs"]
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +58,7 @@ _POSITIVE_PNL_DOWNGRADE = bool(EXIT_DECISION_PARAMS.get("positive_pnl_exit_downg
 
 def get_default_params() -> np.ndarray:
     """
-    Build the 15-element params vector from the current config values.
+    Build the 16-element params vector base from the current config values.
 
     Layout mirrors tuner._current_params():
       [0-3]  score_weights (value, quality, income, momentum)
@@ -66,10 +68,10 @@ def get_default_params() -> np.ndarray:
       [7]    sell_weak_value_below
       [8]    trailing_stop_pct
       [9]    value_pe_weight
-      [10-14] momentum_v2 sub-weights (rs_3m, rs_6m, risk_adj_3m, trend_structure, return_1m)
+      [10-15] momentum input sub-weights (rs_3m, rs_6m, risk_adj_3m, trend_structure, return_1m, return_5d)
     """
     sw  = SCORE_WEIGHTS
-    v2w = MOMENTUM_V2_PARAMS.get("weights", {})
+    v2w = MOMENTUM_INPUT_PARAMS.get("weights", {})
     return np.array([
         sw["value"], sw["quality"], sw["income"], sw["momentum"],
         INDEX_PCT,
@@ -77,12 +79,13 @@ def get_default_params() -> np.ndarray:
         SELL_RULES["take_profit_pct"],
         SELL_RULES["sell_weak_value_below"],
         SELL_RULES["trailing_stop_pct"],
-        SCORING_PARAMS["value_pe_weight"],
+        SCORING_PARAMS["factors"]["value"]["pe_weight"],
         v2w.get("rs_3m",           0.25),
         v2w.get("rs_6m",           0.25),
         v2w.get("risk_adj_3m",     0.20),
         v2w.get("trend_structure", 0.15),
         v2w.get("return_1m",       0.10),
+        v2w.get("return_5d",       0.05),
     ])
 
 
@@ -96,15 +99,16 @@ def _col_arr(df: pd.DataFrame, name: str, default: float = 0.0) -> np.ndarray:
     return np.full(len(df), default, dtype=np.float64)
 
 
-def _momentum_score_vec(
+def _momentum_score_warmup_vec(
     bin_indices: np.ndarray,
     has_pos: np.ndarray,
     pos_52w: np.ndarray,
     return_1m: np.ndarray,
     mbin_scores: np.ndarray,
 ) -> np.ndarray:
-    """Vectorized v1 (bucket) momentum scoring — used as fallback when v2 features absent."""
-    mp = MOMENTUM_PARAMS
+    """Vectorized warm-up bin momentum scoring — used during the first ~63 trading
+    days when rolling momentum-input features (rs_3m, rs_6m, …) aren't yet stable."""
+    mp = MOMENTUM_WARMUP_PARAMS
     base = np.where(has_pos, mbin_scores[bin_indices], 0.0)
 
     has_r1m  = np.isfinite(return_1m)
@@ -129,13 +133,14 @@ def _pct_rank_vec(arr: np.ndarray) -> np.ndarray:
     return out
 
 
-def _momentum_score_v2_vec(
+def _momentum_score_multifactor_vec(
     day: int,
     precomp: PrecomputedData,
     mom_weights_raw: np.ndarray,
 ) -> np.ndarray:
-    """Vectorized v2 momentum scoring using multi-factor cross-sectional model."""
-    cfg = MOMENTUM_V2_PARAMS
+    """Vectorized cross-sectional momentum scoring — multi-factor blend of
+    rs_3m, rs_6m, risk_adj_3m, trend_structure, return_1m, return_5d."""
+    cfg = MOMENTUM_INPUT_PARAMS
     pen = cfg["penalties"]
     n   = precomp.prices.shape[1]
     zeros = np.zeros(n)
@@ -163,9 +168,8 @@ def _momentum_score_v2_vec(
     a200 = (precomp.above_200dma_daily[day] if precomp.above_200dma_daily is not None else zeros).astype(bool)
     trend = np.select([a50 & a200, a50 & ~a200, ~a50 & a200], [0.5, 0.1, -0.1], default=-0.5)
 
-    raw_w = np.abs(mom_weights_raw[:5])
-    w_r5d = cfg["weights"].get("return_5d", 0.05)
-    total = raw_w.sum() + w_r5d
+    raw_w = np.abs(mom_weights_raw[:6])
+    total = raw_w.sum()
     if total < 1e-9:
         total = 1.0
     w = raw_w / total
@@ -176,7 +180,7 @@ def _momentum_score_v2_vec(
         w[2] * _pct_rank_vec(risk_adj) +
         w[3] * trend                    +
         w[4] * _pct_rank_vec(ret1m)    +
-        (w_r5d / total) * _pct_rank_vec(ret5d)
+        w[5] * _pct_rank_vec(ret5d)
     )
 
     score -= np.where(ret3m < pen["falling_knife_3m_threshold"],  pen["falling_knife_penalty"],  0.0)
@@ -248,14 +252,14 @@ def score_stocks_at_day(precomp: PrecomputedData, params: np.ndarray, day: int) 
     value_score = value_pe_w * precomp.pe_comp + (1.0 - value_pe_w) * precomp.pb_comp
 
     if precomp.ret_3m_daily is not None:
-        momentum_score = _momentum_score_v2_vec(day, precomp, params[10:15])
+        momentum_score = _momentum_score_multifactor_vec(day, precomp, params[10:16])
     else:
-        momentum_score = _momentum_score_vec(
+        momentum_score = _momentum_score_warmup_vec(
             precomp.bin_indices_daily[day],
             precomp.has_position_52w_daily[day],
             precomp.position_52w_daily[day],
             precomp.return_1m_daily[day],
-            params[10:15],
+            params[10:16],
         )
 
     return (
@@ -268,13 +272,13 @@ def score_stocks_at_day(precomp: PrecomputedData, params: np.ndarray, day: int) 
 
 def _momentum_score_at_day(precomp: PrecomputedData, params: np.ndarray, day: int) -> np.ndarray:
     if precomp.ret_3m_daily is not None:
-        return _momentum_score_v2_vec(day, precomp, params[10:15])
-    return _momentum_score_vec(
+        return _momentum_score_multifactor_vec(day, precomp, params[10:16])
+    return _momentum_score_warmup_vec(
         precomp.bin_indices_daily[day],
         precomp.has_position_52w_daily[day],
         precomp.position_52w_daily[day],
         precomp.return_1m_daily[day],
-        params[10:15],
+        params[10:16],
     )
 
 
@@ -306,6 +310,15 @@ def select_candidates(
     """
     if cs_params is None:
         cs_params = CANDIDATE_SELECTION_PARAMS
+
+    # Phase-2 vector override: when the tuner extends params with candidate-filter
+    # slots (see _CS_FILTER_SLOT_OFFSET=40 in tuning/constants.py), those values
+    # take precedence over the live config for this run.
+    if params is not None and len(params) > 40:
+        cs_params = dict(cs_params)
+        cs_params["top_percentile"]     = float(params[40])
+        cs_params["min_quality_score"]  = float(params[41])
+        cs_params["min_momentum_score"] = float(params[42])
 
     n            = len(composite_scores)
     mode         = cs_params["mode"]
@@ -513,7 +526,9 @@ def _build_archetype_thresholds(
     that takes precedence over ARCHETYPE_PARAMS so the tuner's lifecycle slots
     actually flow into per-position thresholds.
     """
-    from portfolio.position_archetypes import classify_archetype_from_scores
+    from portfolio.position_archetypes import (
+        classify_archetype_full_from_scores,
+    )
 
     n = precomp.quality_scores.shape[0]
     tp_arr        = np.full(n, default_take_profit,    dtype=np.float64)
@@ -526,6 +541,7 @@ def _build_archetype_thresholds(
     max_sleeve_arr= np.full(n, np.nan,                 dtype=np.float64)
     min_score_arr = np.full(n, np.nan,                 dtype=np.float64)
     labels        = [""] * n
+    buckets       = [""] * n   # confidence bucket per stock (for attribution rollups)
 
     if arch_cfg_override is not None and arch_cfg_override:
         arch_cfg = arch_cfg_override
@@ -536,19 +552,41 @@ def _build_archetype_thresholds(
             "tp": tp_arr, "stop": stop_arr, "harvest": harvest_arr, "min_hold": min_hold_arr,
             "enabled": enabled_arr, "score_mult": score_mult_arr, "pos_mult": pos_mult_arr,
             "max_sleeve": max_sleeve_arr, "min_score": min_score_arr, "labels": labels,
+            "buckets": buckets,
         }
 
     yt_mask = precomp.yield_trap_mask if precomp.yield_trap_mask is not None else np.zeros(n, dtype=bool)
 
+    # Augment signals: pass sector/industry/market_cap from precomp so the
+    # backtest classifier sees ~6 signals instead of 4 (closes most of the
+    # live/backtest label-disagreement gap).
+    _ind_labels = precomp.industry_labels if precomp.industry_labels else ()
+    _mkt_caps = precomp.market_caps if precomp.market_caps is not None else None
+    _sec_labels = precomp.sector_labels if precomp.sector_labels else ()
+    _mom_scores = precomp.momentum_scores if precomp.momentum_scores is not None else None
     for i in range(n):
         try:
-            policy = classify_archetype_from_scores(
+            _sec = _sec_labels[i] if i < len(_sec_labels) else None
+            _ind = _ind_labels[i] if i < len(_ind_labels) else None
+            _mc  = float(_mkt_caps[i]) if (_mkt_caps is not None
+                                           and i < len(_mkt_caps)
+                                           and np.isfinite(_mkt_caps[i])) else None
+            _mom = float(_mom_scores[i]) if (_mom_scores is not None
+                                             and i < len(_mom_scores)
+                                             and np.isfinite(_mom_scores[i])) else 0.0
+            # Use the full classifier to also capture confidence_bucket for attribution.
+            _full = classify_archetype_full_from_scores(
                 quality_score  = float(precomp.quality_scores[i]),
-                momentum_score = float(precomp.income_scores[i]),   # proxy at day-0
+                momentum_score = _mom,
                 income_score   = float(precomp.income_scores[i]),
                 yield_trap     = bool(yt_mask[i]),
                 archetype_cfg  = arch_cfg,
+                sector         = _sec,
+                industry       = _ind,
+                market_cap     = _mc,
             )
+            policy = _full.policy
+            buckets[i] = _full.confidence_bucket
             tp_arr[i]        = policy.harvest_profit_threshold
             stop_arr[i]      = policy.trailing_stop_pct
             harvest_arr[i]   = policy.harvest_profit_threshold
@@ -568,6 +606,7 @@ def _build_archetype_thresholds(
         "tp": tp_arr, "stop": stop_arr, "harvest": harvest_arr, "min_hold": min_hold_arr,
         "enabled": enabled_arr, "score_mult": score_mult_arr, "pos_mult": pos_mult_arr,
         "max_sleeve": max_sleeve_arr, "min_score": min_score_arr, "labels": labels,
+        "buckets": buckets,
     }
 
 
@@ -592,7 +631,7 @@ def run_simulation(
       [0] sw_value  [1] sw_quality  [2] sw_income  [3] sw_momentum
       [4] index_pct  [5] metric_threshold  [6] take_profit_pct
       [7] sell_weak_below  [8] trailing_stop  [9] value_pe_weight
-      [10-14] momentum sub-weights (v2) or bin scores (v1 fallback)
+      [10-14] momentum input sub-weights (rs_3m, rs_6m, risk_adj_3m, trend, return_1m)
     """
     n_days, n_stocks = precomp.prices.shape
     n_etfs           = precomp.etf_prices.shape[1]
@@ -652,6 +691,7 @@ def run_simulation(
         _arch_max_sleeve_arr    = _arch["max_sleeve"]
         _arch_min_score_arr     = _arch["min_score"]
         _arch_labels            = _arch["labels"]
+        _arch_buckets           = _arch.get("buckets", [""] * len(_arch_labels))
     else:
         _arch_take_profit_arr = None
         _arch_trailing_stop_arr = None
@@ -663,7 +703,11 @@ def run_simulation(
         _arch_max_sleeve_arr = None
         _arch_min_score_arr = None
         _arch_labels = []
+        _arch_buckets = []
     _arch_pnl: dict = {}
+    _arch_pnl_by_confidence: dict[str, float] = {}
+    _arch_trade_counts_by_confidence: dict[str, int] = {}
+    _arch_buy_bucket: dict[int, str] = {}
     _arch_trade_counts: dict = {}
     _arch_exit_breakdown: dict = {}
     # Extended rollups
@@ -682,6 +726,13 @@ def run_simulation(
     # Cluster concentration tracking (walk-forward, diagnostics only)
     _cluster_snapshots: list = []
     _cluster_labels_by_day: np.ndarray | None = None
+    _cluster_pnl: dict[str, float] = {}
+    _cluster_trade_counts: dict[str, int] = {}
+    _cluster_win_count: dict[str, int] = {}
+    _cluster_hold_days_sum: dict[str, float] = {}
+    _cluster_buy_cluster: dict[int, str] = {}   # idx → cluster at last buy
+    _cluster_decision_counts: dict[str, int] = {"allowed": 0, "downsized": 0, "blocked": 0}
+    _cluster_violations_count: int = 0
     _conc_limits = ARCHETYPE_PARAMS  # fallback; we use concentration_limits separately
     try:
         from util import CONCENTRATION_LIMIT_PARAMS as _CLP
@@ -690,6 +741,19 @@ def run_simulation(
     _max_cluster_w = float(_CLP.get("max_cluster_weight", 0.35))
     _max_sector_w  = float(_CLP.get("max_sector_weight", 0.40))
     _n_clusters_ct = int(_CLP.get("n_clusters", 6))
+
+    # Cluster cap enforcement (no-op when warn_only=true, the default).
+    _cluster_cap_enabled = bool(
+        _CLP.get("enabled", False)
+        and not _CLP.get("warn_only", True)
+        and (_CLP.get("apply_to", {}) or {}).get("active_sleeve", True)
+    )
+    _cluster_cap_limit = _max_cluster_w
+    _cluster_cap_downsize = bool((_CLP.get("enforcement", {}) or {}).get("downsize_to_fit", True))
+
+    # Auto-enable cluster_tracking when enforcement is on (we need the per-day labels).
+    if _cluster_cap_enabled and not cluster_tracking:
+        cluster_tracking = True
 
     if cluster_tracking:
         try:
@@ -782,6 +846,7 @@ def run_simulation(
     def _do_buy(day: int, budget: float) -> float:
         nonlocal cash, trades_made, skipped_buys, cap_reductions, cooldown_skips
         nonlocal total_friction, total_traded_notional, trades_this_week
+        nonlocal _cluster_violations_count
 
         if budget < min_order:
             return 0.0
@@ -866,6 +931,48 @@ def run_simulation(
             else:
                 sector = precomp.sector_labels[i] if i < len(precomp.sector_labels) else "Unknown"
 
+            # ── Cluster concentration enforcement (config-gated) ──────────────
+            # When the user flips warn_only=false, the simulator's `_do_buy()` enforces
+            # cluster caps the same way as live `buy_cycle()`. Defaults are a no-op.
+            _cls_for_buy: str | None = None
+            if (
+                _cluster_cap_enabled
+                and _cluster_labels_by_day is not None
+                and portfolio_value > 0
+            ):
+                _rebal_idx = day // rebalance_frequency_days
+                if _rebal_idx < _cluster_labels_by_day.shape[0]:
+                    _cls = str(_cluster_labels_by_day[_rebal_idx][i])
+                    _cls_for_buy = _cls
+                    _cur_cw = 0.0
+                    for _k in np.where(stock_shares > 0)[0]:
+                        if _k >= _cluster_labels_by_day.shape[1]:
+                            continue
+                        if str(_cluster_labels_by_day[_rebal_idx][_k]) == _cls:
+                            _p_k = prices_d[_k] if np.isfinite(prices_d[_k]) and prices_d[_k] > 0 else stock_avg_cost[_k]
+                            _cur_cw += float(stock_shares[_k] * _p_k)
+                    _cur_cw = _cur_cw / portfolio_value
+                    _new_w = _cur_cw + (alloc / portfolio_value)
+                    if _new_w > _cluster_cap_limit:
+                        _cluster_violations_count += 1
+                        if _cluster_cap_downsize:
+                            _headroom = max(0.0, _cluster_cap_limit - _cur_cw)
+                            _fit = _headroom * portfolio_value
+                            if _fit >= min_order:
+                                alloc = _fit
+                                cap_reductions += 1
+                                _cluster_decision_counts["downsized"] += 1
+                            else:
+                                _cluster_decision_counts["blocked"] += 1
+                                skipped_buys += 1
+                                continue
+                        else:
+                            _cluster_decision_counts["blocked"] += 1
+                            skipped_buys += 1
+                            continue
+                    else:
+                        _cluster_decision_counts["allowed"] += 1
+
             # Per-archetype max_active_weight sleeve cap (soft, post-rank)
             _al_i = _arch_labels[i] if _arch_labels and i < len(_arch_labels) else ""
             if (
@@ -907,6 +1014,13 @@ def run_simulation(
                 _al = _arch_labels[i] if _arch_labels and i < len(_arch_labels) else ""
                 _arch_buy_archetype[i] = _al
                 _arch_buy_cost_basis[i] = alloc
+                # Capture confidence bucket at buy for by-confidence attribution
+                _buy_bucket = _arch_buckets[i] if _arch_buckets and i < len(_arch_buckets) else ""
+                if _buy_bucket:
+                    _arch_buy_bucket[i] = _buy_bucket
+                # Capture cluster label at buy so sell-side rollups can attribute pnl
+                if _cls_for_buy is not None:
+                    _cluster_buy_cluster[i] = _cls_for_buy
                 trade_log.append(TradeRecord(
                     date=str(day), symbol=sym, side="buy",
                     quantity=shares, price=effective_price, amount=alloc, reason="buy",
@@ -914,6 +1028,7 @@ def run_simulation(
                     archetype_at_entry=_al,
                     archetype_at_exit="",
                     decision_source=("archetype_rule" if _al else "global_rule"),
+                    cluster_id=(_cls_for_buy or ""),
                 ))
             stock_shares[i] += shares
             stock_peak[i]    = max(stock_peak[i], p)
@@ -1025,6 +1140,7 @@ def run_simulation(
                 sym = precomp.symbols[i] if i < len(precomp.symbols) else str(i)
                 _al = _arch_labels[i] if _arch_labels and i < len(_arch_labels) else ""
                 _al_entry = _arch_buy_archetype.get(int(i), _al)
+                _cls_entry = _cluster_buy_cluster.get(int(i), "")
                 _pnl_i = proceeds_i - cost_basis
                 trade_log.append(TradeRecord(
                     date=str(d), symbol=sym, side="sell",
@@ -1035,6 +1151,7 @@ def run_simulation(
                     archetype_at_entry=_al_entry,
                     archetype_at_exit=_al,
                     decision_source=_src,
+                    cluster_id=_cls_entry,
                 ))
                 if _al:
                     _arch_pnl[_al] = _arch_pnl.get(_al, 0.0) + _pnl_i
@@ -1047,6 +1164,18 @@ def run_simulation(
                         _arch_win_count[_al] = _arch_win_count.get(_al, 0) + 1
                     _arch_decision_source_counts.setdefault(_al, {})
                     _arch_decision_source_counts[_al][_src] = _arch_decision_source_counts[_al].get(_src, 0) + 1
+                if _cls_entry:
+                    _cluster_pnl[_cls_entry] = _cluster_pnl.get(_cls_entry, 0.0) + _pnl_i
+                    _cluster_trade_counts[_cls_entry] = _cluster_trade_counts.get(_cls_entry, 0) + 1
+                    _cluster_hold_days_sum[_cls_entry] = _cluster_hold_days_sum.get(_cls_entry, 0.0) + float(days_held[i])
+                    if _pnl_i > 0:
+                        _cluster_win_count[_cls_entry] = _cluster_win_count.get(_cls_entry, 0) + 1
+                # Per-archetype, per-confidence-bucket attribution
+                _bucket = _arch_buy_bucket.pop(int(i), "")
+                if _al and _bucket:
+                    _key = f"{_al}|{_bucket}"
+                    _arch_pnl_by_confidence[_key] = _arch_pnl_by_confidence.get(_key, 0.0) + _pnl_i
+                    _arch_trade_counts_by_confidence[_key] = _arch_trade_counts_by_confidence.get(_key, 0) + 1
                 # Clear per-position entry tracking
                 if int(i) in _arch_buy_archetype:
                     del _arch_buy_archetype[int(i)]
@@ -1364,6 +1493,67 @@ def run_simulation(
                 sleeve_return = 0.0
             _arch_active_excess[_al] = float(sleeve_return - bench_twr_val)
 
+    # ── Per-cluster rollups (only when cluster_tracking ran) ────────────────
+    _cluster_win_rate: dict[str, float] = {}
+    _cluster_avg_hold: dict[str, float] = {}
+    _cluster_sleeve_weight: dict[str, float] = {}
+    _cluster_active_excess: dict[str, float] = {}
+    _cluster_dominant_sectors: dict[str, str] = {}
+    _cluster_dominant_archetypes: dict[str, str] = {}
+    if _cluster_labels_by_day is not None and n_days > 0:
+        # End-of-sim cluster sleeve weights + dominant labels
+        last_port_val = float(daily_values[-1]) if n_days > 0 else 0.0
+        last_rebal_idx = min(
+            (n_days - 1) // rebalance_frequency_days,
+            _cluster_labels_by_day.shape[0] - 1,
+        )
+        if last_rebal_idx >= 0 and last_port_val > 0:
+            last_labels = _cluster_labels_by_day[last_rebal_idx]
+            last_prices = precomp.prices[-1] if n_days > 0 else None
+            if last_prices is not None:
+                _per_cluster_value: dict[str, float] = {}
+                _per_cluster_sectors: dict[str, dict[str, int]] = {}
+                _per_cluster_archetypes: dict[str, dict[str, int]] = {}
+                _valid_last = np.isfinite(last_prices) & (last_prices > 0)
+                for k in np.where(stock_shares > 0)[0]:
+                    if k >= last_labels.shape[0]:
+                        continue
+                    cls = str(last_labels[k])
+                    _p = last_prices[k] if _valid_last[k] else stock_avg_cost[k]
+                    _val = float(stock_shares[k] * _p)
+                    _per_cluster_value[cls] = _per_cluster_value.get(cls, 0.0) + _val
+                    if k < len(precomp.sector_labels):
+                        _sec = str(precomp.sector_labels[k])
+                        _per_cluster_sectors.setdefault(cls, {})
+                        _per_cluster_sectors[cls][_sec] = _per_cluster_sectors[cls].get(_sec, 0) + 1
+                    if _arch_labels and k < len(_arch_labels) and _arch_labels[k]:
+                        _arl = _arch_labels[k]
+                        _per_cluster_archetypes.setdefault(cls, {})
+                        _per_cluster_archetypes[cls][_arl] = _per_cluster_archetypes[cls].get(_arl, 0) + 1
+                for cls, v in _per_cluster_value.items():
+                    _cluster_sleeve_weight[cls] = float(v / last_port_val)
+                for cls, sects in _per_cluster_sectors.items():
+                    if sects:
+                        _cluster_dominant_sectors[cls] = max(sects, key=sects.get)
+                for cls, arcs in _per_cluster_archetypes.items():
+                    if arcs:
+                        _cluster_dominant_archetypes[cls] = max(arcs, key=arcs.get)
+
+        # Win rate + avg hold (from sells)
+        for cls, n in _cluster_trade_counts.items():
+            if n > 0:
+                _cluster_win_rate[cls] = float(_cluster_win_count.get(cls, 0)) / float(n)
+                _cluster_avg_hold[cls] = float(_cluster_hold_days_sum.get(cls, 0.0)) / float(n)
+        # Approximate per-cluster active excess: realized pnl / avg deployed - bench_twr
+        for cls, pnl in _cluster_pnl.items():
+            # Crude avg deployed: end-of-sim sleeve value (close enough for diagnostics)
+            avg_deployed = _cluster_sleeve_weight.get(cls, 0.0) * (float(daily_values[-1]) if n_days else 0.0)
+            if avg_deployed > 0:
+                sleeve_return = pnl / avg_deployed
+            else:
+                sleeve_return = 0.0
+            _cluster_active_excess[cls] = float(sleeve_return - bench_twr_val)
+
     _active_total_return: float | None = None
     _active_sharpe:       float | None = None
     _active_calmar:       float | None = None
@@ -1421,6 +1611,18 @@ def run_simulation(
         cluster_result=_build_cluster_result_if_needed(
             _cluster_snapshots, _n_clusters_ct
         ) if cluster_tracking else None,
+        cluster_pnl=_cluster_pnl,
+        cluster_trade_counts=_cluster_trade_counts,
+        cluster_win_rate=_cluster_win_rate,
+        cluster_avg_hold_days=_cluster_avg_hold,
+        cluster_sleeve_weight=_cluster_sleeve_weight,
+        cluster_active_excess=_cluster_active_excess,
+        cluster_dominant_sectors=_cluster_dominant_sectors,
+        cluster_dominant_archetypes=_cluster_dominant_archetypes,
+        cluster_violations_count=_cluster_violations_count,
+        cluster_decision_counts=_cluster_decision_counts,
+        archetype_pnl_by_confidence=_arch_pnl_by_confidence,
+        archetype_trade_counts_by_confidence=_arch_trade_counts_by_confidence,
         scope=scope,
         active_equity_curve=_active_equity_curve,
         active_total_return=_active_total_return,
@@ -1544,6 +1746,10 @@ def run_backtest_report(
         _cfg_hash = ""
     _ts = datetime.datetime.utcnow().isoformat(timespec="seconds")
 
+    from strategy.scoring.composite import SCORING_MODEL_VERSION
+    _engine_version = SCORING_MODEL_VERSION
+    _peer_cfg = dict(SCORING_PARAMS.get("peer_standardization", {}))
+
     return BacktestReport(
         mode=precomp.mode,
         universe_selection=precomp.universe_selection,
@@ -1563,6 +1769,8 @@ def run_backtest_report(
         trade_log=train_result.trade_log,
         config_hash=_cfg_hash,
         run_timestamp=_ts,
+        scoring_engine_version=_engine_version,
+        peer_config=_peer_cfg,
     )
 
 

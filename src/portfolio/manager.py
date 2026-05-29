@@ -1288,6 +1288,62 @@ class PortfolioManager:
                 skipped.append(symbol)
                 continue
 
+            # ── Cluster concentration enforcement (config-gated) ──────────────
+            _cluster_decision = None
+            _cluster_id_for_log: str | None = None
+            _cluster_cw = 0.0
+            _cluster_pw = 0.0
+            _cluster_limit = 0.0
+            _cluster_block_reason = ""
+            from util import CONCENTRATION_LIMIT_PARAMS as _CLP
+            if (
+                _CLP["enabled"] and not _CLP["warn_only"]
+                and _CLP["apply_to"]["active_sleeve"]
+                and getattr(self, "_cluster_report", None) is not None
+            ):
+                from portfolio.exposure.cluster_enforcement import (
+                    cluster_buy_decision,
+                    current_cluster_weight,
+                )
+                _cluster_lookup = self._cluster_report.universe_cluster_lookup
+                _cluster_id_for_log = _cluster_lookup.get(symbol)
+                if _cluster_id_for_log is not None:
+                    _cluster_cw = current_cluster_weight(
+                        holdings, _cluster_lookup, portfolio_value, _cluster_id_for_log,
+                    )
+                    _cluster_limit = float(_CLP["max_cluster_weight"])
+                    _cluster_decision, _new_alloc, _cluster_block_reason = cluster_buy_decision(
+                        symbol=symbol,
+                        cluster_id=_cluster_id_for_log,
+                        current_weight=_cluster_cw,
+                        alloc=alloc,
+                        portfolio_value=portfolio_value,
+                        cluster_limit=_cluster_limit,
+                        enforcement_cfg=_CLP["enforcement"],
+                        min_order_amount=RISK_LIMITS["min_order_amount"],
+                        is_underweight=active_is_underweight,
+                    )
+                    _cluster_pw = (
+                        _cluster_cw + (_new_alloc / portfolio_value)
+                        if portfolio_value > 0 else 0.0
+                    )
+                    if _cluster_decision == "blocked":
+                        logger.info(
+                            "Skipping %s: %s", symbol, _cluster_block_reason,
+                        )
+                        self._log_candidate(
+                            symbol, row, "SKIP", False, f"cluster_cap: {_cluster_block_reason}",
+                            _sent_result, True, "", alloc, 0.0, regime, _cand_rank, agg_df,
+                        )
+                        skipped.append(symbol)
+                        continue
+                    if _cluster_decision == "downsized":
+                        logger.info(
+                            "%s: cluster_cap downsized $%.2f → $%.2f",
+                            symbol, alloc, _new_alloc,
+                        )
+                        alloc = _new_alloc
+
             n_remaining = len(candidates) - (_cand_rank - 1)
             _buy_dec = self._risk.can_buy(
                 symbol, alloc, holdings, agg_df, portfolio_value, cash, sector_exposure,
@@ -1453,7 +1509,8 @@ class PortfolioManager:
         except Exception:
             _start_pv = 0.0
 
-        # ── Concentration diagnostic (non-blocking) ───────────────────────────
+        # ── Concentration diagnostic (logs warnings; enforcement happens in buy_cycle) ──
+        self._cluster_report = None  # populated below; consumed by buy_cycle
         try:
             from util import CONCENTRATION_LIMIT_PARAMS as _clp
             if _clp["enabled"]:
@@ -1465,14 +1522,16 @@ class PortfolioManager:
                     agg_df=_agg_for_conc,
                     etfs=ETFS,
                 )
-                if _conc is not None and _conc.has_violations:
-                    logger.warning(
-                        "=== CONCENTRATION WARNINGS ===\n%s",
-                        "\n".join(_conc.summary_lines()),
-                    )
-                    _conc.log_warnings()
-                else:
-                    logger.info("Concentration check: no violations")
+                if _conc is not None:
+                    self._cluster_report = _conc
+                    if _conc.has_violations:
+                        logger.warning(
+                            "=== CONCENTRATION WARNINGS ===\n%s",
+                            "\n".join(_conc.summary_lines()),
+                        )
+                        _conc.log_warnings()
+                    else:
+                        logger.info("Concentration check: no violations")
         except Exception as _ce:
             logger.debug("Concentration check skipped: %s", _ce)
 

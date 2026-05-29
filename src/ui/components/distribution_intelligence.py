@@ -127,7 +127,7 @@ def _cached_threshold_sim(df_json: str, score_col: str, return_col: str):
 
 @st.cache_data(ttl=3600)
 def _cached_ic_history(factors_key: str, factors: tuple, horizon: int) -> pd.DataFrame:
-    from strategy.research.ic_engine import FactorResearchEngine
+    from research.ic_engine import FactorResearchEngine
     engine = FactorResearchEngine(factors=list(factors))
     return engine.compute_multi_horizon_ic(factors=list(factors), horizons=[horizon])
 

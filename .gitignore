@@ -25,8 +25,19 @@ credentials.*
 *.log
 data/
 
+# Ephemeral config artifacts (must never re-accumulate as tracked files)
+#   - cfg/*.bak: migrate-scoring backups written next to the source config
+#   - .variants/: user-saved UI config variants (DAILY_INVESTOR_VARIANTS_DIR)
+#   - *.bak.parquet: in-place snapshot rescore backups
+cfg/*.bak
+.variants/
+*.bak.parquet
+
 # Claude / editor
 .claude/
+
+# Understand-anything knowledge graph (regenerable tooling artifact; auto-updates)
+.understand-anything/
 
 # macOS
 .DS_Store

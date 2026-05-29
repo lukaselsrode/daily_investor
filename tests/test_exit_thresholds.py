@@ -15,7 +15,6 @@ import pytest
 
 from config.validation import validate_exit_thresholds
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -159,6 +158,7 @@ class TestConfigManagerIntegration:
 
     def test_valid_config_loads_with_no_threshold_warnings(self):
         import warnings
+
         from config.manager import ConfigManager
 
         data = {
@@ -178,7 +178,6 @@ class TestConfigManagerIntegration:
         assert threshold_warns == []
 
     def test_invalid_config_logs_warning(self):
-        import logging
         from config.manager import ConfigManager
 
         data = {

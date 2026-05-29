@@ -10,11 +10,9 @@ import yaml
 from ui.utils import CFG_PATH, load_config_raw, ui_config
 
 _SECTIONS = [
-    ("scoring",              "Scoring & Weights"),
+    ("scoring",              "Scoring Engine"),
     ("score_weights",        "Score Weights"),
     ("valuation_guardrails", "Valuation Guardrails"),
-    ("momentum",             "Momentum v1"),
-    ("momentum_v2",          "Momentum v2 Sub-Weights"),
     ("sell_rules",           "Sell Rules"),
     ("risk",                 "Risk Limits"),
     ("harvest",              "Profit Harvesting"),
@@ -27,7 +25,6 @@ _SECTIONS = [
     ("reliability",          "Reliability Gating"),
     ("stability",            "Stability"),
     ("candidate_rotation",   "Candidate Rotation"),
-    ("value_v2",             "Value v2"),
     ("snapshots",            "Snapshots"),
     ("dividends",            "Dividends"),
     ("research",             "Research"),

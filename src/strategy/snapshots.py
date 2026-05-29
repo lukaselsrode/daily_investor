@@ -15,6 +15,7 @@ load_snapshots(start, end, columns)        → pd.DataFrame  (snapshot_date + sn
 prune_snapshots(keep_days)                 → int (files removed)
 compute_forward_ic(horizon_days, factors)  → pd.DataFrame  (date, factor, ic, n, p_value)
 backfill_from_csvs()                       → int (files written)
+rescore_snapshots(...)                     → MigrationReport (under unified peer engine)
 
 IC note
 -------
@@ -27,6 +28,8 @@ from __future__ import annotations
 
 import datetime
 import logging
+import shutil
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pandas as pd
@@ -368,3 +371,226 @@ def compute_forward_ic(
             })
 
     return pd.DataFrame(results)
+
+
+# ---------------------------------------------------------------------------
+# Snapshot rescore (hard cutover — writes canonical column names only)
+# ---------------------------------------------------------------------------
+
+# Legacy `*_v3`-suffixed columns that may still exist on disk from prior runs.
+# rescore_snapshots() strips these on write to converge to a single canonical schema.
+_LEGACY_SUFFIXED_COLUMNS = (
+    "value_score_v3", "quality_score_v3", "momentum_score_v3", "income_score_v3",
+    "yield_trap_flag_v3", "value_metric_v3",
+    "scoring_v3_config_hash", "scoring_v3_migration_timestamp", "scoring_v3_source_snapshot",
+)
+
+_SCORING_META_COLUMNS = (
+    "scoring_model_version",
+    "scoring_config_hash",
+    "rescore_timestamp",
+    "rescore_source_snapshot",
+)
+
+
+@dataclass
+class MigrationReport:
+    """Summary of a `snapshots rescore` run (under the unified peer engine)."""
+    files_processed: int = 0
+    files_rescored: int = 0
+    files_skipped_already_migrated: int = 0
+    files_skipped_error: int = 0
+    rows_rescored: int = 0
+    rows_missing_sector: int = 0
+    rows_missing_industry: int = 0
+    fallback_usage: dict[str, int] = field(default_factory=dict)
+    nan_value_metric_rows: int = 0
+    backups_created: int = 0
+    dry_run: bool = False
+    before_value_metric_mean: float = 0.0
+    after_value_metric_mean: float = 0.0
+    top_score_shifts: list[tuple[str, float, float]] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+
+    def pretty(self) -> str:
+        lines = [
+            f"Snapshot rescore ({'DRY RUN' if self.dry_run else 'WRITE'})",
+            f"  files processed:           {self.files_processed}",
+            f"  files rescored:            {self.files_rescored}",
+            f"  skipped (already peer-1):  {self.files_skipped_already_migrated}",
+            f"  skipped (errors):          {self.files_skipped_error}",
+            f"  backups created:           {self.backups_created}",
+            f"  rows rescored:             {self.rows_rescored}",
+            f"  rows missing sector:       {self.rows_missing_sector}",
+            f"  rows missing industry:     {self.rows_missing_industry}",
+            f"  nan value_metric rows:     {self.nan_value_metric_rows}",
+            f"  value_metric mean (before/after): {self.before_value_metric_mean:.3f} / {self.after_value_metric_mean:.3f}",
+        ]
+        if self.fallback_usage:
+            lines.append("  fallback usage:")
+            for k, v in sorted(self.fallback_usage.items(), key=lambda kv: -kv[1]):
+                lines.append(f"    {k:<20s} {v}")
+        if self.top_score_shifts:
+            lines.append("  largest score shifts (top 10):")
+            for sym, before, after in self.top_score_shifts[:10]:
+                lines.append(f"    {sym:<10s} {before:+.3f} → {after:+.3f}  (Δ {after - before:+.3f})")
+        if self.errors:
+            lines.append("  errors:")
+            for err in self.errors[:20]:
+                lines.append(f"    {err}")
+        return "\n".join(lines)
+
+
+def _is_already_current_engine(df: pd.DataFrame) -> bool:
+    """True if the snapshot is already stamped with the current engine revision."""
+    from strategy.scoring.composite import SCORING_MODEL_VERSION
+    return (
+        "scoring_model_version" in df.columns
+        and (df["scoring_model_version"] == SCORING_MODEL_VERSION).any()
+    )
+
+
+def rescore_snapshots(
+    input_dir: Path | str | None = None,
+    output_dir: Path | str | None = None,
+    *,
+    dry_run: bool = False,
+    overwrite_existing: bool = False,
+    in_place_with_backup: bool = False,
+    scoring_cfg: dict | None = None,
+) -> MigrationReport:
+    """Rescore snapshots under the unified peer engine. Writes canonical column names.
+
+    Behavior
+    --------
+    - Iterates every *.parquet under input_dir (defaults to data/snapshots/).
+    - Reads each file, recomputes scores via strategy.scoring.compute_metric using
+      the in-memory universe as the peer set (no lookahead).
+    - WRITES canonical column names (value_score, value_metric, etc.) and drops
+      any legacy `*_v3` columns.
+    - When output_dir is None and in_place_with_backup=True: creates a
+      <file>.bak.parquet copy first, then writes the rescored file in place.
+    - When output_dir is set: writes rescored copies into output_dir.
+    - dry_run=True: writes nothing, only logs and tallies.
+    - overwrite_existing=False (default): files already at the current engine
+      version are skipped (idempotent).
+    """
+    from strategy.scoring.composite import (
+        SCORING_MODEL_VERSION,
+        compute_metric,
+        scoring_config_hash,
+    )
+
+    if input_dir is None:
+        input_dir = _snapshot_dir()
+    input_path = Path(input_dir)
+    if not input_path.exists():
+        raise FileNotFoundError(f"snapshots input dir not found: {input_path}")
+
+    if output_dir is not None:
+        out_path = Path(output_dir)
+        out_path.mkdir(parents=True, exist_ok=True)
+    else:
+        out_path = input_path  # in-place mode
+
+    cfg_hash = scoring_config_hash(scoring_cfg)
+    timestamp = datetime.datetime.now().isoformat(timespec="seconds")
+    report = MigrationReport(dry_run=dry_run)
+
+    before_means: list[float] = []
+    after_means: list[float] = []
+    shifts: list[tuple[str, float, float]] = []
+
+    for snap_path in sorted(input_path.glob("*.parquet")):
+        if snap_path.name.endswith(".bak.parquet"):
+            continue
+        report.files_processed += 1
+
+        try:
+            df = pd.read_parquet(snap_path)
+        except Exception as exc:
+            report.files_skipped_error += 1
+            report.errors.append(f"{snap_path.name}: read failed — {exc}")
+            continue
+
+        if _is_already_current_engine(df) and not overwrite_existing:
+            report.files_skipped_already_migrated += 1
+            continue
+
+        if "sector" not in df.columns:
+            df["sector"] = pd.NA
+        if "industry" not in df.columns:
+            df["industry"] = pd.NA
+        report.rows_missing_sector += int(df["sector"].isna().sum())
+        report.rows_missing_industry += int(df["industry"].isna().sum())
+
+        before_metric = pd.to_numeric(df.get("value_metric", 0.0), errors="coerce").fillna(0.0)
+        before_means.append(float(before_metric.mean()))
+
+        try:
+            from util import SCORE_WEIGHTS, SCORING_PARAMS
+            cfg = scoring_cfg if scoring_cfg is not None else SCORING_PARAMS
+            compute_metric(df, SCORE_WEIGHTS, cfg)
+        except Exception as exc:
+            report.files_skipped_error += 1
+            report.errors.append(f"{snap_path.name}: rescore failed — {exc}")
+            continue
+
+        after_metric = pd.to_numeric(df.get("value_metric", 0.0), errors="coerce").fillna(0.0)
+        after_means.append(float(after_metric.mean()))
+        report.nan_value_metric_rows += int(after_metric.isna().sum())
+        report.rows_rescored += len(df)
+        report.files_rescored += 1
+
+        for col in ("value_fallback_reason", "quality_fallback_reason",
+                    "momentum_fallback_reason", "income_fallback_reason"):
+            if col in df.columns:
+                vc = df[col].value_counts(dropna=False).to_dict()
+                for reason, n in vc.items():
+                    key = f"{col}:{reason}"
+                    report.fallback_usage[key] = report.fallback_usage.get(key, 0) + int(n)
+
+        # Strip legacy `*_v3`-suffixed columns to converge on canonical names.
+        for col in _LEGACY_SUFFIXED_COLUMNS:
+            if col in df.columns:
+                del df[col]
+
+        df["scoring_model_version"] = SCORING_MODEL_VERSION
+        df["scoring_config_hash"] = cfg_hash
+        df["rescore_timestamp"] = timestamp
+        df["rescore_source_snapshot"] = snap_path.name
+
+        if "symbol" in df.columns:
+            diff = (after_metric - before_metric).abs()
+            top_idx = diff.nlargest(min(20, len(diff))).index
+            for i in top_idx:
+                sym = str(df.at[i, "symbol"])
+                shifts.append((sym, float(before_metric.at[i]), float(after_metric.at[i])))
+
+        if dry_run:
+            continue
+
+        if output_dir is None:
+            if in_place_with_backup:
+                bak_path = snap_path.with_suffix(".bak.parquet")
+                if not bak_path.exists():
+                    shutil.copy2(snap_path, bak_path)
+                    report.backups_created += 1
+            target = snap_path
+        else:
+            target = out_path / snap_path.name
+
+        try:
+            from util import SNAPSHOT_PARAMS
+            compression = SNAPSHOT_PARAMS.get("compression", "snappy")
+            df.to_parquet(target, index=False, compression=compression)
+        except Exception as exc:
+            report.errors.append(f"{target.name}: write failed — {exc}")
+
+    if before_means:
+        report.before_value_metric_mean = float(sum(before_means) / len(before_means))
+    if after_means:
+        report.after_value_metric_mean = float(sum(after_means) / len(after_means))
+    shifts.sort(key=lambda x: -abs(x[2] - x[1]))
+    report.top_score_shifts = shifts[:20]
+    return report

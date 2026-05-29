@@ -18,7 +18,6 @@ from tuning.profiles import (
     total_simulations,
 )
 
-
 # ---------------------------------------------------------------------------
 # Profile expansion
 # ---------------------------------------------------------------------------
@@ -162,9 +161,9 @@ def _make_mock_summary(pct_beating: float, excess: float = 0.02,
 
 class TestRobustScanResult:
 
-    def _make_result(self, horizon_excesses: dict[int, float]) -> "RobustScanResult":
+    def _make_result(self, horizon_excesses: dict[int, float]) -> RobustScanResult:
         """Build a RobustScanResult with one cell per horizon (single seed=42)."""
-        from tuning.robust_scan import RobustScanResult, ScanCell, _aggregate
+        from tuning.robust_scan import ScanCell, _aggregate
         cells = [
             ScanCell(horizon_days=h, seed=42, summary=_make_mock_summary(
                 pct_beating=1.0 if excess > 0 else 0.0, excess=excess))

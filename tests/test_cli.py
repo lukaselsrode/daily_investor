@@ -19,7 +19,6 @@ import tuning.reports as _t
 from cli.commands import (
     cmd_auto_tune,
     cmd_backtest,
-    cmd_list_presets,
     cmd_report,
     cmd_stability_scan,
     cmd_tune,

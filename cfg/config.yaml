@@ -4,7 +4,7 @@ dividend_threshold: 0.03
 metric_threshold: 0.75
 selloff_threshold: 30
 weekly_investment: 400
-index_pct: 0.7
+index_pct: 0.8465
 rebalance:
   mode: contribution_driven
   drift_tolerance_pct: 0.03
@@ -26,29 +26,29 @@ etfs:
 - IWM
 - DRAM
 score_weights:
-  value: 0.06
-  quality: 0.43
-  income: 0.08
-  momentum: 0.43
+  value: 0.0411
+  quality: 0.5373
+  income: 0.0404
+  momentum: 0.3812
 valuation_guardrails:
   max_pe_component: 5.0
   max_pb_component: 5.45
   min_pe_ratio: 1.0
   min_pb_ratio: 0.1
 risk:
-  max_single_position_pct: 0.07
+  max_single_position_pct: 0.09
   max_sector_pct: 0.25
   max_order_pct_of_cash: 0.5
   min_order_amount: 30.0
   min_liquidity_volume: 500000
-  max_buys_per_rebalance: 4
+  max_buys_per_rebalance: 3
   max_sentiment_candidates: 20
   minimum_hold_days: 10
   allow_whole_share_fallback: true
   max_whole_share_buys_per_run: 2
   max_whole_share_allocation_multiplier: 1.25
   min_index_pct: 0.65
-  min_candidate_allocation_pct: 0.1
+  min_candidate_allocation_pct: 0.12
 sell_rules:
   stop_loss_pct: -0.2
   trailing_stop_pct: -0.07
@@ -62,59 +62,82 @@ sell_rules:
 archetype_management:
   enabled: true
   quality_compounder:
-    trim_profit_threshold: 0.35
-    harvest_profit_threshold: 0.50
-    trailing_stop_pct: -0.12
-    minimum_hold_days: 30
+    trim_profit_threshold: 0.3
+    harvest_profit_threshold: 0.5
+    trailing_stop_pct: -0.1
+    minimum_hold_days: 21
     thesis_exit_requires_confirmation: true
     allow_deeper_drawdown: true
   legacy_turnaround:
-    trim_profit_threshold: 0.12
-    harvest_profit_threshold: 0.22
+    trim_profit_threshold: 0.1
+    harvest_profit_threshold: 0.2
     trailing_stop_pct: -0.06
     minimum_hold_days: 5
     thesis_exit_requires_confirmation: false
     allow_deeper_drawdown: false
   speculative_momentum:
-    trim_profit_threshold: 0.10
-    harvest_profit_threshold: 0.20
-    trailing_stop_pct: -0.06
+    trim_profit_threshold: 0.1
+    harvest_profit_threshold: 0.25
+    trailing_stop_pct: -0.07
     minimum_hold_days: 5
     thesis_exit_requires_confirmation: false
     allow_deeper_drawdown: false
   value_recovery:
-    trim_profit_threshold: 0.15
-    harvest_profit_threshold: 0.30
-    trailing_stop_pct: -0.08
-    minimum_hold_days: 10
+    trim_profit_threshold: 0.12
+    harvest_profit_threshold: 0.25
+    trailing_stop_pct: -0.07
+    minimum_hold_days: 7
     thesis_exit_requires_confirmation: false
     allow_deeper_drawdown: false
   defensive_income:
-    trim_profit_threshold: 0.12
-    harvest_profit_threshold: 0.25
-    trailing_stop_pct: -0.08
-    minimum_hold_days: 15
+    trim_profit_threshold: 0.08
+    harvest_profit_threshold: 0.18
+    trailing_stop_pct: -0.06
+    minimum_hold_days: 5
     thesis_exit_requires_confirmation: false
     allow_deeper_drawdown: false
   core_default:
-    trim_profit_threshold: 0.20
-    harvest_profit_threshold: 0.30
-    trailing_stop_pct: -0.08
-    minimum_hold_days: 10
+    trim_profit_threshold: 0.15
+    harvest_profit_threshold: 0.28
+    trailing_stop_pct: -0.07
+    minimum_hold_days: 7
     thesis_exit_requires_confirmation: false
     allow_deeper_drawdown: false
 contrarian_penalty:
   enabled: true
   score_multiplier: 0.92
-  max_position_multiplier: 0.60
+  max_position_multiplier: 0.6
   archetype_bias: speculative_momentum
 concentration_limits:
   enabled: true
-  max_cluster_weight: 0.35
-  max_sector_weight: 0.40
+  warn_only: false                         # ENFORCING — block/downsize cluster-cap violations
+  max_cluster_weight: 0.60
+  max_sector_weight: 0.4
   cluster_method: pca
   n_clusters: 6
-  warn_only: true
+  apply_to:
+    active_sleeve: true
+    etf_sleeve: false
+  enforcement:
+    block_new_buys: true
+    allow_existing_positions: true
+    allow_trim_only: true
+    allow_sell: true
+    allow_if_underweight: true
+    downsize_to_fit: true
+    min_remaining_alloc_multiple: 1.0
+archetype_classifier:
+  enabled: true                            # ON — diagnostics + (gate when require_yield=true)
+  confidence_buckets:
+    high_min: 0.65
+    medium_min: 0.45
+  defensive_income:
+    require_yield: true                    # ON — strict gate disqualifies low-quality DI
+    min_income_score: 0.30
+    min_quality_score: 0.40
+    min_momentum_score: -0.10
+    max_volatility_percentile: 0.75
+    reject_falling_knife: true
 bear_market:
   spy_ma_period: 200
   vix_threshold: 25.0
@@ -136,57 +159,95 @@ etf_risk:
   defensive_etf_pct: 0.85
   defensive_cash_pct: 0.1
 scoring:
-  value_pe_weight: 0.70
-  value_pb_weight: 0.30
-  income_score_cap: 1.5
-  yield_trap_threshold: 0.1
-  distress_pe_max: 5.0
-  quality_volume_high: 1000000
-  quality_volume_low: 100000
-  quality_dividend_min: 0.02
-  quality_dividend_max: 0.06
-  quality_weight_has_positive_pe: 0.5
-  quality_weight_distress_pe: -0.4
-  quality_weight_has_positive_pb: 0.2
-  quality_weight_high_volume: 0.3
-  quality_weight_low_volume: -0.3
-  quality_weight_yield_trap: -0.6
-  quality_weight_healthy_dividend: 0.2
-momentum:
-  position_bin_boundaries:
-  - 0.15
-  - 0.35
-  - 0.75
-  - 0.95
-  position_bin_scores:
-  - -0.35
-  - -0.1
-  - 0.55
-  - 0.85
-  - 0.45
-  return_1m_low_position_cutoff: 0.4
-  return_1m_recovery_threshold: 0.05
-  return_1m_falling_knife_threshold: -0.1
-  return_1m_recovery_bonus: 0.15
-  return_1m_falling_knife_penalty: 0.2
-momentum_v2:
-  weights:
-    rs_3m: 0.36
-    rs_6m: 0.10
-    risk_adj_3m: 0.22
-    trend_structure: 0.12
-    return_1m: 0.18
-    return_5d: 0.02
-  penalties:
-    falling_knife_3m_threshold: -0.15
-    falling_knife_penalty: 0.25
-    overextension_52w_threshold: 0.97
-    overextension_penalty: 0.2
-    high_vol_annual_threshold: 0.5
-    high_vol_penalty: 0.15
-  clamp_low: -1.0
-  clamp_high: 1.5
-  winsorize_pct: 0.05
+  enabled: true
+  peer_standardization:
+    group_by: industry
+    fallback_group_by: sector
+    min_group_size: 25
+    method: percentile
+    winsorize_pct: 0.01
+    clamp_low: -1.0
+    clamp_high: 1.5
+    blend:
+      industry_relative: 0.3
+      sector_relative: 0.2
+      market_relative: 0.5
+  factors:
+    value:
+      enabled: true
+      peer_relative: true
+      pe_weight: 0.7
+      pb_weight: 0.3
+      distress:
+        pe_threshold: 5.0
+        pe_penalty: 0.3
+        negative_eps_penalty: 0.25
+      anchor_blend: 0.5
+    quality:
+      enabled: true
+      peer_relative: true
+      use_legacy_checklist_fallback: true
+      anchor_blend: 0.7
+    momentum:
+      enabled: false
+    income:
+      enabled: true
+      peer_relative: true
+      safety_aware: true
+      anchor_blend: 0.0
+    growth_leadership:
+      enabled: false
+      peer_relative: true
+  momentum_inputs:
+    weights:
+      rs_3m: 0.36
+      rs_6m: 0.1
+      risk_adj_3m: 0.22
+      trend_structure: 0.12
+      return_1m: 0.18
+      return_5d: 0.02
+    penalties:
+      falling_knife_3m_threshold: -0.15
+      falling_knife_penalty: 0.25
+      overextension_52w_threshold: 0.97
+      overextension_penalty: 0.2
+      high_vol_annual_threshold: 0.5
+      high_vol_penalty: 0.15
+    clamp_low: -1.0
+    clamp_high: 1.5
+    winsorize_pct: 0.05
+  momentum_warmup:
+    position_bin_boundaries:
+    - 0.15
+    - 0.35
+    - 0.75
+    - 0.95
+    position_bin_scores:
+    - -0.35
+    - -0.1
+    - 0.55
+    - 0.85
+    - 0.45
+    return_1m_low_position_cutoff: 0.4
+    return_1m_recovery_threshold: 0.05
+    return_1m_falling_knife_threshold: -0.1
+    return_1m_recovery_bonus: 0.15
+    return_1m_falling_knife_penalty: 0.2
+  quality_checklist:
+    income_score_cap: 1.5
+    yield_trap_threshold: 0.1
+    distress_pe_max: 5.0
+    quality_volume_high: 1000000
+    quality_volume_low: 100000
+    quality_dividend_min: 0.02
+    quality_dividend_max: 0.06
+    quality_weight_has_positive_pe: 0.5
+    quality_weight_distress_pe: -0.4
+    quality_weight_has_positive_pb: 0.2
+    quality_weight_high_volume: 0.3
+    quality_weight_low_volume: -0.3
+    quality_weight_yield_trap: -0.6
+    quality_weight_healthy_dividend: 0.2
 analyst_ratings:
   strong_buy_ratio: 5.0
   net_sell_ratio: 1.0
@@ -244,13 +305,13 @@ tuning:
   - sell_rules.take_profit_pct
   - sell_rules.sell_weak_value_below
   - sell_rules.trailing_stop_pct
-  - scoring.value_pe_weight
-  - momentum_v2.weights.rs_3m
-  - momentum_v2.weights.rs_6m
-  - momentum_v2.weights.risk_adj_3m
-  - momentum_v2.weights.trend_structure
-  - momentum_v2.weights.return_1m
-  - momentum_v2.weights.return_5d
+  - scoring.factors.value.pe_weight
+  - scoring.momentum_inputs.weights.rs_3m
+  - scoring.momentum_inputs.weights.rs_6m
+  - scoring.momentum_inputs.weights.risk_adj_3m
+  - scoring.momentum_inputs.weights.trend_structure
+  - scoring.momentum_inputs.weights.return_1m
+  - scoring.momentum_inputs.weights.return_5d
   parameter_bounds:
     score_weights.value:
       min: 0.03
@@ -288,24 +349,10 @@ stability:
   scan_maxiter: 15
   scan_popsize: 6
 candidate_rotation:
-  buy_cooldown_days: 30
-  score_jitter_pct: 0.08
-  allow_add_to_existing_if_score_above: 0.80
+  buy_cooldown_days: 21
+  score_jitter_pct: 0.05
+  allow_add_to_existing_if_score_above: 0.82
   cooldown_exempt_if_active_underweight: true
-value_v2:
-  enabled: true
-  winsorize_pct: 0.05
-  sector_relative: true
-  min_sector_size: 5
-  clamp_low: -1.0
-  clamp_high: 1.5
-  distress:
-    pe_threshold: 5.0
-    pe_penalty: 0.3
-    negative_eps_penalty: 0.25
-  composite:
-    pe_weight: 0.7
-    pb_weight: 0.3
 snapshots:
   enabled: true
   subdir: snapshots
@@ -348,17 +395,13 @@ exit_decision:
   positive_pnl_review_floor: 0.0
   positive_momentum_review_floor: 0.1
   strong_quality_review_floor: 0.7
-  trim_profit_threshold: 0.20
-  harvest_profit_threshold: 0.30
+  trim_profit_threshold: 0.2
+  harvest_profit_threshold: 0.3
   thesis_intact_review_floor: 0.6
   thesis_intact_hard_exit_below: 0.35
-  # --- True TRIM (partial exit) ---
   trim_enabled: true
   trim_fraction: 0.33
   trim_min_gain_pct: 0.08
-  # trim_score_below is the explicit absolute threshold for the trim zone.
-  # Trim fires when: sell_weak_value_below <= score < trim_score_below (and profitable).
-  # Must satisfy: sell_weak_value_below < trim_score_below <= metric_threshold.
   trim_score_below: 0.74
   trim_requires_positive_momentum: true
   trim_to_etfs_pct: 0.85
@@ -371,19 +414,19 @@ outcome_tracking:
   fill_returns_on_run: true
 candidate_selection:
   mode: percentile
-  top_percentile: 0.10
-  max_candidates: 15
-  min_candidates: 5
+  top_percentile: 0.07
+  max_candidates: 10
+  min_candidates: 4
   use_absolute_score_floor: false
   absolute_score_floor: 0.45
-  min_quality_score: 0.3
-  min_momentum_score: -0.1
-  min_conditional_momentum_score: -0.05
-  allow_income_defensive_exception: true
+  min_quality_score: 0.38
+  min_momentum_score: 0.0
+  min_conditional_momentum_score: 0.0
+  allow_income_defensive_exception: false
   fallback_thresholds:
-    - 0.75
-    - 0.72
-    - 0.70
+  - 0.75
+  - 0.72
+  - 0.7
   min_post_cooldown_candidates: 5
 ui:
   allow_config_writes: true

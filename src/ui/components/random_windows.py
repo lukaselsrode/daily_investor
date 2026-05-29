@@ -228,7 +228,6 @@ def _summary_cards(summary) -> None:
 
 def _horizon_heatmap(scan_result) -> None:
     """Colored table: rows = horizon lengths, cols = key metrics."""
-    import pandas as pd
     df = scan_result.horizon_heatmap_df()
     if df.empty:
         return

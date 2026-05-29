@@ -50,7 +50,7 @@ def _load_cfg(filename: str) -> dict | None:
 def _params_from_cfg(cfg: dict) -> np.ndarray:
     """Build the 15-element params vector from a config dict. Mirrors tuner._current_params()."""
     sw   = cfg.get("score_weights", {})
-    mv2w = cfg.get("momentum_v2", {}).get("weights", {})
+    mv2w = cfg.get("scoring", {}).get("momentum_inputs", {}).get("weights", {})
     sr   = cfg.get("sell_rules", {})
     sc   = cfg.get("scoring", {})
     return np.array([

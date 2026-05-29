@@ -14,6 +14,9 @@ from backtesting.types import SimResult
 from util import CONFIG_FILE, RISK_LIMITS
 
 from .constants import (
+    _ARCH_FIELDS,
+    _ARCH_KEYS,
+    _ARCH_SLOT_OFFSET,
     PARAM_NAMES,
     _current_params,
 )
@@ -23,7 +26,7 @@ logger = logging.getLogger(__name__)
 _LLM_ALLOWED_PARAMS = frozenset([
     "score_weights", "metric_threshold", "index_pct",
     "take_profit_pct", "trailing_stop_pct", "sell_weak_value_below",
-    "value_pe_weight", "momentum_v2_weights",
+    "value_pe_weight", "scoring_momentum_inputs_weights",
 ])
 _LLM_FORBIDDEN_PARAMS = frozenset([
     "max_single_position_pct", "max_sector_pct", "max_order_pct_of_cash",
@@ -56,17 +59,18 @@ def apply_config_params(params: np.ndarray) -> None:
     cfg["sell_rules"]["sell_weak_value_below"] = round(float(params[7]), 4)
     cfg["sell_rules"]["trailing_stop_pct"]     = round(float(params[8]), 4)
 
-    cfg.setdefault("scoring", {})
-    cfg["scoring"]["value_pe_weight"] = round(float(params[9]), 4)
-    cfg["scoring"]["value_pb_weight"] = round(float(1.0 - params[9]), 4)
+    sc = cfg.setdefault("scoring", {})
+    factors = sc.setdefault("factors", {}).setdefault("value", {})
+    factors["pe_weight"] = round(float(params[9]), 4)
+    factors["pb_weight"] = round(float(1.0 - params[9]), 4)
 
-    v2_raw = np.abs(params[10:15])
-    v2_total = max(float(v2_raw.sum()), 1e-9)
-    v2_norm = v2_raw / v2_total
-    v2_keys = ["rs_3m", "rs_6m", "risk_adj_3m", "trend_structure", "return_1m"]
-    cfg.setdefault("momentum_v2", {}).setdefault("weights", {})
-    for k, v in zip(v2_keys, v2_norm):
-        cfg["momentum_v2"]["weights"][k] = round(float(v), 4)
+    mom_raw = np.abs(params[10:16])
+    mom_total = max(float(mom_raw.sum()), 1e-9)
+    mom_norm = mom_raw / mom_total
+    mom_keys = ["rs_3m", "rs_6m", "risk_adj_3m", "trend_structure", "return_1m", "return_5d"]
+    mi_w = sc.setdefault("momentum_inputs", {}).setdefault("weights", {})
+    for k, v in zip(mom_keys, mom_norm):
+        mi_w[k] = round(float(v), 4)
 
     with open(CONFIG_FILE, "w") as f:
         yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
@@ -87,10 +91,10 @@ def _diff_table(
     norm_sw = raw_sw / max(raw_sw.sum(), 1e-9)
     cur_sw_norm = cur[:4] / max(cur[:4].sum(), 1e-9)
 
-    cur_v2_raw = np.abs(cur[10:15])
-    cur_v2_norm = cur_v2_raw / max(cur_v2_raw.sum(), 1e-9)
-    v2_raw = np.abs(best_params[10:15])
-    v2_norm = v2_raw / max(v2_raw.sum(), 1e-9)
+    cur_mom_raw = np.abs(cur[10:16])
+    cur_mom_norm = cur_mom_raw / max(cur_mom_raw.sum(), 1e-9)
+    mom_raw = np.abs(best_params[10:16])
+    mom_norm = mom_raw / max(mom_raw.sum(), 1e-9)
 
     header = f"AVERAGED CONFIG ({label})" if label else "SUGGESTED CONFIG"
     print(f"\n{'=' * 64}")
@@ -109,7 +113,7 @@ def _diff_table(
         )
     print()
 
-    v2_keys = ["rs_3m", "rs_6m", "risk_adj_3m", "trend_structure", "return_1m"]
+    mom_keys = ["rs_3m", "rs_6m", "risk_adj_3m", "trend_structure", "return_1m"]
     rows = [
         ("score_weights.value",              cur_sw_norm[0],  norm_sw[0]),
         ("score_weights.quality",            cur_sw_norm[1],  norm_sw[1]),
@@ -121,12 +125,41 @@ def _diff_table(
         ("sell_rules.sell_weak",             cur[7],           best_params[7]),
         ("sell_rules.trailing_stop",         cur[8],           best_params[8]),
         ("scoring.value_pe_weight",          cur[9],           best_params[9]),
-        ("momentum_v2.weights.rs_3m",        cur_v2_norm[0],   v2_norm[0]),
-        ("momentum_v2.weights.rs_6m",        cur_v2_norm[1],   v2_norm[1]),
-        ("momentum_v2.weights.risk_adj_3m",  cur_v2_norm[2],   v2_norm[2]),
-        ("momentum_v2.weights.trend",        cur_v2_norm[3],   v2_norm[3]),
-        ("momentum_v2.weights.return_1m",    cur_v2_norm[4],   v2_norm[4]),
+        ("scoring.momentum_inputs.weights.rs_3m",        cur_mom_norm[0],   mom_norm[0]),
+        ("scoring.momentum_inputs.weights.rs_6m",        cur_mom_norm[1],   mom_norm[1]),
+        ("scoring.momentum_inputs.weights.risk_adj_3m",  cur_mom_norm[2],   mom_norm[2]),
+        ("scoring.momentum_inputs.weights.trend",        cur_mom_norm[3],   mom_norm[3]),
+        ("scoring.momentum_inputs.weights.return_1m",    cur_mom_norm[4],   mom_norm[4]),
     ]
+
+    # Append archetype lifecycle rows when the params vector includes them.
+    if len(best_params) > _ARCH_SLOT_OFFSET and len(cur) > _ARCH_SLOT_OFFSET:
+        for _ai, _alabel in enumerate(_ARCH_KEYS):
+            for _fi, (_field, _, _) in enumerate(_ARCH_FIELDS):
+                _idx = _ARCH_SLOT_OFFSET + _ai * len(_ARCH_FIELDS) + _fi
+                if _idx >= len(best_params):
+                    continue
+                rows.append((
+                    f"archetype_management.{_alabel}.{_field}",
+                    float(cur[_idx]),
+                    float(best_params[_idx]),
+                ))
+
+    # Append candidate-filter rows when the params vector includes them (slots 40-42).
+    try:
+        from .constants import _CS_FILTER_FIELDS, _CS_FILTER_SLOT_OFFSET
+        if len(best_params) > _CS_FILTER_SLOT_OFFSET and len(cur) > _CS_FILTER_SLOT_OFFSET:
+            for _i, (_, _cs_field, _) in enumerate(_CS_FILTER_FIELDS):
+                _idx = _CS_FILTER_SLOT_OFFSET + _i
+                if _idx >= len(best_params):
+                    continue
+                rows.append((
+                    f"candidate_selection.{_cs_field}",
+                    float(cur[_idx]),
+                    float(best_params[_idx]),
+                ))
+    except ImportError:
+        pass
 
     print("CHANGES  (> 1% relative)")
     print("-" * 64)
@@ -162,10 +195,28 @@ def _diff_table(
     print("scoring:")
     print(f"  value_pe_weight: {best_params[9]:.4f}")
     print(f"  value_pb_weight: {1.0 - best_params[9]:.4f}")
-    print("momentum_v2:")
+    print("scoring.momentum_inputs:")
     print("  weights:")
-    for k, v in zip(v2_keys, v2_norm):
+    for k, v in zip(mom_keys, mom_norm):
         print(f"    {k}: {v:.4f}")
+
+    if len(best_params) > _ARCH_SLOT_OFFSET:
+        print("archetype_management:")
+        for _ai, _alabel in enumerate(_ARCH_KEYS):
+            entry_lines = []
+            for _fi, (_field, _, _) in enumerate(_ARCH_FIELDS):
+                _idx = _ARCH_SLOT_OFFSET + _ai * len(_ARCH_FIELDS) + _fi
+                if _idx >= len(best_params):
+                    continue
+                _v = float(best_params[_idx])
+                if _field == "minimum_hold_days":
+                    entry_lines.append(f"    {_field}: {round(_v)}")
+                else:
+                    entry_lines.append(f"    {_field}: {_v:.4f}")
+            if entry_lines:
+                print(f"  {_alabel}:")
+                for line in entry_lines:
+                    print(line)
     print("=" * 64)
 
 
@@ -351,10 +402,10 @@ def merge_llm_recommendation_with_config(
             cfg.setdefault("score_weights", {}).update(
                 {k: round(float(v), 4) for k, v in value.items()}
             )
-        elif key == "momentum_v2_weights" and isinstance(value, dict):
-            cfg.setdefault("momentum_v2", {}).setdefault("weights", {}).update(
-                {k: round(float(v), 4) for k, v in value.items()}
-            )
+        elif key == "scoring_momentum_inputs_weights" and isinstance(value, dict):
+            cfg.setdefault("scoring", {}).setdefault("momentum_inputs", {}).setdefault(
+                "weights", {}
+            ).update({k: round(float(v), 4) for k, v in value.items()})
         elif key == "value_pe_weight":
             cfg.setdefault("scoring", {})["value_pe_weight"] = round(float(value), 4)
             cfg["scoring"]["value_pb_weight"] = round(1.0 - float(value), 4)

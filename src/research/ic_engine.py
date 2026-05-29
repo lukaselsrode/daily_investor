@@ -1,5 +1,5 @@
 """
-strategy/research/ic_engine.py — FactorResearchEngine: multi-horizon IC analytics.
+research/ic_engine.py — FactorResearchEngine: multi-horizon IC analytics.
 
 Extends the single-horizon compute_forward_ic() in strategy/snapshots.py with:
   - Multi-horizon IC (5, 20, 60, 120, 252 days)

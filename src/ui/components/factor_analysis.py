@@ -442,8 +442,9 @@ Orthogonalize live scoring when:
 - Candidate list stability < 80%
 
 Currently the live scorer uses raw (non-residualized) scores. If the diagnostics above
-flag high overlap, the next step is adding an `orthogonalize_value: true` flag to `value_v2`
-config that applies OLS residualization before final value_metric computation.
+flag high overlap, the next step is adding an `orthogonalize_value: true` flag to
+`scoring.factors.value` config that applies OLS residualization before final
+value_metric computation.
 
 ---
 

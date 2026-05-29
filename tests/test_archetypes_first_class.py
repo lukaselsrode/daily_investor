@@ -23,7 +23,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import numpy as np
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # 1. Config validation
 # ---------------------------------------------------------------------------
@@ -167,10 +166,10 @@ class TestArchetypePresets:
 
 class TestParamVector:
 
-    def test_vector_length_is_39(self):
+    def test_vector_length_is_43(self):
         from tuning.constants import BOUNDS, PARAM_NAMES
-        assert len(PARAM_NAMES) == 39
-        assert len(BOUNDS) == 39
+        assert len(PARAM_NAMES) == 43
+        assert len(BOUNDS) == 43
 
     def test_archetype_slots_frozen_by_default(self):
         # No preset → archetype slots stay frozen even if config doesn't list them.
@@ -223,10 +222,10 @@ class TestSellEngineDecisionSource:
         assert d.decision_source == "global_rule"
 
     def test_trailing_stop_marks_archetype_when_policy_set(self):
-        from portfolio.position_archetypes import get_archetype_policy
-        from portfolio.sell_engine import SellDecisionEngine
         # Need archetype management enabled for the policy to take effect
         import util
+        from portfolio.position_archetypes import get_archetype_policy
+        from portfolio.sell_engine import SellDecisionEngine
         old = util.ARCHETYPE_PARAMS
         util.ARCHETYPE_PARAMS = {"enabled": True}
         try:

@@ -2,13 +2,14 @@
 ui/components/config_variants.py — In-UI config editor, save-as-variant, and visual comparison.
 
 Edit all simulated parameters directly in the browser, save as a named config variant
-(cfg/config_<name>.yaml), then compare any set of variants with overlaid equity curves
-and a metrics bar chart.
+(written to the ephemeral, gitignored VARIANTS_DIR — not tracked cfg/), then compare any
+set of variants with overlaid equity curves and a metrics bar chart. Comparison also
+discovers the code-referenced anchors that live in cfg/ (config_*.yaml).
 
 Production config.yaml is never written from this component — only variant files.
 
 Fully isolated per variant (passed explicitly to run_simulation):
-  - score_weights, momentum_v2, index_pct, metric_threshold
+  - score_weights, scoring.momentum_inputs, index_pct, metric_threshold
   - sell_rules (take_profit, trailing_stop, sell_weak), value_pe_weight
   - candidate_selection params
 
@@ -19,6 +20,7 @@ Use current config for all variants (read from globals at call time):
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import numpy as np
@@ -27,6 +29,13 @@ import yaml
 
 ROOT    = Path(__file__).resolve().parents[3]
 CFG_DIR = ROOT / "cfg"
+
+# User-saved variants are transient — keep them OUT of the tracked cfg/ directory
+# so they don't accumulate as tracked files. Env-overridable; defaults to a
+# gitignored dir under the repo.
+VARIANTS_DIR = Path(
+    os.environ.get("DAILY_INVESTOR_VARIANTS_DIR", str(ROOT / ".variants"))
+)
 
 from ui.utils import BACKTEST_MODES
 
@@ -43,20 +52,31 @@ def _load_cfg(path: Path) -> dict:
 
 
 def _list_variants() -> list[tuple[str, Path]]:
-    """Return (display_name, path) for config.yaml and all config_*.yaml files."""
+    """Return (display_name, path) for config.yaml, the cfg/ anchors, and any
+    user-saved variants in the ephemeral VARIANTS_DIR.
+
+    Ephemeral user variants take precedence over a same-named cfg/ file.
+    """
     result = []
     base = CFG_DIR / "config.yaml"
     if base.exists():
         result.append(("Current (config.yaml)", base))
-    for p in sorted(CFG_DIR.glob("config_*.yaml")):
-        name = p.stem.removeprefix("config_")
-        result.append((name, p))
+    seen: set[str] = set()
+    for d in (VARIANTS_DIR, CFG_DIR):
+        if not d.exists():
+            continue
+        for p in sorted(d.glob("config_*.yaml")):
+            name = p.stem.removeprefix("config_")
+            if name in seen:
+                continue
+            seen.add(name)
+            result.append((name, p))
     return result
 
 
 def _params_from_cfg(cfg: dict) -> np.ndarray:
     sw   = cfg.get("score_weights", {})
-    mv2w = cfg.get("momentum_v2", {}).get("weights", {})
+    mv2w = cfg.get("scoring", {}).get("momentum_inputs", {}).get("weights", {})
     sr   = cfg.get("sell_rules", {})
     sc   = cfg.get("scoring", {})
     return np.array([
@@ -109,7 +129,8 @@ def _save_variant(cfg: dict, name: str) -> Path:
     name = name.strip().lower().replace(" ", "_")
     if not name:
         raise ValueError("Variant name cannot be empty.")
-    path = CFG_DIR / f"config_{name}.yaml"
+    VARIANTS_DIR.mkdir(parents=True, exist_ok=True)
+    path = VARIANTS_DIR / f"config_{name}.yaml"
     with open(path, "w") as f:
         yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
     return path
@@ -195,7 +216,7 @@ def _param_editor(cfg: dict, key_prefix: str = "cv") -> dict:
         sc["value_pb_weight"] = round(1.0 - sc["value_pe_weight"], 4)
 
     with st.expander("🚀 Momentum v2 Sub-Weights"):
-        mv2 = out.setdefault("momentum_v2", {}).setdefault("weights", {})
+        mv2 = out.setdefault("scoring", {}).setdefault("momentum_inputs", {}).setdefault("weights", {})
         c1, c2, c3, c4, c5 = st.columns(5)
         mv2["rs_3m"]           = c1.slider("RS 3m",       0.0, 1.0, float(mv2.get("rs_3m",           0.25)), 0.01, key=f"{key_prefix}_m_rs3m")
         mv2["rs_6m"]           = c2.slider("RS 6m",       0.0, 1.0, float(mv2.get("rs_6m",           0.25)), 0.01, key=f"{key_prefix}_m_rs6m")
@@ -434,13 +455,11 @@ def render_config_variants() -> None:
         if variant_files and st.button("🗑️ Delete variant", key="cv_del_btn", use_container_width=True):
             st.session_state["cv_show_delete"] = True
     if st.session_state.get("cv_show_delete"):
-        del_names = [n for n, p in _list_variants() if p.stem.startswith("config_")]
-        to_del = st.selectbox("Select variant to delete", del_names, key="cv_del_sel")
+        del_map = {n: p for n, p in _list_variants() if p.stem.startswith("config_")}
+        to_del = st.selectbox("Select variant to delete", list(del_map), key="cv_del_sel")
         if st.button("Confirm delete", key="cv_del_confirm"):
             try:
-                path = CFG_DIR / f"config_{to_del}.yaml"
-                if to_del == "yaml":
-                    path = CFG_DIR / "config.yaml"
+                path = del_map[to_del]
                 path.unlink(missing_ok=True)
                 st.success(f"Deleted {path.name}")
                 st.session_state.pop("cv_show_delete", None)

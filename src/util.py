@@ -137,29 +137,168 @@ CANDIDATE_ROTATION_PARAMS: dict = {
 }
 
 # ---------------------------------------------------------------------------
-# Value scoring v2 — sector-relative robust normalization
+# Unified scoring engine parameters (consolidated from old `scoring`, `momentum`,
+# `momentum_v2`, `value_v2`, `scoring_v3` blocks). Hard-cutover: legacy top-level
+# keys are rejected with a clear error pointing at the migrate-scoring CLI.
 # ---------------------------------------------------------------------------
 
-_vv2   = _app.get("value_v2", {})
-_vv2_d = _vv2.get("distress", {})
-_vv2_c = _vv2.get("composite", {})
-VALUE_V2_PARAMS: dict = {
-    "enabled":          bool(_vv2.get("enabled",         True)),
-    "winsorize_pct":    float(_vv2.get("winsorize_pct",  0.05)),
-    "sector_relative":  bool(_vv2.get("sector_relative", True)),
-    "min_sector_size":  int(_vv2.get("min_sector_size",  5)),
-    "clamp_low":        float(_vv2.get("clamp_low",      -1.0)),
-    "clamp_high":       float(_vv2.get("clamp_high",      1.5)),
-    "distress": {
-        "pe_threshold":          float(_vv2_d.get("pe_threshold",          5.0)),
-        "pe_penalty":            float(_vv2_d.get("pe_penalty",            0.30)),
-        "negative_eps_penalty":  float(_vv2_d.get("negative_eps_penalty",  0.25)),
+class ConfigError(ValueError):
+    """Raised when the YAML config uses a legacy/unmigrated shape."""
+
+
+_LEGACY_TOP_LEVEL_KEYS = ("scoring_v3", "momentum_v2", "value_v2")
+
+
+def _check_legacy_scoring_shape(app: dict) -> None:
+    """Raise if any pre-consolidation scoring block exists at the top level."""
+    legacy_present = [k for k in _LEGACY_TOP_LEVEL_KEYS if k in app]
+    sc = app.get("scoring", {})
+    sc_is_legacy = (
+        isinstance(sc, dict)
+        and "peer_standardization" not in sc
+        and "factors" not in sc
+        and "quality_checklist" not in sc
+    )
+    # Old flat scoring: had value_pe_weight / quality_volume_high at the top level
+    if isinstance(sc, dict) and (
+        "value_pe_weight" in sc or "quality_volume_high" in sc
+    ):
+        legacy_present.append("scoring (flat)")
+    # Old flat momentum: position_bin_boundaries at top level (not under scoring.momentum_warmup)
+    mo = app.get("momentum", {})
+    if isinstance(mo, dict) and ("position_bin_boundaries" in mo or "position_bin_scores" in mo):
+        legacy_present.append("momentum")
+    if legacy_present and sc_is_legacy:
+        raise ConfigError(
+            "Config uses the pre-consolidation scoring shape. Found legacy keys: "
+            f"{', '.join(sorted(set(legacy_present)))}. "
+            "Run: `daily-investor config migrate-scoring --in-place` to convert to the unified "
+            "`scoring:` block."
+        )
+
+
+_check_legacy_scoring_shape(_app)
+
+
+def _normalize_blend(blend: dict) -> dict[str, float]:
+    """Normalize blend weights to sum to 1.0; emit a warning if user values diverge."""
+    ind = float(blend.get("industry_relative", 0.60))
+    sec = float(blend.get("sector_relative",   0.25))
+    mkt = float(blend.get("market_relative",   0.15))
+    total = ind + sec + mkt
+    if total <= 0:
+        logger.warning("peer_standardization.blend weights non-positive — falling back to defaults")
+        return {"industry_relative": 0.60, "sector_relative": 0.25, "market_relative": 0.15}
+    if abs(total - 1.0) > 0.01:
+        logger.warning(
+            f"peer_standardization.blend weights sum to {total:.3f} (not 1.0) — using as-given"
+        )
+    return {"industry_relative": ind, "sector_relative": sec, "market_relative": mkt}
+
+
+_sc = _app.get("scoring", {})
+_sc_ps = _sc.get("peer_standardization", {})
+_sc_fc = _sc.get("factors", {})
+_sc_mi = _sc.get("momentum_inputs", {})
+_sc_mi_w = _sc_mi.get("weights", {})
+_sc_mi_p = _sc_mi.get("penalties", {})
+_sc_mw = _sc.get("momentum_warmup", {})
+_sc_qc = _sc.get("quality_checklist", {})
+
+
+def _factor(name: str, defaults: dict) -> dict:
+    raw = _sc_fc.get(name, {})
+    out = {
+        "enabled":                       bool(raw.get("enabled",       defaults.get("enabled", True))),
+        "peer_relative":                 bool(raw.get("peer_relative", defaults.get("peer_relative", True))),
+        "pe_weight":                     float(raw.get("pe_weight",    defaults.get("pe_weight", 0.70))),
+        "pb_weight":                     float(raw.get("pb_weight",    defaults.get("pb_weight", 0.30))),
+        "use_legacy_checklist_fallback": bool(raw.get("use_legacy_checklist_fallback",
+                                                     defaults.get("use_legacy_checklist_fallback", True))),
+        "safety_aware":                  bool(raw.get("safety_aware",  defaults.get("safety_aware", True))),
+        # anchor_blend: weight on the cross-sectional anchor (vs pure peer-relative).
+        # Accept legacy `v2_blend` key for one transition cycle so hand-edited configs don't break.
+        "anchor_blend":                  float(raw.get("anchor_blend",
+                                                       raw.get("v2_blend",
+                                                               defaults.get("anchor_blend", 0.0)))),
+    }
+    if "distress" in raw or name == "value":
+        d = raw.get("distress", {})
+        out["distress"] = {
+            "pe_threshold":         float(d.get("pe_threshold",         5.0)),
+            "pe_penalty":           float(d.get("pe_penalty",           0.30)),
+            "negative_eps_penalty": float(d.get("negative_eps_penalty", 0.25)),
+        }
+    return out
+
+
+SCORING_PARAMS: dict = {
+    "enabled": bool(_sc.get("enabled", True)),
+    "peer_standardization": {
+        "group_by":          str(_sc_ps.get("group_by",          "industry")),
+        "fallback_group_by": str(_sc_ps.get("fallback_group_by", "sector")),
+        "min_group_size":    int(_sc_ps.get("min_group_size",    8)),
+        "method":            str(_sc_ps.get("method",            "percentile")),
+        "winsorize_pct":     float(_sc_ps.get("winsorize_pct",   0.05)),
+        "clamp_low":         float(_sc_ps.get("clamp_low",      -1.0)),
+        "clamp_high":        float(_sc_ps.get("clamp_high",      1.5)),
+        "blend":             _normalize_blend(_sc_ps.get("blend", {})),
     },
-    "composite": {
-        "pe_weight": float(_vv2_c.get("pe_weight", 0.60)),
-        "pb_weight": float(_vv2_c.get("pb_weight", 0.40)),
+    "factors": {
+        "value":             _factor("value",             {"pe_weight": 0.70, "pb_weight": 0.30}),
+        "quality":           _factor("quality",           {"use_legacy_checklist_fallback": True}),
+        "momentum":          _factor("momentum",          {"enabled": False}),
+        "income":            _factor("income",            {"safety_aware": True}),
+        "growth_leadership": _factor("growth_leadership", {"enabled": False}),
+    },
+    "momentum_inputs": {
+        "weights": {
+            "rs_3m":           float(_sc_mi_w.get("rs_3m",           0.25)),
+            "rs_6m":           float(_sc_mi_w.get("rs_6m",           0.25)),
+            "risk_adj_3m":     float(_sc_mi_w.get("risk_adj_3m",     0.20)),
+            "trend_structure": float(_sc_mi_w.get("trend_structure", 0.15)),
+            "return_1m":       float(_sc_mi_w.get("return_1m",       0.10)),
+            "return_5d":       float(_sc_mi_w.get("return_5d",       0.05)),
+        },
+        "penalties": {
+            "falling_knife_3m_threshold":  float(_sc_mi_p.get("falling_knife_3m_threshold",  -0.15)),
+            "falling_knife_penalty":       float(_sc_mi_p.get("falling_knife_penalty",        0.25)),
+            "overextension_52w_threshold": float(_sc_mi_p.get("overextension_52w_threshold",  0.97)),
+            "overextension_penalty":       float(_sc_mi_p.get("overextension_penalty",        0.20)),
+            "high_vol_annual_threshold":   float(_sc_mi_p.get("high_vol_annual_threshold",    0.50)),
+            "high_vol_penalty":            float(_sc_mi_p.get("high_vol_penalty",             0.15)),
+        },
+        "clamp_low":     float(_sc_mi.get("clamp_low",     -1.0)),
+        "clamp_high":    float(_sc_mi.get("clamp_high",     1.5)),
+        "winsorize_pct": float(_sc_mi.get("winsorize_pct",  0.05)),
+    },
+    "momentum_warmup": {
+        "position_bin_boundaries":           list(_sc_mw.get("position_bin_boundaries",           [0.15, 0.35, 0.75, 0.95])),
+        "position_bin_scores":               list(_sc_mw.get("position_bin_scores",               [-0.4, 0.1, 0.3, 0.5, 0.2])),
+        "return_1m_low_position_cutoff":     float(_sc_mw.get("return_1m_low_position_cutoff",      0.40)),
+        "return_1m_recovery_threshold":      float(_sc_mw.get("return_1m_recovery_threshold",        0.05)),
+        "return_1m_falling_knife_threshold": float(_sc_mw.get("return_1m_falling_knife_threshold",  -0.10)),
+        "return_1m_recovery_bonus":          float(_sc_mw.get("return_1m_recovery_bonus",           0.15)),
+        "return_1m_falling_knife_penalty":   float(_sc_mw.get("return_1m_falling_knife_penalty",    0.20)),
+    },
+    "quality_checklist": {
+        "income_score_cap":               float(_sc_qc.get("income_score_cap",               1.5)),
+        "yield_trap_threshold":           float(_sc_qc.get("yield_trap_threshold",           0.10)),
+        "distress_pe_max":                float(_sc_qc.get("distress_pe_max",                5.0)),
+        "quality_volume_high":            float(_sc_qc.get("quality_volume_high",            1_000_000)),
+        "quality_volume_low":             float(_sc_qc.get("quality_volume_low",             100_000)),
+        "quality_dividend_min":           float(_sc_qc.get("quality_dividend_min",           0.02)),
+        "quality_dividend_max":           float(_sc_qc.get("quality_dividend_max",           0.06)),
+        "quality_weight_has_positive_pe": float(_sc_qc.get("quality_weight_has_positive_pe", 0.5)),
+        "quality_weight_distress_pe":     float(_sc_qc.get("quality_weight_distress_pe",     -0.4)),
+        "quality_weight_has_positive_pb": float(_sc_qc.get("quality_weight_has_positive_pb", 0.2)),
+        "quality_weight_high_volume":     float(_sc_qc.get("quality_weight_high_volume",     0.3)),
+        "quality_weight_low_volume":      float(_sc_qc.get("quality_weight_low_volume",      -0.3)),
+        "quality_weight_yield_trap":      float(_sc_qc.get("quality_weight_yield_trap",      -0.6)),
+        "quality_weight_healthy_dividend":float(_sc_qc.get("quality_weight_healthy_dividend", 0.2)),
     },
 }
+
 
 # ---------------------------------------------------------------------------
 # Historical snapshot store parameters
@@ -268,45 +407,6 @@ SELL_RULES: dict = {
 # Bear market regime
 # ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# Scoring parameters
-# ---------------------------------------------------------------------------
-
-_sc = _app.get("scoring", {})
-SCORING_PARAMS: dict = {
-    "value_pe_weight":                float(_sc.get("value_pe_weight",                0.6)),
-    "value_pb_weight":                float(_sc.get("value_pb_weight",                0.4)),
-    "income_score_cap":               float(_sc.get("income_score_cap",               1.5)),
-    "yield_trap_threshold":           float(_sc.get("yield_trap_threshold",           0.10)),
-    "distress_pe_max":                float(_sc.get("distress_pe_max",                5.0)),
-    "quality_volume_high":            float(_sc.get("quality_volume_high",            1_000_000)),
-    "quality_volume_low":             float(_sc.get("quality_volume_low",             100_000)),
-    "quality_dividend_min":           float(_sc.get("quality_dividend_min",           0.02)),
-    "quality_dividend_max":           float(_sc.get("quality_dividend_max",           0.06)),
-    "quality_weight_has_positive_pe": float(_sc.get("quality_weight_has_positive_pe", 0.5)),
-    "quality_weight_distress_pe":     float(_sc.get("quality_weight_distress_pe",     -0.4)),
-    "quality_weight_has_positive_pb": float(_sc.get("quality_weight_has_positive_pb", 0.2)),
-    "quality_weight_high_volume":     float(_sc.get("quality_weight_high_volume",     0.3)),
-    "quality_weight_low_volume":      float(_sc.get("quality_weight_low_volume",      -0.3)),
-    "quality_weight_yield_trap":      float(_sc.get("quality_weight_yield_trap",      -0.6)),
-    "quality_weight_healthy_dividend":float(_sc.get("quality_weight_healthy_dividend", 0.2)),
-}
-
-# ---------------------------------------------------------------------------
-# Momentum parameters
-# ---------------------------------------------------------------------------
-
-_mo = _app.get("momentum", {})
-MOMENTUM_PARAMS: dict = {
-    "position_bin_boundaries":           _mo.get("position_bin_boundaries",           [0.15, 0.35, 0.75, 0.95]),
-    "position_bin_scores":               _mo.get("position_bin_scores",               [-0.4, 0.1, 0.3, 0.5, 0.2]),
-    "return_1m_low_position_cutoff":     float(_mo.get("return_1m_low_position_cutoff",      0.40)),
-    "return_1m_recovery_threshold":      float(_mo.get("return_1m_recovery_threshold",        0.05)),
-    "return_1m_falling_knife_threshold": float(_mo.get("return_1m_falling_knife_threshold",  -0.10)),
-    "return_1m_recovery_bonus":          float(_mo.get("return_1m_recovery_bonus",           0.15)),
-    "return_1m_falling_knife_penalty":   float(_mo.get("return_1m_falling_knife_penalty",    0.20)),
-}
-
 MAX_ITERATIONS: int = int(_app.get("max_iterations", 10))
 
 # ---------------------------------------------------------------------------
@@ -324,6 +424,8 @@ CONTRARIAN_PENALTY_PARAMS: dict = {
 }
 
 _cl = _app.get("concentration_limits", {})
+_cl_apply = _cl.get("apply_to", {}) or {}
+_cl_enf = _cl.get("enforcement", {}) or {}
 CONCENTRATION_LIMIT_PARAMS: dict = {
     "enabled":            bool(_cl.get("enabled", True)),
     "max_cluster_weight": float(_cl.get("max_cluster_weight", 0.35)),
@@ -331,35 +433,113 @@ CONCENTRATION_LIMIT_PARAMS: dict = {
     "cluster_method":     str(_cl.get("cluster_method", "pca")),
     "n_clusters":         int(_cl.get("n_clusters", 6)),
     "warn_only":          bool(_cl.get("warn_only", True)),
+    "apply_to": {
+        "active_sleeve": bool(_cl_apply.get("active_sleeve", True)),
+        "etf_sleeve":    bool(_cl_apply.get("etf_sleeve",    False)),
+    },
+    "enforcement": {
+        "block_new_buys":              bool(_cl_enf.get("block_new_buys",              True)),
+        "allow_existing_positions":    bool(_cl_enf.get("allow_existing_positions",    True)),
+        "allow_trim_only":             bool(_cl_enf.get("allow_trim_only",             True)),
+        "allow_sell":                  bool(_cl_enf.get("allow_sell",                  True)),
+        "allow_if_underweight":        bool(_cl_enf.get("allow_if_underweight",        True)),
+        "downsize_to_fit":             bool(_cl_enf.get("downsize_to_fit",             True)),
+        "min_remaining_alloc_multiple": float(_cl_enf.get("min_remaining_alloc_multiple", 1.0)),
+    },
 }
 
 # ---------------------------------------------------------------------------
-# Momentum v2 parameters
+# Archetype classifier v2 — config-driven thresholds, opt-in via `enabled`
 # ---------------------------------------------------------------------------
 
-_mv2 = _app.get("momentum_v2", {})
-_mv2_w = _mv2.get("weights", {})
-_mv2_p = _mv2.get("penalties", {})
-MOMENTUM_V2_PARAMS: dict = {
-    "weights": {
-        "rs_3m":          float(_mv2_w.get("rs_3m",          0.25)),
-        "rs_6m":          float(_mv2_w.get("rs_6m",          0.25)),
-        "risk_adj_3m":    float(_mv2_w.get("risk_adj_3m",    0.20)),
-        "trend_structure":float(_mv2_w.get("trend_structure", 0.15)),
-        "return_1m":      float(_mv2_w.get("return_1m",      0.10)),
-        "return_5d":      float(_mv2_w.get("return_5d",      0.05)),
+_ac = _app.get("archetype_classifier", {}) or {}
+_ac_cb = _ac.get("confidence_buckets", {}) or {}
+_ac_di = _ac.get("defensive_income", {}) or {}
+_ac_qc = _ac.get("quality_compounder", {}) or {}
+_ac_lt = _ac.get("legacy_turnaround", {}) or {}
+_ac_sm = _ac.get("speculative_momentum", {}) or {}
+_ac_vr = _ac.get("value_recovery", {}) or {}
+
+ARCHETYPE_CLASSIFIER_PARAMS: dict = {
+    "enabled": bool(_ac.get("enabled", False)),
+    "confidence_buckets": {
+        "high_min":   float(_ac_cb.get("high_min",   0.65)),
+        "medium_min": float(_ac_cb.get("medium_min", 0.45)),
     },
-    "penalties": {
-        "falling_knife_3m_threshold": float(_mv2_p.get("falling_knife_3m_threshold", -0.15)),
-        "falling_knife_penalty":      float(_mv2_p.get("falling_knife_penalty",       0.25)),
-        "overextension_52w_threshold":float(_mv2_p.get("overextension_52w_threshold", 0.97)),
-        "overextension_penalty":      float(_mv2_p.get("overextension_penalty",       0.20)),
-        "high_vol_annual_threshold":  float(_mv2_p.get("high_vol_annual_threshold",   0.50)),
-        "high_vol_penalty":           float(_mv2_p.get("high_vol_penalty",            0.15)),
+    "defensive_income": {
+        "require_yield":             bool(_ac_di.get("require_yield",             False)),
+        "min_income_score":          float(_ac_di.get("min_income_score",          0.30)),
+        "min_quality_score":         float(_ac_di.get("min_quality_score",         0.40)),
+        "min_momentum_score":        float(_ac_di.get("min_momentum_score",       -0.10)),
+        "max_volatility_percentile": float(_ac_di.get("max_volatility_percentile", 0.75)),
+        "reject_falling_knife":      bool(_ac_di.get("reject_falling_knife",      True)),
+        "yield_high":                float(_ac_di.get("yield_high",                0.80)),
+        "yield_moderate":            float(_ac_di.get("yield_moderate",            0.50)),
+        "yield_minimal":             float(_ac_di.get("yield_minimal",             0.05)),
+        "sector_defensive":          list(_ac_di.get("sector_defensive", [
+            "Utilities", "Real Estate", "Consumer Non-Durables",
+            "Consumer Staples", "Finance",
+        ])),
+        "industry_defensive":        list(_ac_di.get("industry_defensive", [
+            "Electric Utilities", "Gas Utilities", "Multi-Utilities",
+            "Water Utilities", "Real Estate Investment Trusts",
+            "Real Estate (Operations & Services)",
+        ])),
+        "quality_min_label":         float(_ac_di.get("quality_min_label",         0.25)),
+        "momentum_disqualify_above": float(_ac_di.get("momentum_disqualify_above", 0.50)),
     },
-    "clamp_low":     float(_mv2.get("clamp_low",     -1.0)),
-    "clamp_high":    float(_mv2.get("clamp_high",     1.5)),
-    "winsorize_pct": float(_mv2.get("winsorize_pct",  0.05)),
+    "quality_compounder": {
+        "market_cap_mega":      float(_ac_qc.get("market_cap_mega",      100_000_000_000)),
+        "market_cap_large":     float(_ac_qc.get("market_cap_large",      10_000_000_000)),
+        "market_cap_small":     float(_ac_qc.get("market_cap_small",         500_000_000)),
+        "maintenance_low":      float(_ac_qc.get("maintenance_low",      0.25)),
+        "maintenance_high":     float(_ac_qc.get("maintenance_high",     0.27)),
+        "maintenance_speculative": float(_ac_qc.get("maintenance_speculative", 1.0)),
+        "day_trade_normal_max": float(_ac_qc.get("day_trade_normal_max", 0.25)),
+        "analyst_buy_strong":   float(_ac_qc.get("analyst_buy_strong",   0.80)),
+        "analyst_buy_moderate": float(_ac_qc.get("analyst_buy_moderate", 0.65)),
+        "analyst_buy_weak":     float(_ac_qc.get("analyst_buy_weak",     0.40)),
+        "quality_high":         float(_ac_qc.get("quality_high",         0.60)),
+        "quality_moderate":     float(_ac_qc.get("quality_moderate",     0.35)),
+        "quality_low":          float(_ac_qc.get("quality_low",          0.10)),
+        "employees_scaled":     float(_ac_qc.get("employees_scaled",     50_000)),
+        "employees_small":      float(_ac_qc.get("employees_small",      2_000)),
+    },
+    "legacy_turnaround": {
+        "maintenance_speculative":  float(_ac_lt.get("maintenance_speculative",  1.0)),
+        "maintenance_elevated":     float(_ac_lt.get("maintenance_elevated",     0.40)),
+        "maintenance_above_standard": float(_ac_lt.get("maintenance_above_standard", 0.27)),
+        "day_trade_elevated":       float(_ac_lt.get("day_trade_elevated",       0.25)),
+        "market_cap_mid":           float(_ac_lt.get("market_cap_mid",           2_000_000_000)),
+        "market_cap_large":         float(_ac_lt.get("market_cap_large",         10_000_000_000)),
+        "market_cap_mega":          float(_ac_lt.get("market_cap_mega",          100_000_000_000)),
+        "analyst_buy_weak":         float(_ac_lt.get("analyst_buy_weak",         0.35)),
+        "analyst_buy_moderate":     float(_ac_lt.get("analyst_buy_moderate",     0.55)),
+        "analyst_buy_strong":       float(_ac_lt.get("analyst_buy_strong",       0.80)),
+        "momentum_strong":          float(_ac_lt.get("momentum_strong",          0.30)),
+    },
+    "speculative_momentum": {
+        "momentum_very_strong": float(_ac_sm.get("momentum_very_strong", 0.60)),
+        "momentum_strong":      float(_ac_sm.get("momentum_strong",      0.35)),
+        "quality_very_low":     float(_ac_sm.get("quality_very_low",     0.10)),
+        "quality_low":          float(_ac_sm.get("quality_low",          0.25)),
+        "quality_too_high":     float(_ac_sm.get("quality_too_high",     0.60)),
+        "maintenance_high":     float(_ac_sm.get("maintenance_high",     1.0)),
+        "maintenance_elevated": float(_ac_sm.get("maintenance_elevated", 0.40)),
+        "day_trade_high":       float(_ac_sm.get("day_trade_high",       0.40)),
+        "market_cap_small":     float(_ac_sm.get("market_cap_small",     500_000_000)),
+        "market_cap_mega":      float(_ac_sm.get("market_cap_mega",      100_000_000_000)),
+        "income_minimal":       float(_ac_sm.get("income_minimal",       0.05)),
+    },
+    "value_recovery": {
+        "value_undervalued":     float(_ac_vr.get("value_undervalued",     0.60)),
+        "value_moderate":        float(_ac_vr.get("value_moderate",        0.30)),
+        "momentum_improving_max":float(_ac_vr.get("momentum_improving_max",0.40)),
+        "momentum_falling_min":  float(_ac_vr.get("momentum_falling_min",  -0.20)),
+        "quality_min":           float(_ac_vr.get("quality_min",           0.15)),
+        "quality_max":           float(_ac_vr.get("quality_max",           0.55)),
+        "maintenance_distress":  float(_ac_vr.get("maintenance_distress",  1.0)),
+    },
 }
 
 # ---------------------------------------------------------------------------
@@ -504,11 +684,25 @@ METRIC_KEYS: list[str] = [
     "liquidity_reliability_score",
     "signal_stability_score",
     "reliability_score",
-    # value v2 diagnostic columns (populated by apply_cross_sectional_value_v2)
-    "value_score_raw",        # legacy ratio-based score before normalization
-    "sector_value_score",     # same as new value_score, kept for UI referencing
-    "relative_pe",            # sector-percentile rank of PE (-1=expensive, +1=cheap)
-    "relative_pb",            # sector-percentile rank of PB (-1=expensive, +1=cheap)
+    # Peer-relative scoring diagnostic columns (populated by strategy.scoring.composite.compute_metric)
+    "value_industry_rank",
+    "value_sector_rank",
+    "value_market_rank",
+    "value_fallback_reason",
+    "value_distress_flag",
+    "quality_industry_rank",
+    "quality_sector_rank",
+    "quality_market_rank",
+    "quality_fallback_reason",
+    "momentum_industry_rank",
+    "momentum_sector_rank",
+    "momentum_market_rank",
+    "momentum_fallback_reason",
+    "momentum_penalties_applied",
+    "income_industry_rank",
+    "income_sector_rank",
+    "income_fallback_reason",
+    "scoring_model_version",
 ]
 
 AGG_DATA_COLUMNS: list[str] = ["symbol"] + METRIC_KEYS

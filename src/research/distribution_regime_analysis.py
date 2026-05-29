@@ -1,9 +1,9 @@
 """
 research/distribution_regime_analysis.py — Distribution regime analysis engine.
 
-Tests whether the bimodal/binomial score distribution (observed after value_v2
-normalization) contains predictive information, and whether alpha concentrates in
-the tails rather than the full continuous ranking.
+Tests whether the bimodal/binomial value-score distribution under peer-relative
+normalization contains predictive information, and whether alpha concentrates
+in the tails rather than the full continuous ranking.
 
 Key questions:
   1. Is the distribution genuinely bimodal?

@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import datetime
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pandas as pd
 
@@ -72,9 +72,22 @@ class ConcentrationReport:
     n_clusters:          int
     unmatched_symbols:   list[str]   # owned symbols with no cluster assignment
 
+    # Full-universe symbol → cluster mapping (covers held + non-held candidates).
+    # Populated by compute_concentration(); empty in the zero-active-equity early returns.
+    universe_cluster_lookup: dict[str, str] = field(default_factory=dict)
+
     @property
     def has_violations(self) -> bool:
         return bool(self.violations)
+
+    @property
+    def symbol_to_cluster(self) -> dict[str, str]:
+        """Inverted view of cluster_symbols — used by buy-cycle cluster enforcement."""
+        lookup: dict[str, str] = {}
+        for cluster_id, symbols in (self.cluster_symbols or {}).items():
+            for sym in symbols or []:
+                lookup[str(sym)] = str(cluster_id)
+        return lookup
 
     def log_warnings(self) -> None:
         """Emit a WARNING log entry for every violation."""
@@ -282,6 +295,7 @@ def _compute(
         method=method,
         n_clusters=n_clusters,
         unmatched_symbols=unmatched,
+        universe_cluster_lookup=dict(cluster_lookup),
     )
 
 

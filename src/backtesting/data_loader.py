@@ -14,14 +14,20 @@ import yfinance as yf
 from util import (
     BACKTEST_PARAMS,
     ETFS,
-    MOMENTUM_PARAMS,
     SCORE_WEIGHTS,
     SCORING_PARAMS,
     read_data_as_pd,
 )
 
-from .simulator import _col_arr, _momentum_score_vec, split_price_window  # noqa: F401 (re-exported)
+from .simulator import (  # noqa: F401 (re-exported)
+    _col_arr,
+    _momentum_score_warmup_vec,
+    split_price_window,
+)
 from .types import PrecomputedData
+
+# Convenience aliases for backward-compat with old code that read flat dict keys
+_MOMENTUM_WARMUP = SCORING_PARAMS["momentum_warmup"]
 
 logger = logging.getLogger(__name__)
 
@@ -212,6 +218,11 @@ def load_and_precompute(
         else np.zeros((n_days, 0), dtype=np.float64)
     )
 
+    # Rescore the loaded universe under the unified peer-relative engine so the
+    # downstream array extraction reflects current scores.
+    from strategy.scoring.composite import compute_metric
+    compute_metric(agg_df, SCORE_WEIGHTS, SCORING_PARAMS)
+
     pe_comp        = _col_arr(agg_df, "pe_comp")
     pb_comp        = _col_arr(agg_df, "pb_comp")
     quality_scores = _col_arr(agg_df, "quality_score")
@@ -222,6 +233,16 @@ def load_and_precompute(
         agg_df["sector"].fillna("Unknown").tolist()
         if "sector" in agg_df.columns
         else ["Unknown"] * len(agg_df)
+    )
+    industry_labels = tuple(
+        agg_df["industry"].fillna("Unknown").tolist()
+        if "industry" in agg_df.columns
+        else ("Unknown",) * len(agg_df)
+    )
+    market_caps_arr = (
+        pd.to_numeric(agg_df.get("market_cap"), errors="coerce").values.astype(np.float64)
+        if "market_cap" in agg_df.columns
+        else np.full(len(agg_df), np.nan, dtype=np.float64)
     )
 
     yield_trap_mask = (
@@ -236,7 +257,7 @@ def load_and_precompute(
     ret_arr = np.where(np.isfinite(ret_arr), ret_arr, np.nan)
     has_pos = np.isfinite(pos_arr)
 
-    boundaries  = np.array(MOMENTUM_PARAMS["position_bin_boundaries"])
+    boundaries  = np.array(_MOMENTUM_WARMUP["position_bin_boundaries"])
     bin_indices = np.searchsorted(
         boundaries, np.where(has_pos, pos_arr, 0.5), side="right"
     ).astype(np.int32)
@@ -271,8 +292,9 @@ def load_and_precompute(
             lo = np.nanmin(window, axis=0)
             hi = np.nanmax(window, axis=0)
         rng    = hi - lo
-        valid52 = (rng > 0) & np.isfinite(curr)
-        raw_pos = np.where(valid52, (curr - lo) / rng, np.nan)
+        valid52 = np.isfinite(rng) & (rng > 0) & np.isfinite(curr)
+        safe_rng = np.where(valid52, rng, 1.0)
+        raw_pos = np.where(valid52, (curr - lo) / safe_rng, np.nan)
         pos_52w_daily[d] = np.clip(raw_pos, 0.0, 1.0)
 
         if d >= 21:
@@ -332,12 +354,13 @@ def load_and_precompute(
 
     has_pos_daily = np.isfinite(pos_52w_daily)
 
-    cur_mbin  = np.array(MOMENTUM_PARAMS["position_bin_scores"])
+    cur_mbin  = np.array(_MOMENTUM_WARMUP["position_bin_scores"])
+    _vf = SCORING_PARAMS["factors"]["value"]
     cur_value = (
-        SCORING_PARAMS["value_pe_weight"] * pe_comp
-        + SCORING_PARAMS["value_pb_weight"] * pb_comp
+        float(_vf["pe_weight"]) * pe_comp
+        + float(_vf["pb_weight"]) * pb_comp
     )
-    cur_mom   = _momentum_score_vec(bin_indices, has_pos, pos_arr, ret_arr, cur_mbin)
+    cur_mom   = _momentum_score_warmup_vec(bin_indices, has_pos, pos_arr, ret_arr, cur_mbin)
     sw        = np.array([SCORE_WEIGHTS["value"], SCORE_WEIGHTS["quality"],
                           SCORE_WEIGHTS["income"], SCORE_WEIGHTS["momentum"]])
     sw        = sw / sw.sum()
@@ -347,6 +370,10 @@ def load_and_precompute(
         + sw[2] * income_scores
         + sw[3] * cur_mom
     )
+    # The unified peer engine already wrote `value_metric` in compute_metric above;
+    # use that as the day-0 score so the sim's initial ranking matches.
+    if "value_metric" in agg_df.columns:
+        baseline_scores = pd.to_numeric(agg_df["value_metric"], errors="coerce").fillna(0.0).values.astype(np.float64)
 
     print(
         f"Precomputed: {n_stocks} stocks, {len(etf_cols)} ETFs, {n_days} trading days "
@@ -387,4 +414,7 @@ def load_and_precompute(
         above_50dma_daily=above_50dma_daily,
         above_200dma_daily=above_200dma_daily,
         spy_prices=bench_prices,
+        industry_labels=industry_labels,
+        market_caps=market_caps_arr,
+        momentum_scores=cur_mom,
     )

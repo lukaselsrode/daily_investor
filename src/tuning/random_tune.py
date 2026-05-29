@@ -46,12 +46,13 @@ _IDX_TO_CONFIG_PATH: dict[int, str] = {
     6:  "sell_rules.take_profit_pct",
     7:  "sell_rules.sell_weak_value_below",
     8:  "sell_rules.trailing_stop_pct",
-    9:  "scoring.value_pe_weight",
-    10: "momentum_v2.weights.rs_3m",
-    11: "momentum_v2.weights.rs_6m",
-    12: "momentum_v2.weights.risk_adj_3m",
-    13: "momentum_v2.weights.trend_structure",
-    14: "momentum_v2.weights.return_1m",
+    9:  "scoring.factors.value.pe_weight",
+    10: "scoring.momentum_inputs.weights.rs_3m",
+    11: "scoring.momentum_inputs.weights.rs_6m",
+    12: "scoring.momentum_inputs.weights.risk_adj_3m",
+    13: "scoring.momentum_inputs.weights.trend_structure",
+    14: "scoring.momentum_inputs.weights.return_1m",
+    15: "scoring.momentum_inputs.weights.return_5d",
 }
 # Append archetype lifecycle slots 15-38 — derived from the same layout as constants.py
 try:
@@ -139,7 +140,7 @@ class WeightCandidate:
     summary: RandomWindowSummary    # representative summary for display
     robust_score: float
     rank: int = 0
-    scan_result: "RobustScanResult | None" = None  # populated when run_matrix used
+    scan_result: RobustScanResult | None = None  # populated when run_matrix used
 
     # Backward-compat alias
     @property
@@ -177,7 +178,7 @@ class RandomTuneResult:
     best_candidate: WeightCandidate | None = None
     current_weights: np.ndarray | None = None   # active param values for current config
     current_summary: RandomWindowSummary | None = None
-    current_scan_result: "RobustScanResult | None" = None  # populated when run_matrix used
+    current_scan_result: RobustScanResult | None = None  # populated when run_matrix used
     warnings: list[str] = field(default_factory=list)
 
     @property

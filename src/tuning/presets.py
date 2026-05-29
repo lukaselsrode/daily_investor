@@ -11,8 +11,10 @@ Phase 1 presets (working, no vector extension needed):
   active_factor_internals — value PE weight + 5 momentum sub-weights
   active_full_safe        — score weights + exits combined
 
-Phase 2 stubs (raise NotImplementedError; require vector extension):
-  active_candidate_filters
+Phase 2 (now wired in — slots 40-42):
+  active_candidate_filters — top_percentile, min_quality_score, min_momentum_score
+
+Phase 2 stubs (still NotImplementedError; require further vector extension):
   active_rebalance_cooldown
   active_position_sizing
 
@@ -23,6 +25,29 @@ list_presets()                                   -> list[tuple[str, str]]
 validate_preset(preset_name)                     -> None  (raises on unknown/phase2)
 """
 from __future__ import annotations
+
+# All non-archetype tunable params. Archetype presets re-freeze this entire list
+# via `freeze_extra` so the optimizer only moves archetype lifecycle slots —
+# otherwise the four score weights / sell rules / momentum sub-weights drift
+# (they are not in the base frozen_parameters list) and dominate the result.
+_NON_ARCHETYPE_PATHS: tuple[str, ...] = (
+    "score_weights.value",
+    "score_weights.quality",
+    "score_weights.income",
+    "score_weights.momentum",
+    "index_pct",
+    "metric_threshold",
+    "sell_rules.take_profit_pct",
+    "sell_rules.sell_weak_value_below",
+    "sell_rules.trailing_stop_pct",
+    "scoring.factors.value.pe_weight",
+    "scoring.momentum_inputs.weights.rs_3m",
+    "scoring.momentum_inputs.weights.rs_6m",
+    "scoring.momentum_inputs.weights.risk_adj_3m",
+    "scoring.momentum_inputs.weights.trend_structure",
+    "scoring.momentum_inputs.weights.return_1m",
+)
+
 
 _PRESETS: dict[str, dict] = {
     # ── Phase 1 — working ────────────────────────────────────────────────────
@@ -52,15 +77,15 @@ _PRESETS: dict[str, dict] = {
         "phase2": False,
     },
     "active_factor_internals": {
-        "description": "Value PE weight + all 5 momentum_v2 sub-weights. "
+        "description": "Value PE weight + all 6 momentum-input weights. "
                        "Score weights stay at defaults.",
         "unfreeze": [
-            "scoring.value_pe_weight",
-            "momentum_v2.weights.rs_3m",
-            "momentum_v2.weights.rs_6m",
-            "momentum_v2.weights.risk_adj_3m",
-            "momentum_v2.weights.trend_structure",
-            "momentum_v2.weights.return_1m",
+            "scoring.factors.value.pe_weight",
+            "scoring.momentum_inputs.weights.rs_3m",
+            "scoring.momentum_inputs.weights.rs_6m",
+            "scoring.momentum_inputs.weights.risk_adj_3m",
+            "scoring.momentum_inputs.weights.trend_structure",
+            "scoring.momentum_inputs.weights.return_1m",
         ],
         "freeze_extra": [
             "score_weights.quality",
@@ -70,7 +95,7 @@ _PRESETS: dict[str, dict] = {
     },
     "active_full_safe": {
         "description": "Score weights + exit rules combined. "
-                       "Leaves momentum_v2 internals frozen. Conservative but broad.",
+                       "Leaves momentum-input internals frozen. Conservative but broad.",
         "unfreeze": [
             "score_weights.value",
             "score_weights.income",
@@ -83,12 +108,19 @@ _PRESETS: dict[str, dict] = {
         "phase2": False,
     },
 
-    # ── Phase 2 stubs ─────────────────────────────────────────────────────────
     "active_candidate_filters": {
         "description": "Candidate selection thresholds (top_percentile, min_quality_score, "
-                       "min_momentum_score). Requires Phase 2 vector extension.",
-        "phase2": True,
+                       "min_momentum_score). Score weights + momentum sub-weights stay frozen.",
+        "unfreeze": [
+            "candidate_selection.top_percentile",
+            "candidate_selection.min_quality_score",
+            "candidate_selection.min_momentum_score",
+        ],
+        "freeze_extra": list(_NON_ARCHETYPE_PATHS),
+        "phase2": False,
     },
+
+    # ── Phase 2 stubs ─────────────────────────────────────────────────────────
     "active_rebalance_cooldown": {
         "description": "Rebalance frequency + cooldown days. "
                        "Requires Phase 2 vector extension.",
@@ -110,7 +142,7 @@ _PRESETS: dict[str, dict] = {
             "archetype_management.quality_compounder.trailing_stop_pct",
             "archetype_management.quality_compounder.minimum_hold_days",
         ],
-        "freeze_extra": [],
+        "freeze_extra": list(_NON_ARCHETYPE_PATHS),
         "phase2": False,
     },
     "active_speculative_momentum": {
@@ -122,7 +154,7 @@ _PRESETS: dict[str, dict] = {
             "archetype_management.speculative_momentum.trailing_stop_pct",
             "archetype_management.speculative_momentum.minimum_hold_days",
         ],
-        "freeze_extra": [],
+        "freeze_extra": list(_NON_ARCHETYPE_PATHS),
         "phase2": False,
     },
     "active_value_recovery": {
@@ -134,7 +166,7 @@ _PRESETS: dict[str, dict] = {
             "archetype_management.value_recovery.trailing_stop_pct",
             "archetype_management.value_recovery.minimum_hold_days",
         ],
-        "freeze_extra": [],
+        "freeze_extra": list(_NON_ARCHETYPE_PATHS),
         "phase2": False,
     },
     "active_defensive_income": {
@@ -146,7 +178,7 @@ _PRESETS: dict[str, dict] = {
             "archetype_management.defensive_income.trailing_stop_pct",
             "archetype_management.defensive_income.minimum_hold_days",
         ],
-        "freeze_extra": [],
+        "freeze_extra": list(_NON_ARCHETYPE_PATHS),
         "phase2": False,
     },
     "active_archetype_lifecycle": {
@@ -163,10 +195,7 @@ _PRESETS: dict[str, dict] = {
                 "trailing_stop_pct", "minimum_hold_days",
             )
         ],
-        "freeze_extra": [
-            "score_weights.value", "score_weights.quality",
-            "score_weights.income", "score_weights.momentum",
-        ],
+        "freeze_extra": list(_NON_ARCHETYPE_PATHS),
         "phase2": False,
     },
     "active_archetype_rotation": {
@@ -178,7 +207,7 @@ _PRESETS: dict[str, dict] = {
             "archetype_management.value_recovery.harvest_profit_threshold",
             "archetype_management.defensive_income.harvest_profit_threshold",
         ],
-        "freeze_extra": [],
+        "freeze_extra": list(_NON_ARCHETYPE_PATHS),
         "phase2": False,
     },
     "active_archetype_alpha": {
@@ -191,10 +220,7 @@ _PRESETS: dict[str, dict] = {
             "archetype_management.speculative_momentum.harvest_profit_threshold",
             "archetype_management.speculative_momentum.trailing_stop_pct",
         ],
-        "freeze_extra": [
-            "score_weights.value", "score_weights.quality",
-            "score_weights.income", "score_weights.momentum",
-        ],
+        "freeze_extra": list(_NON_ARCHETYPE_PATHS),
         "phase2": False,
     },
 }

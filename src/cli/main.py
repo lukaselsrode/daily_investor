@@ -14,6 +14,7 @@ Old-style invocation via src/main.py is preserved for backward compatibility.
 
 from __future__ import annotations
 
+import os
 import sys
 
 from core.logging import configure_logging
@@ -30,14 +31,29 @@ def main(argv: list[str] | None = None) -> None:
     cmd = args[0]
     rest = args[1:]
 
+    # --config <path>  — override which YAML the run reads.
+    # Must be applied BEFORE importing cli.commands so core/paths.CONFIG_FILE
+    # picks up the override at import time.
+    _cfg_override = _flag_value(rest, "--config")
+    if _cfg_override:
+        if not os.path.isabs(_cfg_override):
+            _cfg_override = os.path.abspath(_cfg_override)
+        if not os.path.isfile(_cfg_override):
+            print(f"--config: file not found: {_cfg_override}")
+            sys.exit(2)
+        os.environ["DAILY_INVESTOR_CONFIG"] = _cfg_override
+        print(f"[config override] {_cfg_override}")
+
     from cli.commands import (
         cmd_auto_tune,
         cmd_backtest,
+        cmd_config,
         cmd_factor_map,
         cmd_fetch_data,
         cmd_list_presets,
         cmd_report,
         cmd_run,
+        cmd_snapshots,
         cmd_stability_scan,
         cmd_tune,
         cmd_update_outcomes,
@@ -96,6 +112,47 @@ def main(argv: list[str] | None = None) -> None:
     elif cmd == "update-outcomes":
         cmd_update_outcomes()
 
+    elif cmd == "experiment":
+        from cli.commands import cmd_experiment
+        days = _flag_value(rest, "--days") or "90,180,365"
+        scope = _flag_value(rest, "--scope") or "active_sleeve_compounding"
+        variants = _flag_value(rest, "--variants")
+        ex_mode = _flag_value(rest, "--mode")
+        cmd_experiment(days=days, scope=scope, variants=variants, mode=ex_mode)
+
+    elif cmd == "config":
+        sub = rest[0] if rest else ""
+        sub_rest = rest[1:] if len(rest) > 1 else []
+        if sub == "migrate-scoring":
+            dry_run = "--dry-run" in sub_rest
+            no_backup = "--no-backup" in sub_rest
+            cmd_config(action="migrate-scoring", dry_run=dry_run, no_backup=no_backup)
+        else:
+            print(f"Unknown config action: {sub!r}")
+            sys.exit(1)
+
+    elif cmd == "snapshots":
+        sub = rest[0] if rest else ""
+        sub_rest = rest[1:] if len(rest) > 1 else []
+        if sub == "rescore":
+            input_dir   = _flag_value(sub_rest, "--input")
+            output_dir  = _flag_value(sub_rest, "--output")
+            dry_run     = "--dry-run" in sub_rest
+            in_place    = "--in-place-with-backup" in sub_rest
+            overwrite   = "--overwrite-existing" in sub_rest
+            cmd_snapshots(
+                action="rescore",
+                input_dir=input_dir,
+                output_dir=output_dir,
+                dry_run=dry_run,
+                in_place_with_backup=in_place,
+                overwrite_existing=overwrite,
+            )
+        else:
+            print("Usage: snapshots rescore "
+                  "[--dry-run] [--input PATH] [--output PATH] [--in-place-with-backup] [--overwrite-existing]")
+            sys.exit(2)
+
     elif cmd == "factor-map":
         method   = _flag_value(rest, "--method") or "pca"
         color    = _flag_value(rest, "--color")
@@ -144,6 +201,8 @@ COMMANDS
   report                   Generate diagnostics report
   update-outcomes          Backfill future returns for past decisions (calibration only)
   factor-map               3-D PCA/UMAP factor-space scatter of the scored universe
+  config <SUB>             config maintenance (sub: migrate-scoring)
+  snapshots <SUB>          snapshot maintenance (sub: rescore)
 
 OPTIONS (run)
   --skip-data              Reuse existing CSV data
@@ -155,6 +214,10 @@ OPTIONS (tune / auto-tune)
   --llm-review             Add Claude second-opinion review
   --scope SCOPE            overall_strategy (default) or active_sleeve_compounding
   --preset NAME            Restrict tunable params to a named preset (see list-presets)
+
+OPTIONS (any command)
+  --config PATH            Use a different YAML config (default: cfg/config.yaml).
+                           Useful for cfg/config_<name>.yaml A/B comparisons.
 
 OPTIONS (all)
   --objective sharpe|calmar  Optimization target (default: sharpe)

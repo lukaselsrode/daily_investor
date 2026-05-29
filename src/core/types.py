@@ -37,6 +37,10 @@ class TradeRecord:
     archetype_at_entry: str = ""    # archetype assigned at buy time
     archetype_at_exit: str = ""     # archetype classification at sell time
     decision_source: str = ""       # "global_rule" | "archetype_rule" | "both" | ""
+    # Cluster concentration metadata (populated when concentration cap is enforced).
+    cluster_id: str = ""
+    cluster_decision: str = ""      # "allowed" | "downsized" | "blocked" | ""
+    cluster_block_reason: str = ""
 
 
 # ---------------------------------------------------------------------------

@@ -796,7 +796,7 @@ def _tab_active_sleeve(df: pd.DataFrame) -> None:
             _eq = float(_grp["equity"].fillna(0.0).sum())
             _arch_rows.append({
                 "Archetype": str(_label or "—"),
-                "Positions": int(len(_grp)),
+                "Positions": len(_grp),
                 "Sleeve value": f"${_eq:,.2f}",
                 "Sleeve weight": f"{_eq / _total_eq:.1%}",
             })

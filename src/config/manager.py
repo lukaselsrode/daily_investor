@@ -29,10 +29,13 @@ from .schema import (
     ConcentrationLimitsConfig,
     EtfRiskConfig,
     HarvestConfig,
-    MomentumConfig,
-    MomentumV2Config,
-    MomentumV2PenaltiesConfig,
-    MomentumV2WeightsConfig,
+    MomentumInputsConfig,
+    MomentumInputsPenaltiesConfig,
+    MomentumInputsWeightsConfig,
+    MomentumWarmupConfig,
+    PeerBlendConfig,
+    PeerStandardizationConfig,
+    QualityChecklistConfig,
     RegimeConfig,
     RegimeDefensiveConfig,
     RegimeNeutralConfig,
@@ -41,6 +44,7 @@ from .schema import (
     RiskConfig,
     ScoreWeightsConfig,
     ScoringConfig,
+    ScoringFactorsConfig,
     SellRulesConfig,
     StabilityConfig,
     TuningConfig,
@@ -265,64 +269,84 @@ class ConfigManager:
 
     @cached_property
     def scoring(self) -> ScoringConfig:
+        """Unified scoring config — uses the SCORING_PARAMS dict from util.py for parsing.
+
+        Reads `scoring:` from raw YAML. Returns dataclass-built ScoringConfig with
+        all nested sub-configs (peer_standardization, factors, momentum_inputs,
+        momentum_warmup, quality_checklist).
+        """
         sc = self._raw.get("scoring", {})
+        ps = sc.get("peer_standardization", {})
+        blend = ps.get("blend", {})
+        mi = sc.get("momentum_inputs", {})
+        mi_w = mi.get("weights", {})
+        mi_p = mi.get("penalties", {})
+        mw = sc.get("momentum_warmup", {})
+        qc = sc.get("quality_checklist", {})
+
         return ScoringConfig(
-            value_pe_weight=float(sc.get("value_pe_weight", 0.60)),
-            value_pb_weight=float(sc.get("value_pb_weight", 0.40)),
-            income_score_cap=float(sc.get("income_score_cap", 1.5)),
-            yield_trap_threshold=float(sc.get("yield_trap_threshold", 0.10)),
-            distress_pe_max=float(sc.get("distress_pe_max", 5.0)),
-            quality_volume_high=float(sc.get("quality_volume_high", 1_000_000)),
-            quality_volume_low=float(sc.get("quality_volume_low", 100_000)),
-            quality_dividend_min=float(sc.get("quality_dividend_min", 0.02)),
-            quality_dividend_max=float(sc.get("quality_dividend_max", 0.06)),
-            quality_weight_has_positive_pe=float(sc.get("quality_weight_has_positive_pe", 0.5)),
-            quality_weight_distress_pe=float(sc.get("quality_weight_distress_pe", -0.4)),
-            quality_weight_has_positive_pb=float(sc.get("quality_weight_has_positive_pb", 0.2)),
-            quality_weight_high_volume=float(sc.get("quality_weight_high_volume", 0.3)),
-            quality_weight_low_volume=float(sc.get("quality_weight_low_volume", -0.3)),
-            quality_weight_yield_trap=float(sc.get("quality_weight_yield_trap", -0.6)),
-            quality_weight_healthy_dividend=float(sc.get("quality_weight_healthy_dividend", 0.2)),
-        )
-
-    @cached_property
-    def momentum(self) -> MomentumConfig:
-        mo = self._raw.get("momentum", {})
-        return MomentumConfig(
-            position_bin_boundaries=tuple(mo.get("position_bin_boundaries", [0.15, 0.35, 0.75, 0.95])),
-            position_bin_scores=tuple(mo.get("position_bin_scores", [-0.35, -0.10, 0.55, 0.85, 0.45])),
-            return_1m_low_position_cutoff=float(mo.get("return_1m_low_position_cutoff", 0.40)),
-            return_1m_recovery_threshold=float(mo.get("return_1m_recovery_threshold", 0.05)),
-            return_1m_falling_knife_threshold=float(mo.get("return_1m_falling_knife_threshold", -0.10)),
-            return_1m_recovery_bonus=float(mo.get("return_1m_recovery_bonus", 0.15)),
-            return_1m_falling_knife_penalty=float(mo.get("return_1m_falling_knife_penalty", 0.20)),
-        )
-
-    @cached_property
-    def momentum_v2(self) -> MomentumV2Config:
-        mv2 = self._raw.get("momentum_v2", {})
-        w = mv2.get("weights", {})
-        p = mv2.get("penalties", {})
-        return MomentumV2Config(
-            weights=MomentumV2WeightsConfig(
-                rs_3m=float(w.get("rs_3m", 0.25)),
-                rs_6m=float(w.get("rs_6m", 0.25)),
-                risk_adj_3m=float(w.get("risk_adj_3m", 0.20)),
-                trend_structure=float(w.get("trend_structure", 0.15)),
-                return_1m=float(w.get("return_1m", 0.10)),
-                return_5d=float(w.get("return_5d", 0.05)),
+            enabled=bool(sc.get("enabled", True)),
+            peer_standardization=PeerStandardizationConfig(
+                group_by=str(ps.get("group_by", "industry")),
+                fallback_group_by=str(ps.get("fallback_group_by", "sector")),
+                min_group_size=int(ps.get("min_group_size", 8)),
+                method=str(ps.get("method", "percentile")),
+                winsorize_pct=float(ps.get("winsorize_pct", 0.05)),
+                clamp_low=float(ps.get("clamp_low", -1.0)),
+                clamp_high=float(ps.get("clamp_high", 1.5)),
+                blend=PeerBlendConfig(
+                    industry_relative=float(blend.get("industry_relative", 0.60)),
+                    sector_relative=float(blend.get("sector_relative", 0.25)),
+                    market_relative=float(blend.get("market_relative", 0.15)),
+                ),
             ),
-            penalties=MomentumV2PenaltiesConfig(
-                falling_knife_3m_threshold=float(p.get("falling_knife_3m_threshold", -0.15)),
-                falling_knife_penalty=float(p.get("falling_knife_penalty", 0.25)),
-                overextension_52w_threshold=float(p.get("overextension_52w_threshold", 0.97)),
-                overextension_penalty=float(p.get("overextension_penalty", 0.20)),
-                high_vol_annual_threshold=float(p.get("high_vol_annual_threshold", 0.50)),
-                high_vol_penalty=float(p.get("high_vol_penalty", 0.15)),
+            factors=ScoringFactorsConfig(),  # field defaults; per-factor parsing lives in util.SCORING_PARAMS["factors"]
+            momentum_inputs=MomentumInputsConfig(
+                weights=MomentumInputsWeightsConfig(
+                    rs_3m=float(mi_w.get("rs_3m", 0.25)),
+                    rs_6m=float(mi_w.get("rs_6m", 0.25)),
+                    risk_adj_3m=float(mi_w.get("risk_adj_3m", 0.20)),
+                    trend_structure=float(mi_w.get("trend_structure", 0.15)),
+                    return_1m=float(mi_w.get("return_1m", 0.10)),
+                    return_5d=float(mi_w.get("return_5d", 0.05)),
+                ),
+                penalties=MomentumInputsPenaltiesConfig(
+                    falling_knife_3m_threshold=float(mi_p.get("falling_knife_3m_threshold", -0.15)),
+                    falling_knife_penalty=float(mi_p.get("falling_knife_penalty", 0.25)),
+                    overextension_52w_threshold=float(mi_p.get("overextension_52w_threshold", 0.97)),
+                    overextension_penalty=float(mi_p.get("overextension_penalty", 0.20)),
+                    high_vol_annual_threshold=float(mi_p.get("high_vol_annual_threshold", 0.50)),
+                    high_vol_penalty=float(mi_p.get("high_vol_penalty", 0.15)),
+                ),
+                clamp_low=float(mi.get("clamp_low", -1.0)),
+                clamp_high=float(mi.get("clamp_high", 1.5)),
+                winsorize_pct=float(mi.get("winsorize_pct", 0.05)),
             ),
-            clamp_low=float(mv2.get("clamp_low", -1.0)),
-            clamp_high=float(mv2.get("clamp_high", 1.5)),
-            winsorize_pct=float(mv2.get("winsorize_pct", 0.05)),
+            momentum_warmup=MomentumWarmupConfig(
+                position_bin_boundaries=tuple(mw.get("position_bin_boundaries", [0.15, 0.35, 0.75, 0.95])),
+                position_bin_scores=tuple(mw.get("position_bin_scores", [-0.35, -0.10, 0.55, 0.85, 0.45])),
+                return_1m_low_position_cutoff=float(mw.get("return_1m_low_position_cutoff", 0.40)),
+                return_1m_recovery_threshold=float(mw.get("return_1m_recovery_threshold", 0.05)),
+                return_1m_falling_knife_threshold=float(mw.get("return_1m_falling_knife_threshold", -0.10)),
+                return_1m_recovery_bonus=float(mw.get("return_1m_recovery_bonus", 0.15)),
+                return_1m_falling_knife_penalty=float(mw.get("return_1m_falling_knife_penalty", 0.20)),
+            ),
+            quality_checklist=QualityChecklistConfig(
+                income_score_cap=float(qc.get("income_score_cap", 1.5)),
+                yield_trap_threshold=float(qc.get("yield_trap_threshold", 0.10)),
+                distress_pe_max=float(qc.get("distress_pe_max", 5.0)),
+                quality_volume_high=float(qc.get("quality_volume_high", 1_000_000)),
+                quality_volume_low=float(qc.get("quality_volume_low", 100_000)),
+                quality_dividend_min=float(qc.get("quality_dividend_min", 0.02)),
+                quality_dividend_max=float(qc.get("quality_dividend_max", 0.06)),
+                quality_weight_has_positive_pe=float(qc.get("quality_weight_has_positive_pe", 0.5)),
+                quality_weight_distress_pe=float(qc.get("quality_weight_distress_pe", -0.4)),
+                quality_weight_has_positive_pb=float(qc.get("quality_weight_has_positive_pb", 0.2)),
+                quality_weight_high_volume=float(qc.get("quality_weight_high_volume", 0.3)),
+                quality_weight_low_volume=float(qc.get("quality_weight_low_volume", -0.3)),
+                quality_weight_yield_trap=float(qc.get("quality_weight_yield_trap", -0.6)),
+                quality_weight_healthy_dividend=float(qc.get("quality_weight_healthy_dividend", 0.2)),
+            ),
         )
 
     @cached_property

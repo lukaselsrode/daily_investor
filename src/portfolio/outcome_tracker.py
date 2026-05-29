@@ -110,6 +110,13 @@ _SCHEMA: list[str] = [
     "archetype_at_entry",        # archetype label captured at original buy
     "archetype_at_exit",         # archetype label at the exit decision
     "decision_source",           # "global_rule" | "archetype_rule" | "both" | ""
+    # ── Cluster concentration metadata (populated when cluster cap is enforced) ──
+    "cluster_id",
+    "current_cluster_weight",
+    "projected_cluster_weight",
+    "cluster_limit",
+    "cluster_decision",          # "allowed" | "downsized" | "blocked" | ""
+    "cluster_block_reason",
     # ── Post-decision price path (backfilled later) ──────────────────────────
     "max_drawdown_after_decision",  # worst drawdown within 90d of decision
     "max_runup_after_decision",     # best runup within 90d of decision
@@ -254,6 +261,12 @@ def record_decision_holding(
     archetype_at_entry: str | None  = None,
     archetype_at_exit: str | None   = None,
     decision_source: str | None     = None,
+    cluster_id: str | None          = None,
+    current_cluster_weight: float | None = None,
+    projected_cluster_weight: float | None = None,
+    cluster_limit: float | None     = None,
+    cluster_decision: str | None    = None,
+    cluster_block_reason: str | None = None,
 ) -> None:
     """Append one holding-evaluation record to decision_outcomes.parquet."""
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -313,6 +326,12 @@ def record_decision_holding(
         "archetype_at_entry":     archetype_at_entry,
         "archetype_at_exit":      archetype_at_exit,
         "decision_source":        decision_source,
+        "cluster_id":               cluster_id,
+        "current_cluster_weight":   current_cluster_weight,
+        "projected_cluster_weight": projected_cluster_weight,
+        "cluster_limit":            cluster_limit,
+        "cluster_decision":         cluster_decision,
+        "cluster_block_reason":     cluster_block_reason,
     })
 
     _append_row(row)

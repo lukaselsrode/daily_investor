@@ -332,6 +332,272 @@ def cmd_update_outcomes() -> None:
     log.info("update-outcomes: %d cells updated", n_updated)
 
 
+def cmd_config(action: str, *, dry_run: bool = False, no_backup: bool = False) -> None:
+    """Config maintenance commands.
+
+    Currently supports:
+      migrate-scoring — rewrite legacy YAML (top-level scoring_v3/momentum_v2/value_v2)
+                        into the unified `scoring:` block expected by the new util.py reader.
+                        Idempotent. Creates .bak copies by default.
+    """
+    if action != "migrate-scoring":
+        print(f"Unknown config action: {action!r} (expected: migrate-scoring)")
+        return
+    from cli.migrate_scoring import cmd_migrate_scoring
+    cmd_migrate_scoring(dry_run=dry_run, no_backup=no_backup)
+
+
+# ---------------------------------------------------------------------------
+# Experiment runner — compare control variants across multiple time windows
+# ---------------------------------------------------------------------------
+
+# Variants A-G from the spec. Each holds a list of (cfg_path, value) overrides
+# applied to live config copies during the experiment.
+EXPERIMENT_VARIANTS: dict[str, dict] = {
+    "A_baseline": {
+        "description": "Current live config — baseline",
+        "overrides": {},
+    },
+    "B_no_defensive_income_buys": {
+        "description": "Disable defensive_income archetype management (no new DI buys)",
+        "overrides": {"archetype_management.defensive_income.enabled": False},
+    },
+    "C_defensive_income_strict_gate": {
+        "description": "Strict defensive_income gate (require yield, quality, momentum)",
+        "overrides": {
+            "archetype_classifier.enabled": True,
+            "archetype_classifier.defensive_income.require_yield": True,
+        },
+    },
+    "D_quality_compounder_only": {
+        "description": "Only allow quality_compounder new buys (other archetypes off)",
+        "overrides": {
+            "archetype_management.legacy_turnaround.enabled": False,
+            "archetype_management.speculative_momentum.enabled": False,
+            "archetype_management.value_recovery.enabled": False,
+            "archetype_management.defensive_income.enabled": False,
+            "archetype_management.core_default.enabled": False,
+        },
+    },
+    "E_cluster_cap_60": {
+        "description": "Enforce cluster cap at 60%",
+        "overrides": {
+            "concentration_limits.warn_only": False,
+            "concentration_limits.max_cluster_weight": 0.60,
+        },
+    },
+    "F_cluster_cap_50": {
+        "description": "Enforce cluster cap at 50%",
+        "overrides": {
+            "concentration_limits.warn_only": False,
+            "concentration_limits.max_cluster_weight": 0.50,
+        },
+    },
+    "G_cluster_cap_plus_strict_di": {
+        "description": "Cluster cap 60% + strict defensive_income gate",
+        "overrides": {
+            "concentration_limits.warn_only": False,
+            "concentration_limits.max_cluster_weight": 0.60,
+            "archetype_classifier.enabled": True,
+            "archetype_classifier.defensive_income.require_yield": True,
+        },
+    },
+}
+
+
+def cmd_experiment(
+    days: str = "90,180,365",
+    scope: str = "active_sleeve_compounding",
+    variants: str | None = None,
+    mode: str | None = None,
+) -> None:
+    """Run side-by-side backtest variants A–G across one or more time windows.
+
+    Each variant patches the live config in-memory (the live cfg/config.yaml is
+    not modified) and runs `run_simulation()` against the same precomp window.
+    Output is a plain-text comparison table.
+
+    --days 90,180,365              Comma-separated trading-day windows.
+    --scope ...                    overall_strategy | active_sleeve_compounding (default).
+    --variants A,E,F               Comma-separated variant IDs (defaults to all).
+    --mode liquid_universe_sanity_test   Optional precomp mode override.
+    """
+    import copy as _copy
+
+    from backtesting.data_loader import load_and_precompute
+    from backtesting.simulator import (
+        get_default_params,
+        run_simulation,
+        split_price_window,
+    )
+    from util import ARCHETYPE_CLASSIFIER_PARAMS, ARCHETYPE_PARAMS, CONCENTRATION_LIMIT_PARAMS
+
+    # Filter variants
+    selected_ids = (
+        [v.strip() for v in variants.split(",")]
+        if variants else list(EXPERIMENT_VARIANTS)
+    )
+    bad = [v for v in selected_ids if v not in EXPERIMENT_VARIANTS]
+    if bad:
+        print(f"Unknown variants: {bad}. Available: {list(EXPERIMENT_VARIANTS)}")
+        return
+
+    window_days = [int(d.strip()) for d in days.split(",")]
+
+    # Build precomp once per window
+    print(f"\nExperiment runner: variants={selected_ids} windows={window_days} scope={scope}\n")
+    print(f"{'window':>7}  {'variant':<30}  {'TWR':>7}  {'bench':>7}  {'excess':>7}  "
+          f"{'Sharpe':>7}  {'Calmar':>7}  {'maxDD':>7}  {'trades':>6}  {'clust_viol':>10}  "
+          f"{'arch_mix':<40}")
+    print("-" * 145)
+
+    for n_days in window_days:
+        precomp = load_and_precompute(n_days=n_days, mode=mode)
+        train_slice, _ = split_price_window(precomp.prices.shape[0], train_pct=0.70)
+
+        def _slice(s, precomp=precomp):
+            def _o(a):
+                return a[s] if a is not None else None
+            return precomp._replace(
+                prices=precomp.prices[s],
+                etf_prices=precomp.etf_prices[s],
+                benchmark_prices=precomp.benchmark_prices[s],
+                position_52w_daily=precomp.position_52w_daily[s],
+                return_1m_daily=precomp.return_1m_daily[s],
+                bin_indices_daily=precomp.bin_indices_daily[s],
+                has_position_52w_daily=precomp.has_position_52w_daily[s],
+                ret_5d_daily=_o(precomp.ret_5d_daily),
+                ret_3m_daily=_o(precomp.ret_3m_daily),
+                ret_6m_daily=_o(precomp.ret_6m_daily),
+                rs_3m_daily=_o(precomp.rs_3m_daily),
+                rs_6m_daily=_o(precomp.rs_6m_daily),
+                vol_3m_daily=_o(precomp.vol_3m_daily),
+                above_50dma_daily=_o(precomp.above_50dma_daily),
+                above_200dma_daily=_o(precomp.above_200dma_daily),
+            )
+        train_pc = _slice(train_slice)
+        params = get_default_params()
+
+        # Snapshot original globals so we can restore between variants
+        _orig_arch = _copy.deepcopy(ARCHETYPE_PARAMS)
+        _orig_cl = _copy.deepcopy(CONCENTRATION_LIMIT_PARAMS)
+        _orig_ac = _copy.deepcopy(ARCHETYPE_CLASSIFIER_PARAMS)
+
+        try:
+            for variant_id in selected_ids:
+                spec = EXPERIMENT_VARIANTS[variant_id]
+                _apply_overrides(spec["overrides"])
+                try:
+                    sim = run_simulation(
+                        train_pc, params,
+                        starting_capital=10_000.0,
+                        slippage_bps=10.0,
+                        weekly_contribution=400.0,
+                        rebalance_frequency_days=5,
+                        archetype_aware=True,
+                        cluster_tracking=True,
+                        scope=scope,
+                    )
+                    _print_experiment_row(n_days, variant_id, sim, precomp)
+                except Exception as exc:
+                    print(f"{n_days:>5}d  {variant_id:<30}  ERROR: {exc}")
+                finally:
+                    # Restore globals between variants
+                    ARCHETYPE_PARAMS.clear()
+                    ARCHETYPE_PARAMS.update(_orig_arch)
+                    CONCENTRATION_LIMIT_PARAMS.clear()
+                    CONCENTRATION_LIMIT_PARAMS.update(_orig_cl)
+                    ARCHETYPE_CLASSIFIER_PARAMS.clear()
+                    ARCHETYPE_CLASSIFIER_PARAMS.update(_orig_ac)
+        finally:
+            ARCHETYPE_PARAMS.clear()
+            ARCHETYPE_PARAMS.update(_orig_arch)
+            CONCENTRATION_LIMIT_PARAMS.clear()
+            CONCENTRATION_LIMIT_PARAMS.update(_orig_cl)
+            ARCHETYPE_CLASSIFIER_PARAMS.clear()
+            ARCHETYPE_CLASSIFIER_PARAMS.update(_orig_ac)
+        print()  # blank line between windows
+
+
+def _apply_overrides(overrides: dict) -> None:
+    """Apply dotted-path overrides to the in-memory config dicts."""
+    from util import ARCHETYPE_CLASSIFIER_PARAMS, ARCHETYPE_PARAMS, CONCENTRATION_LIMIT_PARAMS
+
+    for path, value in overrides.items():
+        parts = path.split(".")
+        root = parts[0]
+        if root == "archetype_management":
+            d = ARCHETYPE_PARAMS
+        elif root == "concentration_limits":
+            d = CONCENTRATION_LIMIT_PARAMS
+        elif root == "archetype_classifier":
+            d = ARCHETYPE_CLASSIFIER_PARAMS
+        else:
+            continue
+        cur = d
+        for part in parts[1:-1]:
+            cur = cur.setdefault(part, {}) if isinstance(cur, dict) else cur
+        if isinstance(cur, dict):
+            cur[parts[-1]] = value
+
+
+def _print_experiment_row(n_days: int, variant_id: str, sim, precomp) -> None:
+    """Print one row of the experiment comparison table."""
+    import numpy as np
+
+    bench_prices = precomp.benchmark_prices[:int(precomp.prices.shape[0] * 0.70)]
+    bench_ret = float(bench_prices[-1] / bench_prices[0] - 1.0) if (
+        len(bench_prices) >= 2 and np.isfinite(bench_prices).all() and bench_prices[0] > 0
+    ) else 0.0
+    excess = sim.total_return - bench_ret
+    arch_total = sum(sim.archetype_pnl.values()) or 1.0
+    arch_mix_parts = []
+    for archetype, pnl in sorted(sim.archetype_pnl.items(), key=lambda kv: -kv[1])[:3]:
+        arch_mix_parts.append(f"{archetype[:8]}{pnl/arch_total:+.2f}")
+    arch_mix = " ".join(arch_mix_parts) or "—"
+    print(
+        f"{n_days:>5}d  {variant_id:<30}  "
+        f"{sim.total_return:+6.1%}  {bench_ret:+6.1%}  {excess:+6.1%}  "
+        f"{sim.sharpe:+6.2f}  {sim.calmar:+6.2f}  {sim.max_drawdown:+6.1%}  "
+        f"{sim.trades_made:>6}  {sim.cluster_violations_count:>10}  {arch_mix:<40}"
+    )
+
+
+def cmd_snapshots(
+    action: str,
+    *,
+    input_dir: str | None = None,
+    output_dir: str | None = None,
+    dry_run: bool = False,
+    in_place_with_backup: bool = False,
+    overwrite_existing: bool = False,
+) -> None:
+    """Snapshot maintenance commands.
+
+    Currently supports:
+      rescore — rescore historical snapshots under the unified peer engine.
+                Canonical column names (value_score, value_metric, …) are
+                written and any legacy `*_v3` columns are stripped.
+                Use --in-place-with-backup to overwrite source files (with
+                .bak.parquet copies created first), or --output PATH to write
+                a parallel tree.
+    """
+    if action != "rescore":
+        print(f"Unknown snapshots action: {action!r} (expected: rescore)")
+        return
+
+    from strategy.snapshots import rescore_snapshots
+
+    report = rescore_snapshots(
+        input_dir=input_dir,
+        output_dir=output_dir,
+        dry_run=dry_run,
+        in_place_with_backup=in_place_with_backup,
+        overwrite_existing=overwrite_existing,
+    )
+    print(report.pretty())
+
+
 def cmd_factor_map(
     method: str = "pca",
     color_by: str | None = None,

@@ -10,14 +10,24 @@ import streamlit as st
 from ui.utils import data_date, fmt_bin_index, load_config_raw, load_latest_csv, no_data_msg
 
 _SCORE_COLS = ["value_metric", "value_score", "quality_score", "income_score", "momentum_score"]
+_PEER_RANK_COLS = [
+    "value_industry_rank", "value_sector_rank",
+    "quality_industry_rank", "quality_sector_rank",
+    "momentum_industry_rank", "momentum_sector_rank",
+    "income_industry_rank", "income_sector_rank",
+]
+_PEER_FALLBACK_COLS = [
+    "value_fallback_reason", "quality_fallback_reason",
+    "momentum_fallback_reason", "income_fallback_reason",
+]
 _META_COLS  = ["symbol", "owned", "sector", "industry", "pe_ratio", "pb_ratio",
                "dividend_yield", "volume", "current_price", "yield_trap_flag"]
 _FRIENDLY   = {
-    "value_metric":   "Composite Score",
-    "value_score":    "Value",
-    "quality_score":  "Quality",
-    "income_score":   "Income",
-    "momentum_score": "Momentum",
+    "value_metric":     "Composite Score",
+    "value_score":      "Value",
+    "quality_score":    "Quality",
+    "income_score":     "Income",
+    "momentum_score":   "Momentum",
 }
 
 
@@ -81,7 +91,10 @@ def render() -> None:
         st.bar_chart(fmt_bin_index(view["value_metric"].dropna().value_counts(bins=20, sort=False).sort_index()))
 
     # ---- Main table -------------------------------------------------------
-    display_cols = [c for c in _META_COLS + _SCORE_COLS if c in view.columns]
+    peer_available = any(c in view.columns for c in _PEER_FALLBACK_COLS)
+    if peer_available:
+        st.caption("Peer-relative ranks + fallback reasons available.")
+    display_cols = [c for c in _META_COLS + _SCORE_COLS + _PEER_FALLBACK_COLS if c in view.columns]
     st.subheader("Universe table")
     _sort_opts = [c for c in _SCORE_COLS if c in view.columns] or display_cols
     sort_col = st.selectbox(
@@ -109,6 +122,14 @@ def render() -> None:
                     if col in r:
                         v = r[col]
                         st.metric(_FRIENDLY.get(col, col), f"{v:.4f}" if pd.notna(v) else "—")
+                if peer_available:
+                    st.markdown("**Peer-relative ranks**")
+                    for col in _PEER_RANK_COLS:
+                        if col in r and pd.notna(r[col]):
+                            st.caption(f"{col}: {float(r[col]):+.3f}")
+                    for col in _PEER_FALLBACK_COLS:
+                        if col in r and pd.notna(r[col]):
+                            st.caption(f"{col}: {r[col]}")
             with c2:
                 st.markdown("**Fundamentals**")
                 for col in ["pe_ratio", "pb_ratio", "dividend_yield", "volume"]:

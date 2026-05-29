@@ -5,7 +5,10 @@ from pathlib import Path
 ROOT_DIR       = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 CFG_DIRECTORY  = os.path.join(ROOT_DIR, "cfg")
 DATA_DIRECTORY = os.path.join(ROOT_DIR, "data")
-CONFIG_FILE    = os.path.join(CFG_DIRECTORY, "config.yaml")
+CONFIG_FILE    = os.environ.get(
+    "DAILY_INVESTOR_CONFIG",
+    os.path.join(CFG_DIRECTORY, "config.yaml"),
+)
 RATIOS_FILE    = os.path.join(CFG_DIRECTORY, "ratios.yaml")
 
 # Path-object aliases for convenience in code that uses / operator

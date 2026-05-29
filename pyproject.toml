@@ -204,11 +204,8 @@ forbidden_modules = [
 # data.fundamentals calls strategy scoring functions when saving snapshots — known coupling,
 # tracked as a future refactor (move score computation out of the data layer).
 ignore_imports = [
-    "data.fundamentals -> strategy.income",
-    "data.fundamentals -> strategy.momentum",
-    "data.fundamentals -> strategy.quality",
+    "data.fundamentals -> strategy.scoring.composite",
     "data.fundamentals -> strategy.snapshots",
-    "data.fundamentals -> strategy.value_v2",
 ]
 
 [[tool.importlinter.contracts]]

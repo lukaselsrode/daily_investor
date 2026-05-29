@@ -197,6 +197,22 @@ def render() -> None:
                 use_container_width=True, hide_index=True,
             )
 
+    # ── 4b. Peer-relative fallback-reason rollup ──────────────────────────
+    _fb_cols = [
+        c for c in ("value_fallback_reason", "quality_fallback_reason",
+                    "momentum_fallback_reason", "income_fallback_reason")
+        if c in result.columns
+    ]
+    if _fb_cols:
+        with st.expander("Peer-relative fallback diagnostics"):
+            fb_rows = []
+            for col in _fb_cols:
+                for reason, n in result[col].value_counts(dropna=False).items():
+                    fb_rows.append({"factor": col, "fallback": str(reason), "n": int(n)})
+            if fb_rows:
+                st.markdown("**Fallback-reason coverage**")
+                st.dataframe(pd.DataFrame(fb_rows), use_container_width=True, hide_index=True)
+
     # ── 5. Threshold sensitivity ──────────────────────────────────────────
     with st.expander("Threshold sensitivity"):
         sens = _sensitivity_data(df, sw)

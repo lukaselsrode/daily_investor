@@ -39,7 +39,7 @@ class PrecomputedData(NamedTuple):
     return_1m_daily: np.ndarray         # (n_days, n_stocks) float, NaN until 21d available
     bin_indices_daily: np.ndarray       # (n_days, n_stocks) int
     has_position_52w_daily: np.ndarray  # (n_days, n_stocks) bool
-    # Momentum v2 daily rolling features — None when not computed (v1 fallback activates)
+    # Daily rolling momentum-input features — None when not computed (warm-up bin scorer activates)
     ret_5d_daily: np.ndarray | None = None    # (n_days, n_stocks) 5-day return
     ret_3m_daily: np.ndarray | None = None    # (n_days, n_stocks) 63-day return
     ret_6m_daily: np.ndarray | None = None    # (n_days, n_stocks) 126-day return
@@ -49,6 +49,13 @@ class PrecomputedData(NamedTuple):
     above_50dma_daily: np.ndarray | None = None   # (n_days, n_stocks) bool
     above_200dma_daily: np.ndarray | None = None  # (n_days, n_stocks) bool
     spy_prices: np.ndarray | None = None      # (n_days,) SPY closes for RS computation
+    # Per-stock classification signals (used by archetype classifier in backtest).
+    # Defaults are empty/None for backward compat with existing PrecomputedData callers.
+    industry_labels: tuple[str, ...] = ()     # (n_stocks,) industry per stock
+    market_caps: np.ndarray | None = None     # (n_stocks,) market cap; NaN where unknown
+    # Static per-stock momentum score (warmup-bin scoring at day 0). Used by the
+    # archetype classifier to seed `momentum_score`; live recomputes momentum daily.
+    momentum_scores: np.ndarray | None = None  # (n_stocks,) momentum proxy at sim start
 
 
 @dataclass
@@ -98,6 +105,21 @@ class SimResult:
     archetype_decision_source_counts: dict[str, dict] = field(default_factory=dict)
     # Walk-forward cluster concentration result (None when cluster_tracking=False)
     cluster_result: object | None = None
+    # Per-cluster rollups (populated when cluster_tracking=True). Empty otherwise.
+    cluster_pnl: dict[str, float] = field(default_factory=dict)
+    cluster_trade_counts: dict[str, int] = field(default_factory=dict)
+    cluster_win_rate: dict[str, float] = field(default_factory=dict)
+    cluster_avg_hold_days: dict[str, float] = field(default_factory=dict)
+    cluster_sleeve_weight: dict[str, float] = field(default_factory=dict)   # end-of-sim
+    cluster_active_excess: dict[str, float] = field(default_factory=dict)
+    cluster_dominant_sectors: dict[str, str] = field(default_factory=dict)
+    cluster_dominant_archetypes: dict[str, str] = field(default_factory=dict)
+    cluster_violations_count: int = 0
+    cluster_decision_counts: dict[str, int] = field(default_factory=dict)   # {"allowed", "downsized", "blocked"}
+    # Per-archetype attribution split by confidence bucket (high/medium/low).
+    # Keys are "{archetype}|{bucket}" strings.
+    archetype_pnl_by_confidence: dict[str, float] = field(default_factory=dict)
+    archetype_trade_counts_by_confidence: dict[str, int] = field(default_factory=dict)
     # Backtest scope and active sleeve metrics (None when scope == "overall_strategy")
     scope: BacktestScope = "overall_strategy"
     active_equity_curve: np.ndarray | None = None
@@ -129,6 +151,9 @@ class BacktestReport:
     trade_log: list = field(default_factory=list)  # list[TradeRecord] from train window
     config_hash: str = ""              # SHA-256[:12] of config at run time
     run_timestamp: str = ""            # ISO datetime string
+    # scoring engine metadata (populated whenever a backtest runs)
+    scoring_engine_version: str = "peer-1"  # scoring model identity; see SCORING_MODEL_VERSION
+    peer_config: dict = field(default_factory=dict)  # SCORING_PARAMS["peer_standardization"]
 
 
 @dataclass
@@ -145,3 +170,7 @@ class CandidatePoolDiagnostics:
     n_momentum_gate_excluded: int
     n_floor_excluded: int
     excluded_high_income_low_momentum: list   # up to 10 symbol names
+    # Peer-rank gate diagnostics — populated by the unified scoring engine.
+    n_peer_relative_rank_excluded: int = 0
+    avg_peer_rank_pct: float = 0.0
+    peer_fallback_usage: dict = field(default_factory=dict)  # {fallback_reason → count}

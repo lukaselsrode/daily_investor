@@ -64,9 +64,8 @@ class ValuationGuardrailsConfig:
 
 
 @dataclass(frozen=True)
-class ScoringConfig:
-    value_pe_weight: float = 0.60
-    value_pb_weight: float = 0.40
+class QualityChecklistConfig:
+    """Legacy quality-checklist weights, used as small-peer-group fallback."""
     income_score_cap: float = 1.5
     yield_trap_threshold: float = 0.10
     distress_pe_max: float = 5.0
@@ -84,29 +83,7 @@ class ScoringConfig:
 
 
 @dataclass(frozen=True)
-class MomentumConfig:
-    position_bin_boundaries: tuple[float, ...] = (0.15, 0.35, 0.75, 0.95)
-    position_bin_scores: tuple[float, ...] = (-0.35, -0.10, 0.55, 0.85, 0.45)
-    return_1m_low_position_cutoff: float = 0.40
-    return_1m_recovery_threshold: float = 0.05
-    return_1m_falling_knife_threshold: float = -0.10
-    return_1m_recovery_bonus: float = 0.15
-    return_1m_falling_knife_penalty: float = 0.20
-
-    def as_dict(self) -> dict:
-        return {
-            "position_bin_boundaries": list(self.position_bin_boundaries),
-            "position_bin_scores": list(self.position_bin_scores),
-            "return_1m_low_position_cutoff": self.return_1m_low_position_cutoff,
-            "return_1m_recovery_threshold": self.return_1m_recovery_threshold,
-            "return_1m_falling_knife_threshold": self.return_1m_falling_knife_threshold,
-            "return_1m_recovery_bonus": self.return_1m_recovery_bonus,
-            "return_1m_falling_knife_penalty": self.return_1m_falling_knife_penalty,
-        }
-
-
-@dataclass(frozen=True)
-class MomentumV2WeightsConfig:
+class MomentumInputsWeightsConfig:
     rs_3m: float = 0.25
     rs_6m: float = 0.25
     risk_adj_3m: float = 0.20
@@ -116,7 +93,7 @@ class MomentumV2WeightsConfig:
 
 
 @dataclass(frozen=True)
-class MomentumV2PenaltiesConfig:
+class MomentumInputsPenaltiesConfig:
     falling_knife_3m_threshold: float = -0.15
     falling_knife_penalty: float = 0.25
     overextension_52w_threshold: float = 0.97
@@ -126,40 +103,106 @@ class MomentumV2PenaltiesConfig:
 
 
 @dataclass(frozen=True)
-class MomentumV2Config:
-    weights: MomentumV2WeightsConfig = field(default_factory=MomentumV2WeightsConfig)
-    penalties: MomentumV2PenaltiesConfig = field(default_factory=MomentumV2PenaltiesConfig)
+class MomentumInputsConfig:
+    """Cross-sectional momentum input weights + penalties consumed by peer scoring."""
+    weights: MomentumInputsWeightsConfig = field(default_factory=MomentumInputsWeightsConfig)
+    penalties: MomentumInputsPenaltiesConfig = field(default_factory=MomentumInputsPenaltiesConfig)
     clamp_low: float = -1.0
     clamp_high: float = 1.5
     winsorize_pct: float = 0.05
 
-    def weights_dict(self) -> dict[str, float]:
-        w = self.weights
-        return {
-            "rs_3m": w.rs_3m, "rs_6m": w.rs_6m, "risk_adj_3m": w.risk_adj_3m,
-            "trend_structure": w.trend_structure, "return_1m": w.return_1m,
-            "return_5d": w.return_5d,
-        }
 
-    def penalties_dict(self) -> dict[str, float]:
-        p = self.penalties
-        return {
-            "falling_knife_3m_threshold": p.falling_knife_3m_threshold,
-            "falling_knife_penalty": p.falling_knife_penalty,
-            "overextension_52w_threshold": p.overextension_52w_threshold,
-            "overextension_penalty": p.overextension_penalty,
-            "high_vol_annual_threshold": p.high_vol_annual_threshold,
-            "high_vol_penalty": p.high_vol_penalty,
-        }
+@dataclass(frozen=True)
+class MomentumWarmupConfig:
+    """Bin-based momentum scoring used during the simulator's ~63-day warm-up window."""
+    position_bin_boundaries: tuple[float, ...] = (0.15, 0.35, 0.75, 0.95)
+    position_bin_scores: tuple[float, ...] = (-0.35, -0.10, 0.55, 0.85, 0.45)
+    return_1m_low_position_cutoff: float = 0.40
+    return_1m_recovery_threshold: float = 0.05
+    return_1m_falling_knife_threshold: float = -0.10
+    return_1m_recovery_bonus: float = 0.15
+    return_1m_falling_knife_penalty: float = 0.20
 
-    def as_dict(self) -> dict:
-        return {
-            "weights": self.weights_dict(),
-            "penalties": self.penalties_dict(),
-            "clamp_low": self.clamp_low,
-            "clamp_high": self.clamp_high,
-            "winsorize_pct": self.winsorize_pct,
-        }
+
+@dataclass(frozen=True)
+class PeerBlendConfig:
+    industry_relative: float = 0.60
+    sector_relative: float = 0.25
+    market_relative: float = 0.15
+
+
+@dataclass(frozen=True)
+class PeerStandardizationConfig:
+    group_by: str = "industry"
+    fallback_group_by: str = "sector"
+    min_group_size: int = 8
+    method: str = "percentile"
+    winsorize_pct: float = 0.05
+    clamp_low: float = -1.0
+    clamp_high: float = 1.5
+    blend: PeerBlendConfig = field(default_factory=PeerBlendConfig)
+
+    def __post_init__(self) -> None:
+        if self.method not in {"percentile", "robust_z"}:
+            raise ValueError(f"peer_standardization.method must be 'percentile' or 'robust_z' (got {self.method!r})")
+        if self.group_by not in {"industry", "sector", "market"}:
+            raise ValueError(f"peer_standardization.group_by invalid: {self.group_by!r}")
+        if self.min_group_size < 2:
+            raise ValueError(f"peer_standardization.min_group_size must be >= 2 (got {self.min_group_size})")
+        if not (0.0 <= self.winsorize_pct <= 0.25):
+            raise ValueError(f"peer_standardization.winsorize_pct out of [0, 0.25] (got {self.winsorize_pct})")
+        if self.clamp_low >= self.clamp_high:
+            raise ValueError(
+                f"peer_standardization.clamp_low must be < clamp_high (got {self.clamp_low}, {self.clamp_high})"
+            )
+        _blend_sum = (
+            self.blend.industry_relative + self.blend.sector_relative + self.blend.market_relative
+        )
+        if abs(_blend_sum - 1.0) > 0.01:
+            raise ValueError(
+                f"peer_standardization.blend weights must sum to 1.0 (got {_blend_sum:.3f})"
+            )
+
+
+@dataclass(frozen=True)
+class FactorDistressConfig:
+    pe_threshold: float = 5.0
+    pe_penalty: float = 0.30
+    negative_eps_penalty: float = 0.25
+
+
+@dataclass(frozen=True)
+class FactorConfig:
+    """Per-factor knobs. Not every field applies to every factor — extras are ignored."""
+    enabled: bool = True
+    peer_relative: bool = True
+    pe_weight: float = 0.70
+    pb_weight: float = 0.30
+    use_legacy_checklist_fallback: bool = True
+    safety_aware: bool = True
+    anchor_blend: float = 0.0
+    distress: FactorDistressConfig = field(default_factory=FactorDistressConfig)
+
+
+@dataclass(frozen=True)
+class ScoringFactorsConfig:
+    value: FactorConfig = field(default_factory=lambda: FactorConfig(pe_weight=0.70, pb_weight=0.30))
+    quality: FactorConfig = field(default_factory=FactorConfig)
+    momentum: FactorConfig = field(default_factory=lambda: FactorConfig(enabled=False))
+    income: FactorConfig = field(default_factory=FactorConfig)
+    growth_leadership: FactorConfig = field(default_factory=lambda: FactorConfig(enabled=False))
+
+
+@dataclass(frozen=True)
+class ScoringConfig:
+    """Single unified scoring engine config — replaces v1 scoring, momentum, momentum_v2,
+    value_v2, and scoring_v3 blocks. Hard-cutover; legacy keys raise ConfigError."""
+    enabled: bool = True
+    peer_standardization: PeerStandardizationConfig = field(default_factory=PeerStandardizationConfig)
+    factors: ScoringFactorsConfig = field(default_factory=ScoringFactorsConfig)
+    momentum_inputs: MomentumInputsConfig = field(default_factory=MomentumInputsConfig)
+    momentum_warmup: MomentumWarmupConfig = field(default_factory=MomentumWarmupConfig)
+    quality_checklist: QualityChecklistConfig = field(default_factory=QualityChecklistConfig)
 
 
 @dataclass(frozen=True)
@@ -356,10 +399,149 @@ class ArchetypeManagementConfig:
 
 
 @dataclass(frozen=True)
+class ConcentrationApplyToConfig:
+    """Which sleeves are subject to concentration enforcement."""
+    active_sleeve: bool = True
+    etf_sleeve: bool = False
+
+
+@dataclass(frozen=True)
+class ConcentrationEnforcementConfig:
+    """Per-decision rules. Defaults are no-op (block_new_buys gated by warn_only)."""
+    block_new_buys: bool = True
+    allow_existing_positions: bool = True
+    allow_trim_only: bool = True
+    allow_sell: bool = True
+    allow_if_underweight: bool = True
+    downsize_to_fit: bool = True            # try to shrink alloc before blocking
+    min_remaining_alloc_multiple: float = 1.0  # x min_order_amount
+
+
+@dataclass(frozen=True)
 class ConcentrationLimitsConfig:
+    """Cluster + sector concentration limits. `warn_only: true` (default) keeps
+    pre-enforcement behavior — set false to activate `apply_to` + `enforcement`."""
     enabled: bool = True
+    warn_only: bool = True
     max_cluster_weight: float = 0.35
     max_sector_weight: float = 0.40
     cluster_method: str = "pca"
     n_clusters: int = 6
-    warn_only: bool = True
+    apply_to: ConcentrationApplyToConfig = field(default_factory=ConcentrationApplyToConfig)
+    enforcement: ConcentrationEnforcementConfig = field(default_factory=ConcentrationEnforcementConfig)
+
+
+# ── Archetype classifier v2 — config-driven thresholds + strict defensive_income gate ──
+
+@dataclass(frozen=True)
+class ConfidenceBucketsConfig:
+    """Thresholds for high/medium/low confidence buckets on classifier results."""
+    high_min: float = 0.65
+    medium_min: float = 0.45
+
+
+@dataclass(frozen=True)
+class DefensiveIncomeGateConfig:
+    """Strict eligibility gate for defensive_income. require_yield=false (default)
+    keeps current scoring behavior."""
+    require_yield: bool = False
+    min_income_score: float = 0.30
+    min_quality_score: float = 0.40
+    min_momentum_score: float = -0.10
+    max_volatility_percentile: float = 0.75
+    reject_falling_knife: bool = True
+    yield_high: float = 0.80
+    yield_moderate: float = 0.50
+    yield_minimal: float = 0.05
+    sector_defensive: tuple[str, ...] = (
+        "Utilities", "Real Estate", "Consumer Non-Durables",
+        "Consumer Staples", "Finance",
+    )
+    industry_defensive: tuple[str, ...] = (
+        "Electric Utilities", "Gas Utilities", "Multi-Utilities",
+        "Water Utilities", "Real Estate Investment Trusts",
+        "Real Estate (Operations & Services)",
+    )
+    quality_min_label: float = 0.25
+    momentum_disqualify_above: float = 0.50
+
+
+@dataclass(frozen=True)
+class QualityCompounderThresholdsConfig:
+    market_cap_mega: float = 100_000_000_000
+    market_cap_large: float =  10_000_000_000
+    market_cap_small: float =     500_000_000
+    maintenance_low: float = 0.25
+    maintenance_high: float = 0.27
+    maintenance_speculative: float = 1.0
+    day_trade_normal_max: float = 0.25
+    analyst_buy_strong: float = 0.80
+    analyst_buy_moderate: float = 0.65
+    analyst_buy_weak: float = 0.40
+    quality_high: float = 0.60
+    quality_moderate: float = 0.35
+    quality_low: float = 0.10
+    employees_scaled: float = 50_000
+    employees_small: float = 2_000
+
+
+@dataclass(frozen=True)
+class LegacyTurnaroundThresholdsConfig:
+    maintenance_speculative: float = 1.0
+    maintenance_elevated: float = 0.40
+    maintenance_above_standard: float = 0.27
+    day_trade_elevated: float = 0.25
+    market_cap_mid: float = 2_000_000_000
+    market_cap_large: float = 10_000_000_000
+    market_cap_mega: float = 100_000_000_000
+    analyst_buy_weak: float = 0.35
+    analyst_buy_moderate: float = 0.55
+    analyst_buy_strong: float = 0.80
+    momentum_strong: float = 0.30
+
+
+@dataclass(frozen=True)
+class SpeculativeMomentumThresholdsConfig:
+    momentum_very_strong: float = 0.60
+    momentum_strong: float = 0.35
+    quality_very_low: float = 0.10
+    quality_low: float = 0.25
+    quality_too_high: float = 0.60
+    maintenance_high: float = 1.0
+    maintenance_elevated: float = 0.40
+    day_trade_high: float = 0.40
+    market_cap_small: float = 500_000_000
+    market_cap_mega: float = 100_000_000_000
+    income_minimal: float = 0.05
+
+
+@dataclass(frozen=True)
+class ValueRecoveryThresholdsConfig:
+    value_undervalued: float = 0.60
+    value_moderate: float = 0.30
+    momentum_improving_max: float = 0.40
+    momentum_falling_min: float = -0.20
+    quality_min: float = 0.15
+    quality_max: float = 0.55
+    maintenance_distress: float = 1.0
+
+
+@dataclass(frozen=True)
+class ArchetypeClassifierConfig:
+    """Config-driven thresholds for each archetype scorer + the defensive_income gate.
+    `enabled: false` (default) keeps the v1 hardcoded-threshold scorers' behavior."""
+    enabled: bool = False
+    confidence_buckets: ConfidenceBucketsConfig = field(default_factory=ConfidenceBucketsConfig)
+    defensive_income: DefensiveIncomeGateConfig = field(default_factory=DefensiveIncomeGateConfig)
+    quality_compounder: QualityCompounderThresholdsConfig = field(
+        default_factory=QualityCompounderThresholdsConfig
+    )
+    legacy_turnaround: LegacyTurnaroundThresholdsConfig = field(
+        default_factory=LegacyTurnaroundThresholdsConfig
+    )
+    speculative_momentum: SpeculativeMomentumThresholdsConfig = field(
+        default_factory=SpeculativeMomentumThresholdsConfig
+    )
+    value_recovery: ValueRecoveryThresholdsConfig = field(
+        default_factory=ValueRecoveryThresholdsConfig
+    )

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
@@ -55,7 +55,7 @@ class RobustScanResult:
             use_active = (self.scope == "active_sleeve_compounding"
                           and getattr(s, "active_robust_score", None) is not None)
 
-            def _get(attr, active_attr):
+            def _get(attr, active_attr, h_cells=h_cells, use_active=use_active):
                 vals = []
                 for c in h_cells:
                     sm = c.summary
@@ -212,7 +212,6 @@ def _aggregate(run_matrix: list[dict], cells: list[ScanCell], scope: str) -> Rob
     sharpes   = _vals("median_sharpe",         "median_active_sharpe")
     dds       = _vals("median_drawdown",        "worst_decile_active_drawdown")
     scores    = _vals("robust_score",           "active_robust_score")
-    pcts      = _vals("pct_beating_benchmark",  "pct_active_beating_benchmark")
 
     result = RobustScanResult(
         run_matrix=run_matrix,

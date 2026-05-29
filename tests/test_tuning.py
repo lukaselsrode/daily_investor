@@ -17,15 +17,15 @@ import numpy as np
 import pytest
 
 from backtesting.types import SimResult
-from tuning.results import AutoTuneResult, StabilityReport, TuneResult
-from tuning.stability import StabilityAnalyzer
-from tuning.tuner import ParameterTuner
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+from tuning.constants import PARAM_NAMES as _PN
+from tuning.results import AutoTuneResult, StabilityReport, TuneResult
+from tuning.stability import StabilityAnalyzer
+from tuning.tuner import ParameterTuner
 
-from tuning.constants import PARAM_NAMES as _PN  # noqa: E402
 _N_PARAMS = len(_PN)
 
 

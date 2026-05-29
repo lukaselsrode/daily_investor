@@ -67,57 +67,31 @@ def render() -> None:
 
     st.caption(f"Source: agg_data {data_date('agg_data')} | {len(df)} symbols")
 
-    has_v2   = "value_score_raw" in df.columns and df["value_score_raw"].notna().any()
     has_sect = "sector" in df.columns
 
     # ── 1. Distribution ──────────────────────────────────────────────────────
     st.subheader("1 · Score distribution")
 
-    if has_v2:
-        t1, t2 = st.tabs(["v2 (current)", "legacy (raw)"])
-        vs_cols = [("value_score", t1), ("value_score_raw", t2)]
+    s = _num(df, "value_score").dropna()
+    if s.empty:
+        st.info("No data for value_score.")
     else:
-        t1 = st.container()
-        vs_cols = [("value_score", t1)]
+        pc1, pc2, pc3, pc4 = st.columns(4)
+        pc1.metric("Mean",  f"{s.mean():.4f}")
+        pc2.metric("Std",   f"{s.std():.4f}")
+        pc3.metric("Skew",  f"{s.skew():.3f}")
+        pc4.metric("Kurt",  f"{float(s.kurtosis()):.3f}")
 
-    for col, tab in vs_cols:
-        with tab:
-            s = _num(df, col).dropna()
-            if s.empty:
-                st.info(f"No data for {col}.")
-                continue
-            pc1, pc2, pc3, pc4 = st.columns(4)
-            pc1.metric("Mean",  f"{s.mean():.4f}")
-            pc2.metric("Std",   f"{s.std():.4f}")
-            pc3.metric("Skew",  f"{s.skew():.3f}")
-            pc4.metric("Kurt",  f"{float(s.kurtosis()):.3f}")
+        c_hist, c_pct = st.columns([2, 1])
+        with c_hist:
+            st.caption("value_score histogram")
+            st.bar_chart(fmt_bin_index(s.value_counts(bins=30, sort=False).sort_index()))
+        with c_pct:
+            st.caption("Percentile table")
+            st.dataframe(_percentile_table(s), use_container_width=True, hide_index=True)
 
-            c_hist, c_pct = st.columns([2, 1])
-            with c_hist:
-                st.caption(f"{col} histogram")
-                st.bar_chart(fmt_bin_index(s.value_counts(bins=30, sort=False).sort_index()))
-            with c_pct:
-                st.caption("Percentile table")
-                st.dataframe(_percentile_table(s), use_container_width=True, hide_index=True)
-
-    # Side-by-side tail comparison when v2 data is available
-    if has_v2:
-        st.divider()
-        st.subheader("Tail reduction: v2 vs legacy")
-        raw_s  = _num(df, "value_score_raw").dropna()
-        v2_s   = _num(df, "value_score").dropna()
-        if not raw_s.empty and not v2_s.empty:
-            tc1, tc2, tc3, tc4 = st.columns(4)
-            tc1.metric("Legacy p99",  f"{raw_s.quantile(0.99):.3f}")
-            tc2.metric("v2 p99",      f"{v2_s.quantile(0.99):.3f}",
-                       delta=f"{v2_s.quantile(0.99) - raw_s.quantile(0.99):+.3f}")
-            tc3.metric("Legacy std",  f"{raw_s.std():.3f}")
-            tc4.metric("v2 std",      f"{v2_s.std():.3f}",
-                       delta=f"{v2_s.std() - raw_s.std():+.3f}")
-            st.caption(
-                "Negative delta on p99 and std = heavy tails compressed. "
-                "Legacy scores in (−0.25, 5.0); v2 scores clamped to (−1.0, 1.5)."
-            )
+    # (Legacy v2/raw side-by-side comparison removed — value_score_raw is no longer
+    # written by any scorer.)
 
     # ── 2. Sector boxplots ───────────────────────────────────────────────────
     if has_sect:
@@ -263,9 +237,52 @@ def render() -> None:
             )
             st.dataframe(vc, use_container_width=True, hide_index=True)
 
-    # ── 6. Methodology note ──────────────────────────────────────────────────
+    # ── 6. Peer-relative diagnostics (fallback coverage) ──────────────────────
+    _peer_cols = [c for c in (
+        "value_fallback_reason", "quality_fallback_reason",
+        "momentum_fallback_reason", "income_fallback_reason",
+    ) if c in df.columns]
+    if _peer_cols:
+        st.divider()
+        st.subheader("6 · Peer-relative diagnostics")
+        st.caption(
+            "Industry → sector → market blended ranks. These tabs surface peer leaders "
+            "and how often a finer peer group was unavailable."
+        )
+
+        peer_tab_leaders, peer_tab_fb = st.tabs(["Peer leaders", "Fallback coverage"])
+
+        with peer_tab_leaders:
+            if "value_metric" in df.columns and "symbol" in df.columns:
+                lead_cols = [c for c in (
+                    "symbol", "sector", "industry",
+                    "value_metric", "quality_score", "momentum_score",
+                    "value_score", "income_score",
+                ) if c in df.columns]
+                st.markdown("**Top 20 by composite (peer leaders)**")
+                top = df.sort_values("value_metric", ascending=False).head(20)
+                st.dataframe(top[lead_cols].reset_index(drop=True), use_container_width=True)
+
+        with peer_tab_fb:
+            fb_rows = []
+            for fb_col in ("value_fallback_reason", "quality_fallback_reason",
+                           "momentum_fallback_reason", "income_fallback_reason"):
+                if fb_col in df.columns:
+                    for reason, n in df[fb_col].value_counts(dropna=False).items():
+                        fb_rows.append({"factor": fb_col, "fallback": str(reason), "n": int(n)})
+            if fb_rows:
+                st.dataframe(pd.DataFrame(fb_rows), use_container_width=True, hide_index=True)
+                st.caption(
+                    "industry = primary group had ≥ min_group_size peers; "
+                    "sector / market indicate fallback was used; legacy_checklist = "
+                    "quality fell back to the raw checklist."
+                )
+            else:
+                st.info("No fallback diagnostics available.")
+
+    # ── 7. Methodology note ──────────────────────────────────────────────────
     st.divider()
-    with st.expander("Methodology — value_v2 scoring"):
+    with st.expander("Methodology — peer-relative value scoring"):
         st.markdown("""
 **Legacy (value_score_raw)**
 

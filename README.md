@@ -95,21 +95,27 @@ daily_investor/
 │   │   └── sentiment.py              # Async Claude batch sentiment
 │   ├── strategy/
 │   │   ├── base.py                   # ScorerBase ABC, ScoreBreakdown
-│   │   ├── value.py                  # ValueScorer: P/E + P/B with guardrails (legacy)
-│   │   ├── value_v2.py               # Sector-relative winsorized percentile value scoring
-│   │   ├── quality.py                # QualityScorer: liquidity, earnings, dividend health
-│   │   ├── income.py                 # IncomeScorer: yield with trap detection
-│   │   ├── momentum.py               # MomentumEngine: v2 multi-factor + v1 fallback
-│   │   ├── composite.py              # CompositeScorer: weighted combination → value_metric
-│   │   ├── snapshots.py              # Parquet snapshot store: save, load, prune, backfill
+│   │   ├── composite.py              # Composite scoring entry → value_metric
+│   │   ├── momentum.py               # Momentum engine (multi-factor + warmup fallback)
+│   │   ├── factor_interactions.py    # Cross-factor interaction adjustments
+│   │   ├── snapshots.py              # Parquet snapshot store: save, load, prune, backfill, rescore
+│   │   ├── scoring/                  # Unified peer-relative factor scoring engine (peer-1)
+│   │   │   ├── composite.py          # compute_metric: blends factors → value_metric
+│   │   │   ├── value.py              # Sector-relative winsorized percentile value scoring
+│   │   │   ├── quality.py            # Quality scoring (peer-relative + legacy checklist fallback)
+│   │   │   ├── income.py             # Income/yield scoring with trap detection
+│   │   │   ├── momentum.py           # Momentum factor scoring
+│   │   │   ├── growth.py             # Growth factor scoring
+│   │   │   ├── peer.py               # Peer-relative ranking + anchor blending
+│   │   │   └── _legacy_checklist.py  # Private legacy checklist scorers (fallback)
 │   │   ├── regimes/
 │   │   │   ├── models.py             # RegimeState, RegimeHistoryEntry, RegimeLabel
 │   │   │   ├── detector.py           # RegimeDetector: live detect + historical replay
 │   │   │   └── __init__.py
-│   │   └── research/
-│   │       ├── ic_engine.py          # FactorResearchEngine: multi-horizon IC, decay, decile
+│   │   └── research/                 # Compat re-export only → research/ic_engine.py
 │   │       └── __init__.py
 │   ├── research/
+│   │   ├── ic_engine.py              # FactorResearchEngine: multi-horizon IC, decay, decile
 │   │   └── distribution_regime_analysis.py  # DistributionAnalyzer: bimodality, tail IC, clusters
 │   ├── portfolio/
 │   │   ├── risk.py                   # RiskManager.can_buy() — position/sector/order gates
@@ -422,7 +428,7 @@ IC > 0.05 = moderate signal. ICIR > 0.5 = actionable.
 
 ### Distribution Regime Analysis
 
-Tests whether the post-value_v2 bimodal score distribution contains predictive information.
+Tests whether the bimodal peer-relative value score distribution contains predictive information.
 
 ```python
 from research.distribution_regime_analysis import DistributionAnalyzer
@@ -517,7 +523,7 @@ Cross-sectional percentile ranking across stocks at one point in time is **not**
 score_weights (quality, momentum)
 index_pct                   — ETF allocation fraction
 trailing_stop_pct           — trailing stop distance from peak
-momentum_v2 sub-weights:
+scoring.momentum_inputs.weights sub-weights:
   rs_3m, rs_6m, risk_adj_3m, trend_structure, return_1m
 ```
 
@@ -680,13 +686,16 @@ regime:
     max_buys_override: 3
     stop_loss_tighten: 0.05
 
-# Sector-relative value scoring (v2)
-value_v2:
-  enabled: true
-  winsorize_pct: 0.05
-  sector_relative: true
-  clamp_low: -1.0
-  clamp_high: 1.5
+# Peer-relative factor scoring (unified `scoring` block — replaces the
+# legacy value_v2/momentum_v2/scoring_v3 top-level keys)
+scoring:
+  factors:
+    value:
+      enabled: true
+      peer_relative: true
+      pe_weight: 0.7
+      pb_weight: 0.3
+      anchor_blend: 0.5
 
 # Backtest
 backtest:

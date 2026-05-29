@@ -18,6 +18,18 @@ def print_backtest_report(report: BacktestReport) -> None:
     print(f"{'=' * 64}")
     print(f"  Universe: {r.n_symbols} symbols, {r.n_days} trading days")
 
+    pc = r.peer_config or {}
+    blend = pc.get("blend", {}) or {}
+    engine = r.scoring_engine_version or "peer-1"
+    print(
+        f"  Scoring engine: {engine}"
+        f" (industry={blend.get('industry_relative', 0.0):.2f}"
+        f" / sector={blend.get('sector_relative', 0.0):.2f}"
+        f" / market={blend.get('market_relative', 0.0):.2f}"
+        f", min_group={pc.get('min_group_size', '?')},"
+        f" method={pc.get('method', 'percentile')})"
+    )
+
     pool = tr.pool_diagnostics
     if pool is not None:
         print(f"\n  CANDIDATE POOL  (selection mode: {CANDIDATE_SELECTION_PARAMS['mode']})")
@@ -26,15 +38,28 @@ def print_backtest_report(report: BacktestReport) -> None:
             f"    Avg factors:   quality={pool.avg_quality:.2f}  momentum={pool.avg_momentum:.2f}  "
             f"income={pool.avg_income:.2f}  value={pool.avg_value:.2f}"
         )
-        if pool.n_floor_excluded or pool.n_quality_gate_excluded or pool.n_momentum_gate_excluded or pool.n_income_trap_excluded:
+        v3_extra = getattr(pool, "n_peer_relative_rank_excluded", 0) or 0
+        if (
+            pool.n_floor_excluded
+            or pool.n_quality_gate_excluded
+            or pool.n_momentum_gate_excluded
+            or pool.n_income_trap_excluded
+            or v3_extra
+        ):
+            extra = f"  peer_rank={v3_extra}" if v3_extra else ""
             print(
                 f"    Gates excluded: floor={pool.n_floor_excluded}  "
                 f"quality={pool.n_quality_gate_excluded}  "
                 f"momentum={pool.n_momentum_gate_excluded}  "
                 f"income_trap={pool.n_income_trap_excluded}"
+                + extra
             )
         if pool.excluded_high_income_low_momentum:
             print(f"    Income-trap excluded: {', '.join(pool.excluded_high_income_low_momentum)}")
+        peer_fb = getattr(pool, "peer_fallback_usage", None)
+        if peer_fb:
+            top_fb = sorted(peer_fb.items(), key=lambda kv: -kv[1])[:4]
+            print("    Peer fallbacks: " + "  ".join(f"{k}={v}" for k, v in top_fb))
         if pool.sector_counts:
             top = sorted(pool.sector_counts.items(), key=lambda x: -x[1])[:6]
             print("    Sectors:       " + "  ".join(f"{s}={c}" for s, c in top))

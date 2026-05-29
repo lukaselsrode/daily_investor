@@ -42,9 +42,6 @@ def test_unknown_preset_raises_value_error():
 def test_phase2_preset_raises_not_implemented():
     from tuning.presets import validate_preset
     with pytest.raises(NotImplementedError, match="Phase 2"):
-        validate_preset("active_candidate_filters")
-
-    with pytest.raises(NotImplementedError, match="Phase 2"):
         validate_preset("active_rebalance_cooldown")
 
     with pytest.raises(NotImplementedError, match="Phase 2"):

@@ -507,7 +507,6 @@ def _render_random_search_mode(scope: str = "overall_strategy", preset: str | No
     from tuning.profiles import (
         HORIZON_PROFILES,
         ROBUSTNESS_PROFILES,
-        effort_caption,
         expand_run_matrix,
     )
 
@@ -734,6 +733,7 @@ Config bounds from `tuning.parameter_bounds` are respected when enabled.
         best = rows[0] if rows else None
         if best:
             import yaml as _yaml
+
             # Build nested config YAML from active param values
             from tuning.constants import _CONFIG_PATH_TO_PARAM_IDX, PARAM_NAMES
             _path_inv = {v: k for k, v in _CONFIG_PATH_TO_PARAM_IDX.items()}
@@ -1188,7 +1188,7 @@ def _render_scipy_mode(scope: str = "overall_strategy", preset: str | None = Non
             if overfit > 0.5:
                 st.warning(
                     f"Overfit warning: optimized config only beats benchmark on "
-                    f"{int(round((1 - overfit) * len(unique_horizons)))}/{len(unique_horizons)} horizons. "
+                    f"{round((1 - overfit) * len(unique_horizons))}/{len(unique_horizons)} horizons. "
                     "Results may not generalize."
                 )
             elif overfit > 0.2:

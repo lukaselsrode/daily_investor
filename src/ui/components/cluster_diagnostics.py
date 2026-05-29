@@ -117,3 +117,55 @@ def _text_fallback(cluster_result) -> None:
     st.write(f"Avg max cluster weight: {cluster_result.avg_max_cluster_weight:.1%}")
     st.write(f"Worst max cluster weight: {cluster_result.worst_max_cluster_weight:.1%}")
     st.write(f"Violation days: {cluster_result.n_violation_days}")
+
+
+def render_cluster_attribution_table(sim_result) -> None:
+    """Per-cluster attribution table (active weight, max allowed, PnL, win rate,
+    avg hold, dominant sectors/archetypes, decision counts).
+
+    Reads from `SimResult.cluster_*` rollups populated by the simulator when
+    `cluster_tracking=True`. No-op when those dicts are empty.
+    """
+    sw = getattr(sim_result, "cluster_sleeve_weight", {}) or {}
+    pnl = getattr(sim_result, "cluster_pnl", {}) or {}
+    counts = getattr(sim_result, "cluster_trade_counts", {}) or {}
+    wins = getattr(sim_result, "cluster_win_rate", {}) or {}
+    holds = getattr(sim_result, "cluster_avg_hold_days", {}) or {}
+    excess = getattr(sim_result, "cluster_active_excess", {}) or {}
+    dom_sect = getattr(sim_result, "cluster_dominant_sectors", {}) or {}
+    dom_arch = getattr(sim_result, "cluster_dominant_archetypes", {}) or {}
+    dec_counts = getattr(sim_result, "cluster_decision_counts", {}) or {}
+    n_viol = getattr(sim_result, "cluster_violations_count", 0)
+
+    if not (sw or pnl or counts):
+        return  # nothing to render
+
+    import pandas as pd
+
+    from util import CONCENTRATION_LIMIT_PARAMS as _CLP
+    max_allowed = float(_CLP.get("max_cluster_weight", 0.35))
+
+    st.subheader("Cluster attribution")
+    clusters = sorted(set(list(sw) + list(pnl) + list(counts)))
+    rows = []
+    for c in clusters:
+        rows.append({
+            "cluster": c,
+            "active_weight": f"{sw.get(c, 0.0):.1%}",
+            "max_allowed": f"{max_allowed:.1%}",
+            "PnL": f"${pnl.get(c, 0.0):+,.2f}",
+            "excess_vs_SPY": f"{excess.get(c, 0.0):+.1%}" if c in excess else "—",
+            "trades": counts.get(c, 0),
+            "win_rate": f"{wins.get(c, 0.0):.0%}" if c in wins else "—",
+            "avg_hold (d)": f"{holds.get(c, 0.0):.0f}" if c in holds else "—",
+            "dominant_sectors": dom_sect.get(c, "—"),
+            "dominant_archetypes": dom_arch.get(c, "—"),
+        })
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    if dec_counts:
+        cols = st.columns(4)
+        cols[0].metric("Cluster cap violations", n_viol)
+        cols[1].metric("Allowed", dec_counts.get("allowed", 0))
+        cols[2].metric("Downsized", dec_counts.get("downsized", 0))
+        cols[3].metric("Blocked", dec_counts.get("blocked", 0))

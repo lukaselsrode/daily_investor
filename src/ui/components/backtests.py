@@ -230,11 +230,15 @@ def _detail_expander(rpt, train):
             from ui.components.archetype_diagnostics import render_archetype_breakdown
             render_archetype_breakdown(train)
 
-    # Cluster concentration timeline
+    # Cluster concentration timeline + attribution table
     if getattr(train, "cluster_result", None) is not None:
         with st.expander("Cluster concentration timeline"):
             from ui.components.cluster_diagnostics import render_cluster_diagnostics
             render_cluster_diagnostics(train.cluster_result)
+    if getattr(train, "cluster_pnl", None) or getattr(train, "cluster_sleeve_weight", None):
+        with st.expander("Cluster attribution table"):
+            from ui.components.cluster_diagnostics import render_cluster_attribution_table
+            render_cluster_attribution_table(train)
 
     if train.trade_log:
         with st.expander(f"Trade log ({len(train.trade_log)} records)"):
