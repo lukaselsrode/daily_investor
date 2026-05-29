@@ -94,8 +94,6 @@ daily_investor/
 │   │   ├── valuation.py              # Industry ratio fetching (FinViz)
 │   │   └── sentiment.py              # Async Claude batch sentiment
 │   ├── strategy/
-│   │   ├── base.py                   # ScorerBase ABC, ScoreBreakdown
-│   │   ├── composite.py              # Composite scoring entry → value_metric
 │   │   ├── momentum.py               # Momentum engine (multi-factor + warmup fallback)
 │   │   ├── factor_interactions.py    # Cross-factor interaction adjustments
 │   │   ├── snapshots.py              # Parquet snapshot store: save, load, prune, backfill, rescore

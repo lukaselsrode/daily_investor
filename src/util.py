@@ -217,10 +217,9 @@ def _factor(name: str, defaults: dict) -> dict:
                                                      defaults.get("use_legacy_checklist_fallback", True))),
         "safety_aware":                  bool(raw.get("safety_aware",  defaults.get("safety_aware", True))),
         # anchor_blend: weight on the cross-sectional anchor (vs pure peer-relative).
-        # Accept legacy `v2_blend` key for one transition cycle so hand-edited configs don't break.
+        # The legacy `v2_blend` key is migrated to `anchor_blend` by `migrate-scoring`.
         "anchor_blend":                  float(raw.get("anchor_blend",
-                                                       raw.get("v2_blend",
-                                                               defaults.get("anchor_blend", 0.0)))),
+                                                       defaults.get("anchor_blend", 0.0))),
     }
     if "distress" in raw or name == "value":
         d = raw.get("distress", {})

@@ -1,5 +1,7 @@
-"""strategy — Composable scoring engines."""
-from .base import ScorerBase
-from .composite import CompositeScorer
+"""strategy — factor scoring engines.
 
-__all__ = ["CompositeScorer", "ScorerBase"]
+Production scoring lives in the functional ``strategy.scoring`` package
+(``compute_metric`` + ``apply_*`` factor scorers). Import from there directly.
+"""
+
+__all__: list[str] = []
