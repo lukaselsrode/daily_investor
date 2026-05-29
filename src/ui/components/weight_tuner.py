@@ -608,24 +608,39 @@ Config bounds from `tuning.parameter_bounds` are respected when enabled.
             respect_bounds = st.checkbox("Respect config weight bounds", value=True, key="at_bounds")
 
     # ── Resolve effective params from profile + overrides ─────────────────
+    effective_run_matrix: list[dict] | None = None
     if use_random_windows:
         rp = ROBUSTNESS_PROFILES[robustness]
         hp = HORIZON_PROFILES[horizon]
-        # dominant horizon = longest in profile
-        _dominant_horizon = max(hp)
-        effective_window_days = adv_window_days if adv_window_days is not None else _dominant_horizon
-        effective_n_windows   = adv_n_windows   if adv_n_windows   is not None else rp["windows_per_horizon"] * len(hp)
-        effective_n_samples   = adv_n_samples   if adv_n_samples   is not None else rp["weight_samples"]
-        effective_seed        = adv_seed         if adv_seed         is not None else rp["seeds"][0]
 
-        total_evals = effective_n_samples * effective_n_windows
-        cap = effort_caption(robustness, horizon) if adv_window_days is None and adv_n_windows is None else (
-            f"Advanced override: {effective_n_samples} samples × {effective_n_windows} windows = "
-            f"**{total_evals} simulations**"
+        # Build the (horizon × seed) run matrix that EACH candidate is scored against
+        custom_h = [adv_window_days] if adv_window_days is not None else None
+        custom_s = [adv_seed]        if adv_seed         is not None else None
+        effective_run_matrix = expand_run_matrix(
+            robustness, horizon,
+            custom_horizons=custom_h,
+            custom_seeds=custom_s,
+            windows_override=adv_n_windows,
         )
-        st.caption(cap)
-        if effective_window_days * 2 > n_days_load:
+        effective_n_samples = adv_n_samples if adv_n_samples is not None else rp["weight_samples"]
+
+        n_cells     = len(effective_run_matrix)
+        cells_sims  = sum(c["n_windows"] for c in effective_run_matrix)
+        total_evals = effective_n_samples * cells_sims
+        st.caption(
+            f"{effective_n_samples} weight samples × {n_cells} cells × "
+            f"{effective_run_matrix[0]['n_windows']} windows = "
+            f"**{total_evals} simulations** "
+            f"(each candidate scored across {n_cells} horizon-seed combinations)"
+        )
+        _max_horizon = max(c["horizon_days"] for c in effective_run_matrix)
+        if _max_horizon * 2 > n_days_load:
             st.warning("Dominant horizon > half loaded history. Increase history days in Advanced.")
+
+        # legacy single-window values used only if run_matrix path fails inside backend
+        effective_window_days = max(hp)
+        effective_n_windows   = rp["windows_per_horizon"] * len(hp)
+        effective_seed        = rp["seeds"][0]
     else:
         effective_window_days = 90
         effective_n_windows   = 15
@@ -661,6 +676,7 @@ Config bounds from `tuning.parameter_bounds` are respected when enabled.
                         progress_callback=_cb,
                         scope=scope,
                         preset=preset,
+                        run_matrix=effective_run_matrix,
                     )
                     bar.empty()
                     st.session_state["at_result"] = tune_result
@@ -796,6 +812,58 @@ Config bounds from `tuning.parameter_bounds` are respected when enabled.
                                   yaxis_title="Value", legend=dict(orientation="h"))
                 st.plotly_chart(fig, use_container_width=True)
 
+    # ── Horizon / seed heatmaps for the best candidate ────────────────────
+    _best_scan = getattr(result.best_candidate, "scan_result", None) if result.best_candidate else None
+    if _best_scan is not None:
+        st.subheader("Best config — robustness across horizons")
+        overfit = _best_scan.overfit_warning_score()
+        if overfit > 0.5:
+            st.warning(
+                f"Overfit warning: best config only beats benchmark on "
+                f"{int((1 - overfit) * len({c.horizon_days for c in _best_scan.cells}))}/"
+                f"{len({c.horizon_days for c in _best_scan.cells})} horizons. "
+                "Results may not generalize."
+            )
+        elif overfit > 0.2:
+            st.info(f"Moderate horizon inconsistency (overfit score: {overfit:.0%}).")
+
+        try:
+            hm = _best_scan.horizon_heatmap_df()
+            disp = hm.copy()
+            for col in ["median excess", "median DD"]:
+                if col in disp.columns:
+                    disp[col] = disp[col].map(lambda v: f"{v:+.1%}" if not (v != v) else "—")
+            for col in ["median Sharpe", "robust score"]:
+                if col in disp.columns:
+                    disp[col] = disp[col].map(lambda v: f"{v:.3f}" if not (v != v) else "—")
+            if "% beating" in disp.columns:
+                disp["% beating"] = disp["% beating"].map(lambda v: f"{v:.0%}" if not (v != v) else "—")
+            if "horizon (days)" in disp.columns:
+                disp["horizon (days)"] = disp["horizon (days)"].astype(str) + "d"
+            st.dataframe(disp, use_container_width=True, hide_index=True)
+        except Exception as exc:
+            st.caption(f"Could not render horizon heatmap: {exc}")
+
+        # Seed stability — only if multiple seeds
+        try:
+            sd = _best_scan.seed_stability_df()
+            if len(sd) >= 2:
+                st.subheader("Best config — stability across seeds")
+                disp_sd = sd.copy()
+                for col in sd.columns:
+                    if col == "seed":
+                        continue
+                    disp_sd[col] = disp_sd[col].map(
+                        lambda v: f"{v:+.1%}" if not (v != v) else "—"
+                    )
+                st.dataframe(disp_sd, use_container_width=True, hide_index=True)
+                st.caption(
+                    "Each row is a random seed. Similar values across rows → results are seed-stable; "
+                    "large variance → config may be sensitive to luck."
+                )
+        except Exception:
+            pass
+
     st.subheader("Top candidates by robust score")
     df = result.to_dataframe()
     if not df.empty:
@@ -857,6 +925,12 @@ Config bounds from `tuning.parameter_bounds` are respected when enabled.
 # ---------------------------------------------------------------------------
 
 def _render_scipy_mode(scope: str = "overall_strategy", preset: str | None = None):
+    from tuning.profiles import (
+        HORIZON_PROFILES,
+        ROBUSTNESS_PROFILES,
+        expand_run_matrix,
+    )
+
     st.subheader("scipy Optimizer")
     st.caption("Differential evolution over all 15 parameters. Slower but explores the full param space.")
 
@@ -869,53 +943,129 @@ def _render_scipy_mode(scope: str = "overall_strategy", preset: str | None = Non
     )
     use_random_windows = optimize_over.startswith("🎲")
 
-    from ui.utils import LOOKAHEAD_LABELS
-    c1, c2 = st.columns(2)
-    with c1:
-        n_days = st.number_input("Look-back days", min_value=30, max_value=1000, value=90, step=30, key="sp_n_days")
-    with c2:
-        mode = st.selectbox("Backtest mode", BACKTEST_MODES, key="sp_mode")
-        st.caption(LOOKAHEAD_LABELS[mode])
-
+    # ── Profile selectors (primary inputs) ────────────────────────────────
     if use_random_windows:
-        c1, c2 = st.columns(2)
-        with c1:
-            sp_n_windows = st.number_input("Windows / evaluation", 3, 20, 8, 1, key="sp_n_windows",
-                                           help="More windows = more reliable but much slower")
-        with c2:
-            sp_window_days = st.number_input("Window length (days)", 20, 120, 45, 5, key="sp_window_days")
-        st.caption(
-            f"Each function evaluation runs {sp_n_windows} backtests. "
-            "Differential evolution typically needs 200–600 evaluations. "
-            "Expect 5–15 minutes."
+        pcol1, pcol2 = st.columns(2)
+        with pcol1:
+            robustness = st.selectbox(
+                "Robustness",
+                list(ROBUSTNESS_PROFILES),
+                index=1,
+                format_func=lambda k: {
+                    "quick":      "Quick — fast sanity check",
+                    "standard":   "Standard — normal research",
+                    "deep":       "Deep — stronger robustness",
+                    "exhaustive": "Exhaustive — overnight",
+                }[k],
+                key="sp_robustness",
+            )
+        with pcol2:
+            horizon = st.selectbox(
+                "Horizon profile",
+                list(HORIZON_PROFILES),
+                index=3,
+                format_func=lambda k: {
+                    "short":  "Short-term (30–90d)",
+                    "medium": "Medium-term (90–180d)",
+                    "long":   "Long-term (180–365d)",
+                    "mixed":  "Mixed (30–365d)",
+                }[k],
+                key="sp_horizon",
+            )
+
+    # ── Advanced expander (manual overrides) ──────────────────────────────
+    adv_n_windows   = None
+    adv_window_days = None
+    adv_seed        = None
+    n_days_load     = 730
+    mode            = BACKTEST_MODES[0]
+    maxiter         = 12
+    popsize         = 8
+    apply_cfg = force_apply = llm_review = False
+
+    with st.expander("Advanced options", expanded=False):
+        if use_random_windows:
+            adv_c1, adv_c2, adv_c3 = st.columns(3)
+            with adv_c1:
+                _nw = st.number_input("Windows/cell override (0=profile)", min_value=0, max_value=100,
+                                      value=0, step=5, key="sp_adv_n_windows")
+                adv_n_windows = int(_nw) if _nw > 0 else None
+            with adv_c2:
+                _wd = st.number_input("Window length override (days, 0=profile)", min_value=0, max_value=365,
+                                      value=0, step=10, key="sp_adv_window_days")
+                adv_window_days = int(_wd) if _wd > 0 else None
+            with adv_c3:
+                _sd = st.number_input("Seed override (0=profile)", min_value=0, max_value=9999,
+                                      value=0, key="sp_adv_seed")
+                adv_seed = int(_sd) if _sd > 0 else None
+
+        adv_c4, adv_c5 = st.columns(2)
+        with adv_c4:
+            n_days_load = st.number_input("History (days)", min_value=120, max_value=1500,
+                                          value=730, step=60, key="sp_n_days")
+        with adv_c5:
+            mode = st.selectbox("Backtest mode", BACKTEST_MODES, key="sp_mode")
+
+        if use_random_windows:
+            adv_c6, adv_c7 = st.columns(2)
+            with adv_c6:
+                maxiter = int(st.number_input("DE max iterations", min_value=4, max_value=50,
+                                              value=12, step=2, key="sp_maxiter"))
+            with adv_c7:
+                popsize = int(st.number_input("DE population size", min_value=4, max_value=30,
+                                              value=8, step=2, key="sp_popsize"))
+        else:
+            from ui.utils import ui_config
+            ui_cfg = ui_config()
+            allow_write = ui_cfg.get("allow_config_writes", False)
+            allow_force = ui_cfg.get("allow_force_apply", False)
+            apply_cfg   = st.checkbox("Apply if validation passes", disabled=not allow_write, key="sp_apply")
+            force_apply = st.checkbox("Force apply ⚠️", disabled=not allow_force, key="sp_force")
+            llm_review  = st.checkbox("LLM second-opinion review", key="sp_llm")
+
+    # ── Resolve effective run matrix from profile + overrides ─────────────
+    effective_run_matrix: list[dict] | None = None
+    if use_random_windows:
+        custom_h = [adv_window_days] if adv_window_days is not None else None
+        custom_s = [adv_seed]        if adv_seed         is not None else None
+        effective_run_matrix = expand_run_matrix(
+            robustness, horizon,
+            custom_horizons=custom_h,
+            custom_seeds=custom_s,
+            windows_override=adv_n_windows,
         )
-    else:
-        sp_n_windows = sp_window_days = None
-        from ui.utils import ui_config
-        ui_cfg = ui_config()
-        allow_write  = ui_cfg.get("allow_config_writes", False)
-        allow_force  = ui_cfg.get("allow_force_apply", False)
-        apply_cfg    = st.checkbox("Apply if validation passes", disabled=not allow_write, key="sp_apply")
-        force_apply  = st.checkbox("Force apply ⚠️", disabled=not allow_force, key="sp_force")
-        llm_review   = st.checkbox("LLM second-opinion review", key="sp_llm")
+        from tuning.constants import _effective_bounds as _eb
+        n_cells     = len(effective_run_matrix)
+        per_eval    = sum(c["n_windows"] for c in effective_run_matrix)
+        n_active    = len(_eb(scope=scope, preset=preset))
+        evals_est   = maxiter * popsize * max(n_active, 1)
+        total_sims  = evals_est * per_eval
+        st.caption(
+            f"{n_cells} cells × {effective_run_matrix[0]['n_windows']} windows/cell "
+            f"× ~{evals_est} DE evaluations ≈ **{total_sims:,} simulations** "
+            f"(each candidate scored across {n_cells} horizon-seed combinations)"
+        )
+        _max_horizon = max(c["horizon_days"] for c in effective_run_matrix)
+        if _max_horizon * 2 > n_days_load:
+            st.warning("Dominant horizon > half loaded history. Increase history in Advanced options.")
 
     if st.button("▶ Run scipy", type="primary", key="sp_run"):
         if use_random_windows:
             bar = st.progress(0, text="Loading data…")
             try:
                 from backtesting.data_loader import load_and_precompute
-                precomp = load_and_precompute(int(n_days), mode=mode)
+                precomp = load_and_precompute(int(n_days_load), mode=mode)
             except Exception as exc:
                 bar.empty()
                 st.error(f"Failed to load data: {exc}")
                 return
 
-            with st.spinner("Running scipy (random windows objective)…"):
+            with st.spinner("Running scipy (robust scan objective)…"):
                 try:
                     from scipy.optimize import differential_evolution
 
-                    from backtesting.random_walk import random_window_backtest
                     from tuning.constants import _effective_bounds
+                    from tuning.robust_scan import run_robust_scan
 
                     bounds = _effective_bounds(scope=scope, preset=preset)
                     call_count = [0]
@@ -925,26 +1075,35 @@ def _render_scipy_mode(scope: str = "overall_strategy", preset: str | None = Non
                         if call_count[0] % 10 == 0:
                             bar.progress(min(call_count[0], 99), text=f"Evaluation {call_count[0]}…")
                         try:
-                            summary = random_window_backtest(
+                            scan = run_robust_scan(
                                 precomp,
                                 params=np.array(params_arr),
-                                n_windows=int(sp_n_windows),
-                                window_days=int(sp_window_days),
-                                seed=42,
+                                run_matrix=effective_run_matrix,
                                 scope=scope,
                             )
-                            score = (
-                                summary.active_robust_score
-                                if scope == "active_sleeve_compounding" and summary.active_robust_score is not None
-                                else summary.robust_score
-                            )
-                            return -score
+                            return -float(scan.overall_robust_score)
                         except Exception:
                             return 0.0
 
-                    opt = differential_evolution(_obj, bounds, maxiter=12, popsize=8,
-                                                 seed=42, workers=1, tol=0.005)
+                    opt = differential_evolution(
+                        _obj, bounds,
+                        maxiter=maxiter, popsize=popsize,
+                        seed=42, workers=1, tol=0.005,
+                    )
                     bar.empty()
+
+                    # Final scan with best params to populate horizon / seed heatmaps
+                    final_scan = None
+                    try:
+                        final_scan = run_robust_scan(
+                            precomp,
+                            params=np.array(opt.x),
+                            run_matrix=effective_run_matrix,
+                            scope=scope,
+                        )
+                    except Exception:
+                        pass
+
                     from tuning.constants import PARAM_NAMES, _get_active_indices
                     active_idxs = _get_active_indices(scope=scope, preset=preset)
                     st.session_state["sp_result"] = {
@@ -953,6 +1112,8 @@ def _render_scipy_mode(scope: str = "overall_strategy", preset: str | None = Non
                         "active_params": [PARAM_NAMES[i] for i in active_idxs],
                         "converged": opt.success,
                         "message": opt.message,
+                        "scan_result": final_scan,
+                        "run_matrix": effective_run_matrix,
                     }
                     st.success(f"✅ Optimized in {call_count[0]} evaluations. Robust score: {-opt.fun:.4f}")
                 except Exception as exc:
@@ -960,11 +1121,11 @@ def _render_scipy_mode(scope: str = "overall_strategy", preset: str | None = Non
                     st.error(f"Optimization failed: {exc}")
                     st.exception(exc)
         else:
-            with st.spinner(f"Running {n_days}-day auto-tune…"):
+            with st.spinner(f"Running {n_days_load}-day auto-tune…"):
                 try:
                     from tuning.tuner import ParameterTuner
                     result = ParameterTuner().auto_tune(
-                        n_days=n_days, mode=mode,
+                        n_days=n_days_load, mode=mode,
                         apply=apply_cfg, force_apply=force_apply,
                         llm_review=llm_review,
                         scope=scope,
@@ -1017,6 +1178,57 @@ def _render_scipy_mode(scope: str = "overall_strategy", preset: str | None = Non
         disp["Optimized"]      = df["Optimized"].map("{:.4f}".format)
         disp["Δ Optimized"]    = df["Δ Optimized"].map("{:+.4f}".format)
         st.dataframe(disp, use_container_width=True, hide_index=True)
+
+        # ── Horizon / seed heatmaps for the optimized config ──────────
+        scan = sp.get("scan_result")
+        if scan is not None:
+            st.subheader("Optimized config — robustness across horizons")
+            unique_horizons = {c.horizon_days for c in scan.cells}
+            overfit = scan.overfit_warning_score()
+            if overfit > 0.5:
+                st.warning(
+                    f"Overfit warning: optimized config only beats benchmark on "
+                    f"{int(round((1 - overfit) * len(unique_horizons)))}/{len(unique_horizons)} horizons. "
+                    "Results may not generalize."
+                )
+            elif overfit > 0.2:
+                st.info(f"Moderate horizon inconsistency (overfit score: {overfit:.0%}).")
+
+            try:
+                hm = scan.horizon_heatmap_df()
+                disp_h = hm.copy()
+                for col in ["median excess", "median DD"]:
+                    if col in disp_h.columns:
+                        disp_h[col] = disp_h[col].map(lambda v: f"{v:+.1%}" if not (v != v) else "—")
+                for col in ["median Sharpe", "robust score"]:
+                    if col in disp_h.columns:
+                        disp_h[col] = disp_h[col].map(lambda v: f"{v:.3f}" if not (v != v) else "—")
+                if "% beating" in disp_h.columns:
+                    disp_h["% beating"] = disp_h["% beating"].map(lambda v: f"{v:.0%}" if not (v != v) else "—")
+                if "horizon (days)" in disp_h.columns:
+                    disp_h["horizon (days)"] = disp_h["horizon (days)"].astype(str) + "d"
+                st.dataframe(disp_h, use_container_width=True, hide_index=True)
+            except Exception as exc:
+                st.caption(f"Could not render horizon heatmap: {exc}")
+
+            try:
+                sd = scan.seed_stability_df()
+                if len(sd) >= 2:
+                    st.subheader("Optimized config — stability across seeds")
+                    disp_sd = sd.copy()
+                    for col in sd.columns:
+                        if col == "seed":
+                            continue
+                        disp_sd[col] = disp_sd[col].map(
+                            lambda v: f"{v:+.1%}" if not (v != v) else "—"
+                        )
+                    st.dataframe(disp_sd, use_container_width=True, hide_index=True)
+                    st.caption(
+                        "Each row is a random seed. Similar values across rows → results are seed-stable; "
+                        "large variance → config may be sensitive to luck."
+                    )
+            except Exception:
+                pass
 
     else:
         result = st.session_state.get("sp_tuner_result")
@@ -1120,14 +1332,28 @@ def render() -> None:
         from tuning.presets import list_presets
         _preset_names = [name for name, _ in list_presets() if not name.endswith("_filters")
                          and not name.endswith("_cooldown") and not name.endswith("_sizing")]
-        _preset_opts = ["(none — use config frozen_parameters)"] + _preset_names
+        # Group: Core (non-archetype) first, then Archetype-targeted
+        _archetype_names = [n for n in _preset_names if "archetype" in n
+                            or n in ("active_quality_compounders",
+                                     "active_speculative_momentum",
+                                     "active_value_recovery",
+                                     "active_defensive_income")]
+        _core_names = [n for n in _preset_names if n not in _archetype_names]
+        _preset_opts = (
+            ["(none — use config frozen_parameters)"]
+            + (["── Core ──"] if _core_names else []) + _core_names
+            + (["── Archetype ──"] if _archetype_names else []) + _archetype_names
+        )
         _sel = st.selectbox(
             "Tuning preset",
             _preset_opts,
             key="wt_preset",
             help="Presets override which parameters are tunable for this run. "
-                 "Phase 2 presets (candidate filters, cooldown, sizing) are not yet available.",
+                 "Archetype presets tune lifecycle slots 15-38 (24 archetype thresholds).",
         )
+        if _sel.startswith("── "):
+            # Section header — ignore as a selection
+            _sel = _preset_opts[0]
         if _sel != _preset_opts[0]:
             preset = _sel
             from tuning.presets import _PRESETS

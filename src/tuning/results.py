@@ -54,9 +54,10 @@ class AutoTuneResult:
     def param_spread(self) -> dict[str, float]:
         """Per-parameter absolute difference between Sharpe and Calmar optimized values."""
         from tuning.constants import PARAM_NAMES
+        n = min(len(self.sharpe_params), len(self.calmar_params), len(PARAM_NAMES))
         return {
-            name: abs(float(self.sharpe_params[i]) - float(self.calmar_params[i]))
-            for i, name in enumerate(PARAM_NAMES)
+            PARAM_NAMES[i]: abs(float(self.sharpe_params[i]) - float(self.calmar_params[i]))
+            for i in range(n)
         }
 
     @property

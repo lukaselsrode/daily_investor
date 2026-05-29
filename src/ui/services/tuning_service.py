@@ -14,8 +14,13 @@ def run_weight_tune(
     progress_callback=None,
     scope: str = "overall_strategy",
     preset: str | None = None,
+    run_matrix: list[dict] | None = None,
 ):
-    """Sample random score-weight combinations on a pre-loaded precomp, rank by robust_score."""
+    """Sample random parameter combinations on a pre-loaded precomp, rank by robust_score.
+
+    When run_matrix is provided, each candidate is evaluated across all (horizon, seed) cells
+    via tuning.robust_scan.run_robust_scan rather than a single random_window_backtest call.
+    """
     from tuning.random_tune import run_random_weight_tune
     return run_random_weight_tune(
         precomp,
@@ -27,6 +32,7 @@ def run_weight_tune(
         progress_callback=progress_callback,
         scope=scope,
         preset=preset,
+        run_matrix=run_matrix,
     )
 
 

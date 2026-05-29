@@ -497,22 +497,46 @@ def _build_archetype_thresholds(
     precomp: PrecomputedData,
     default_take_profit: float,
     default_trailing_stop: float,
-) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    default_min_hold: int,
+    arch_cfg_override: dict | None = None,
+) -> dict:
     """
     Classify each stock archetype from precomp quality/income/momentum scores.
-    Returns (take_profit_arr, trailing_stop_arr, archetype_labels) of shape (n_stocks,).
+    Returns a dict of per-stock arrays:
+      tp, stop, harvest, min_hold     — lifecycle thresholds
+      enabled, score_mult, pos_mult   — buy-side controls
+      max_sleeve, min_score           — sleeve / score gating (NaN/None when unset)
+      labels                          — archetype label per stock
     Falls back to defaults when archetype management is disabled or signals missing.
+
+    When arch_cfg_override is provided (from `archetype_cfg_from_params(params)`),
+    that takes precedence over ARCHETYPE_PARAMS so the tuner's lifecycle slots
+    actually flow into per-position thresholds.
     """
     from portfolio.position_archetypes import classify_archetype_from_scores
 
     n = precomp.quality_scores.shape[0]
-    tp_arr   = np.full(n, default_take_profit,  dtype=np.float64)
-    stop_arr = np.full(n, default_trailing_stop, dtype=np.float64)
-    labels   = [""] * n
+    tp_arr        = np.full(n, default_take_profit,    dtype=np.float64)
+    stop_arr      = np.full(n, default_trailing_stop,  dtype=np.float64)
+    harvest_arr   = np.full(n, default_take_profit,    dtype=np.float64)
+    min_hold_arr  = np.full(n, default_min_hold,       dtype=np.int32)
+    enabled_arr   = np.ones(n,                         dtype=bool)
+    score_mult_arr= np.ones(n,                         dtype=np.float64)
+    pos_mult_arr  = np.ones(n,                         dtype=np.float64)
+    max_sleeve_arr= np.full(n, np.nan,                 dtype=np.float64)
+    min_score_arr = np.full(n, np.nan,                 dtype=np.float64)
+    labels        = [""] * n
 
-    arch_cfg = ARCHETYPE_PARAMS if ARCHETYPE_PARAMS.get("enabled", False) else None
+    if arch_cfg_override is not None and arch_cfg_override:
+        arch_cfg = arch_cfg_override
+    else:
+        arch_cfg = ARCHETYPE_PARAMS if ARCHETYPE_PARAMS.get("enabled", False) else None
     if arch_cfg is None:
-        return tp_arr, stop_arr, labels
+        return {
+            "tp": tp_arr, "stop": stop_arr, "harvest": harvest_arr, "min_hold": min_hold_arr,
+            "enabled": enabled_arr, "score_mult": score_mult_arr, "pos_mult": pos_mult_arr,
+            "max_sleeve": max_sleeve_arr, "min_score": min_score_arr, "labels": labels,
+        }
 
     yt_mask = precomp.yield_trap_mask if precomp.yield_trap_mask is not None else np.zeros(n, dtype=bool)
 
@@ -525,13 +549,26 @@ def _build_archetype_thresholds(
                 yield_trap     = bool(yt_mask[i]),
                 archetype_cfg  = arch_cfg,
             )
-            tp_arr[i]   = policy.harvest_profit_threshold
-            stop_arr[i] = policy.trailing_stop_pct
-            labels[i]   = policy.archetype
+            tp_arr[i]        = policy.harvest_profit_threshold
+            stop_arr[i]      = policy.trailing_stop_pct
+            harvest_arr[i]   = policy.harvest_profit_threshold
+            min_hold_arr[i]  = int(policy.minimum_hold_days)
+            enabled_arr[i]   = bool(policy.enabled)
+            score_mult_arr[i]= float(policy.score_multiplier)
+            pos_mult_arr[i]  = float(policy.max_position_multiplier)
+            if policy.max_active_weight is not None:
+                max_sleeve_arr[i] = float(policy.max_active_weight)
+            if policy.min_score_to_buy is not None:
+                min_score_arr[i] = float(policy.min_score_to_buy)
+            labels[i]        = policy.archetype
         except Exception:
             pass
 
-    return tp_arr, stop_arr, labels
+    return {
+        "tp": tp_arr, "stop": stop_arr, "harvest": harvest_arr, "min_hold": min_hold_arr,
+        "enabled": enabled_arr, "score_mult": score_mult_arr, "pos_mult": pos_mult_arr,
+        "max_sleeve": max_sleeve_arr, "min_score": min_score_arr, "labels": labels,
+    }
 
 
 def run_simulation(
@@ -590,15 +627,57 @@ def run_simulation(
     max_order_pct  = RISK_LIMITS["max_order_pct_of_cash"]
     max_buys       = RISK_LIMITS["max_buys_per_rebalance"]
 
-    # Per-stock archetype thresholds (used when archetype_aware=True)
-    _arch_take_profit_arr, _arch_trailing_stop_arr, _arch_labels = (
-        _build_archetype_thresholds(precomp, take_profit_pct, trailing_stop)
-        if archetype_aware
-        else (None, None, [])
-    )
+    # Per-stock archetype thresholds + controls (used when archetype_aware=True)
+    # Build a config override from the params tail (slots 15-38) so the tuner's
+    # active_archetype_lifecycle preset takes effect during the sim.
+    _arch_cfg_override: dict | None = None
+    if len(params) > 15:
+        try:
+            from tuning.constants import archetype_cfg_from_params
+            _arch_cfg_override = archetype_cfg_from_params(params)
+        except Exception:
+            _arch_cfg_override = None
+    if archetype_aware:
+        _arch = _build_archetype_thresholds(
+            precomp, take_profit_pct, trailing_stop, _MIN_HOLD_DAYS,
+            arch_cfg_override=_arch_cfg_override,
+        )
+        _arch_take_profit_arr   = _arch["tp"]
+        _arch_trailing_stop_arr = _arch["stop"]
+        _arch_harvest_arr       = _arch["harvest"]
+        _arch_min_hold_arr      = _arch["min_hold"]
+        _arch_enabled_arr       = _arch["enabled"]
+        _arch_score_mult_arr    = _arch["score_mult"]
+        _arch_pos_mult_arr      = _arch["pos_mult"]
+        _arch_max_sleeve_arr    = _arch["max_sleeve"]
+        _arch_min_score_arr     = _arch["min_score"]
+        _arch_labels            = _arch["labels"]
+    else:
+        _arch_take_profit_arr = None
+        _arch_trailing_stop_arr = None
+        _arch_harvest_arr = None
+        _arch_min_hold_arr = None
+        _arch_enabled_arr = None
+        _arch_score_mult_arr = None
+        _arch_pos_mult_arr = None
+        _arch_max_sleeve_arr = None
+        _arch_min_score_arr = None
+        _arch_labels = []
     _arch_pnl: dict = {}
     _arch_trade_counts: dict = {}
     _arch_exit_breakdown: dict = {}
+    # Extended rollups
+    _arch_buy_archetype: dict[int, str] = {}   # idx → archetype at last buy
+    _arch_buy_cost_basis: dict[int, float] = {}  # idx → cost basis at last buy
+    _arch_win_count: dict[str, int] = {}
+    _arch_completed_sells: dict[str, int] = {}
+    _arch_hold_days_sum: dict[str, float] = {}
+    _arch_decision_source_counts: dict[str, dict[str, int]] = {}
+    _arch_daily_value: dict[str, np.ndarray] = {}
+    if archetype_aware:
+        from portfolio.position_archetypes import ARCHETYPE_LABELS as _AL
+        for _label in _AL:
+            _arch_daily_value[_label] = np.zeros(n_days, dtype=np.float64)
 
     # Cluster concentration tracking (walk-forward, diagnostics only)
     _cluster_snapshots: list = []
@@ -687,6 +766,19 @@ def run_simulation(
             exposure[s] = exposure.get(s, 0.0) + val
         return exposure
 
+    def _archetype_sleeve_value(label: str, day: int) -> float:
+        """Sum stock value across positions tagged to archetype label."""
+        if not label or not _arch_labels:
+            return 0.0
+        prices_d = precomp.prices[day]
+        valid    = np.isfinite(prices_d) & (prices_d > 0)
+        total = 0.0
+        for k in range(len(_arch_labels)):
+            if _arch_labels[k] == label and stock_shares[k] > 0:
+                p_k = prices_d[k] if valid[k] else stock_avg_cost[k]
+                total += float(stock_shares[k] * p_k)
+        return total
+
     def _do_buy(day: int, budget: float) -> float:
         nonlocal cash, trades_made, skipped_buys, cap_reductions, cooldown_skips
         nonlocal total_friction, total_traded_notional, trades_this_week
@@ -695,9 +787,26 @@ def run_simulation(
             return 0.0
         prices_d = precomp.prices[day]
         eligible = candidate_mask & np.isfinite(prices_d) & (prices_d > 0)
+
+        # Apply per-archetype enabled-flag and min_score_to_buy filter
+        if _arch_enabled_arr is not None and _arch_labels:
+            eligible = eligible & _arch_enabled_arr
+            ms = _arch_min_score_arr
+            if ms is not None:
+                # NaN means "no min" → always pass; finite values gate on raw score.
+                min_gate = np.where(np.isfinite(ms), current_scores >= ms, True)
+                eligible = eligible & min_gate
+
         if not eligible.any():
             return 0.0
-        total_score = current_scores[eligible].sum()
+
+        # Effective score (used for both ranking AND budget allocation)
+        if _arch_score_mult_arr is not None:
+            eff_scores = current_scores * _arch_score_mult_arr
+        else:
+            eff_scores = current_scores
+
+        total_score = eff_scores[eligible].sum()
         if total_score <= 0:
             return 0.0
 
@@ -706,7 +815,11 @@ def run_simulation(
         spent           = 0.0
         buys_this_pass  = 0
 
-        candidate_indices = sorted(np.where(eligible)[0], key=lambda i: -current_scores[i])
+        candidate_indices = sorted(np.where(eligible)[0], key=lambda i: -eff_scores[i])
+
+        # Track archetype sleeve consumption within this rebalance pass so we cap
+        # against running totals, not the stale day-start value.
+        sleeve_consumed: dict[str, float] = {}
 
         for i in candidate_indices:
             if buys_this_pass >= max_buys or trades_this_week >= max_trades_week:
@@ -719,16 +832,20 @@ def run_simulation(
                 cooldown_skips += 1
                 continue
 
-            alloc = (current_scores[i] / total_score) * budget
+            alloc = (eff_scores[i] / total_score) * budget
 
             max_by_cash = cash * max_order_pct
             if alloc > max_by_cash:
                 alloc = max_by_cash
                 cap_reductions += 1
 
+            # Per-archetype max_position_multiplier cap on max_single_pct
+            _pos_mult = float(_arch_pos_mult_arr[i]) if _arch_pos_mult_arr is not None else 1.0
+            _eff_max_single = max_single_pct * _pos_mult
+
             if portfolio_value > 0:
                 cur_pos_val = float(stock_shares[i] * prices_d[i])
-                room = portfolio_value * max_single_pct - cur_pos_val
+                room = portfolio_value * _eff_max_single - cur_pos_val
                 if room <= 0:
                     skipped_buys += 1
                     continue
@@ -748,6 +865,24 @@ def run_simulation(
                     cap_reductions += 1
             else:
                 sector = precomp.sector_labels[i] if i < len(precomp.sector_labels) else "Unknown"
+
+            # Per-archetype max_active_weight sleeve cap (soft, post-rank)
+            _al_i = _arch_labels[i] if _arch_labels and i < len(_arch_labels) else ""
+            if (
+                _al_i
+                and _arch_max_sleeve_arr is not None
+                and np.isfinite(_arch_max_sleeve_arr[i])
+                and portfolio_value > 0
+            ):
+                base_sleeve = _archetype_sleeve_value(_al_i, day)
+                running     = sleeve_consumed.get(_al_i, 0.0)
+                sleeve_cap_room = portfolio_value * float(_arch_max_sleeve_arr[i]) - (base_sleeve + running)
+                if sleeve_cap_room <= 0:
+                    skipped_buys += 1
+                    continue
+                if alloc > sleeve_cap_room:
+                    alloc = sleeve_cap_room
+                    cap_reductions += 1
 
             if alloc < min_order:
                 skipped_buys += 1
@@ -770,14 +905,21 @@ def run_simulation(
                 trades_this_week  += 1
                 sym = precomp.symbols[i] if i < len(precomp.symbols) else str(i)
                 _al = _arch_labels[i] if _arch_labels and i < len(_arch_labels) else ""
+                _arch_buy_archetype[i] = _al
+                _arch_buy_cost_basis[i] = alloc
                 trade_log.append(TradeRecord(
                     date=str(day), symbol=sym, side="buy",
                     quantity=shares, price=effective_price, amount=alloc, reason="buy",
                     archetype=_al,
+                    archetype_at_entry=_al,
+                    archetype_at_exit="",
+                    decision_source=("archetype_rule" if _al else "global_rule"),
                 ))
             stock_shares[i] += shares
             stock_peak[i]    = max(stock_peak[i], p)
             sector_exp[sector] = sector_exp.get(sector, 0.0) + alloc
+            if _al_i:
+                sleeve_consumed[_al_i] = sleeve_consumed.get(_al_i, 0.0) + alloc
             spent                 += alloc
             total_traded_notional += alloc
             buys_this_pass        += 1
@@ -825,11 +967,13 @@ def run_simulation(
         days_held      = np.where(stock_day_bought >= 0, d - stock_day_bought, 0)
         take_profit_ok = current_scores < metric_threshold * _TAKE_PROFIT_FLOOR_MULTIPLIER
 
-        _eff_tp   = _arch_take_profit_arr   if _arch_take_profit_arr   is not None else take_profit_pct
-        _eff_stop = _arch_trailing_stop_arr if _arch_trailing_stop_arr is not None else trailing_stop
+        _eff_tp      = _arch_take_profit_arr   if _arch_take_profit_arr   is not None else take_profit_pct
+        _eff_stop    = _arch_trailing_stop_arr if _arch_trailing_stop_arr is not None else trailing_stop
+        _eff_harvest = _arch_harvest_arr       if _arch_harvest_arr       is not None else _HARVEST_PROFIT_THRESHOLD
+        _eff_minhold = _arch_min_hold_arr      if _arch_min_hold_arr      is not None else _MIN_HOLD_DAYS
 
         stop_loss_mask = held & (pct_from_avg  <= _STOP_LOSS_PCT)
-        trail_mask     = held & (pct_from_peak <= _eff_stop)        & (days_held >= _MIN_HOLD_DAYS)
+        trail_mask     = held & (pct_from_peak <= _eff_stop)        & (days_held >= _eff_minhold)
         tp_mask        = held & (pct_from_avg  >= _eff_tp)          & take_profit_ok & (days_held >= _MIN_DAYS_BEFORE_TAKE_PROFIT)
         # WATCH/REVIEW logic: live holds positions that are still profitable and
         # not fully collapsed — don't exit on score alone when pnl > 0 and score
@@ -868,14 +1012,19 @@ def run_simulation(
                 cost_basis = float(stock_avg_cost[i] * stock_shares[i])
                 if stop_loss_mask[i]:
                     _exit = "stop_loss"
+                    _src  = "global_rule"
                 elif trail_mask[i]:
                     _exit = "trailing_stop"
+                    _src  = "archetype_rule" if _arch_trailing_stop_arr is not None else "global_rule"
                 elif tp_mask[i]:
                     _exit = "take_profit"
+                    _src  = "archetype_rule" if _arch_take_profit_arr is not None else "global_rule"
                 else:
                     _exit = "weak_value"
+                    _src  = "global_rule"
                 sym = precomp.symbols[i] if i < len(precomp.symbols) else str(i)
                 _al = _arch_labels[i] if _arch_labels and i < len(_arch_labels) else ""
+                _al_entry = _arch_buy_archetype.get(int(i), _al)
                 _pnl_i = proceeds_i - cost_basis
                 trade_log.append(TradeRecord(
                     date=str(d), symbol=sym, side="sell",
@@ -883,12 +1032,26 @@ def run_simulation(
                     amount=proceeds_i, exit_type=_exit,  # type: ignore[arg-type]
                     pnl=_pnl_i, hold_days=int(days_held[i]),
                     archetype=_al,
+                    archetype_at_entry=_al_entry,
+                    archetype_at_exit=_al,
+                    decision_source=_src,
                 ))
                 if _al:
                     _arch_pnl[_al] = _arch_pnl.get(_al, 0.0) + _pnl_i
                     _arch_trade_counts[_al] = _arch_trade_counts.get(_al, 0) + 1
                     _arch_exit_breakdown.setdefault(_al, {})
                     _arch_exit_breakdown[_al][_exit] = _arch_exit_breakdown[_al].get(_exit, 0) + 1
+                    _arch_completed_sells[_al] = _arch_completed_sells.get(_al, 0) + 1
+                    _arch_hold_days_sum[_al] = _arch_hold_days_sum.get(_al, 0.0) + float(days_held[i])
+                    if _pnl_i > 0:
+                        _arch_win_count[_al] = _arch_win_count.get(_al, 0) + 1
+                    _arch_decision_source_counts.setdefault(_al, {})
+                    _arch_decision_source_counts[_al][_src] = _arch_decision_source_counts[_al].get(_src, 0) + 1
+                # Clear per-position entry tracking
+                if int(i) in _arch_buy_archetype:
+                    del _arch_buy_archetype[int(i)]
+                if int(i) in _arch_buy_cost_basis:
+                    del _arch_buy_cost_basis[int(i)]
             total_traded_notional += sell_notional
             sells_made            += int(sell_mask.sum())
             stock_shares[sell_mask]    = 0.0
@@ -903,13 +1066,14 @@ def run_simulation(
         harvest_mask = (
             held
             & ~sell_mask
-            & (pct_from_avg >= _HARVEST_PROFIT_THRESHOLD)
-            & (days_held >= _MIN_HOLD_DAYS)
+            & (pct_from_avg >= _eff_harvest)
+            & (days_held >= _eff_minhold)
         )
         if harvest_mask.any():
             harv_prices   = np.where(valid_price, prices, stock_avg_cost)
             harv_indices  = np.where(harvest_mask)[0]
             harv_notional = 0.0
+            _harv_src = "archetype_rule" if _arch_harvest_arr is not None else "global_rule"
             for i in harv_indices:
                 shares_to_sell = stock_shares[i] * _HARVEST_FRACTION
                 if shares_to_sell <= 0:
@@ -923,6 +1087,7 @@ def run_simulation(
                 sym = precomp.symbols[i] if i < len(precomp.symbols) else str(i)
                 cost_basis_i = float(stock_avg_cost[i] * shares_to_sell)
                 _al = _arch_labels[i] if _arch_labels and i < len(_arch_labels) else ""
+                _al_entry = _arch_buy_archetype.get(int(i), _al)
                 _pnl_i = proceeds_i - cost_basis_i
                 trade_log.append(TradeRecord(
                     date=str(d), symbol=sym, side="sell",
@@ -930,12 +1095,17 @@ def run_simulation(
                     amount=proceeds_i, exit_type="harvest_exit",
                     pnl=_pnl_i, hold_days=int(days_held[i]), is_partial=True,
                     archetype=_al,
+                    archetype_at_entry=_al_entry,
+                    archetype_at_exit=_al,
+                    decision_source=_harv_src,
                 ))
                 if _al:
                     _arch_pnl[_al] = _arch_pnl.get(_al, 0.0) + _pnl_i
                     _arch_trade_counts[_al] = _arch_trade_counts.get(_al, 0) + 1
                     _arch_exit_breakdown.setdefault(_al, {})
                     _arch_exit_breakdown[_al]["harvest_exit"] = _arch_exit_breakdown[_al].get("harvest_exit", 0) + 1
+                    _arch_decision_source_counts.setdefault(_al, {})
+                    _arch_decision_source_counts[_al][_harv_src] = _arch_decision_source_counts[_al].get(_harv_src, 0) + 1
             harvest_count         += int(harvest_mask.sum())
             total_traded_notional += harv_notional
             sells_made            += int(harvest_mask.sum())
@@ -979,6 +1149,7 @@ def run_simulation(
                     sym = precomp.symbols[i] if i < len(precomp.symbols) else str(i)
                     cost_basis_i = float(stock_avg_cost[i] * shares_to_sell)
                     _al = _arch_labels[i] if _arch_labels and i < len(_arch_labels) else ""
+                    _al_entry = _arch_buy_archetype.get(int(i), _al)
                     _pnl_i = proceeds_i - cost_basis_i
                     trade_log.append(TradeRecord(
                         date=str(d), symbol=sym, side="sell",
@@ -986,12 +1157,17 @@ def run_simulation(
                         amount=proceeds_i, exit_type="trim_exit",
                         pnl=_pnl_i, hold_days=int(days_held[i]), is_partial=True,
                         archetype=_al,
+                        archetype_at_entry=_al_entry,
+                        archetype_at_exit=_al,
+                        decision_source="global_rule",
                     ))
                     if _al:
                         _arch_pnl[_al] = _arch_pnl.get(_al, 0.0) + _pnl_i
                         _arch_trade_counts[_al] = _arch_trade_counts.get(_al, 0) + 1
                         _arch_exit_breakdown.setdefault(_al, {})
                         _arch_exit_breakdown[_al]["trim_exit"] = _arch_exit_breakdown[_al].get("trim_exit", 0) + 1
+                        _arch_decision_source_counts.setdefault(_al, {})
+                        _arch_decision_source_counts[_al]["global_rule"] = _arch_decision_source_counts[_al].get("global_rule", 0) + 1
                 trim_count            += int(trim_mask.sum())
                 total_traded_notional += trim_notional
                 sells_made            += int(trim_mask.sum())
@@ -1102,6 +1278,15 @@ def run_simulation(
         max_positions        = max(max_positions, n_pos)
         total_cash_pct_sum  += (cash / max(port_val, 1e-9))
 
+        # Per-archetype daily sleeve value (used for max DD + final sleeve weight)
+        if archetype_aware and _arch_labels:
+            for k in range(len(_arch_labels)):
+                _ak = _arch_labels[k]
+                if not _ak or stock_shares[k] <= 0:
+                    continue
+                _p = prices[k] if valid_price[k] else stock_avg_cost[k]
+                _arch_daily_value[_ak][d] += float(stock_shares[k] * _p)
+
     final_value = float(daily_values[-1])
     metrics     = compute_performance_metrics(ca_daily_values)
     avg_port    = float(daily_values[daily_values > 0].mean()) if daily_values.any() else starting_capital
@@ -1124,6 +1309,60 @@ def run_simulation(
             precomp.benchmark_prices, starting_capital,
             weekly_contribution, rebalance_frequency_days,
         )
+
+    # ── Per-archetype rollups ───────────────────────────────────────────
+    _arch_active_excess: dict[str, float] = {}
+    _arch_win_rate: dict[str, float] = {}
+    _arch_avg_hold: dict[str, float] = {}
+    _arch_max_dd: dict[str, float] = {}
+    _arch_sleeve_weight: dict[str, float] = {}
+    _arch_realized_pnl: dict[str, float] = dict(_arch_pnl)
+    _arch_unrealized_pnl: dict[str, float] = {}
+
+    if archetype_aware and _arch_daily_value:
+        last_port_val = float(daily_values[-1]) if n_days > 0 else 0.0
+        # Unrealized PnL: open positions valued at last-day prices
+        last_prices = precomp.prices[-1] if n_days > 0 else None
+        if last_prices is not None:
+            valid_last = np.isfinite(last_prices) & (last_prices > 0)
+            for i in range(len(_arch_labels)):
+                _al = _arch_labels[i]
+                if not _al or stock_shares[i] <= 0:
+                    continue
+                _p = last_prices[i] if valid_last[i] else stock_avg_cost[i]
+                _val = float(stock_shares[i] * _p)
+                _cost = float(stock_shares[i] * stock_avg_cost[i])
+                _arch_unrealized_pnl[_al] = _arch_unrealized_pnl.get(_al, 0.0) + (_val - _cost)
+        for _al, _series in _arch_daily_value.items():
+            # Sleeve weight at end of sim
+            if last_port_val > 0:
+                _arch_sleeve_weight[_al] = float(_series[-1] / last_port_val)
+            else:
+                _arch_sleeve_weight[_al] = 0.0
+            # Max drawdown of the sleeve value series (ignoring leading zeros)
+            _nz = _series[_series > 0]
+            if len(_nz) >= 2:
+                _peak = np.maximum.accumulate(_nz)
+                _dd = (_nz / _peak) - 1.0
+                _arch_max_dd[_al] = float(_dd.min())
+            else:
+                _arch_max_dd[_al] = 0.0
+        # Win rate, avg hold days, active excess
+        for _al, _n in _arch_completed_sells.items():
+            if _n > 0:
+                _arch_win_rate[_al] = float(_arch_win_count.get(_al, 0)) / float(_n)
+                _arch_avg_hold[_al] = float(_arch_hold_days_sum.get(_al, 0.0)) / float(_n)
+        # Active excess: (sleeve realized + unrealized) / sleeve deployed_capital - bench_twr_val
+        # Approximate deployed capital as average non-zero sleeve value.
+        for _al, _series in _arch_daily_value.items():
+            _nz = _series[_series > 0]
+            avg_deployed = float(_nz.mean()) if len(_nz) else 0.0
+            total_pnl = _arch_realized_pnl.get(_al, 0.0) + _arch_unrealized_pnl.get(_al, 0.0)
+            if avg_deployed > 0:
+                sleeve_return = total_pnl / avg_deployed
+            else:
+                sleeve_return = 0.0
+            _arch_active_excess[_al] = float(sleeve_return - bench_twr_val)
 
     _active_total_return: float | None = None
     _active_sharpe:       float | None = None
@@ -1171,6 +1410,14 @@ def run_simulation(
         archetype_pnl=_arch_pnl,
         archetype_trade_counts=_arch_trade_counts,
         archetype_exit_breakdown=_arch_exit_breakdown,
+        archetype_active_excess=_arch_active_excess,
+        archetype_win_rate=_arch_win_rate,
+        archetype_avg_hold_days=_arch_avg_hold,
+        archetype_max_drawdown=_arch_max_dd,
+        archetype_sleeve_weight=_arch_sleeve_weight,
+        archetype_realized_pnl=_arch_realized_pnl,
+        archetype_unrealized_pnl=_arch_unrealized_pnl,
+        archetype_decision_source_counts=_arch_decision_source_counts,
         cluster_result=_build_cluster_result_if_needed(
             _cluster_snapshots, _n_clusters_ct
         ) if cluster_tracking else None,

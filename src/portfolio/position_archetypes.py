@@ -109,6 +109,12 @@ class ArchetypePolicy:
     minimum_hold_days: int
     thesis_exit_requires_confirmation: bool
     allow_deeper_drawdown: bool
+    # Behavioral controls — defaults are no-ops (live/backtest behave as today).
+    enabled: bool = True
+    score_multiplier: float = 1.0
+    max_position_multiplier: float = 1.0
+    max_active_weight: float | None = None
+    min_score_to_buy: float | None = None
 
 
 @dataclass
@@ -195,6 +201,15 @@ def get_archetype_policy(archetype: str, cfg: dict | None = None) -> ArchetypePo
     def _get(key: str):
         return overrides.get(key, defaults[key])
 
+    def _opt(key: str, default):
+        v = overrides.get(key, default)
+        if v is None:
+            return None
+        return v
+
+    max_active_weight = _opt("max_active_weight", None)
+    min_score_to_buy = _opt("min_score_to_buy", None)
+
     return ArchetypePolicy(
         archetype=archetype,
         trim_profit_threshold=float(_get("trim_profit_threshold")),
@@ -203,6 +218,11 @@ def get_archetype_policy(archetype: str, cfg: dict | None = None) -> ArchetypePo
         minimum_hold_days=int(_get("minimum_hold_days")),
         thesis_exit_requires_confirmation=bool(_get("thesis_exit_requires_confirmation")),
         allow_deeper_drawdown=bool(_get("allow_deeper_drawdown")),
+        enabled=bool(overrides.get("enabled", True)),
+        score_multiplier=float(overrides.get("score_multiplier", 1.0)),
+        max_position_multiplier=float(overrides.get("max_position_multiplier", 1.0)),
+        max_active_weight=None if max_active_weight is None else float(max_active_weight),
+        min_score_to_buy=None if min_score_to_buy is None else float(min_score_to_buy),
     )
 
 

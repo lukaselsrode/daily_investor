@@ -101,6 +101,8 @@ class SellDecisionEngine:
 
         # ── Hard sells ──────────────────────────────────────────────────────
 
+        _arch_active = _arch_enabled and archetype_policy is not None
+
         if percent_change is not None and percent_change <= stop_loss:
             return SellDecision(
                 symbol=symbol,
@@ -108,12 +110,15 @@ class SellDecisionEngine:
                 reason=f"stop loss breached ({percent_change:.1%} ≤ {stop_loss:.1%})",
                 severity="hard",
                 exit_type="failure_exit",
+                decision_source="global_rule",
                 **base,
             )
 
         trailing_stop = SELL_RULES["trailing_stop_pct"]
-        if _arch_enabled and archetype_policy is not None:
+        _trail_source = "global_rule"
+        if _arch_active:
             trailing_stop = archetype_policy.trailing_stop_pct
+            _trail_source = "archetype_rule"
         if peak_price is not None and peak_price > 0:
             current_p = safe_float(holding.get("price"))
             if current_p is not None:
@@ -125,6 +130,7 @@ class SellDecisionEngine:
                         reason=f"trailing stop: {drawdown:.1%} from peak ${peak_price:.2f}",
                         severity="hard",
                         exit_type="failure_exit",
+                        decision_source=_trail_source,
                         **base,
                     )
 
@@ -135,6 +141,7 @@ class SellDecisionEngine:
                 reason=f"yield trap with weak value_metric={value_metric:.3f} < {sell_weak}",
                 severity="hard",
                 exit_type="failure_exit",
+                decision_source="global_rule",
                 **base,
             )
 
@@ -145,6 +152,7 @@ class SellDecisionEngine:
                 reason=f"quality_score {quality_score:.3f} below floor {sell_lq}",
                 severity="hard",
                 exit_type="failure_exit",
+                decision_source="global_rule",
                 **base,
             )
 
@@ -164,6 +172,7 @@ class SellDecisionEngine:
                     reason=f"take profit triggered ({percent_change:.1%} ≥ {take_profit:.1%})",
                     severity="soft",
                     exit_type="harvest_exit",
+                    decision_source=("archetype_rule" if _arch_active else "global_rule"),
                     **base,
                 )
 
@@ -174,7 +183,7 @@ class SellDecisionEngine:
         if _trim.get("trim_enabled") and percent_change is not None:
             _trim_min_gain = (
                 archetype_policy.trim_profit_threshold
-                if _arch_enabled and archetype_policy is not None
+                if _arch_active
                 else _trim["trim_min_gain_pct"]
             )
             _trim_fraction     = _trim["trim_fraction"]
@@ -199,6 +208,7 @@ class SellDecisionEngine:
                     severity="soft",
                     exit_type="trim_exit",
                     trim_fraction=_trim_fraction,
+                    decision_source=("archetype_rule" if _arch_active else "global_rule"),
                     **base,
                 )
 
@@ -211,6 +221,7 @@ class SellDecisionEngine:
                     reason=f"value_metric={value_metric:.3f} < {sell_weak} (held {days_str})",
                     severity="soft",
                     exit_type="thesis_exit",
+                    decision_source="global_rule",
                     **base,
                 )
 
@@ -290,4 +301,5 @@ def evaluate_sell_candidate(
         "value_metric":   d.value_metric,
         "quality_score":  d.quality_score,
         "yield_trap_flag": d.yield_trap_flag,
+        "decision_source": d.decision_source,
     }

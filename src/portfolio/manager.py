@@ -1095,6 +1095,65 @@ class PortfolioManager:
         except Exception:
             agg_df = None
 
+        # Per-candidate archetype policy (used for enabled/min_score gate + sizing caps).
+        # Built once and reused below. Empty dict when archetype management disabled.
+        _buy_arch_policies: dict = {}
+        if ARCHETYPE_PARAMS.get("enabled", False):
+            _mkt_buy: dict[str, dict] = {}
+            try:
+                from data.market_structure import load_market_structure
+                _mkt_buy = load_market_structure(candidates["symbol"].tolist(), auto_refresh=False)
+            except Exception:
+                _mkt_buy = {}
+            _to_drop: list[str] = []
+            for _i_idx, _crow in candidates.iterrows():
+                _sym_c = _crow["symbol"]
+                _signals_c: dict = {"symbol": _sym_c}
+                for _k in ("quality_score", "momentum_score", "value_score",
+                           "income_score", "value_metric", "yield_trap_flag",
+                           "sector", "industry", "buy_to_sell_ratio"):
+                    _v = _crow.get(_k)
+                    if _v is not None and not (isinstance(_v, float) and pd.isna(_v)):
+                        _signals_c[_k] = _v
+                _ms_c = _mkt_buy.get(_sym_c, {})
+                for _mk in ("maintenance_ratio", "day_trade_ratio", "instrument_type",
+                            "country", "market_cap", "description", "num_employees"):
+                    _mv = _ms_c.get(_mk)
+                    if _mv is not None:
+                        _signals_c[_mk] = _mv
+                try:
+                    _ar = classify_archetype(_signals_c, ARCHETYPE_PARAMS)
+                    _policy_c = _ar.policy
+                except Exception:
+                    _policy_c = None
+                if _policy_c is None:
+                    continue
+                _buy_arch_policies[_sym_c] = _policy_c
+                # Skip new buys when archetype is disabled (existing holdings still managed by sell side)
+                if not _policy_c.enabled:
+                    _to_drop.append(_sym_c)
+                    continue
+                # Hard score gate
+                _vm = float(_crow.get("value_metric") or 0.0)
+                if _policy_c.min_score_to_buy is not None and _vm < float(_policy_c.min_score_to_buy):
+                    _to_drop.append(_sym_c)
+                    continue
+                # Score multiplier — applied in-place to value_metric so the existing
+                # ranking + budget-share logic naturally accounts for it.
+                if _policy_c.score_multiplier != 1.0:
+                    candidates.loc[candidates["symbol"] == _sym_c, "value_metric"] = (
+                        _vm * float(_policy_c.score_multiplier)
+                    )
+            if _to_drop:
+                logger.info(
+                    f"Archetype buy-filter dropped {len(_to_drop)} candidates "
+                    f"(disabled/below-min-score): {_to_drop[:10]}"
+                )
+                candidates = candidates[~candidates["symbol"].isin(_to_drop)].copy()
+                if candidates.empty:
+                    logger.warning("No candidates remain after archetype buy-filter")
+                    return [], df["symbol"].tolist(), []
+
         sentiment_results: dict[str, dict] = {}
         if self._use_sentiment:
             logger.info(f"Running batch sentiment on {len(candidates)} candidates...")
@@ -1119,6 +1178,8 @@ class PortfolioManager:
         buys_made    = 0
         _cand_rank   = 0
         stock_deployed = 0.0
+        # Running deployed-to-archetype tally (for max_active_weight sleeve caps)
+        _arch_deployed_this_pass: dict[str, float] = {}
 
         for _, row in candidates.iterrows():
             _cand_rank += 1
@@ -1187,6 +1248,46 @@ class PortfolioManager:
                 )
                 alloc = min(alloc, _ctr_cap)
 
+            # Per-archetype position cap (max_position_multiplier × max_single_position_pct)
+            # and sleeve cap (max_active_weight × portfolio_value). Defaults are no-ops.
+            _arch_pol = _buy_arch_policies.get(symbol) if _buy_arch_policies else None
+            if _arch_pol is not None and portfolio_value > 0:
+                if _arch_pol.max_position_multiplier != 1.0:
+                    _max_pos_dollars = (
+                        RISK_LIMITS["max_single_position_pct"]
+                        * portfolio_value
+                        * float(_arch_pol.max_position_multiplier)
+                    )
+                    _cur_pos_val = safe_float(holdings.get(symbol, {}).get("equity")) or 0.0
+                    _room_pos = max(0.0, _max_pos_dollars - _cur_pos_val)
+                    if alloc > _room_pos:
+                        alloc = _room_pos
+                if _arch_pol.max_active_weight is not None:
+                    _label = _arch_pol.archetype
+                    # Current sleeve exposure for this archetype (sum of held-position equity)
+                    _sleeve_val = 0.0
+                    if held_symbols:
+                        for _sym2 in held_symbols:
+                            _pol2 = _buy_arch_policies.get(_sym2)
+                            if _pol2 is not None and _pol2.archetype == _label:
+                                _sleeve_val += safe_float(holdings.get(_sym2, {}).get("equity")) or 0.0
+                    _sleeve_cap_dollars = portfolio_value * float(_arch_pol.max_active_weight)
+                    _running = _arch_deployed_this_pass.get(_label, 0.0)
+                    _room_sleeve = max(0.0, _sleeve_cap_dollars - _sleeve_val - _running)
+                    if alloc > _room_sleeve:
+                        alloc = _room_sleeve
+
+            if alloc < RISK_LIMITS["min_order_amount"]:
+                logger.info(
+                    f"Skipping {symbol}: archetype cap reduced alloc below min_order"
+                )
+                self._log_candidate(
+                    symbol, row, "SKIP", False, "archetype_cap",
+                    _sent_result, True, "", alloc, 0.0, regime, _cand_rank, agg_df,
+                )
+                skipped.append(symbol)
+                continue
+
             n_remaining = len(candidates) - (_cand_rank - 1)
             _buy_dec = self._risk.can_buy(
                 symbol, alloc, holdings, agg_df, portfolio_value, cash, sector_exposure,
@@ -1227,6 +1328,10 @@ class PortfolioManager:
                         purchased.append(symbol)
                         buys_made += 1
                         stock_deployed += adj_alloc
+                        if _arch_pol is not None:
+                            _arch_deployed_this_pass[_arch_pol.archetype] = (
+                                _arch_deployed_this_pass.get(_arch_pol.archetype, 0.0) + adj_alloc
+                            )
                         self._record_buy(symbol)
                         self._update_local_exposures_after_buy(
                             symbol, adj_alloc, agg_df, sector_exposure

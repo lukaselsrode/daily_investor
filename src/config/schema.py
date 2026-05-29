@@ -297,6 +297,30 @@ class ArchetypeEntryConfig:
     minimum_hold_days: int = 10
     thesis_exit_requires_confirmation: bool = False
     allow_deeper_drawdown: bool = False
+    # Behavioral controls — defaults are no-ops; live + backtest read these identically.
+    enabled: bool = True
+    score_multiplier: float = 1.0
+    max_position_multiplier: float = 1.0
+    max_active_weight: float | None = None
+    min_score_to_buy: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.score_multiplier < 0.0:
+            raise ValueError(
+                f"score_multiplier must be >= 0 (got {self.score_multiplier})"
+            )
+        if self.max_position_multiplier < 0.0:
+            raise ValueError(
+                f"max_position_multiplier must be >= 0 (got {self.max_position_multiplier})"
+            )
+        if self.max_active_weight is not None and not (0.0 <= self.max_active_weight <= 1.0):
+            raise ValueError(
+                f"max_active_weight must be in [0,1] (got {self.max_active_weight})"
+            )
+        if self.min_score_to_buy is not None and not (-1.0 <= self.min_score_to_buy <= 5.0):
+            raise ValueError(
+                f"min_score_to_buy must be in [-1,5] (got {self.min_score_to_buy})"
+            )
 
 
 @dataclass(frozen=True)
@@ -322,6 +346,11 @@ class ArchetypeManagementConfig:
                 "minimum_hold_days": entry.minimum_hold_days,
                 "thesis_exit_requires_confirmation": entry.thesis_exit_requires_confirmation,
                 "allow_deeper_drawdown": entry.allow_deeper_drawdown,
+                "enabled": entry.enabled,
+                "score_multiplier": entry.score_multiplier,
+                "max_position_multiplier": entry.max_position_multiplier,
+                "max_active_weight": entry.max_active_weight,
+                "min_score_to_buy": entry.min_score_to_buy,
             }
         return result
 

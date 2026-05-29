@@ -34,6 +34,9 @@ class TradeRecord:
     hold_days: int = 0
     is_partial: bool = False
     archetype: str = ""   # populated when archetype_aware=True
+    archetype_at_entry: str = ""    # archetype assigned at buy time
+    archetype_at_exit: str = ""     # archetype classification at sell time
+    decision_source: str = ""       # "global_rule" | "archetype_rule" | "both" | ""
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +59,7 @@ class SellDecision:
     quality_score: float | None
     yield_trap_flag: bool | None
     trim_fraction: float | None = None
+    decision_source: str = ""   # "global_rule" | "archetype_rule" | "both" | ""
 
 
 # ---------------------------------------------------------------------------

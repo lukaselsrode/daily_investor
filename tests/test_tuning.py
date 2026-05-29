@@ -25,7 +25,8 @@ from tuning.tuner import ParameterTuner
 # Helpers
 # ---------------------------------------------------------------------------
 
-_N_PARAMS = 15   # len(PARAM_NAMES)
+from tuning.constants import PARAM_NAMES as _PN  # noqa: E402
+_N_PARAMS = len(_PN)
 
 
 def _params(seed: int = 0) -> np.ndarray:

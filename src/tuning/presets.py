@@ -99,6 +99,104 @@ _PRESETS: dict[str, dict] = {
                        "Requires Phase 2 vector extension.",
         "phase2": True,
     },
+
+    # ── Archetype-targeted presets (use lifecycle slots 15-38) ────────────────
+    "active_quality_compounders": {
+        "description": "Test whether quality_compounder archetype can beat SPY with "
+                       "longer holds, wider stops, and higher harvest thresholds.",
+        "unfreeze": [
+            "archetype_management.quality_compounder.harvest_profit_threshold",
+            "archetype_management.quality_compounder.trim_profit_threshold",
+            "archetype_management.quality_compounder.trailing_stop_pct",
+            "archetype_management.quality_compounder.minimum_hold_days",
+        ],
+        "freeze_extra": [],
+        "phase2": False,
+    },
+    "active_speculative_momentum": {
+        "description": "Test whether momentum/speculative names can create alpha when "
+                       "capped and exited quickly. Tunes spec_momentum lifecycle only.",
+        "unfreeze": [
+            "archetype_management.speculative_momentum.harvest_profit_threshold",
+            "archetype_management.speculative_momentum.trim_profit_threshold",
+            "archetype_management.speculative_momentum.trailing_stop_pct",
+            "archetype_management.speculative_momentum.minimum_hold_days",
+        ],
+        "freeze_extra": [],
+        "phase2": False,
+    },
+    "active_value_recovery": {
+        "description": "Test whether value/recovery names work when filtered for "
+                       "quality and improving momentum. Tunes value_recovery lifecycle.",
+        "unfreeze": [
+            "archetype_management.value_recovery.harvest_profit_threshold",
+            "archetype_management.value_recovery.trim_profit_threshold",
+            "archetype_management.value_recovery.trailing_stop_pct",
+            "archetype_management.value_recovery.minimum_hold_days",
+        ],
+        "freeze_extra": [],
+        "phase2": False,
+    },
+    "active_defensive_income": {
+        "description": "Test whether income names actually add active alpha or should "
+                       "just be ETF exposure. Tunes defensive_income lifecycle only.",
+        "unfreeze": [
+            "archetype_management.defensive_income.harvest_profit_threshold",
+            "archetype_management.defensive_income.trim_profit_threshold",
+            "archetype_management.defensive_income.trailing_stop_pct",
+            "archetype_management.defensive_income.minimum_hold_days",
+        ],
+        "freeze_extra": [],
+        "phase2": False,
+    },
+    "active_archetype_lifecycle": {
+        "description": "Tune ALL archetype lifecycle thresholds (trim/harvest/trail/hold "
+                       "across all 6 archetypes — 24 params). Score weights stay frozen.",
+        "unfreeze": [
+            f"archetype_management.{a}.{f}"
+            for a in (
+                "quality_compounder", "legacy_turnaround", "speculative_momentum",
+                "value_recovery", "defensive_income", "core_default",
+            )
+            for f in (
+                "harvest_profit_threshold", "trim_profit_threshold",
+                "trailing_stop_pct", "minimum_hold_days",
+            )
+        ],
+        "freeze_extra": [
+            "score_weights.value", "score_weights.quality",
+            "score_weights.income", "score_weights.momentum",
+        ],
+        "phase2": False,
+    },
+    "active_archetype_rotation": {
+        "description": "Test whether some archetypes should be capped, favored, or "
+                       "suppressed — tunes the four most divergent archetype harvests.",
+        "unfreeze": [
+            "archetype_management.quality_compounder.harvest_profit_threshold",
+            "archetype_management.speculative_momentum.harvest_profit_threshold",
+            "archetype_management.value_recovery.harvest_profit_threshold",
+            "archetype_management.defensive_income.harvest_profit_threshold",
+        ],
+        "freeze_extra": [],
+        "phase2": False,
+    },
+    "active_archetype_alpha": {
+        "description": "Safer combined archetype preset — tunes harvest + trailing stop "
+                       "for the two highest-volume archetypes (quality_compounder + "
+                       "speculative_momentum). Score weights frozen.",
+        "unfreeze": [
+            "archetype_management.quality_compounder.harvest_profit_threshold",
+            "archetype_management.quality_compounder.trailing_stop_pct",
+            "archetype_management.speculative_momentum.harvest_profit_threshold",
+            "archetype_management.speculative_momentum.trailing_stop_pct",
+        ],
+        "freeze_extra": [
+            "score_weights.value", "score_weights.quality",
+            "score_weights.income", "score_weights.momentum",
+        ],
+        "phase2": False,
+    },
 }
 
 

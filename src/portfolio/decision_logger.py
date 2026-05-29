@@ -237,6 +237,12 @@ def _log_holding_inner(
         archetype          = getattr(archetype_result, "archetype",   None) if archetype_result else None,
         archetype_confidence = getattr(archetype_result, "confidence", None) if archetype_result else None,
         archetype_drivers  = getattr(archetype_result, "drivers",     None) if archetype_result else None,
+        archetype_at_entry = (
+            (buy_context_row or {}).get("archetype_at_buy")
+            or (buy_context_row or {}).get("archetype")
+        ),
+        archetype_at_exit  = getattr(archetype_result, "archetype",   None) if archetype_result else None,
+        decision_source    = raw_decision.get("decision_source") or None,
     )
 
 

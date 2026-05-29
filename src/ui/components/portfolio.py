@@ -788,6 +788,34 @@ def _tab_active_sleeve(df: pd.DataFrame) -> None:
         st.info("No active positions found.")
         return
 
+    # ── Archetype sleeve panel ──────────────────────────────────────────
+    if "archetype" in active.columns and active["archetype"].notna().any():
+        _arch_rows = []
+        _total_eq = float(active["equity"].fillna(0.0).sum()) or 1.0
+        for _label, _grp in active.groupby("archetype"):
+            _eq = float(_grp["equity"].fillna(0.0).sum())
+            _arch_rows.append({
+                "Archetype": str(_label or "—"),
+                "Positions": int(len(_grp)),
+                "Sleeve value": f"${_eq:,.2f}",
+                "Sleeve weight": f"{_eq / _total_eq:.1%}",
+            })
+        # Surface configured caps if present
+        try:
+            from portfolio.position_archetypes import get_archetype_policy
+            from util import ARCHETYPE_PARAMS as _AP
+            for _r in _arch_rows:
+                _pol = get_archetype_policy(_r["Archetype"], _AP)
+                _r["Cap"] = (
+                    f"{_pol.max_active_weight:.0%}"
+                    if _pol.max_active_weight is not None else "—"
+                )
+                _r["Enabled"] = "Yes" if _pol.enabled else "No"
+        except Exception:
+            pass
+        st.markdown("**Archetype sleeve allocation**")
+        st.dataframe(pd.DataFrame(_arch_rows), use_container_width=True, hide_index=True)
+
     agg = _load_agg()
 
     for _, row in active.iterrows():

@@ -14,6 +14,7 @@ from __future__ import annotations
 import numpy as np
 
 from util import (
+    ARCHETYPE_PARAMS,
     INDEX_PCT,
     METRIC_THRESHOLD,
     MOMENTUM_V2_PARAMS,
@@ -22,6 +23,34 @@ from util import (
     SCORING_PARAMS,
     SELL_RULES,
     TUNING_PARAMS,
+)
+
+# ── Archetype lifecycle slot layout ────────────────────────────────────────
+# 24 slots appended after slot 14 — slots 15-38 — driven by the tuner's
+# `active_archetype_lifecycle` preset. The simulator reads these when
+# `len(params) > 15` (otherwise it falls back to ARCHETYPE_PARAMS from config).
+_ARCH_KEYS: tuple[str, ...] = (
+    "quality_compounder",
+    "legacy_turnaround",
+    "speculative_momentum",
+    "value_recovery",
+    "defensive_income",
+    "core_default",
+)
+_ARCH_SHORT: dict[str, str] = {
+    "quality_compounder":   "qc",
+    "legacy_turnaround":    "lt",
+    "speculative_momentum": "sm",
+    "value_recovery":       "vr",
+    "defensive_income":     "di",
+    "core_default":         "cd",
+}
+_ARCH_FIELDS: tuple[tuple[str, str, tuple[float, float]], ...] = (
+    # (config field name, vector-name suffix, bounds)
+    ("harvest_profit_threshold", "harvest", (0.10, 0.80)),
+    ("trim_profit_threshold",    "trim",    (0.05, 0.50)),
+    ("trailing_stop_pct",        "trail",   (-0.25, -0.04)),
+    ("minimum_hold_days",        "hold",    (1.0, 60.0)),
 )
 
 _MIN_TRADES_HARD = 20
@@ -93,6 +122,39 @@ _CONFIG_PATH_TO_PARAM_IDX: dict[str, int] = {
     "momentum_v2.weights.return_1m":       14,
 }
 
+# ── Append archetype lifecycle slots 15-38 (24 entries) ────────────────────
+_ARCH_SLOT_OFFSET = len(PARAM_NAMES)  # 15
+for _ai, _alabel in enumerate(_ARCH_KEYS):
+    _short = _ARCH_SHORT[_alabel]
+    for _fi, (_field, _suffix, _bnd) in enumerate(_ARCH_FIELDS):
+        _name = f"arch_{_short}_{_suffix}"
+        _idx  = _ARCH_SLOT_OFFSET + _ai * len(_ARCH_FIELDS) + _fi
+        PARAM_NAMES.append(_name)
+        BOUNDS.append(_bnd)
+        _CONFIG_PATH_TO_PARAM_IDX[f"archetype_management.{_alabel}.{_field}"] = _idx
+
+
+def archetype_cfg_from_params(params) -> dict:
+    """
+    Build an archetype-config override dict from the lifecycle slots in *params*.
+    Returns {} when params has only the original 15 slots.
+    """
+    if params is None or len(params) <= _ARCH_SLOT_OFFSET:
+        return {}
+    cfg: dict = {"enabled": True}
+    for _ai, _alabel in enumerate(_ARCH_KEYS):
+        entry: dict = {}
+        for _fi, (_field, _, _) in enumerate(_ARCH_FIELDS):
+            _idx = _ARCH_SLOT_OFFSET + _ai * len(_ARCH_FIELDS) + _fi
+            if _idx < len(params):
+                _v = float(params[_idx])
+                if _field == "minimum_hold_days":
+                    entry[_field] = int(round(_v))
+                else:
+                    entry[_field] = _v
+        cfg[_alabel] = entry
+    return cfg
+
 
 def _effective_bounds(scope: str = "overall_strategy", preset: str | None = None) -> list[tuple[float, float]]:
     bounds = list(BOUNDS)
@@ -106,12 +168,22 @@ def _effective_bounds(scope: str = "overall_strategy", preset: str | None = None
     return bounds
 
 
+def _archetype_default_frozen_indices() -> set[int]:
+    """All archetype lifecycle slots default to frozen — they unfreeze only via an archetype preset."""
+    return {
+        _idx for _path, _idx in _CONFIG_PATH_TO_PARAM_IDX.items()
+        if _path.startswith("archetype_management.")
+    }
+
+
 def _get_active_indices(scope: str = "overall_strategy", preset: str | None = None) -> list[int]:
     frozen = {
         _CONFIG_PATH_TO_PARAM_IDX[p]
         for p in TUNING_PARAMS.get("frozen_parameters", [])
         if p in _CONFIG_PATH_TO_PARAM_IDX
     }
+    # Archetype lifecycle slots are frozen-by-default; an archetype preset unfreezes them.
+    frozen |= _archetype_default_frozen_indices()
     if preset is not None:
         from .presets import apply_preset_to_frozen
         frozen = apply_preset_to_frozen(frozen, preset)
@@ -141,7 +213,7 @@ def _current_params() -> np.ndarray:
         v2w.get("trend_structure", 0.15),
         v2w.get("return_1m",       0.10),
     ]
-    return np.array([
+    base = [
         sw["value"], sw["quality"], sw["income"], sw["momentum"],
         INDEX_PCT,
         METRIC_THRESHOLD,
@@ -150,4 +222,15 @@ def _current_params() -> np.ndarray:
         SELL_RULES["trailing_stop_pct"],
         SCORING_PARAMS["value_pe_weight"],
         *mom_sub,
-    ])
+    ]
+    # Archetype lifecycle slots 15-38 — read from ARCHETYPE_PARAMS, fall back to slot bounds midpoint
+    arch_tail: list[float] = []
+    for _ai, _alabel in enumerate(_ARCH_KEYS):
+        entry = (ARCHETYPE_PARAMS or {}).get(_alabel, {}) or {}
+        for _fi, (_field, _suffix, _bnd) in enumerate(_ARCH_FIELDS):
+            _idx = _ARCH_SLOT_OFFSET + _ai * len(_ARCH_FIELDS) + _fi
+            _default = entry.get(_field)
+            if _default is None:
+                _default = (_bnd[0] + _bnd[1]) / 2.0
+            arch_tail.append(float(_default))
+    return np.array(base + arch_tail)

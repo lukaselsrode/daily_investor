@@ -107,6 +107,9 @@ _SCHEMA: list[str] = [
     "archetype",                 # classified archetype label at decision time
     "archetype_confidence",      # float 0–1 confidence in the classification
     "archetype_drivers",         # JSON string list of driver strings
+    "archetype_at_entry",        # archetype label captured at original buy
+    "archetype_at_exit",         # archetype label at the exit decision
+    "decision_source",           # "global_rule" | "archetype_rule" | "both" | ""
     # ── Post-decision price path (backfilled later) ──────────────────────────
     "max_drawdown_after_decision",  # worst drawdown within 90d of decision
     "max_runup_after_decision",     # best runup within 90d of decision
@@ -248,6 +251,9 @@ def record_decision_holding(
     archetype: str | None           = None,
     archetype_confidence: float | None = None,
     archetype_drivers: list | None  = None,
+    archetype_at_entry: str | None  = None,
+    archetype_at_exit: str | None   = None,
+    decision_source: str | None     = None,
 ) -> None:
     """Append one holding-evaluation record to decision_outcomes.parquet."""
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -304,6 +310,9 @@ def record_decision_holding(
         "archetype":              archetype,
         "archetype_confidence":   archetype_confidence,
         "archetype_drivers":      json.dumps(archetype_drivers) if archetype_drivers else None,
+        "archetype_at_entry":     archetype_at_entry,
+        "archetype_at_exit":      archetype_at_exit,
+        "decision_source":        decision_source,
     })
 
     _append_row(row)

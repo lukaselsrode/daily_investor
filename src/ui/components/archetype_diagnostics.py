@@ -91,6 +91,21 @@ def render_archetype_breakdown(sim_result) -> None:
 
     # ── Summary table ──────────────────────────────────────────────────────
     import pandas as pd
+    excess  = getattr(sim_result, "archetype_active_excess",   {}) or {}
+    winrate = getattr(sim_result, "archetype_win_rate",        {}) or {}
+    avghold = getattr(sim_result, "archetype_avg_hold_days",   {}) or {}
+    maxdd   = getattr(sim_result, "archetype_max_drawdown",    {}) or {}
+    sleeve  = getattr(sim_result, "archetype_sleeve_weight",   {}) or {}
+    unreal  = getattr(sim_result, "archetype_unrealized_pnl",  {}) or {}
+
+    def _beats_spy_badge(label: str) -> str:
+        v = excess.get(label)
+        if v is None:
+            return "—"
+        if v >  0.05: return "✅ Beats"
+        if v >= 0.0:  return "🟡 ~Even"
+        return "❌ Lags"
+
     rows = []
     for a in all_archetypes:
         total_pnl = pnl.get(a, 0.0)
@@ -100,8 +115,15 @@ def render_archetype_breakdown(sim_result) -> None:
         rows.append({
             "Archetype":     _ARCHETYPE_LABELS.get(a, a),
             "Sells":         n_sells,
+            "Win rate":      f"{winrate.get(a, 0.0):.0%}" if a in winrate else "—",
             "Total PnL":     f"${total_pnl:+,.2f}",
+            "Unrealized":    f"${unreal.get(a, 0.0):+,.2f}",
             "Avg PnL/trade": f"${avg_pnl:+,.2f}",
+            "Avg hold (d)":  f"{avghold.get(a, 0.0):.0f}" if a in avghold else "—",
+            "Max DD":        f"{maxdd.get(a, 0.0):.1%}" if a in maxdd else "—",
+            "Sleeve weight": f"{sleeve.get(a, 0.0):.1%}" if a in sleeve else "—",
+            "Excess vs SPY": f"{excess.get(a, 0.0):+.1%}" if a in excess else "—",
+            "Beats SPY":     _beats_spy_badge(a),
             "Stop-outs":     ex.get("stop_loss", 0) + ex.get("trailing_stop", 0),
             "Take-profits":  ex.get("take_profit", 0),
             "Weak-value":    ex.get("weak_value", 0),

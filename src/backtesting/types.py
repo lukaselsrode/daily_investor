@@ -87,6 +87,15 @@ class SimResult:
     archetype_pnl: dict[str, float] = field(default_factory=dict)
     archetype_trade_counts: dict[str, int] = field(default_factory=dict)
     archetype_exit_breakdown: dict[str, dict] = field(default_factory=dict)
+    # Extended archetype rollups — empty when no trades in the archetype.
+    archetype_active_excess: dict[str, float] = field(default_factory=dict)
+    archetype_win_rate: dict[str, float] = field(default_factory=dict)
+    archetype_avg_hold_days: dict[str, float] = field(default_factory=dict)
+    archetype_max_drawdown: dict[str, float] = field(default_factory=dict)
+    archetype_sleeve_weight: dict[str, float] = field(default_factory=dict)
+    archetype_realized_pnl: dict[str, float] = field(default_factory=dict)
+    archetype_unrealized_pnl: dict[str, float] = field(default_factory=dict)
+    archetype_decision_source_counts: dict[str, dict] = field(default_factory=dict)
     # Walk-forward cluster concentration result (None when cluster_tracking=False)
     cluster_result: object | None = None
     # Backtest scope and active sleeve metrics (None when scope == "overall_strategy")

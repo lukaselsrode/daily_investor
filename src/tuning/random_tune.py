@@ -53,6 +53,14 @@ _IDX_TO_CONFIG_PATH: dict[int, str] = {
     13: "momentum_v2.weights.trend_structure",
     14: "momentum_v2.weights.return_1m",
 }
+# Append archetype lifecycle slots 15-38 — derived from the same layout as constants.py
+try:
+    from tuning.constants import _CONFIG_PATH_TO_PARAM_IDX as _C2I
+    for _path, _idx in _C2I.items():
+        if _path.startswith("archetype_management.") and _idx not in _IDX_TO_CONFIG_PATH:
+            _IDX_TO_CONFIG_PATH[_idx] = _path
+except Exception:
+    pass
 
 _SCORE_WEIGHT_IDXS: frozenset[int] = frozenset({0, 1, 2, 3})
 
@@ -169,6 +177,7 @@ class RandomTuneResult:
     best_candidate: WeightCandidate | None = None
     current_weights: np.ndarray | None = None   # active param values for current config
     current_summary: RandomWindowSummary | None = None
+    current_scan_result: "RobustScanResult | None" = None  # populated when run_matrix used
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -287,20 +296,23 @@ def run_random_weight_tune(
     progress_callback: Callable[[int, int], None] | None = None,
     scope: str = "overall_strategy",
     preset: str | None = None,
+    run_matrix: list[dict] | None = None,
 ) -> RandomTuneResult:
     """
-    Sample n_samples random parameter combinations, evaluate each on n_windows
-    random windows of window_days, and return candidates ranked by robust_score.
+    Sample n_samples random parameter combinations, evaluate each on either:
+      - a single (n_windows, window_days) call to random_window_backtest  [legacy]
+      - the full multi-cell run_matrix via run_robust_scan                 [new]
 
-    When preset is None or active set is exactly {0,1,2,3}: uses Dirichlet simplex
-    sampling for score weights (original behaviour).
+    When run_matrix is provided, each candidate is scored by
+    RobustScanResult.overall_robust_score, and the best_candidate carries
+    the full RobustScanResult for downstream heatmap display.
 
-    When a preset selects other params (e.g. active_exits, active_factor_internals):
-    samples each active param independently from its effective bounds via uniform
-    distribution.
+    When preset is None or active set is exactly {0,1,2,3}: Dirichlet simplex.
+    Otherwise: independent uniform within effective bounds.
     """
     from backtesting.simulator import get_default_params
     from tuning.constants import PARAM_NAMES, _effective_bounds, _get_active_indices
+    from tuning.robust_scan import run_robust_scan
 
     if base_params is None:
         base_params = get_default_params()
@@ -310,46 +322,45 @@ def run_random_weight_tune(
     active_names = [PARAM_NAMES[i] for i in active_idxs]
     active_bnds  = [eff_bounds[i] for i in active_idxs]
 
-    # Decide sampling strategy
     use_simplex = (set(active_idxs) == _SCORE_WEIGHT_IDXS)
 
     if use_simplex:
         simplex_bounds = _weight_bounds_from_config() if respect_config_bounds else None
         raw_samples = sample_weight_simplex(n_samples, n_dims=4, seed=seed, bounds=simplex_bounds)
     else:
-        # Independent uniform sampling within each active param's effective bounds
         rng = np.random.default_rng(seed)
         raw_samples = np.zeros((n_samples, len(active_idxs)), dtype=float)
         for j, (lo, hi) in enumerate(active_bnds):
             raw_samples[:, j] = rng.uniform(lo, hi, n_samples)
 
-    # Current active param values as baseline
     current_active = base_params[np.array(active_idxs)].copy()
 
     warnings: list[str] = []
     n_total = precomp.prices.shape[0]
-    if n_total < window_days * 2:
+    _max_horizon = max(c["horizon_days"] for c in run_matrix) if run_matrix else window_days
+    if n_total < _max_horizon * 2:
         warnings.append(
-            f"Only {n_total} days of data for window_days={window_days}. "
+            f"Only {n_total} days of data vs longest horizon {_max_horizon}d. "
             "Results may be unreliable — consider loading more history."
         )
 
     candidates: list[WeightCandidate] = []
 
-    for idx, active_vals in enumerate(raw_samples):
-        if progress_callback is not None:
-            progress_callback(idx, n_samples)
-
-        params_i = base_params.copy()
-        for j, aidx in enumerate(active_idxs):
-            params_i[aidx] = float(active_vals[j])
-
-        try:
+    def _evaluate(params_i, eval_seed):
+        """Evaluate params_i via run_matrix scan or single window_backtest."""
+        if run_matrix is not None:
+            scan = run_robust_scan(precomp, params_i, run_matrix, scope=scope)
+            rep_summary = scan.aggregate_summary()
+            if rep_summary is None:
+                return None, None
+            rank_score = scan.overall_robust_score
+            return rep_summary, rank_score, scan
+        else:
             summary = random_window_backtest(
                 precomp, params_i,
                 n_windows=n_windows,
                 window_days=window_days,
-                seed=seed + idx + 1,
+                seed=eval_seed,
                 starting_capital=starting_capital,
                 weekly_contribution=weekly_contribution,
                 slippage_bps=slippage_bps,
@@ -361,6 +372,21 @@ def run_random_weight_tune(
                 if scope == "active_sleeve_compounding" and summary.active_robust_score is not None
                 else summary.robust_score
             )
+            return summary, rank_score, None
+
+    for idx, active_vals in enumerate(raw_samples):
+        if progress_callback is not None:
+            progress_callback(idx, n_samples)
+
+        params_i = base_params.copy()
+        for j, aidx in enumerate(active_idxs):
+            params_i[aidx] = float(active_vals[j])
+
+        try:
+            result = _evaluate(params_i, seed + idx + 1)
+            if result[0] is None:
+                continue
+            summary, rank_score, scan = result
             candidates.append(WeightCandidate(
                 sample_id=idx,
                 active_values=active_vals.copy(),
@@ -368,6 +394,7 @@ def run_random_weight_tune(
                 full_params=params_i.copy(),
                 summary=summary,
                 robust_score=rank_score,
+                scan_result=scan,
             ))
         except Exception as exc:
             logger.warning("Sample %d failed: %s", idx, exc)
@@ -382,19 +409,11 @@ def run_random_weight_tune(
 
     # Evaluate current config as baseline
     current_summary: RandomWindowSummary | None = None
+    current_scan: RobustScanResult | None = None
     try:
-        current_params = base_params.copy()
-        current_summary = random_window_backtest(
-            precomp, current_params,
-            n_windows=n_windows,
-            window_days=window_days,
-            seed=seed + n_samples + 99,
-            starting_capital=starting_capital,
-            weekly_contribution=weekly_contribution,
-            slippage_bps=slippage_bps,
-            rebalance_frequency_days=rebalance_frequency_days,
-            scope=scope,
-        )
+        result = _evaluate(base_params.copy(), seed + n_samples + 99)
+        if result[0] is not None:
+            current_summary, _, current_scan = result
     except Exception as exc:
         logger.warning("Current-config baseline evaluation failed: %s", exc)
         warnings.append(f"Current config evaluation failed: {exc}")
@@ -411,5 +430,6 @@ def run_random_weight_tune(
         best_candidate=best,
         current_weights=current_active,
         current_summary=current_summary,
+        current_scan_result=current_scan,
         warnings=warnings,
     )
