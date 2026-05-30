@@ -133,3 +133,43 @@ def test_market_structure_df_shape():
     df = load_market_structure_df([], auto_refresh=False)
     assert list(df.columns) == ["symbol", *MARKET_STRUCTURE_DF_COLS]
     assert df.empty
+
+
+def test_compute_graph_features_shape_and_values():
+    """compute_graph_features returns the documented columns and sane structural values."""
+    from data.comention_graph import (
+        GRAPH_FEATURE_COLS,
+        build_comention_graph,
+        compute_graph_features,
+    )
+    # A 3-clique (A,B,C share an article) plus a pendant D attached to A.
+    news = _news_df([
+        ("A", [{"title": "Trio rallies on strong growth", "link": "http://n/1"},
+               {"title": "A and D partner up", "link": "http://n/2"}]),
+        ("B", [{"title": "Trio rallies on strong growth", "link": "http://n/1"}]),
+        ("C", [{"title": "Trio rallies on strong growth", "link": "http://n/1"}]),
+        ("D", [{"title": "A and D partner up", "link": "http://n/2"}]),
+    ])
+    edges, nodes = build_comention_graph(news_df=news, persist=False)
+    feats = compute_graph_features(edges, nodes)
+    assert list(feats.columns) == ["symbol", *GRAPH_FEATURE_COLS]
+    fmap = feats.set_index("symbol")
+    # A is the hub: connected to B, C (clique) and D -> degree 3, highest.
+    assert fmap.loc["A", "news_degree"] == 3
+    assert fmap.loc["B", "news_degree"] == 2  # B-A, B-C
+    assert fmap.loc["D", "news_degree"] == 1  # only D-A
+    # clique members A,B,C have clustering > 0; pendant D has 0.
+    assert fmap.loc["B", "news_clustering"] > 0
+    assert fmap.loc["D", "news_clustering"] == 0.0
+
+
+def test_compute_graph_features_empty_input():
+    import pandas as pd
+
+    from data.comention_graph import GRAPH_FEATURE_COLS, compute_graph_features
+    feats = compute_graph_features(
+        pd.DataFrame(columns=["source", "target", "weight"]),
+        pd.DataFrame(columns=["symbol", "sentiment"]),
+    )
+    assert list(feats.columns) == ["symbol", *GRAPH_FEATURE_COLS]
+    assert feats.empty

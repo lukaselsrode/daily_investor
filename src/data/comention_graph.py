@@ -27,21 +27,61 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# Crude, transparent title-sentiment lexicon (intentionally small — this is a
-# coarse directional tag, not an NLP model). Lives here so the graph artifact is
-# self-contained ETL output.
+# Transparent finance-aware title-sentiment lexicon. Intentionally rule-based (not an
+# NLP model) so the graph artifact stays self-contained and deterministic. Expanded
+# with negation handling. NOTE: validated offline (.session_tmp/h7) that a heavier
+# model (VADER) and this expansion do NOT improve cross-sectional forward-return IC —
+# this is a correctness/display upgrade, not an alpha lever. No trading claim attached.
 _POS = frozenset({
-    "surge", "surges", "soar", "soars", "jump", "jumps", "rally", "rallies", "beat",
-    "beats", "gain", "gains", "rise", "rises", "record", "strong", "growth", "upgrade",
-    "outperform", "buy", "bullish", "boom", "wins", "win", "profit", "tops", "rebound",
-    "raises", "raise", "high", "highs",
+    "surge", "surges", "surged", "soar", "soars", "soared", "jump", "jumps", "jumped",
+    "rally", "rallies", "rallied", "beat", "beats", "gain", "gains", "gained", "rise",
+    "rises", "rose", "record", "strong", "growth", "upgrade", "upgraded", "outperform",
+    "buy", "bullish", "boom", "wins", "win", "profit", "profits", "tops", "topped",
+    "rebound", "rebounds", "raises", "raise", "raised", "high", "highs", "best", "boost",
+    "boosts", "boosted", "soaring", "surging", "climb", "climbs", "climbed", "advance",
+    "advances", "leap", "leaps", "expands", "expansion", "accelerate", "accelerates",
+    "momentum", "breakout", "upside", "buyback", "approval", "approved", "secures",
+    "optimism", "outperforms",
 })
 _NEG = frozenset({
-    "fall", "falls", "drop", "drops", "plunge", "plunges", "slump", "sink", "sinks",
-    "miss", "misses", "loss", "losses", "weak", "cut", "cuts", "downgrade", "sell",
-    "bearish", "crash", "fear", "fears", "warn", "warns", "slash", "plummet", "tumble",
-    "probe", "sue", "lawsuit", "low", "lows",
+    "fall", "falls", "fell", "drop", "drops", "dropped", "plunge", "plunges", "plunged",
+    "slump", "slumps", "sink", "sinks", "sank", "miss", "misses", "missed", "loss",
+    "losses", "weak", "cut", "cuts", "downgrade", "downgraded", "sell", "bearish",
+    "crash", "crashes", "fear", "fears", "warn", "warns", "warning", "slash", "slashes",
+    "plummet", "plummets", "tumble", "tumbles", "probe", "sue", "sued", "lawsuit", "low",
+    "lows", "decline", "declines", "declined", "layoff", "layoffs", "bankruptcy",
+    "default", "recall", "halt", "halts", "slowdown", "weakness", "disappoints",
+    "disappointing", "investigation", "fraud", "scandal", "selloff", "downside", "woes",
 })
+# Negators flip the polarity of a sentiment word in the following 1-2 tokens.
+_NEGATORS = frozenset({"not", "no", "never", "without", "fails", "failed", "lacks", "lack",
+                       "unable", "halts", "halt"})
+
+
+def title_sentiment(text: str) -> float:
+    """Finance-aware lexical sentiment in [-1, 1] from a headline. 0.0 when no hits.
+
+    Counts positive/negative lexicon hits, flipping a hit's sign when a negator
+    appears within the preceding two tokens ("not strong" -> negative). Score is the
+    mean signed hit, clamped to [-1, 1]. Deterministic and dependency-free.
+    """
+    toks = re.findall(r"[a-zA-Z]+", (text or "").lower())
+    if not toks:
+        return 0.0
+    total = 0.0
+    hits = 0
+    for i, t in enumerate(toks):
+        base = 1.0 if t in _POS else (-1.0 if t in _NEG else 0.0)
+        if base == 0.0:
+            continue
+        if any(w in _NEGATORS for w in toks[max(0, i - 2):i]):
+            base = -base
+        total += base
+        hits += 1
+    if hits == 0:
+        return 0.0
+    v = total / hits
+    return float(max(-1.0, min(1.0, v)))
 
 
 def _data_dir() -> Path:
@@ -55,14 +95,6 @@ def _edges_path() -> Path:
 
 def _nodes_path() -> Path:
     return _data_dir() / "comention_nodes.csv"
-
-
-def title_sentiment(text: str) -> float:
-    """Crude lexical sentiment in [-1, 1] from a headline. 0.0 when no hits."""
-    toks = re.findall(r"[a-zA-Z]+", (text or "").lower())
-    p = sum(1 for t in toks if t in _POS)
-    n = sum(1 for t in toks if t in _NEG)
-    return 0.0 if (p + n) == 0 else (p - n) / (p + n)
 
 
 def _article_key(art: dict) -> str:
@@ -215,3 +247,103 @@ def load_comention_graph() -> tuple[pd.DataFrame, pd.DataFrame]:
     edges = pd.read_csv(ep) if ep.exists() else pd.DataFrame(columns=e_cols)
     nodes = pd.read_csv(np_) if np_.exists() else pd.DataFrame(columns=n_cols)
     return edges, nodes
+
+
+# Per-node structural features exposed to the enriched data block (agg_data). Prefixed
+# ``news_`` so consumers can tell graph-derived columns apart. Computed in ETL; the
+# strategy/portfolio layer reads them as columns (pure consumer), never builds a graph.
+GRAPH_FEATURE_COLS: list[str] = [
+    "news_degree", "news_wdegree", "news_centrality", "news_clustering",
+    "news_core", "news_community", "news_community_size",
+    "news_sentiment", "news_peer_sentiment", "news_sent_dispersion",
+]
+
+
+def compute_graph_features(edges_df: pd.DataFrame, nodes_df: pd.DataFrame) -> pd.DataFrame:
+    """Derive per-node structural + sentiment features from the co-mention graph.
+
+    Returns a DataFrame keyed by ``symbol`` with the GRAPH_FEATURE_COLS columns. Uses
+    networkx for centrality/community; degrades gracefully (zeros) if networkx is
+    unavailable or the graph is empty. This is the research-validated feature set
+    (degree/centrality/community + neighbor-sentiment aggregates).
+    """
+    cols = ["symbol", *GRAPH_FEATURE_COLS]
+    if edges_df is None or edges_df.empty:
+        return pd.DataFrame(columns=cols)
+    try:
+        import networkx as nx
+    except Exception:
+        logger.warning("networkx unavailable — graph features skipped")
+        return pd.DataFrame(columns=cols)
+
+    G = nx.Graph()
+    for r in edges_df.itertuples(index=False):
+        G.add_edge(r.source, r.target, weight=getattr(r, "weight", 1))
+    if G.number_of_nodes() == 0:
+        return pd.DataFrame(columns=cols)
+
+    sent_map: dict[str, float] = {}
+    if nodes_df is not None and not nodes_df.empty and "sentiment" in nodes_df.columns:
+        sent_map = dict(zip(nodes_df["symbol"], nodes_df["sentiment"]))
+
+    deg = dict(G.degree())
+    wdeg = dict(G.degree(weight="weight"))
+    clustering = nx.clustering(G)
+    core = nx.core_number(G)
+    try:
+        cent = nx.eigenvector_centrality_numpy(G, weight="weight")
+    except Exception:
+        cent = {n: 0.0 for n in G.nodes()}
+    comm_id: dict[str, int] = {}
+    comm_sz: dict[str, int] = {}
+    try:
+        for ci, cset in enumerate(nx.community.greedy_modularity_communities(G, weight="weight")):
+            for n in cset:
+                comm_id[n] = ci
+                comm_sz[n] = len(cset)
+    except Exception:
+        pass
+
+    rows = []
+    for n in G.nodes():
+        nbrs = list(G.neighbors(n))
+        psent = [sent_map.get(x, 0.0) for x in nbrs]
+        rows.append({
+            "symbol": n,
+            "news_degree": int(deg.get(n, 0)),
+            "news_wdegree": int(wdeg.get(n, 0)),
+            "news_centrality": round(float(cent.get(n, 0.0)), 6),
+            "news_clustering": round(float(clustering.get(n, 0.0)), 6),
+            "news_core": int(core.get(n, 0)),
+            "news_community": int(comm_id.get(n, -1)),
+            "news_community_size": int(comm_sz.get(n, 0)),
+            "news_sentiment": round(float(sent_map.get(n, 0.0)), 4),
+            "news_peer_sentiment": round(float(sum(psent) / len(psent)), 4) if psent else 0.0,
+            "news_sent_dispersion": round(float(pd.Series(psent).std()), 4) if len(psent) > 1 else 0.0,
+        })
+    return pd.DataFrame(rows, columns=cols)
+
+
+def _features_path() -> Path:
+    return _data_dir() / "comention_features.csv"
+
+
+def build_and_persist_features() -> pd.DataFrame:
+    """Read the persisted graph, compute features, persist comention_features.csv."""
+    edges, nodes = load_comention_graph()
+    feats = compute_graph_features(edges, nodes)
+    if not feats.empty:
+        try:
+            feats.to_csv(_features_path(), index=False)
+            logger.info("comention features: %d nodes persisted", len(feats))
+        except Exception as exc:
+            logger.warning("Could not persist comention features: %s", exc)
+    return feats
+
+
+def load_comention_features() -> pd.DataFrame:
+    """Read the persisted per-node feature artifact. Empty frame when not built."""
+    fp = _features_path()
+    if fp.exists():
+        return pd.read_csv(fp)
+    return pd.DataFrame(columns=["symbol", *GRAPH_FEATURE_COLS])
