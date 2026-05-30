@@ -156,6 +156,16 @@ regime:
     # Contrarian mean-reversion blend in fear regimes (0.0 = off; validated lever,
     # left off in the recommended config — see research notes).
     mean_reversion_blend: 0.0
+    # Falling-knife / value-trap guard (0.0 = off, behavior-preserving default).
+    # Research finding: among below-200DMA names, the HIGHEST-composite ones
+    # systematically underperform the lowest-composite ones (monotonic pooled
+    # quintiles, market-excess, t up to -7 at the 8-day horizon). When > 0, the
+    # composite of below-200DMA names in the top `falling_knife_top_frac` of their
+    # below-200DMA peer group is multiplied by (1 - falling_knife_guard). This is
+    # downside protection for drawdowns, not an alpha source — it rarely changes the
+    # buy basket because top-composite names are usually already above their 200DMA.
+    falling_knife_guard: 0.0
+    falling_knife_top_frac: 0.5
   neutral:
     index_pct_override: 0.77
     max_buys_override: 4

@@ -572,6 +572,13 @@ REGIME_PARAMS: dict = {
         "stop_loss_tighten": float(_rg_def.get("stop_loss_tighten", 0.05)),
         # Contrarian mean-reversion blend in fear regimes (0.0 = off).
         "mean_reversion_blend": float(_rg_def.get("mean_reversion_blend", 0.0)),
+        # Falling-knife / value-trap guard: multiplicatively penalize the composite of
+        # below-200DMA names whose composite ranks in the top `fk_top_frac` of their
+        # below-200DMA peers. Research (4h session) found high-composite downtrend names
+        # systematically underperform (monotonic pooled deciles, t up to -7). 0.0 = off
+        # (behavior-preserving default); 0.5 halves the score of the worst value traps.
+        "falling_knife_guard": float(_rg_def.get("falling_knife_guard", 0.0)),
+        "falling_knife_top_frac": float(_rg_def.get("falling_knife_top_frac", 0.5)),
     },
     "neutral": {
         "index_pct_override": None,
