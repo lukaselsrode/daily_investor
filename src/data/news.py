@@ -62,19 +62,32 @@ async def _get_reddit_sentiments_async(days: int = 7) -> dict:
 # ---------------------------------------------------------------------------
 
 def _robinhood_news(ticker: str, max_articles: int) -> list[dict]:
-    """Fetch news from Robinhood. Returns [] if not logged in or on any error."""
+    """Fetch news from Robinhood. Returns [] if not logged in or on any error.
+
+    Captures the structured ``related_instruments`` field (instrument UUIDs of other
+    securities the article links) and resolves it to ``related_symbols`` via the
+    cached data-layer resolver — the source for the co-mention graph.
+    """
     try:
-        items = rb.robinhood.get_news(ticker) or []
+        from .instrument_resolver import resolve_symbols
+        items = rb.get_news(ticker) or []
         result = []
         for item in items[:max_articles]:
+            rel_ids = item.get("related_instruments") or []
+            rel_map = resolve_symbols(rel_ids) if rel_ids else {}
+            related = sorted({s for s in rel_map.values() if s and s != ticker})
+            # `source` may be a plain string (e.g. "MarketWatch") or a dict.
+            src = item.get("source")
+            publisher = src.get("name", "Robinhood") if isinstance(src, dict) else (src or "Robinhood")
             result.append({
                 "title": item.get("title", ""),
-                "publisher": item.get("source", {}).get("name", "Robinhood"),
+                "publisher": publisher,
                 "link": item.get("url", ""),
                 "summary": item.get("summary", item.get("preview_text", "")),
                 "pub_date": item.get("published_at", ""),
                 "formatted_date": item.get("published_at", ""),
                 "api_source": "robinhood",
+                "related_symbols": related,
             })
         return result
     except Exception:
@@ -97,6 +110,7 @@ def _parse_yfinance_item(item: dict) -> dict | None:
         "summary": content.get("summary", ""),
         "pub_date": pub_date,
         "formatted_date": formatted_date,
+        "related_symbols": [],  # yfinance payload carries no structured related tickers
     }
 
 
@@ -108,6 +122,7 @@ def _parse_robinhood_item(item: dict) -> dict:
         "summary": item.get("summary", ""),
         "pub_date": item.get("pub_date", ""),
         "formatted_date": item.get("formatted_date", ""),
+        "related_symbols": item.get("related_symbols", []),
     }
 
 

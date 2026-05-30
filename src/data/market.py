@@ -49,23 +49,42 @@ def get_data(refresh: bool = False) -> pd.DataFrame:
     else:
         result = metrics.copy()
 
-    # Tag each symbol with its Robinhood instrument type (etp/cef/mlp/stock/...)
-    # so downstream ETF/fund classification covers the full universe, not just
-    # the configured ETF tickers. Best-effort: failures leave the column null.
+    # Merge the FULL market-structure enrichment (broker risk ratios, analyst
+    # ratings, raw valuation multiples, company age, instrument type) into the
+    # final data block so the strategy/portfolio layer reads them as columns —
+    # rather than calling load_market_structure() live at decision time. This keeps
+    # all derivation in the ETL phase (single enriched block; pure-consumer engine).
+    # Best-effort: failures leave the columns null.
     if refresh and not result.empty:
         try:
-            from .market_structure import load_market_structure
-            syms = [str(s) for s in result["symbol"].tolist()]
-            ms = load_market_structure(syms, auto_refresh=True)
-            result["instrument_type"] = result["symbol"].astype(str).map(
-                lambda s: (ms.get(s) or {}).get("instrument_type")
+            from .market_structure import (
+                MARKET_STRUCTURE_DF_COLS,
+                load_market_structure_df,
             )
+            syms = [str(s) for s in result["symbol"].tolist()]
+            ms_df = load_market_structure_df(syms, auto_refresh=True)
+            # Don't clobber columns fundamentals already provides (e.g. market_cap,
+            # pe_ratio) — only add market-structure cols absent from the metrics block.
+            add_cols = [c for c in MARKET_STRUCTURE_DF_COLS if c not in result.columns]
+            if add_cols and not ms_df.empty:
+                result = result.merge(
+                    ms_df[["symbol", *add_cols]], on="symbol", how="left"
+                )
         except Exception as e:
-            logger.warning("instrument_type enrichment skipped: %s", e)
+            logger.warning("market-structure enrichment skipped: %s", e)
 
     if not result.empty:
         store_data_as_csv("agg_data", "", result)
         time.sleep(1)
+
+    # Build the news co-mention graph artifact from the freshly-fetched news, so it
+    # is a first-class ETL output (persisted), not derived live in a consumer.
+    if refresh and news_df is not None and not news_df.empty:
+        try:
+            from .comention_graph import build_comention_graph
+            build_comention_graph(news_df=news_df, held_symbols=held or None)
+        except Exception as e:
+            logger.warning("co-mention graph build skipped: %s", e)
 
     return result
 

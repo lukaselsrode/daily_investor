@@ -327,3 +327,37 @@ def load_market_structure(
         }
 
     return result
+
+
+# Per-symbol fields exposed to the final enriched data block (agg_data). These are
+# merged in during ETL (data.market.get_data) so the strategy/portfolio layer reads
+# them as columns rather than calling load_market_structure() live at decision time.
+MARKET_STRUCTURE_DF_COLS: list[str] = [
+    "maintenance_ratio", "day_trade_ratio", "instrument_type", "country",
+    "margin_initial_ratio", "market_cap", "num_employees",
+    "analyst_buy_pct", "analyst_num_ratings", "year_founded", "pe_ratio", "pb_ratio",
+]
+
+
+def load_market_structure_df(
+    symbols: list[str],
+    auto_refresh: bool = True,
+) -> pd.DataFrame:
+    """Return market-structure fields for *symbols* as a DataFrame keyed by ``symbol``.
+
+    Thin wrapper over load_market_structure() so the ETL layer (data.market.get_data)
+    can merge the FULL enrichment into agg_data in one place. ``description`` is
+    intentionally omitted here (long free text; merged separately when needed) — all
+    other fields in MARKET_STRUCTURE_DF_COLS are included. Missing symbols simply
+    don't appear; callers merge how='left'.
+    """
+    data = load_market_structure(symbols, auto_refresh=auto_refresh)
+    rows = []
+    for sym, fields in data.items():
+        row = {"symbol": sym}
+        for col in MARKET_STRUCTURE_DF_COLS:
+            row[col] = fields.get(col)
+        rows.append(row)
+    if not rows:
+        return pd.DataFrame(columns=["symbol", *MARKET_STRUCTURE_DF_COLS])
+    return pd.DataFrame(rows, columns=["symbol", *MARKET_STRUCTURE_DF_COLS])
