@@ -561,7 +561,8 @@ class PortfolioManager:
                     # Enrich with market structure signals
                     _ms = _mkt_structure.get(symbol, {})
                     for _mk in ("maintenance_ratio", "day_trade_ratio", "instrument_type",
-                                "country", "market_cap", "description", "num_employees"):
+                                "country", "market_cap", "description", "num_employees",
+                                "analyst_buy_pct", "analyst_num_ratings"):
                         _mv = _ms.get(_mk)
                         if _mv is not None:
                             _signals[_mk] = _mv
@@ -627,7 +628,9 @@ class PortfolioManager:
                 stocks_data = self._build_stocks_data(soft_df, action="sell")
                 try:
                     from data.sentiment import get_batch_sentiment_recommendations
-                    sentiment_results = get_batch_sentiment_recommendations(stocks_data, action="sell")
+                    sentiment_results = get_batch_sentiment_recommendations(
+                        stocks_data, action="sell", regime=get_current_regime(),
+                    )
                 except Exception:
                     logger.error("Batch sentiment failed for soft sells — executing all", exc_info=True)
 
@@ -1117,7 +1120,8 @@ class PortfolioManager:
                         _signals_c[_k] = _v
                 _ms_c = _mkt_buy.get(_sym_c, {})
                 for _mk in ("maintenance_ratio", "day_trade_ratio", "instrument_type",
-                            "country", "market_cap", "description", "num_employees"):
+                            "country", "market_cap", "description", "num_employees",
+                            "analyst_buy_pct", "analyst_num_ratings"):
                     _mv = _ms_c.get(_mk)
                     if _mv is not None:
                         _signals_c[_mk] = _mv
@@ -1160,7 +1164,9 @@ class PortfolioManager:
             stocks_data = self._build_stocks_data(candidates, action="buy")
             try:
                 from data.sentiment import get_batch_sentiment_recommendations
-                sentiment_results = get_batch_sentiment_recommendations(stocks_data, action="buy")
+                sentiment_results = get_batch_sentiment_recommendations(
+                    stocks_data, action="buy", regime=regime,
+                )
             except Exception:
                 logger.error("Batch sentiment failed — all candidates skipped", exc_info=True)
                 return [], candidates["symbol"].tolist(), []

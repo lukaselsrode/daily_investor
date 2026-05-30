@@ -51,6 +51,9 @@ WEEKLY_INVESTMENT:    float = float(_app.get("weekly_investment", 400))
 INDEX_PCT:            float = float(_app.get("index_pct", 0.85))
 AUTO_APPROVE:         bool  = _app.get("auto_approve", False)
 USE_SENTIMENT_ANALYSIS: bool = _app.get("use_sentiment_analysis", False)
+# Config-driven model id for the sentiment final-guard (env SENTIMENT_MODEL overrides).
+# Empty string → sentiment.py uses its built-in default.
+SENTIMENT_MODEL: str = str(_app.get("sentiment_model", "") or "")
 CONFIDENCE_THRESHOLD: float = float(_app.get("confidence_threshold", 70))
 SELL_SENTIMENT_OVERRIDE_CONFIDENCE: float = float(_app.get("sell_sentiment_override_confidence", 85))
 ETFS:                 list  = _app.get("etfs", ["SPY", "VOO", "VTI", "QQQ", "SCHD"])
