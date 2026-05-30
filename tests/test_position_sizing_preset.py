@@ -73,16 +73,17 @@ def test_position_sizing_cfg_from_params():
 
 def test_current_params_extended_length():
     cp = constants._current_params()
-    # _PS_SLOT_OFFSET + 3 position-sizing slots + 1 regime-tilt slot (slot 46)
-    assert len(cp) == constants._PS_SLOT_OFFSET + 4
+    # _PS_SLOT_OFFSET + 3 position-sizing + 1 regime-tilt (46) + 1 mean-reversion (47)
+    assert len(cp) == constants._PS_SLOT_OFFSET + 5
     # within bounds for each position-sizing slot
     for off in range(3):
         lo, hi = constants.BOUNDS[constants._PS_SLOT_OFFSET + off]
         assert lo <= cp[constants._PS_SLOT_OFFSET + off] <= hi
-    # regime-tilt slot present, defaults to 0.0 (behaviour-preserving) and in bounds
-    tilt_idx = constants._CONFIG_PATH_TO_PARAM_IDX["regime.bullish.momentum_tilt"]
-    lo, hi = constants.BOUNDS[tilt_idx]
-    assert lo <= cp[tilt_idx] <= hi
+    # regime slots present, default to 0.0 (behaviour-preserving) and in bounds
+    for path in ("regime.bullish.momentum_tilt", "regime.defensive.mean_reversion_blend"):
+        idx = constants._CONFIG_PATH_TO_PARAM_IDX[path]
+        lo, hi = constants.BOUNDS[idx]
+        assert lo <= cp[idx] <= hi
 
 
 # ── 5. write-back persists sizing slots (temp file, not live config) ─────────

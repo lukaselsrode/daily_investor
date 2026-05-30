@@ -86,6 +86,12 @@ def apply_config_params(params: np.ndarray) -> None:
         cfg["regime"].setdefault("bullish", {})
         cfg["regime"]["bullish"]["momentum_tilt"] = round(float(params[46]), 4)
 
+    # Regime-conditional mean-reversion blend slot 47 (active_alpha_engine) — persist when present.
+    if len(params) > 47:
+        cfg.setdefault("regime", {})
+        cfg["regime"].setdefault("defensive", {})
+        cfg["regime"]["defensive"]["mean_reversion_blend"] = round(float(params[47]), 4)
+
     with open(CONFIG_FILE, "w") as f:
         yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
 

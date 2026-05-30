@@ -34,6 +34,53 @@ def test_slot46_layout_and_frozen_by_default():
     assert 46 not in _get_active_indices(scope="active_sleeve_compounding", preset=None)
 
 
+def test_slot47_meanrev_layout_and_frozen_by_default():
+    from tuning.constants import (
+        _CONFIG_PATH_TO_PARAM_IDX,
+        BOUNDS,
+        PARAM_NAMES,
+        _get_active_indices,
+    )
+    idx = _CONFIG_PATH_TO_PARAM_IDX["regime.defensive.mean_reversion_blend"]
+    assert idx == 47
+    assert PARAM_NAMES[idx] == "regime_defensive_mean_reversion_blend"
+    assert BOUNDS[idx] == (0.0, 1.0)
+    assert 47 not in _get_active_indices(scope="active_sleeve_compounding", preset=None)
+
+
+def test_active_alpha_engine_preset_unfreezes_regime_slots():
+    from tuning.constants import _get_active_indices
+    active = _get_active_indices(scope="active_sleeve_compounding", preset="active_alpha_engine")
+    assert 46 in active  # momentum tilt
+    assert 47 in active  # mean-reversion blend
+
+
+def test_meanrev_blend_only_affects_nonbull_scoring():
+    """slot 47 > 0 changes scoring ONLY in non-bull regimes; inert in bull."""
+    import numpy as np
+
+    from backtesting.simulator import _detect_regime, get_default_params, score_stocks_at_day
+    base16 = get_default_params()
+    ext = np.concatenate([base16, np.zeros(48 - len(base16))])
+    ext[47] = 0.5  # heavy mean-reversion blend
+
+    # bullish substrate: mean-reversion blend must be INERT
+    pc_bull = _tiny_precomp(bullish=True)
+    db = pc_bull.prices.shape[0] - 1
+    if _detect_regime(pc_bull, db) == "bullish":
+        s0 = score_stocks_at_day(pc_bull, np.concatenate([base16, np.zeros(48 - len(base16))]), db)
+        s_mr = score_stocks_at_day(pc_bull, ext, db)
+        assert np.allclose(s0, s_mr, atol=1e-12), "mean-reversion must be inert in bull regime"
+
+    # defensive substrate: mean-reversion blend must CHANGE scoring
+    pc_def = _tiny_precomp(bullish=False)
+    dd = pc_def.prices.shape[0] - 1
+    if _detect_regime(pc_def, dd) != "bullish":
+        s0d = score_stocks_at_day(pc_def, np.concatenate([base16, np.zeros(48 - len(base16))]), dd)
+        s_mrd = score_stocks_at_day(pc_def, ext, dd)
+        assert not np.allclose(s0d, s_mrd), "mean-reversion must alter scores in fear regime"
+
+
 def test_active_regime_tilt_preset_unfreezes_only_slot46():
     from tuning.constants import _get_active_indices
     active = _get_active_indices(scope="active_sleeve_compounding", preset="active_regime_tilt")

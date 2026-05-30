@@ -121,6 +121,35 @@ _PRESETS: dict[str, dict] = {
         "phase2": False,
     },
 
+    "active_alpha_engine": {
+        "description": "Full high-risk alpha engine: momentum-led selection in bull "
+                       "(regime momentum tilt) + contrarian mean-reversion in fear regimes "
+                       "(regime mean_reversion_blend), with ride-winners exits. Unfreezes "
+                       "score weights, all momentum sub-weights, exits, and both regime "
+                       "slots (46+47). Highest DOF — rolling/non-overlapping windows are "
+                       "the overfit guard. This is the 'chase alpha, convert to beta' sleeve.",
+        "unfreeze": [
+            "score_weights.value",
+            "score_weights.quality",
+            "score_weights.income",
+            "score_weights.momentum",
+            "metric_threshold",
+            "sell_rules.take_profit_pct",
+            "sell_rules.sell_weak_value_below",
+            "sell_rules.trailing_stop_pct",
+            "scoring.momentum_inputs.weights.rs_3m",
+            "scoring.momentum_inputs.weights.rs_6m",
+            "scoring.momentum_inputs.weights.risk_adj_3m",
+            "scoring.momentum_inputs.weights.trend_structure",
+            "scoring.momentum_inputs.weights.return_1m",
+            "scoring.momentum_inputs.weights.return_5d",
+            "regime.bullish.momentum_tilt",
+            "regime.defensive.mean_reversion_blend",
+        ],
+        "freeze_extra": [],
+        "phase2": False,
+    },
+
     "active_regime_tilt": {
         "description": "Regime-conditional bull aggressiveness. Unfreezes the single "
                        "regime.bullish.momentum_tilt scalar (slot 46): in confirmed-bull "

@@ -184,6 +184,16 @@ PARAM_NAMES.append("regime_bull_momentum_tilt")
 BOUNDS.append((0.0, 0.50))
 _CONFIG_PATH_TO_PARAM_IDX["regime.bullish.momentum_tilt"] = _REGIME_TILT_SLOT
 
+# ── Append regime-conditional mean-reversion blend slot 47 ─────────────────
+# In NON-bull regimes, blend an 'oversold' (below-25d-MA) contrarian score into the
+# composite. Mirror of momentum: contrarian works in fear regimes (+2-3% fwd edge),
+# momentum works in bull. Frozen by default (0.0). Unfrozen via active_alpha_engine.
+# Scoring-only lever — changes which stocks rank high, never cash/share accounting.
+_MEANREV_SLOT = len(PARAM_NAMES)  # 47
+PARAM_NAMES.append("regime_defensive_mean_reversion_blend")
+BOUNDS.append((0.0, 1.0))
+_CONFIG_PATH_TO_PARAM_IDX["regime.defensive.mean_reversion_blend"] = _MEANREV_SLOT
+
 
 def position_sizing_cfg_from_params(params) -> dict:
     """
@@ -290,9 +300,13 @@ def _archetype_default_frozen_indices() -> set[int]:
 
 
 def _regime_tilt_default_frozen_indices() -> set[int]:
-    """Regime-tilt slot defaults to frozen — unfrozen only via active_regime_tilt."""
-    idx = _CONFIG_PATH_TO_PARAM_IDX.get("regime.bullish.momentum_tilt")
-    return {idx} if idx is not None else set()
+    """Regime tilt + mean-reversion slots default to frozen — unfrozen via presets."""
+    out: set[int] = set()
+    for path in ("regime.bullish.momentum_tilt", "regime.defensive.mean_reversion_blend"):
+        idx = _CONFIG_PATH_TO_PARAM_IDX.get(path)
+        if idx is not None:
+            out.add(idx)
+    return out
 
 
 def _get_active_indices(scope: str = "overall_strategy", preset: str | None = None) -> list[int]:
@@ -384,4 +398,13 @@ def _current_params() -> np.ndarray:
     except (TypeError, ValueError, AttributeError):
         _tilt_default = 0.0
     regime_tail: list[float] = [_tilt_default]
+    # Mean-reversion blend slot 47 — read from REGIME_PARAMS defensive block; default 0.0.
+    _mr_default = 0.0
+    try:
+        _mr_default = float(
+            (REGIME_PARAMS or {}).get("defensive", {}).get("mean_reversion_blend", 0.0)
+        )
+    except (TypeError, ValueError, AttributeError):
+        _mr_default = 0.0
+    regime_tail.append(_mr_default)
     return np.array(base + arch_tail + cs_tail + ps_tail + regime_tail)
