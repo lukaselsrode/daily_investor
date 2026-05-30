@@ -41,22 +41,36 @@ def render() -> None:
             return fallback
 
     base_buys = _int(risk_cfg.get("max_buys_per_rebalance"), 4)
+    bull_cfg = regime_cfg.get("bullish", {})
+    base_momentum = _float(cfg.get("score_weights", {}).get("momentum"), 0.0)
+    momentum_tilt = _float(bull_cfg.get("momentum_tilt"), 0.0)
+    mean_rev_blend = _float(def_cfg.get("mean_reversion_blend"), 0.0)
 
     if regime == "Bullish":
         eff_index  = _float(base_index, 0.72)
         max_buys   = base_buys
         stop_adj   = 0.0
         etf_filter = False
+        scoring_note = (
+            f"Momentum tilt +{momentum_tilt:.0%}: weight shifts from value/quality/income "
+            f"into momentum (alpha engine — chase winners)." if momentum_tilt > 0
+            else "No scoring tilt (regime-neutral weights)."
+        )
     elif regime == "Neutral":
         eff_index  = _float(neut_cfg.get("index_pct_override"), _float(base_index, 0.72))
         max_buys   = _int(neut_cfg.get("max_buys_override"), base_buys)
         stop_adj   = 0.0
         etf_filter = False
+        scoring_note = "No scoring tilt (regime-neutral weights)."
     else:  # Defensive
         eff_index  = _float(def_cfg.get("index_pct_override"), 0.85)
         max_buys   = _int(def_cfg.get("max_buys_override"), 3)
         stop_adj   = _float(def_cfg.get("stop_loss_tighten"), 0.05)
         etf_filter = True
+        scoring_note = (
+            f"Mean-reversion blend {mean_rev_blend:.0%}: buy oversold names (contrarian)."
+            if mean_rev_blend > 0 else "No scoring tilt (regime-neutral weights)."
+        )
 
     base_stop = cfg.get("sell_rules", {}).get("stop_loss_pct", -0.20)
     eff_stop  = base_stop + stop_adj
@@ -67,6 +81,16 @@ def render() -> None:
     c2.metric("Max active buys", max_buys)
     c3.metric("Stop-loss pct", f"{eff_stop:.0%}", f"{stop_adj:+.0%} vs base" if stop_adj else "base")
     c4.metric("ETF MA filter", "ACTIVE" if etf_filter else "off")
+
+    # Alpha-engine scoring behaviour per regime
+    eff_momentum = min(1.0, base_momentum + momentum_tilt) if regime == "Bullish" and momentum_tilt > 0 else base_momentum
+    s1, s2 = st.columns([1, 3])
+    s1.metric(
+        "Momentum weight",
+        f"{eff_momentum:.0%}",
+        f"{eff_momentum - base_momentum:+.0%} tilt" if regime == "Bullish" and momentum_tilt > 0 else "base",
+    )
+    s2.info(f"**Scoring:** {scoring_note}")
 
     # ---- Thresholds -------------------------------------------------------
     st.divider()

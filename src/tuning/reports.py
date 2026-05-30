@@ -72,6 +72,26 @@ def apply_config_params(params: np.ndarray) -> None:
     for k, v in zip(mom_keys, mom_norm):
         mi_w[k] = round(float(v), 4)
 
+    # Position-sizing slots 43-45 (active_position_sizing preset) — persist when present.
+    if len(params) > 45:
+        cfg.setdefault("risk", {})
+        cfg["risk"]["max_single_position_pct"] = round(float(params[43]), 4)
+        cfg["risk"]["max_buys_per_rebalance"]  = round(float(params[44]))
+        cfg.setdefault("candidate_selection", {})
+        cfg["candidate_selection"]["max_candidates"] = round(float(params[45]))
+
+    # Regime-conditional momentum tilt slot 46 (active_regime_tilt preset) — persist when present.
+    if len(params) > 46:
+        cfg.setdefault("regime", {})
+        cfg["regime"].setdefault("bullish", {})
+        cfg["regime"]["bullish"]["momentum_tilt"] = round(float(params[46]), 4)
+
+    # Regime-conditional mean-reversion blend slot 47 (active_alpha_engine) — persist when present.
+    if len(params) > 47:
+        cfg.setdefault("regime", {})
+        cfg["regime"].setdefault("defensive", {})
+        cfg["regime"]["defensive"]["mean_reversion_blend"] = round(float(params[47]), 4)
+
     with open(CONFIG_FILE, "w") as f:
         yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
 

@@ -1,7 +1,7 @@
 ignore_negative_pe: false
 ignore_negative_pb: false
 dividend_threshold: 0.03
-metric_threshold: 0.75
+metric_threshold: 1.15
 selloff_threshold: 30
 weekly_investment: 400
 index_pct: 0.8465
@@ -26,10 +26,10 @@ etfs:
 - IWM
 - DRAM
 score_weights:
-  value: 0.0411
-  quality: 0.5373
-  income: 0.0404
-  momentum: 0.3812
+  value: 0.1121
+  quality: 0.1121
+  income: 0.0374
+  momentum: 0.7383
 valuation_guardrails:
   max_pe_component: 5.0
   max_pb_component: 5.45
@@ -51,10 +51,10 @@ risk:
   min_candidate_allocation_pct: 0.12
 sell_rules:
   stop_loss_pct: -0.2
-  trailing_stop_pct: -0.07
-  take_profit_pct: 0.36
+  trailing_stop_pct: -0.39
+  take_profit_pct: 0.81
   take_profit_value_floor_multiplier: 1.2
-  sell_weak_value_below: 0.72
+  sell_weak_value_below: 0.37
   minimum_days_before_take_profit: 10
   sell_yield_trap: true
   sell_low_quality_below: -0.25
@@ -145,10 +145,17 @@ regime:
   spy_ma_period: 200
   vix_defensive_threshold: 30.0
   vix_neutral_threshold: 20.0
+  bullish:
+    # Momentum-alpha tilt: in confirmed-bull regime shift this fraction of score
+    # weight from value/quality/income into momentum (alpha engine — chase winners).
+    momentum_tilt: 0.36
   defensive:
     index_pct_override: 0.85
     max_buys_override: 3
     stop_loss_tighten: 0.05
+    # Contrarian mean-reversion blend in fear regimes (0.0 = off; validated lever,
+    # left off in the recommended config — see research notes).
+    mean_reversion_blend: 0.0
   neutral:
     index_pct_override: 0.77
     max_buys_override: 4
@@ -200,12 +207,12 @@ scoring:
       peer_relative: true
   momentum_inputs:
     weights:
-      rs_3m: 0.36
-      rs_6m: 0.1
-      risk_adj_3m: 0.22
-      trend_structure: 0.12
-      return_1m: 0.18
-      return_5d: 0.02
+      rs_3m: 0.2479
+      rs_6m: 0.4793
+      risk_adj_3m: 0.1901
+      trend_structure: 0.0083
+      return_1m: 0.0165
+      return_5d: 0.0579
     penalties:
       falling_knife_3m_threshold: -0.15
       falling_knife_penalty: 0.25

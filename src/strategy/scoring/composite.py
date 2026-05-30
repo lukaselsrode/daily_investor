@@ -23,6 +23,37 @@ from .value import apply_value
 
 logger = logging.getLogger(__name__)
 
+
+def _regime_tilt_weights(sw: dict, regime: str | None) -> dict:
+    """Apply the regime-conditional momentum tilt to score weights (live mirror of
+    backtesting.simulator._regime_tilted_weights). In confirmed-bull regime, shift
+    `regime.bullish.momentum_tilt` of total weight from value/quality/income into
+    momentum. No-op when regime is not bullish, tilt is 0, or regime is unknown.
+    Returns a NEW normalized dict; never mutates the input.
+    """
+    from util import REGIME_PARAMS
+
+    total = sw.get("value", 0.0) + sw.get("quality", 0.0) + sw.get("income", 0.0) + sw.get("momentum", 0.0)
+    base = {k: (sw.get(k, 0.0) / total if total > 0 else 0.0)
+            for k in ("value", "quality", "income", "momentum")}
+    if regime != "bullish":
+        return base
+    tilt = float((REGIME_PARAMS or {}).get("bullish", {}).get("momentum_tilt", 0.0))
+    if tilt <= 0.0:
+        return base
+    non_mom = base["value"] + base["quality"] + base["income"]
+    if non_mom <= 1e-9:
+        return base
+    move = min(tilt, non_mom)
+    scale = (non_mom - move) / non_mom
+    return {
+        "value":    base["value"] * scale,
+        "quality":  base["quality"] * scale,
+        "income":   base["income"] * scale,
+        "momentum": base["momentum"] + move,
+    }
+
+
 # Snapshot stamp written into every scored DataFrame so loaders know the
 # engine revision used. Bump when peer-relative math changes meaningfully.
 SCORING_MODEL_VERSION = "peer-1"
@@ -41,6 +72,7 @@ def compute_metric(
     df: pd.DataFrame,
     score_weights: dict | None = None,
     scoring_cfg: dict | None = None,
+    regime: str | None = None,
 ) -> pd.DataFrame:
     """Score a universe DataFrame in-place. Writes:
 
@@ -72,11 +104,20 @@ def compute_metric(
         if col not in df.columns:
             df[col] = 0.0
 
+    # Regime-conditional momentum tilt: in confirmed-bull regime, shift weight toward
+    # momentum (alpha engine). No-op when regime is None / not bullish / tilt == 0.
+    ew = _regime_tilt_weights(sw, regime)
+    if regime == "bullish" and abs(ew["momentum"] - (sw.get("momentum", 0.0))) > 1e-9:
+        logger.info(
+            "regime=bullish momentum tilt applied: momentum %.3f -> %.3f",
+            sw.get("momentum", 0.0), ew["momentum"],
+        )
+
     df["value_metric"] = (
-        sw["value"]    * df["value_score"]
-        + sw["quality"]  * df["quality_score"]
-        + sw["income"]   * df["income_score"]
-        + sw["momentum"] * df["momentum_score"]
+        ew["value"]    * df["value_score"]
+        + ew["quality"]  * df["quality_score"]
+        + ew["income"]   * df["income_score"]
+        + ew["momentum"] * df["momentum_score"]
     ).round(3)
 
     df["scoring_model_version"] = SCORING_MODEL_VERSION

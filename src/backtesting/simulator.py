@@ -239,6 +239,63 @@ def score_stocks(precomp: PrecomputedData, params: np.ndarray) -> np.ndarray:
     return score_stocks_at_day(precomp, params, 0)
 
 
+def _oversold_score_at_day(precomp: PrecomputedData, day: int, ma_window: int = 25) -> np.ndarray:
+    """Cross-sectional 'oversold' score for mean-reversion (Kotegawa/BNF daily analog).
+
+    Computes each stock's deviation BELOW its trailing `ma_window`-day moving average
+    (negative deviation = oversold), then returns the cross-sectional percentile rank
+    scaled to [-1, 1] where the MOST oversold names score HIGHEST. Causal: uses only
+    prices up to and including `day`. In fear regimes oversold names bounce harder than
+    the market (validated: +2-3% forward edge in defensive/neutral regimes); in bull
+    regimes they underperform, which is why this is only blended in non-bull regimes.
+    """
+    n_stocks = precomp.prices.shape[1]
+    if day < ma_window:
+        return np.zeros(n_stocks)
+    window = precomp.prices[day - ma_window:day]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        ma = np.nanmean(window, axis=0)
+        px = precomp.prices[day]
+        dev = np.where((ma > 0) & np.isfinite(px), px / ma - 1.0, np.nan)
+    # most oversold (most negative dev) -> highest score: rank ascending then map
+    return _pct_rank_vec(-dev)
+
+
+def _regime_tilted_weights(raw_sw: np.ndarray, params: np.ndarray,
+                           precomp: PrecomputedData, day: int) -> np.ndarray:
+    """Apply a regime-conditional momentum tilt to the raw score weights.
+
+    Slot 46 (`regime.bullish.momentum_tilt`) is frozen-by-default (0.0 →
+    behaviour-preserving). When present and positive AND the day's regime is
+    confirmed bullish, shift up to `tilt` of total weight from value/quality/
+    income into momentum, then renormalise. This makes the active sleeve more
+    aggressive (momentum-led) in confirmed bull tapes while keeping its
+    defensive quality/income tilt in neutral/defensive regimes. It only changes
+    *which* stocks score high — never cash/share accounting.
+    """
+    sw = raw_sw / max(raw_sw.sum(), 1e-9)
+    if len(params) <= 46:
+        return sw
+    tilt = float(params[46])
+    if tilt <= 0.0:
+        return sw
+    if _detect_regime(precomp, day) != "bullish":
+        return sw
+    # Move `tilt` of weight away from value/quality/income (slots 0,1,2)
+    # proportionally, and add it to momentum (slot 3). sw already sums to 1.
+    non_mom = sw[0] + sw[1] + sw[2]
+    move = min(tilt, non_mom)  # never take more than available
+    if non_mom <= 1e-9:
+        return sw
+    scale = (non_mom - move) / non_mom
+    tilted = sw.copy()
+    tilted[0] *= scale
+    tilted[1] *= scale
+    tilted[2] *= scale
+    tilted[3] += move
+    return tilted
+
+
 def score_stocks_at_day(precomp: PrecomputedData, params: np.ndarray, day: int) -> np.ndarray:
     """
     Score stocks using day-specific rolling momentum features.
@@ -247,7 +304,7 @@ def score_stocks_at_day(precomp: PrecomputedData, params: np.ndarray, day: int) 
     otherwise falls back to v1 bucket scoring for backward compatibility.
     """
     raw_sw = params[:4]
-    sw = raw_sw / max(raw_sw.sum(), 1e-9)
+    sw = _regime_tilted_weights(raw_sw, params, precomp, day)
     value_pe_w  = params[9]
     value_score = value_pe_w * precomp.pe_comp + (1.0 - value_pe_w) * precomp.pb_comp
 
@@ -262,12 +319,25 @@ def score_stocks_at_day(precomp: PrecomputedData, params: np.ndarray, day: int) 
             params[10:16],
         )
 
-    return (
+    composite = (
         sw[0] * value_score
         + sw[1] * precomp.quality_scores
         + sw[2] * precomp.income_scores
         + sw[3] * momentum_score
     )
+
+    # Regime-conditional mean-reversion blend (slot 47, frozen-by-default = 0.0).
+    # In NON-bull regimes (neutral/defensive fear tapes), blend an oversold score
+    # into the composite: contrarian selection (buy names most below their 25d MA)
+    # generates +2-3% forward edge in fear regimes, the mirror of momentum which
+    # only works in bull. blend in [0,1]: 0 = pure composite, 1 = pure oversold.
+    if len(params) > 47:
+        mr_blend = float(params[47])
+        if mr_blend > 0.0 and _detect_regime(precomp, day) != "bullish":
+            oversold = _oversold_score_at_day(precomp, day)
+            composite = (1.0 - mr_blend) * composite + mr_blend * oversold
+
+    return composite
 
 
 def _momentum_score_at_day(precomp: PrecomputedData, params: np.ndarray, day: int) -> np.ndarray:
@@ -319,6 +389,8 @@ def select_candidates(
         cs_params["top_percentile"]     = float(params[40])
         cs_params["min_quality_score"]  = float(params[41])
         cs_params["min_momentum_score"] = float(params[42])
+        if len(params) > 45:
+            cs_params["max_candidates"] = round(float(params[45]))
 
     n            = len(composite_scores)
     mode         = cs_params["mode"]
@@ -665,6 +737,12 @@ def run_simulation(
     max_sector_pct = RISK_LIMITS["max_sector_pct"]
     max_order_pct  = RISK_LIMITS["max_order_pct_of_cash"]
     max_buys       = RISK_LIMITS["max_buys_per_rebalance"]
+
+    # Position-sizing override: the active_position_sizing preset appends sizing
+    # slots 43-45; when present they take precedence over live RISK_LIMITS.
+    if len(params) > 45:
+        max_single_pct = float(params[43])
+        max_buys       = round(float(params[44]))
 
     # Per-stock archetype thresholds + controls (used when archetype_aware=True)
     # Build a config override from the params tail (slots 15-38) so the tuner's

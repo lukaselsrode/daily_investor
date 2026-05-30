@@ -44,8 +44,8 @@ def test_phase2_preset_raises_not_implemented():
     with pytest.raises(NotImplementedError, match="Phase 2"):
         validate_preset("active_rebalance_cooldown")
 
-    with pytest.raises(NotImplementedError, match="Phase 2"):
-        validate_preset("active_position_sizing")
+    # active_position_sizing was revived (no longer Phase 2) — it must NOT raise.
+    validate_preset("active_position_sizing")
 
 
 # ---------------------------------------------------------------------------
