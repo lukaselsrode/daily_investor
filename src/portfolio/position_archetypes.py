@@ -40,6 +40,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from core.instruments import is_fund_asset_value, is_fund_instrument_type
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -51,6 +53,7 @@ ARCHETYPE_LABELS: frozenset[str] = frozenset({
     "value_recovery",
     "defensive_income",
     "core_default",
+    "fund",
 })
 
 _COMPOUNDER_TERMS: frozenset[str] = frozenset({
@@ -187,6 +190,17 @@ _DEFAULT_POLICIES: dict[str, dict] = {
         "thesis_exit_requires_confirmation":False,
         "allow_deeper_drawdown":            False,
     },
+    "fund": {
+        # Pooled vehicle (ETF/CEF/MLP/ETN), not a single-company bet. Manage like a
+        # diversified holding: wider stops, longer hold, no aggressive single-name
+        # trim/harvest. Stock factor scorecards do not apply to funds.
+        "trim_profit_threshold":            0.30,
+        "harvest_profit_threshold":         0.45,
+        "trailing_stop_pct":               -0.15,
+        "minimum_hold_days":                30,
+        "thesis_exit_requires_confirmation":True,
+        "allow_deeper_drawdown":            True,
+    },
 }
 
 
@@ -236,6 +250,23 @@ def get_archetype_policy(archetype: str, cfg: dict | None = None) -> ArchetypePo
 # ---------------------------------------------------------------------------
 # Description feature extraction
 # ---------------------------------------------------------------------------
+
+def _is_fund_signal(signals: dict) -> bool:
+    """True when the signals indicate a pooled fund (ETF/CEF/MLP/ETN), not a stock.
+
+    Reuses the shared core predicate (single source of truth) and honours an
+    explicit ``is_etf`` flag or an ``asset_type``/``security_type`` field when
+    present. Never infers fund status from sector or missing fundamentals.
+    """
+    if bool(signals.get("is_etf", False)):
+        return True
+    if is_fund_instrument_type(signals.get("instrument_type")):
+        return True
+    for _k in ("asset_type", "security_type"):
+        if is_fund_asset_value(signals.get(_k)):
+            return True
+    return False
+
 
 def _desc_features(description: str | None) -> dict[str, bool]:
     """Return {compounder, legacy, defensive} term-hit flags from company description."""
@@ -851,6 +882,27 @@ def classify_archetype(signals: dict, archetype_cfg: dict | None = None) -> Arch
     config-driven thresholds + the strict defensive_income gate take effect.
     Otherwise the existing hardcoded thresholds run unchanged.
     """
+    # Fund short-circuit: ETFs / CEFs / MLPs / ETNs are pooled vehicles, not
+    # single companies. Running them through the stock factor scorecards produces
+    # nonsense labels (e.g. a leveraged muni-bond CEF scored "speculative_momentum"
+    # off its day-trade margin ratio). Detect via the shared core predicate
+    # (Robinhood instrument_type or an explicit is_etf / asset_type flag) and route
+    # straight to the dedicated `fund` archetype + policy.
+    if _is_fund_signal(signals):
+        policy = get_archetype_policy("fund", archetype_cfg)
+        return ArchetypeResult(
+            archetype="fund",
+            confidence=1.0,
+            scores={"fund": 1.0},
+            drivers=[f"instrument_type={signals.get('instrument_type', 'fund')} — pooled fund (not a single stock)"],
+            policy=policy,
+            confidence_bucket="high",
+            runner_up=None,
+            runner_up_score=0.0,
+            reason_codes={"fund": ["pooled_fund"]},
+            features_used=["instrument_type"],
+        )
+
     desc = signals.get("description", "")
     desc_feats = _desc_features(desc)
     desc_terms = _desc_matched_terms(desc)

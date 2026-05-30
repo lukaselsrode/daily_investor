@@ -42,6 +42,8 @@ if TYPE_CHECKING:
 import numpy as np
 import pandas as pd
 
+from core.instruments import FUND_ASSET_VALUES, FUND_INSTRUMENT_TYPES
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -1122,11 +1124,11 @@ def load_universe_with_holdings(agg_path: str | None = None) -> pd.DataFrame:
 # ETF status from sector or missing fundamentals.
 # ---------------------------------------------------------------------------
 
-_ETF_ASSET_VALUES = {"etf", "fund", "etn", "index", "index_fund"}
+_ETF_ASSET_VALUES = FUND_ASSET_VALUES
 
 # Robinhood instrument ``type`` values treated as pooled funds (excluded by the
 # stocks-only / active-sleeve scopes). ADR / REIT remain individual equities.
-_ETF_INSTRUMENT_TYPES = {"etp", "cef", "mlp"}
+_ETF_INSTRUMENT_TYPES = FUND_INSTRUMENT_TYPES
 
 
 def etf_symbols_from_config(config: dict | None = None) -> set[str]:
