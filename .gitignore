@@ -26,10 +26,11 @@ credentials.*
 data/
 
 # Ephemeral config artifacts (must never re-accumulate as tracked files)
-#   - cfg/*.bak: migrate-scoring backups written next to the source config
+#   - cfg/*.bak*: migrate-scoring backups + timestamped config backups written
+#     next to the source config (e.g. config.yaml.bak, config.yaml.bak-<ts>)
 #   - .variants/: user-saved UI config variants (DAILY_INVESTOR_VARIANTS_DIR)
 #   - *.bak.parquet: in-place snapshot rescore backups
-cfg/*.bak
+cfg/*.bak*
 .variants/
 *.bak.parquet
 
