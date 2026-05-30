@@ -96,12 +96,12 @@ BOUNDS: list[tuple[float, float]] = [
     (0.05, 0.80),  # 0 sw_value
     (0.05, 0.60),  # 1 sw_quality
     (0.00, 0.40),  # 2 sw_income
-    (0.00, 0.40),  # 3 sw_momentum
+    (0.00, 0.90),  # 3 sw_momentum (widened 0.40->0.90 for momentum-alpha engine; see active_alpha_engine preset)
     (RISK_LIMITS["min_index_pct"], 0.95),  # 4 index_pct
     (0.30, 3.00),  # 5 metric_threshold
     (0.15, 1.00),  # 6 take_profit_pct
     (0.10, 0.90),  # 7 sell_weak_below
-    (-0.30, -0.05),# 8 trailing_stop
+    (-0.45, -0.05),# 8 trailing_stop (widened to -0.45 to allow ride-winners regime)
     (0.30, 0.90),  # 9 value_pe_weight
     (0.00, 0.60),  # 10 mom_rs3m
     (0.00, 0.60),  # 11 mom_rs6m
