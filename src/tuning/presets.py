@@ -86,6 +86,7 @@ _PRESETS: dict[str, dict] = {
             "scoring.momentum_inputs.weights.risk_adj_3m",
             "scoring.momentum_inputs.weights.trend_structure",
             "scoring.momentum_inputs.weights.return_1m",
+            "scoring.momentum_inputs.weights.return_5d",
         ],
         "freeze_extra": [
             "score_weights.quality",
@@ -120,6 +121,35 @@ _PRESETS: dict[str, dict] = {
         "phase2": False,
     },
 
+    "active_regime_tilt": {
+        "description": "Regime-conditional bull aggressiveness. Unfreezes the single "
+                       "regime.bullish.momentum_tilt scalar (slot 46): in confirmed-bull "
+                       "regime (SPY>200DMA) shift this fraction of score weight from "
+                       "value/quality/income into momentum; stay defensive otherwise. "
+                       "All other params frozen at config defaults. Low-DOF, scoring-only.",
+        "unfreeze": [
+            "regime.bullish.momentum_tilt",
+        ],
+        "freeze_extra": list(_NON_ARCHETYPE_PATHS),
+        "phase2": False,
+    },
+
+    "active_regime_tilt_plus_weights": {
+        "description": "Regime tilt + base score weights + core exits. Tests whether the "
+                       "bull/defensive split works best alongside a re-tuned base book. "
+                       "Higher DOF — rolling-window stability is the overfit guard.",
+        "unfreeze": [
+            "regime.bullish.momentum_tilt",
+            "score_weights.value",
+            "score_weights.income",
+            "metric_threshold",
+            "sell_rules.take_profit_pct",
+            "sell_rules.trailing_stop_pct",
+        ],
+        "freeze_extra": [],
+        "phase2": False,
+    },
+
     # ── Phase 2 stubs ─────────────────────────────────────────────────────────
     "active_rebalance_cooldown": {
         "description": "Rebalance frequency + cooldown days. "
@@ -127,9 +157,16 @@ _PRESETS: dict[str, dict] = {
         "phase2": True,
     },
     "active_position_sizing": {
-        "description": "max_single_position_pct + max_buys_per_rebalance. "
-                       "Requires Phase 2 vector extension.",
-        "phase2": True,
+        "description": "Breadth / sizing — does the active sleeve do better concentrated "
+                       "or broader? Tunes max_single_position_pct, max_buys_per_rebalance, "
+                       "and candidate-pool max_candidates. Everything else frozen.",
+        "unfreeze": [
+            "risk.max_single_position_pct",
+            "risk.max_buys_per_rebalance",
+            "candidate_selection.max_candidates",
+        ],
+        "freeze_extra": list(_NON_ARCHETYPE_PATHS),
+        "phase2": False,
     },
 
     # ── Archetype-targeted presets (use lifecycle slots 15-38) ────────────────

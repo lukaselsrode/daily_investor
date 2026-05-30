@@ -41,3 +41,4 @@ cfg/*.bak
 
 # macOS
 .DS_Store
+.session_tmp/

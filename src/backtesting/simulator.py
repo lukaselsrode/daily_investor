@@ -239,6 +239,41 @@ def score_stocks(precomp: PrecomputedData, params: np.ndarray) -> np.ndarray:
     return score_stocks_at_day(precomp, params, 0)
 
 
+def _regime_tilted_weights(raw_sw: np.ndarray, params: np.ndarray,
+                           precomp: PrecomputedData, day: int) -> np.ndarray:
+    """Apply a regime-conditional momentum tilt to the raw score weights.
+
+    Slot 46 (`regime.bullish.momentum_tilt`) is frozen-by-default (0.0 →
+    behaviour-preserving). When present and positive AND the day's regime is
+    confirmed bullish, shift up to `tilt` of total weight from value/quality/
+    income into momentum, then renormalise. This makes the active sleeve more
+    aggressive (momentum-led) in confirmed bull tapes while keeping its
+    defensive quality/income tilt in neutral/defensive regimes. It only changes
+    *which* stocks score high — never cash/share accounting.
+    """
+    sw = raw_sw / max(raw_sw.sum(), 1e-9)
+    if len(params) <= 46:
+        return sw
+    tilt = float(params[46])
+    if tilt <= 0.0:
+        return sw
+    if _detect_regime(precomp, day) != "bullish":
+        return sw
+    # Move `tilt` of weight away from value/quality/income (slots 0,1,2)
+    # proportionally, and add it to momentum (slot 3). sw already sums to 1.
+    non_mom = sw[0] + sw[1] + sw[2]
+    move = min(tilt, non_mom)  # never take more than available
+    if non_mom <= 1e-9:
+        return sw
+    scale = (non_mom - move) / non_mom
+    tilted = sw.copy()
+    tilted[0] *= scale
+    tilted[1] *= scale
+    tilted[2] *= scale
+    tilted[3] += move
+    return tilted
+
+
 def score_stocks_at_day(precomp: PrecomputedData, params: np.ndarray, day: int) -> np.ndarray:
     """
     Score stocks using day-specific rolling momentum features.
@@ -247,7 +282,7 @@ def score_stocks_at_day(precomp: PrecomputedData, params: np.ndarray, day: int) 
     otherwise falls back to v1 bucket scoring for backward compatibility.
     """
     raw_sw = params[:4]
-    sw = raw_sw / max(raw_sw.sum(), 1e-9)
+    sw = _regime_tilted_weights(raw_sw, params, precomp, day)
     value_pe_w  = params[9]
     value_score = value_pe_w * precomp.pe_comp + (1.0 - value_pe_w) * precomp.pb_comp
 
@@ -319,6 +354,8 @@ def select_candidates(
         cs_params["top_percentile"]     = float(params[40])
         cs_params["min_quality_score"]  = float(params[41])
         cs_params["min_momentum_score"] = float(params[42])
+        if len(params) > 45:
+            cs_params["max_candidates"] = round(float(params[45]))
 
     n            = len(composite_scores)
     mode         = cs_params["mode"]
@@ -665,6 +702,12 @@ def run_simulation(
     max_sector_pct = RISK_LIMITS["max_sector_pct"]
     max_order_pct  = RISK_LIMITS["max_order_pct_of_cash"]
     max_buys       = RISK_LIMITS["max_buys_per_rebalance"]
+
+    # Position-sizing override: the active_position_sizing preset appends sizing
+    # slots 43-45; when present they take precedence over live RISK_LIMITS.
+    if len(params) > 45:
+        max_single_pct = float(params[43])
+        max_buys       = round(float(params[44]))
 
     # Per-stock archetype thresholds + controls (used when archetype_aware=True)
     # Build a config override from the params tail (slots 15-38) so the tuner's

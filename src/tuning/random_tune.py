@@ -312,13 +312,29 @@ def run_random_weight_tune(
     Otherwise: independent uniform within effective bounds.
     """
     from backtesting.simulator import get_default_params
-    from tuning.constants import PARAM_NAMES, _effective_bounds, _get_active_indices
+    from tuning.constants import (
+        PARAM_NAMES,
+        _current_params,
+        _effective_bounds,
+        _get_active_indices,
+    )
     from tuning.robust_scan import run_robust_scan
 
     if base_params is None:
         base_params = get_default_params()
 
+    # Ensure the seed vector spans every appended slot (archetype/cs/sizing/regime
+    # tails). get_default_params() returns only the 16-element base; tuning presets
+    # may activate higher slots (e.g. slot 46 regime tilt), so pad from the
+    # full-length _current_params() to keep base_params[active_idxs] in-bounds.
     active_idxs  = _get_active_indices(scope=scope, preset=preset)
+    if active_idxs and max(active_idxs) >= len(base_params):
+        full = _current_params()
+        if len(full) > len(base_params):
+            padded = full.copy()
+            padded[: len(base_params)] = base_params
+            base_params = padded
+
     eff_bounds   = _effective_bounds(scope=scope, preset=preset)
     active_names = [PARAM_NAMES[i] for i in active_idxs]
     active_bnds  = [eff_bounds[i] for i in active_idxs]

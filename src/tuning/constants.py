@@ -18,6 +18,7 @@ from util import (
     CANDIDATE_SELECTION_PARAMS,
     INDEX_PCT,
     METRIC_THRESHOLD,
+    REGIME_PARAMS,
     RISK_LIMITS,
     SCORE_WEIGHTS,
     SCORING_PARAMS,
@@ -157,6 +158,59 @@ for _i, (_name, _cs_field, _bnd) in enumerate(_CS_FILTER_FIELDS):
     # but we expose them as `candidate_selection.<field>` for preset readability.
     _CONFIG_PATH_TO_PARAM_IDX[f"candidate_selection.{_cs_field}"] = _CS_FILTER_SLOT_OFFSET + _i
 
+# ── Append position-sizing slots 43-45 ─────────────────────────────────────
+# Breadth / sizing knobs: max position size, buys per rebalance, candidate-pool
+# size. Frozen by default; the `active_position_sizing` preset unfreezes them.
+_PS_SLOT_OFFSET = len(PARAM_NAMES)  # 43
+_PS_FIELDS: tuple[tuple[str, str, tuple[float, float]], ...] = (
+    ("ps_max_single_position_pct", "risk.max_single_position_pct",       (0.03, 0.20)),
+    ("ps_max_buys_per_rebalance",  "risk.max_buys_per_rebalance",        (3.0, 15.0)),
+    ("ps_max_candidates",          "candidate_selection.max_candidates", (5.0, 50.0)),
+)
+for _i, (_name, _path, _bnd) in enumerate(_PS_FIELDS):
+    PARAM_NAMES.append(_name)
+    BOUNDS.append(_bnd)
+    _CONFIG_PATH_TO_PARAM_IDX[_path] = _PS_SLOT_OFFSET + _i
+
+# ── Append regime-conditional tilt slot 46 ─────────────────────────────────
+# Single scalar: in CONFIRMED-BULL regime (SPY > 200DMA), shift this fraction of
+# total score weight from value/quality/income into momentum (renormalised),
+# making the active sleeve more aggressive in bull tapes while keeping its
+# defensive quality/income tilt in neutral/defensive regimes. Frozen by default
+# (0.0 = behaviour-preserving). Unfrozen only via the `active_regime_tilt` preset.
+# Scoring-only lever: changes *which* stocks rank high, never cash/share accounting.
+_REGIME_TILT_SLOT = len(PARAM_NAMES)  # 46
+PARAM_NAMES.append("regime_bull_momentum_tilt")
+BOUNDS.append((0.0, 0.50))
+_CONFIG_PATH_TO_PARAM_IDX["regime.bullish.momentum_tilt"] = _REGIME_TILT_SLOT
+
+
+def position_sizing_cfg_from_params(params) -> dict:
+    """
+    Build a position-sizing override dict from the sizing slots in *params*.
+    Returns {} when params lacks the appended sizing slots (len <= _PS_SLOT_OFFSET).
+    max_buys_per_rebalance and max_candidates are integers.
+    """
+    if params is None or len(params) <= _PS_SLOT_OFFSET:
+        return {}
+    out: dict = {}
+    if _PS_SLOT_OFFSET < len(params):
+        out["max_single_position_pct"] = float(params[_PS_SLOT_OFFSET])
+    if _PS_SLOT_OFFSET + 1 < len(params):
+        out["max_buys_per_rebalance"] = round(float(params[_PS_SLOT_OFFSET + 1]))
+    if _PS_SLOT_OFFSET + 2 < len(params):
+        out["max_candidates"] = round(float(params[_PS_SLOT_OFFSET + 2]))
+    return out
+
+
+def _position_sizing_default_frozen_indices() -> set[int]:
+    """Sizing slots default to frozen — unfrozen only via active_position_sizing."""
+    _ps_paths = {p for _, p, _ in _PS_FIELDS}
+    return {
+        _idx for _path, _idx in _CONFIG_PATH_TO_PARAM_IDX.items()
+        if _path in _ps_paths
+    }
+
 
 def candidate_cfg_from_params(params) -> dict:
     """
@@ -235,6 +289,12 @@ def _archetype_default_frozen_indices() -> set[int]:
     }
 
 
+def _regime_tilt_default_frozen_indices() -> set[int]:
+    """Regime-tilt slot defaults to frozen — unfrozen only via active_regime_tilt."""
+    idx = _CONFIG_PATH_TO_PARAM_IDX.get("regime.bullish.momentum_tilt")
+    return {idx} if idx is not None else set()
+
+
 def _get_active_indices(scope: str = "overall_strategy", preset: str | None = None) -> list[int]:
     frozen = {
         _CONFIG_PATH_TO_PARAM_IDX[p]
@@ -245,6 +305,9 @@ def _get_active_indices(scope: str = "overall_strategy", preset: str | None = No
     frozen |= _archetype_default_frozen_indices()
     # Candidate-filter slots are frozen-by-default; active_candidate_filters unfreezes them.
     frozen |= _candidate_filter_default_frozen_indices()
+    frozen |= _position_sizing_default_frozen_indices()
+    # Regime-conditional tilt slot is frozen-by-default; active_regime_tilt unfreezes it.
+    frozen |= _regime_tilt_default_frozen_indices()
     if preset is not None:
         from .presets import apply_preset_to_frozen
         frozen = apply_preset_to_frozen(frozen, preset)
@@ -302,4 +365,23 @@ def _current_params() -> np.ndarray:
         if _default is None:
             _default = (_bnd[0] + _bnd[1]) / 2.0
         cs_tail.append(float(_default))
-    return np.array(base + arch_tail + cs_tail)
+    # Position-sizing slots 43-45 — read from live RISK_LIMITS / CANDIDATE_SELECTION_PARAMS
+    ps_tail: list[float] = []
+    for _name, _path, _bnd in _PS_FIELDS:
+        if _path == "candidate_selection.max_candidates":
+            _default = (CANDIDATE_SELECTION_PARAMS or {}).get("max_candidates")
+        else:
+            _default = (RISK_LIMITS or {}).get(_path.split(".", 1)[1])
+        if _default is None:
+            _default = (_bnd[0] + _bnd[1]) / 2.0
+        ps_tail.append(float(_default))
+    # Regime-tilt slot 46 — read from live REGIME_PARAMS; default 0.0 (off).
+    _tilt_default = 0.0
+    try:
+        _tilt_default = float(
+            (REGIME_PARAMS or {}).get("bullish", {}).get("momentum_tilt", 0.0)
+        )
+    except (TypeError, ValueError, AttributeError):
+        _tilt_default = 0.0
+    regime_tail: list[float] = [_tilt_default]
+    return np.array(base + arch_tail + cs_tail + ps_tail + regime_tail)
