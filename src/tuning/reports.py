@@ -92,6 +92,11 @@ def apply_config_params(params: np.ndarray) -> None:
         cfg["regime"].setdefault("defensive", {})
         cfg["regime"]["defensive"]["mean_reversion_blend"] = round(float(params[47]), 4)
 
+    # Low-vol quality blend slot 48 — persist when present.
+    if len(params) > 48:
+        cfg.setdefault("scoring", {})
+        cfg["scoring"]["quality_low_vol_blend"] = round(float(params[48]), 4)
+
     with open(CONFIG_FILE, "w") as f:
         yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
 

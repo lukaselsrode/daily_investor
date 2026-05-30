@@ -166,12 +166,12 @@ class TestArchetypePresets:
 
 class TestParamVector:
 
-    def test_vector_length_is_48(self):
+    def test_vector_length_is_49(self):
         # 16 base + 24 archetype + 3 candidate-filter + 3 position-sizing
-        # + 1 regime-tilt (46) + 1 mean-reversion blend (47)
+        # + 1 regime-tilt (46) + 1 mean-reversion blend (47) + 1 low-vol quality blend (48)
         from tuning.constants import BOUNDS, PARAM_NAMES
-        assert len(PARAM_NAMES) == 48
-        assert len(BOUNDS) == 48
+        assert len(PARAM_NAMES) == 49
+        assert len(BOUNDS) == 49
 
     def test_archetype_slots_frozen_by_default(self):
         # No preset → archetype slots stay frozen even if config doesn't list them.

@@ -194,6 +194,18 @@ PARAM_NAMES.append("regime_defensive_mean_reversion_blend")
 BOUNDS.append((0.0, 1.0))
 _CONFIG_PATH_TO_PARAM_IDX["regime.defensive.mean_reversion_blend"] = _MEANREV_SLOT
 
+# ── Append low-volatility quality blend slot 48 ────────────────────────────
+# Blend a causal cross-sectional low-vol score into the QUALITY factor. Low-vol
+# is a documented quality anomaly: on the 1550d substrate it has positive
+# full-sample forward-IC (+0.04@21d, +0.067@63d), is strongest in bull regimes,
+# and is largely orthogonal to momentum (corr(-vol, rs_6m)≈+0.13) so it adds new
+# information rather than re-proxying it. Frozen by default (0.0 = pure configured
+# quality). Scoring-only lever — changes which stocks rank high, never accounting.
+_LOWVOL_SLOT = len(PARAM_NAMES)  # 48
+PARAM_NAMES.append("quality_low_vol_blend")
+BOUNDS.append((0.0, 1.0))
+_CONFIG_PATH_TO_PARAM_IDX["scoring.quality_low_vol_blend"] = _LOWVOL_SLOT
+
 
 def position_sizing_cfg_from_params(params) -> dict:
     """
@@ -300,9 +312,10 @@ def _archetype_default_frozen_indices() -> set[int]:
 
 
 def _regime_tilt_default_frozen_indices() -> set[int]:
-    """Regime tilt + mean-reversion slots default to frozen — unfrozen via presets."""
+    """Regime tilt + mean-reversion + low-vol blend slots default to frozen — unfrozen via presets."""
     out: set[int] = set()
-    for path in ("regime.bullish.momentum_tilt", "regime.defensive.mean_reversion_blend"):
+    for path in ("regime.bullish.momentum_tilt", "regime.defensive.mean_reversion_blend",
+                 "scoring.quality_low_vol_blend"):
         idx = _CONFIG_PATH_TO_PARAM_IDX.get(path)
         if idx is not None:
             out.add(idx)
@@ -407,4 +420,11 @@ def _current_params() -> np.ndarray:
     except (TypeError, ValueError, AttributeError):
         _mr_default = 0.0
     regime_tail.append(_mr_default)
+    # Low-vol quality blend slot 48 — read from SCORING_PARAMS; default 0.0 (off).
+    _lv_default = 0.0
+    try:
+        _lv_default = float((SCORING_PARAMS or {}).get("quality_low_vol_blend", 0.0))
+    except (TypeError, ValueError, AttributeError):
+        _lv_default = 0.0
+    regime_tail.append(_lv_default)
     return np.array(base + arch_tail + cs_tail + ps_tail + regime_tail)

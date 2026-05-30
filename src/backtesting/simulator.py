@@ -261,6 +261,27 @@ def _oversold_score_at_day(precomp: PrecomputedData, day: int, ma_window: int = 
     return _pct_rank_vec(-dev)
 
 
+def _low_vol_score_at_day(precomp: PrecomputedData, day: int) -> np.ndarray:
+    """Cross-sectional low-volatility 'quality' score (causal).
+
+    Uses the precomputed daily annualized realized vol (vol_3m_daily) up to and
+    including `day`; returns a cross-sectional percentile rank in [-1, 1] where the
+    LOWEST-vol names score HIGHEST. Captures the low-volatility anomaly (low-vol
+    stocks earn higher risk-adjusted, and on this substrate higher absolute,
+    forward returns — full-sample fwd-IC +0.04@21d / +0.067@63d, strongest in bull
+    and largely orthogonal to momentum: corr(-vol, rs_6m)≈+0.13). Used as a quality
+    blend (slot 48), frozen-by-default. Falls back to zeros when vol is unavailable.
+    """
+    n_stocks = precomp.prices.shape[1]
+    if precomp.vol_3m_daily is None:
+        return np.zeros(n_stocks)
+    vol = precomp.vol_3m_daily[day]
+    if not np.any(np.isfinite(vol)):
+        return np.zeros(n_stocks)
+    # lowest vol -> highest score
+    return _pct_rank_vec(-vol)
+
+
 def _regime_tilted_weights(raw_sw: np.ndarray, params: np.ndarray,
                            precomp: PrecomputedData, day: int) -> np.ndarray:
     """Apply a regime-conditional momentum tilt to the raw score weights.
@@ -319,9 +340,20 @@ def score_stocks_at_day(precomp: PrecomputedData, params: np.ndarray, day: int) 
             params[10:16],
         )
 
+    quality_component = precomp.quality_scores
+    # Low-vol quality blend (slot 48, frozen-by-default = 0.0). Blends a causal
+    # cross-sectional low-volatility score into the quality factor: 0 = pure
+    # configured quality, 1 = pure low-vol rank. Low-vol is a documented quality
+    # anomaly, orthogonal to momentum, positive full-sample fwd-IC on this substrate.
+    if len(params) > 48:
+        lv_blend = float(params[48])
+        if lv_blend > 0.0:
+            low_vol = _low_vol_score_at_day(precomp, day)
+            quality_component = (1.0 - lv_blend) * quality_component + lv_blend * low_vol
+
     composite = (
         sw[0] * value_score
-        + sw[1] * precomp.quality_scores
+        + sw[1] * quality_component
         + sw[2] * precomp.income_scores
         + sw[3] * momentum_score
     )
