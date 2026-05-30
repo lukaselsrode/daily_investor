@@ -548,10 +548,15 @@ ARCHETYPE_CLASSIFIER_PARAMS: dict = {
 _rg = _app.get("regime", {})
 _rg_def = _rg.get("defensive", {})
 _rg_neu = _rg.get("neutral", {})
+_rg_bull = _rg.get("bullish", {})
 REGIME_PARAMS: dict = {
     "spy_ma_period":          int(_rg.get("spy_ma_period", 200)),
     "vix_defensive_threshold":float(_rg.get("vix_defensive_threshold", 30.0)),
     "vix_neutral_threshold":  float(_rg.get("vix_neutral_threshold",   20.0)),
+    "bullish": {
+        # Momentum-alpha tilt applied to score weights in confirmed-bull regime.
+        "momentum_tilt": float(_rg_bull.get("momentum_tilt", 0.0)),
+    },
     "defensive": {
         "index_pct_override": (
             float(_rg_def["index_pct_override"])
@@ -562,6 +567,8 @@ REGIME_PARAMS: dict = {
             if _rg_def.get("max_buys_override") is not None else None
         ),
         "stop_loss_tighten": float(_rg_def.get("stop_loss_tighten", 0.05)),
+        # Contrarian mean-reversion blend in fear regimes (0.0 = off).
+        "mean_reversion_blend": float(_rg_def.get("mean_reversion_blend", 0.0)),
     },
     "neutral": {
         "index_pct_override": None,
