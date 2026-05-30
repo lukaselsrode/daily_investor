@@ -314,10 +314,47 @@ def _analyst_buy_pct(signals: dict) -> float | None:
     return 0.88
 
 
+def _company_age(signals: dict) -> float | None:
+    """Years since founding (proxy for old-economy vs young/speculative)."""
+    yf = _sf(signals, "year_founded")
+    if yf is None or yf < 1700 or yf > 2100:
+        return None
+    import datetime as _dt
+    return float(_dt.date.today().year - int(yf))
+
+
+def _valuation_character(signals: dict) -> dict:
+    """Derive valuation-character flags from raw PE/PB (no fair-value API exists).
+
+    Robinhood get_fundamentals exposes pe_ratio / pb_ratio but NOT an intrinsic
+    fair value, so we read raw multiples as a *character* proxy, not a target price:
+      - cheap:     low PE and/or low PB  -> value_recovery / defensive lean
+      - expensive: very high PE/PB       -> growth / speculative lean
+      - negative_pe: loss-making          -> speculative / turnaround lean
+    Thresholds are deliberately wide (regime-agnostic character buckets), and
+    missing data yields all-False so behavior is unchanged when unavailable.
+    """
+    pe = _sf(signals, "pe_ratio")
+    pb = _sf(signals, "pb_ratio")
+    out = {"cheap": False, "expensive": False, "negative_pe": False}
+    if pe is not None:
+        if pe < 0:
+            out["negative_pe"] = True
+        elif pe <= 15.0:
+            out["cheap"] = True
+        elif pe >= 50.0:
+            out["expensive"] = True
+    if pb is not None:
+        if 0 < pb <= 1.5:
+            out["cheap"] = True
+        elif pb >= 10.0:
+            out["expensive"] = True
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Per-archetype scorecards
 # ---------------------------------------------------------------------------
-
 def _score_quality_compounder(
     signals: dict, desc_feats: dict, desc_terms: dict, *, cfg: dict | None = None,
 ) -> tuple[float, list[str], list[str]]:
@@ -497,6 +534,13 @@ def _score_legacy_turnaround(
         score -= 0.12
         reason_codes.append("compounder_terms_penalty")
 
+    # Company age: long-established firms lean old-economy / legacy character.
+    _age = _company_age(signals)
+    if _age is not None and _age >= 50:
+        score += 0.10
+        drivers.append(f"long-established (~{int(_age)}y old) — old-economy character")
+        reason_codes.append("old_company")
+
     if maint is not None and maint >= 1.0:
         reason_codes.append("high_maintenance")
     if desc_feats["legacy"]:
@@ -581,6 +625,18 @@ def _score_speculative_momentum(
     if quality is not None and quality < 0.10:
         reason_codes.append("quality_very_low")
 
+    # Raw-multiple character: rich/expensive or loss-making (negative PE) names
+    # lean speculative-momentum (priced for growth, not value).
+    _val_char = _valuation_character(signals)
+    if _val_char["negative_pe"]:
+        score += 0.12
+        drivers.append(f"negative PE (PE={_sf(signals, 'pe_ratio')}) — loss-making / speculative")
+        reason_codes.append("negative_pe")
+    elif _val_char["expensive"]:
+        score += 0.10
+        drivers.append(f"expensive multiples (PE={_sf(signals, 'pe_ratio')}) — growth/speculative pricing")
+        reason_codes.append("expensive_multiples")
+
     return max(score, 0.0), drivers, reason_codes
 
 
@@ -634,6 +690,18 @@ def _score_value_recovery(
         reason_codes.append("momentum_improving")
     if maint is not None and maint >= 1.0:
         reason_codes.append("distress_penalty")
+
+    # Raw-multiple valuation character (PE/PB) — cheap reinforces value_recovery.
+    _val_char = _valuation_character(signals)
+    if _val_char["cheap"]:
+        score += 0.12
+        pe = _sf(signals, "pe_ratio")
+        pb = _sf(signals, "pb_ratio")
+        drivers.append(f"cheap multiples (PE={pe}, PB={pb}) — value character")
+        reason_codes.append("cheap_multiples")
+    elif _val_char["expensive"]:
+        score -= 0.10
+        reason_codes.append("expensive_multiples_penalty")
 
     return max(score, 0.0), drivers, reason_codes
 
@@ -747,6 +815,7 @@ _EXPECTED_SIGNALS: tuple[str, ...] = (
     "buy_to_sell_ratio", "analyst_buy_pct",
     "sector", "industry", "description", "num_employees",
     "yield_trap_flag", "instrument_type", "country",
+    "year_founded", "pe_ratio", "pb_ratio",
 )
 
 

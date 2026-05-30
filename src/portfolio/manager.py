@@ -562,7 +562,8 @@ class PortfolioManager:
                     _ms = _mkt_structure.get(symbol, {})
                     for _mk in ("maintenance_ratio", "day_trade_ratio", "instrument_type",
                                 "country", "market_cap", "description", "num_employees",
-                                "analyst_buy_pct", "analyst_num_ratings"):
+                                "analyst_buy_pct", "analyst_num_ratings",
+                                "year_founded", "pe_ratio", "pb_ratio"):
                         _mv = _ms.get(_mk)
                         if _mv is not None:
                             _signals[_mk] = _mv
@@ -1121,7 +1122,8 @@ class PortfolioManager:
                 _ms_c = _mkt_buy.get(_sym_c, {})
                 for _mk in ("maintenance_ratio", "day_trade_ratio", "instrument_type",
                             "country", "market_cap", "description", "num_employees",
-                            "analyst_buy_pct", "analyst_num_ratings"):
+                            "analyst_buy_pct", "analyst_num_ratings",
+                            "year_founded", "pe_ratio", "pb_ratio"):
                     _mv = _ms_c.get(_mk)
                     if _mv is not None:
                         _signals_c[_mk] = _mv

@@ -46,6 +46,9 @@ _FUNDAMENTAL_FIELDS = [
     "market_cap",
     "description",
     "num_employees",
+    "year_founded",
+    "pe_ratio",
+    "pb_ratio",
 ]
 
 _SCHEMA_COLS = [
@@ -61,6 +64,9 @@ _SCHEMA_COLS = [
     "num_employees",
     "analyst_buy_pct",
     "analyst_num_ratings",
+    "year_founded",
+    "pe_ratio",
+    "pb_ratio",
 ]
 
 
@@ -145,6 +151,9 @@ def _fetch_fundamentals(symbols: list[str]) -> dict[str, dict]:
                         "market_cap":    item.get("market_cap"),
                         "description":   item.get("description"),
                         "num_employees": item.get("num_employees"),
+                        "year_founded":  item.get("year_founded"),
+                        "pe_ratio":      item.get("pe_ratio"),
+                        "pb_ratio":      item.get("pb_ratio"),
                     }
             except Exception as exc:
                 logger.warning("get_fundamentals batch %d failed: %s", i, exc)
@@ -226,6 +235,9 @@ def refresh_market_structure(symbols: list[str]) -> dict[str, dict]:
             "num_employees":      combined.get("num_employees"),
             "analyst_buy_pct":    combined.get("analyst_buy_pct"),
             "analyst_num_ratings": combined.get("analyst_num_ratings"),
+            "year_founded":       combined.get("year_founded"),
+            "pe_ratio":           combined.get("pe_ratio"),
+            "pb_ratio":           combined.get("pb_ratio"),
         })
 
     existing = _load_cache()
@@ -309,6 +321,9 @@ def load_market_structure(
             "num_employees":        _i("num_employees"),
             "analyst_buy_pct":      _f("analyst_buy_pct"),
             "analyst_num_ratings":  _i("analyst_num_ratings"),
+            "year_founded":         _i("year_founded"),
+            "pe_ratio":             _f("pe_ratio"),
+            "pb_ratio":             _f("pb_ratio"),
         }
 
     return result
