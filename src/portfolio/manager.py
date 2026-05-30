@@ -518,16 +518,11 @@ class PortfolioManager:
         soft_sells: dict[str, dict] = {}
         _all_evaluated: dict[str, dict] = {}
 
-        # Pre-load market structure signals (maintenance_ratio, day_trade_ratio, etc.)
-        # for all active positions in one batch; used to enrich archetype classification.
-        _mkt_structure: dict[str, dict] = {}
-        if ARCHETYPE_PARAMS.get("enabled", False):
-            try:
-                from data.market_structure import load_market_structure
-                _active_syms = [s for s in holdings if s not in ETFS]
-                _mkt_structure = load_market_structure(_active_syms, auto_refresh=True)
-            except Exception as _mse:
-                logger.debug("market_structure load failed: %s", _mse)
+        # Market-structure enrichment (maintenance_ratio, analyst_buy_pct, etc.) is read
+        # from the agg_data block as columns (ETL layer merges it). No live
+        # load_market_structure() call at decision time — absent columns degrade
+        # gracefully to fundamentals-only classification.
+        from data.market_structure import MARKET_STRUCTURE_DF_COLS
 
         for symbol, data in holdings.items():
             if symbol in ETFS:
@@ -554,19 +549,11 @@ class PortfolioManager:
                     if metrics_row is not None:
                         for _k in ("quality_score", "momentum_score", "value_score",
                                    "income_score", "value_metric", "yield_trap_flag",
-                                   "sector", "industry", "buy_to_sell_ratio"):
+                                   "sector", "industry", "buy_to_sell_ratio",
+                                   *MARKET_STRUCTURE_DF_COLS):
                             _v = metrics_row.get(_k)
-                            if _v is not None:
+                            if _v is not None and not (isinstance(_v, float) and pd.isna(_v)):
                                 _signals[_k] = _v
-                    # Enrich with market structure signals
-                    _ms = _mkt_structure.get(symbol, {})
-                    for _mk in ("maintenance_ratio", "day_trade_ratio", "instrument_type",
-                                "country", "market_cap", "description", "num_employees",
-                                "analyst_buy_pct", "analyst_num_ratings",
-                                "year_founded", "pe_ratio", "pb_ratio"):
-                        _mv = _ms.get(_mk)
-                        if _mv is not None:
-                            _signals[_mk] = _mv
                     _arch_result = classify_archetype(_signals, ARCHETYPE_PARAMS)
                     _arch_policy = _arch_result.policy
                     logger.debug(
@@ -1103,30 +1090,22 @@ class PortfolioManager:
         # Built once and reused below. Empty dict when archetype management disabled.
         _buy_arch_policies: dict = {}
         if ARCHETYPE_PARAMS.get("enabled", False):
-            _mkt_buy: dict[str, dict] = {}
-            try:
-                from data.market_structure import load_market_structure
-                _mkt_buy = load_market_structure(candidates["symbol"].tolist(), auto_refresh=False)
-            except Exception:
-                _mkt_buy = {}
+            # Market-structure enrichment is read from the agg_data block (ETL layer
+            # merges it as columns). No live load_market_structure() call here — if the
+            # columns are absent (stale block), classification degrades gracefully to
+            # fundamentals-only, same as before enrichment existed.
+            from data.market_structure import MARKET_STRUCTURE_DF_COLS
             _to_drop: list[str] = []
             for _i_idx, _crow in candidates.iterrows():
                 _sym_c = _crow["symbol"]
                 _signals_c: dict = {"symbol": _sym_c}
                 for _k in ("quality_score", "momentum_score", "value_score",
                            "income_score", "value_metric", "yield_trap_flag",
-                           "sector", "industry", "buy_to_sell_ratio"):
+                           "sector", "industry", "buy_to_sell_ratio",
+                           *MARKET_STRUCTURE_DF_COLS):
                     _v = _crow.get(_k)
                     if _v is not None and not (isinstance(_v, float) and pd.isna(_v)):
                         _signals_c[_k] = _v
-                _ms_c = _mkt_buy.get(_sym_c, {})
-                for _mk in ("maintenance_ratio", "day_trade_ratio", "instrument_type",
-                            "country", "market_cap", "description", "num_employees",
-                            "analyst_buy_pct", "analyst_num_ratings",
-                            "year_founded", "pe_ratio", "pb_ratio"):
-                    _mv = _ms_c.get(_mk)
-                    if _mv is not None:
-                        _signals_c[_mk] = _mv
                 try:
                     _ar = classify_archetype(_signals_c, ARCHETYPE_PARAMS)
                     _policy_c = _ar.policy

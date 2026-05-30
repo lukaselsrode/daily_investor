@@ -334,7 +334,7 @@ def load_market_structure(
 # them as columns rather than calling load_market_structure() live at decision time.
 MARKET_STRUCTURE_DF_COLS: list[str] = [
     "maintenance_ratio", "day_trade_ratio", "instrument_type", "country",
-    "margin_initial_ratio", "market_cap", "num_employees",
+    "margin_initial_ratio", "market_cap", "num_employees", "description",
     "analyst_buy_pct", "analyst_num_ratings", "year_founded", "pe_ratio", "pb_ratio",
 ]
 
@@ -346,10 +346,10 @@ def load_market_structure_df(
     """Return market-structure fields for *symbols* as a DataFrame keyed by ``symbol``.
 
     Thin wrapper over load_market_structure() so the ETL layer (data.market.get_data)
-    can merge the FULL enrichment into agg_data in one place. ``description`` is
-    intentionally omitted here (long free text; merged separately when needed) — all
-    other fields in MARKET_STRUCTURE_DF_COLS are included. Missing symbols simply
-    don't appear; callers merge how='left'.
+    can merge the FULL enrichment into agg_data in one place. All fields in
+    MARKET_STRUCTURE_DF_COLS are included (incl. ``description``, which the archetype
+    classifier term-matches). Missing symbols simply don't appear; callers merge
+    how='left'.
     """
     data = load_market_structure(symbols, auto_refresh=auto_refresh)
     rows = []
