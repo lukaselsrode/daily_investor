@@ -23,7 +23,12 @@ credentials.*
 
 # Logs & runtime data
 *.log
-data/
+# Root-level runtime artifacts dir (CSVs, snapshots). Anchored to repo root with
+# a leading slash so it does NOT also match src/data/ — which is Python SOURCE
+# (data.sentiment, data.market_structure, data.fundamentals, ...) that tracked
+# modules import via `from data.x import`. An unanchored `data/` silently
+# excluded those source files from version control.
+/data/
 
 # Ephemeral config artifacts (must never re-accumulate as tracked files)
 #   - cfg/*.bak*: migrate-scoring backups + timestamped config backups written
