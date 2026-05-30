@@ -54,7 +54,14 @@ def load_journal(symbol: str | None = None, limit: int = 200) -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame(columns=_JOURNAL_COLS)
     try:
-        df = pd.read_csv(path)
+        # Tolerate malformed rows (e.g. a foreign writer appended wrong-width
+        # lines): skip bad lines and keep only rows matching our schema rather
+        # than blanking the whole panel on a single parse error.
+        df = pd.read_csv(path, on_bad_lines="skip")
+        # Drop any rows whose columns don't match this journal's schema.
+        if list(df.columns) != _JOURNAL_COLS:
+            keep = [c for c in _JOURNAL_COLS if c in df.columns]
+            df = df[keep] if keep else pd.DataFrame(columns=_JOURNAL_COLS)
         if symbol is not None:
             df = df[df["symbol"] == symbol]
         return df.tail(limit)

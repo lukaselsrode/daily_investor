@@ -165,7 +165,11 @@ def _outcomes_path() -> Path:
 
 
 def _journal_path() -> Path:
-    return _data_dir() / "position_journal.csv"
+    # NOTE: distinct from portfolio.position_journal's `position_journal.csv`.
+    # These two journals have incompatible schemas (this one is the 12-col
+    # decision-outcome mirror; the other is the 9-col position-event log).
+    # Sharing one file corrupts it — pandas fails to parse mixed-width rows.
+    return _data_dir() / "outcome_journal.csv"
 
 
 # ---------------------------------------------------------------------------
