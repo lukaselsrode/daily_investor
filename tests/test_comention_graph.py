@@ -59,6 +59,48 @@ def test_build_graph_edges_and_sentiment():
     assert nmap["NVO"].sentiment < 0
 
 
+def test_shared_article_identity_creates_edges():
+    """The primary mechanism: same article (by link, else title) under multiple
+    tickers' news lists creates a co-mention edge — even when related_symbols is
+    empty (the yfinance case, which is the common one in production)."""
+    from data.comention_graph import build_comention_graph
+
+    # AAPL and MSFT both carry the SAME article (same link), no related_symbols.
+    shared = {"title": "Tech giants rally on AI optimism", "link": "http://x.com/a1",
+              "related_symbols": []}
+    # CSCO and JNPR share a different article by TITLE only (no link on either) — the
+    # title-fallback path.
+    shared_titled = {"title": "Networking sector upgraded by analysts", "link": "",
+                     "related_symbols": []}
+    news = _news_df([
+        ("AAPL", [shared, {"title": "Apple unique story", "link": "http://x.com/aapl",
+                            "related_symbols": []}]),
+        ("MSFT", [shared]),
+        ("CSCO", [shared_titled]),
+        ("JNPR", [{"title": "Networking sector upgraded by analysts", "link": "",
+                   "related_symbols": []}]),
+    ])
+    edges, nodes = build_comention_graph(news_df=news, persist=False)
+    emap = {(r.source, r.target): r.weight for r in edges.itertuples()}
+    # AAPL--MSFT share the link identity
+    assert emap.get(("AAPL", "MSFT")) == 1
+    # CSCO--JNPR share the title identity (link-less fallback)
+    assert emap.get(("CSCO", "JNPR")) == 1
+    nmap = {r.symbol: r for r in nodes.itertuples()}
+    assert nmap["MSFT"].degree >= 1
+
+
+def test_link_normalization_matches_variants():
+    """Links differing only by scheme/www/query/trailing slash are the same article."""
+    from data.comention_graph import _article_key
+    k1 = _article_key({"link": "https://www.x.com/story?utm=1"})
+    k2 = _article_key({"link": "http://x.com/story/"})
+    assert k1 == k2 == "L:x.com/story"
+    # title fallback when no link
+    assert _article_key({"title": "Big  News"}) == "T:big news"
+    assert _article_key({}) == ""
+
+
 def test_build_graph_empty_input():
     from data.comention_graph import build_comention_graph
     edges, nodes = build_comention_graph(news_df=pd.DataFrame(columns=["symbol", "news"]), persist=False)

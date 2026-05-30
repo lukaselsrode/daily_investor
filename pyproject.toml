@@ -21,6 +21,9 @@ dependencies = [
     "pandas>=2.0",
     "scipy>=1.10",
 
+    # Graph analytics (news co-mention graph + structural signals)
+    "networkx>=3.0",
+
     # Config / env
     "pyyaml>=6.0",
     "python-dotenv>=1.0",

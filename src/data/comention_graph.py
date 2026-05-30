@@ -17,6 +17,7 @@ Persists two files:
 from __future__ import annotations
 
 import collections
+import itertools
 import json
 import logging
 import re
@@ -64,6 +65,22 @@ def title_sentiment(text: str) -> float:
     return 0.0 if (p + n) == 0 else (p - n) / (p + n)
 
 
+def _article_key(art: dict) -> str:
+    """Stable identity for an article so the same story under multiple tickers maps
+    to one node-set. Prefer the normalized link (strip scheme/query/trailing slash);
+    fall back to a normalized title. Empty when neither is usable."""
+    link = str(art.get("link") or "").strip()
+    if link:
+        link = re.sub(r"^https?://(www\.)?", "", link.lower())
+        link = link.split("?")[0].split("#")[0].rstrip("/")
+        if link:
+            return f"L:{link}"
+    title = str(art.get("title") or "").strip().lower()
+    title = re.sub(r"\s+", " ", title)
+    return f"T:{title}" if title else ""
+
+
+
 def build_comention_graph(
     news_df: pd.DataFrame | None = None,
     held_symbols: set[str] | None = None,
@@ -86,6 +103,16 @@ def build_comention_graph(
     node_sent: dict[str, list[float]] = collections.defaultdict(list)
     node_articles: collections.Counter = collections.Counter()
 
+    # Map an article identity -> set of symbols whose news lists carry it. The same
+    # article surfacing under multiple tickers IS a co-mention, regardless of whether
+    # the upstream feed populated the structured related_symbols field (yfinance, the
+    # primary source, never does). This title/link-identity mechanism is what makes the
+    # graph dense and source-agnostic; related_symbols (when present) is added on top.
+    article_syms: dict[str, set[str]] = collections.defaultdict(set)
+    # Per-article-identity sentiment (computed once from the title), so we can attribute
+    # a shared article's sentiment to every symbol it touches.
+    article_sent: dict[str, float] = {}
+
     if news_df is not None and not news_df.empty and "news" in news_df.columns:
         for _, row in news_df.iterrows():
             sym = str(row.get("symbol", "")).strip().upper()
@@ -102,6 +129,8 @@ def build_comention_graph(
                 s = title_sentiment(art.get("title", ""))
                 node_sent[sym].append(s)
                 node_articles[sym] += 1
+
+                # (1) Structured related_symbols edges (kept for when the feed provides them)
                 related = art.get("related_symbols") or []
                 touched = {sym}
                 for other in related:
@@ -110,9 +139,30 @@ def build_comention_graph(
                         continue
                     edges[tuple(sorted((sym, o)))] += 1
                     touched.add(o)
-                # attribute this title's sentiment to co-mentioned nodes too
+                # attribute this title's sentiment to related-symbol nodes too
                 for o in touched - {sym}:
                     node_sent[o].append(s)
+
+                # (2) Shared-article-identity co-mention: register this symbol under the
+                # article's identity key (normalized link if present, else title).
+                akey = _article_key(art)
+                if akey:
+                    article_syms[akey].add(sym)
+                    if akey not in article_sent:
+                        article_sent[akey] = s
+
+    # Build co-mention edges from shared article identity. Every pair of distinct
+    # symbols carrying the same article gets an edge (weight = number of shared
+    # articles). Also attribute each shared article's sentiment to every node it
+    # touches (so a co-mentioned-but-not-primary symbol still accrues sentiment).
+    for akey, syms in article_syms.items():
+        if len(syms) < 2:
+            continue
+        s = article_sent.get(akey, 0.0)
+        for a, b in itertools.combinations(sorted(syms), 2):
+            edges[(a, b)] += 1
+        for sym in syms:
+            node_sent[sym].append(s)
 
     edge_rows = [
         {"source": a, "target": b, "weight": w}
