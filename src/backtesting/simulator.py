@@ -282,6 +282,59 @@ def _low_vol_score_at_day(precomp: PrecomputedData, day: int) -> np.ndarray:
     return _pct_rank_vec(-vol)
 
 
+def _residmom_score_at_day(precomp: PrecomputedData, day: int,
+                           beta_win: int = 252, form_lo: int = 252,
+                           skip: int = 21) -> np.ndarray:
+    """Cross-sectional RESIDUAL-momentum score (Blitz-Huij-Martens 2011), causal.
+
+    For each stock: estimate beta vs SPY over a trailing `beta_win`-day window, strip
+    the market component, cumulate the residual return over the formation window
+    [day-form_lo, day-skip], standardize by residual std, then cross-sectionally
+    percentile-rank to [-1, 1] (highest residual momentum = highest score). Uses only
+    prices up to `day`. Residual momentum strips market beta, so it does NOT load up on
+    high-beta winners that crash in sharp reversals — the crash-resistance that makes it
+    additive to raw relative-strength momentum (corr≈0.56 on this substrate, not a
+    duplicate). Falls back to zeros when SPY prices are unavailable or the window is
+    not yet filled.
+    """
+    n_stocks = precomp.prices.shape[1]
+    spy = precomp.spy_prices
+    if spy is None or day < beta_win or day < form_lo:
+        return np.zeros(n_stocks)
+    prices = precomp.prices
+    # daily simple returns within the beta window
+    lo_b = day - beta_win
+    with np.errstate(invalid="ignore", divide="ignore"):
+        stk_b = prices[lo_b + 1:day + 1] / prices[lo_b:day] - 1.0      # (beta_win, N)
+        spy_full = spy[lo_b + 1:day + 1] / spy[lo_b:day] - 1.0          # (beta_win,)
+    bmask = np.isfinite(spy_full)
+    spy_b = spy_full[bmask]
+    var = np.var(spy_b) if spy_b.size else 0.0
+    if var <= 0 or spy_b.size < 60:
+        return np.zeros(n_stocks)
+    # formation-window market returns (a sub-slice of the beta window)
+    f0, f1 = day - form_lo, day - skip
+    with np.errstate(invalid="ignore", divide="ignore"):
+        spy_form = spy[f0 + 1:f1 + 1] / spy[f0:f1] - 1.0
+    fmask = np.isfinite(spy_form)
+    out = np.full(n_stocks, np.nan)
+    for j in range(n_stocks):
+        rj_b = stk_b[:, j]
+        if np.isfinite(rj_b[bmask]).sum() < 60:
+            continue
+        cov = np.cov(rj_b[bmask], spy_b)[0, 1]
+        beta = cov / var
+        with np.errstate(invalid="ignore", divide="ignore"):
+            rj_form = prices[f0 + 1:f1 + 1, j] / prices[f0:f1, j] - 1.0
+        resid = rj_form - beta * spy_form
+        rr = resid[fmask & np.isfinite(rj_form)]
+        if rr.size < 30:
+            continue
+        sd = np.std(rr)
+        out[j] = np.sum(rr) / sd if sd > 0 else np.nan
+    return _pct_rank_vec(out)
+
+
 def _regime_tilted_weights(raw_sw: np.ndarray, params: np.ndarray,
                            precomp: PrecomputedData, day: int) -> np.ndarray:
     """Apply a regime-conditional momentum tilt to the raw score weights.
@@ -339,6 +392,17 @@ def score_stocks_at_day(precomp: PrecomputedData, params: np.ndarray, day: int) 
             precomp.return_1m_daily[day],
             params[10:16],
         )
+
+    # Residual-momentum blend (slot 49, frozen-by-default = 0.0). Blends a causal
+    # cross-sectional residual-momentum score (beta-stripped, crash-resistant) into the
+    # momentum factor: 0 = pure configured momentum, 1 = pure residual momentum. Strongest
+    # single-factor fwd-IC on this substrate and only ~0.56 corr with rs_6m, so it adds
+    # information; its edge is regime-shaped (cushions momentum's weak era). Scoring-only.
+    if len(params) > 49:
+        rm_blend = float(params[49])
+        if rm_blend > 0.0:
+            resid_mom = _residmom_score_at_day(precomp, day)
+            momentum_score = (1.0 - rm_blend) * momentum_score + rm_blend * resid_mom
 
     quality_component = precomp.quality_scores
     # Low-vol quality blend (slot 48, frozen-by-default = 0.0). Blends a causal

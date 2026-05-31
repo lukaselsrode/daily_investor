@@ -177,6 +177,25 @@ etf_risk:
   defensive_cash_pct: 0.1
 scoring:
   enabled: true
+  # ── Price-derived factor blend overlays (frozen-by-default = 0.0) ──────────
+  # Both blend a causal, backtestable price-only score into a factor sub-score.
+  # 0.0 = pure configured factor (behavior-preserving). They are documented, tunable
+  # knobs (param slots 48/49). Both have genuine SIGNAL-level edge (forward-IC +
+  # quintile + random-basket placebo on the pinned 1550d substrate) BUT both FAILED
+  # the system-level stability framework: run through random_window_backtest on the
+  # best_alpha base across multiple seeds, neither improves active-sleeve excess —
+  # low-vol monotonically hurts (-0.3% to -1.4%), residual-momentum is flat-to-negative
+  # on a 4-seed mean (a +3.6% single-seed spike at 0.2 did not replicate; per-seed
+  # window variance ±0.10 dwarfs the effect). Textbook IC≠P&L: real signal, not
+  # additive to THIS tuned concentrated sleeve. LEFT OFF. Do not enable without a
+  # multi-seed robust backtest that clears the bar.
+  #
+  # quality_low_vol_blend (slot 48): low-volatility rank into the QUALITY factor.
+  quality_low_vol_blend: 0.0
+  # momentum_residual_blend (slot 49): residual momentum (Blitz-Huij-Martens, beta-
+  #   stripped) into the MOMENTUM factor. Strongest single-factor fwd-IC on the
+  #   substrate but fails the robust multi-seed backtest (above).
+  momentum_residual_blend: 0.0
   peer_standardization:
     group_by: industry
     fallback_group_by: sector

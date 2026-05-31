@@ -74,8 +74,8 @@ def test_position_sizing_cfg_from_params():
 def test_current_params_extended_length():
     cp = constants._current_params()
     # _PS_SLOT_OFFSET + 3 position-sizing + 1 regime-tilt (46) + 1 mean-reversion (47)
-    # + 1 low-vol quality blend (48)
-    assert len(cp) == constants._PS_SLOT_OFFSET + 6
+    # + 1 low-vol quality blend (48) + 1 residual-momentum blend (49)
+    assert len(cp) == constants._PS_SLOT_OFFSET + 7
     # within bounds for each position-sizing slot
     for off in range(3):
         lo, hi = constants.BOUNDS[constants._PS_SLOT_OFFSET + off]

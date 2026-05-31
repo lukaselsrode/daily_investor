@@ -97,6 +97,11 @@ def apply_config_params(params: np.ndarray) -> None:
         cfg.setdefault("scoring", {})
         cfg["scoring"]["quality_low_vol_blend"] = round(float(params[48]), 4)
 
+    # Residual-momentum blend slot 49 — persist when present.
+    if len(params) > 49:
+        cfg.setdefault("scoring", {})
+        cfg["scoring"]["momentum_residual_blend"] = round(float(params[49]), 4)
+
     with open(CONFIG_FILE, "w") as f:
         yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
 

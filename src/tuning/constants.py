@@ -206,6 +206,21 @@ PARAM_NAMES.append("quality_low_vol_blend")
 BOUNDS.append((0.0, 1.0))
 _CONFIG_PATH_TO_PARAM_IDX["scoring.quality_low_vol_blend"] = _LOWVOL_SLOT
 
+# ── Append residual-momentum blend slot 49 ─────────────────────────────────
+# Blend a causal cross-sectional RESIDUAL-momentum score into the MOMENTUM factor.
+# Residual momentum (Blitz-Huij-Martens 2011) strips market beta: rolling 252d beta
+# vs SPY, cumulate the market-residual return t-252..t-21, standardize by residual
+# std. On the 1550d substrate it has the strongest forward-IC of any factor tested
+# (+0.069@63d / t+3.3, +0.095 in bull / t+5.3), beats raw rs_6m, and is only ~0.56
+# correlated with it (additive, not a duplicate). A 0.2-0.7 blend beats rs_6m-alone
+# in the top-quintile PoC across every weight and horizon; its edge is regime-shaped
+# (cushions momentum's weak era — the crash-resistance Blitz documents). Frozen by
+# default (0.0 = pure configured momentum). Scoring-only lever — never accounting.
+_RESIDMOM_SLOT = len(PARAM_NAMES)  # 49
+PARAM_NAMES.append("momentum_residual_blend")
+BOUNDS.append((0.0, 1.0))
+_CONFIG_PATH_TO_PARAM_IDX["scoring.momentum_residual_blend"] = _RESIDMOM_SLOT
+
 
 def position_sizing_cfg_from_params(params) -> dict:
     """
@@ -312,10 +327,11 @@ def _archetype_default_frozen_indices() -> set[int]:
 
 
 def _regime_tilt_default_frozen_indices() -> set[int]:
-    """Regime tilt + mean-reversion + low-vol blend slots default to frozen — unfrozen via presets."""
+    """Regime tilt + mean-reversion + low-vol + residual-momentum blend slots default
+    to frozen — unfrozen via presets."""
     out: set[int] = set()
     for path in ("regime.bullish.momentum_tilt", "regime.defensive.mean_reversion_blend",
-                 "scoring.quality_low_vol_blend"):
+                 "scoring.quality_low_vol_blend", "scoring.momentum_residual_blend"):
         idx = _CONFIG_PATH_TO_PARAM_IDX.get(path)
         if idx is not None:
             out.add(idx)
@@ -427,4 +443,11 @@ def _current_params() -> np.ndarray:
     except (TypeError, ValueError, AttributeError):
         _lv_default = 0.0
     regime_tail.append(_lv_default)
+    # Residual-momentum blend slot 49 — read from SCORING_PARAMS; default 0.0 (off).
+    _rm_default = 0.0
+    try:
+        _rm_default = float((SCORING_PARAMS or {}).get("momentum_residual_blend", 0.0))
+    except (TypeError, ValueError, AttributeError):
+        _rm_default = 0.0
+    regime_tail.append(_rm_default)
     return np.array(base + arch_tail + cs_tail + ps_tail + regime_tail)
