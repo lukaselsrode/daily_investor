@@ -67,7 +67,76 @@ class ClusterTrackingResult:
 # Core functions
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Memoization cache
+# ---------------------------------------------------------------------------
+# Cluster labels are a pure function of (precomp data, rebalance cadence,
+# n_clusters). During parameter tuning, run_simulation() is called hundreds to
+# thousands of times with the SAME precomp and rebalance days but different
+# strategy params — none of which affect the labels. Refitting PCA+KMeans on
+# every call dominates backtest runtime (~50% of a single sim). We memoize on a
+# cheap content fingerprint so the fit happens once per (precomp, cadence) pair.
+_LABEL_CACHE: dict[tuple, np.ndarray] = {}
+_LABEL_CACHE_REFS: dict[tuple, object] = {}  # keep precomp alive so id() can't be reused
+_LABEL_CACHE_MAXSIZE = 32
+
+
+def _precomp_fingerprint(precomp, rebalance_days: list[int], n_clusters: int) -> tuple:
+    """Cheap, collision-safe key for the inputs precompute_cluster_labels reads.
+
+    Uses object identity of precomp (kept alive via _LABEL_CACHE_REFS) plus the
+    shapes/dtypes that would change if a structurally different precomp reused an
+    id, plus the rebalance cadence and cluster count. We deliberately avoid
+    hashing full arrays — id + shape is sufficient because precomp is immutable
+    (a NamedTuple of read-only arrays) for its lifetime.
+    """
+    prices = precomp.prices
+    return (
+        id(precomp),
+        prices.shape,
+        int(prices.dtype.itemsize),
+        float(prices[0, 0]) if prices.size else 0.0,
+        float(prices[-1, -1]) if prices.size else 0.0,
+        tuple(rebalance_days),
+        int(n_clusters),
+    )
+
+
+def clear_cluster_label_cache() -> None:
+    """Drop all memoized cluster labels. Call between unrelated runs if needed."""
+    _LABEL_CACHE.clear()
+    _LABEL_CACHE_REFS.clear()
+
+
 def precompute_cluster_labels(
+    precomp,
+    rebalance_days: list[int],
+    n_clusters: int = 6,
+) -> np.ndarray:
+    """Memoized wrapper over _compute_cluster_labels.
+
+    Returns the same (n_rebalances, n_stocks) int32 array as the underlying
+    compute, but caches by a content fingerprint so repeated calls during tuning
+    (same precomp + cadence, different strategy params) reuse the fitted labels.
+    """
+    key = _precomp_fingerprint(precomp, rebalance_days, n_clusters)
+    cached = _LABEL_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    labels = _compute_cluster_labels(precomp, rebalance_days, n_clusters)
+
+    if len(_LABEL_CACHE) >= _LABEL_CACHE_MAXSIZE:
+        # FIFO eviction — drop the oldest entry to bound memory.
+        oldest = next(iter(_LABEL_CACHE))
+        _LABEL_CACHE.pop(oldest, None)
+        _LABEL_CACHE_REFS.pop(oldest, None)
+    _LABEL_CACHE[key] = labels
+    _LABEL_CACHE_REFS[key] = precomp  # strong ref prevents id() reuse for a live key
+    return labels
+
+
+def _compute_cluster_labels(
     precomp,
     rebalance_days: list[int],
     n_clusters: int = 6,

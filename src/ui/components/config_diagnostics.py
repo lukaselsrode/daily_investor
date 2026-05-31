@@ -481,17 +481,30 @@ def render() -> None:
     sell      = cfg.get("sell_rules", {})
     index_pct = float(cfg.get("index_pct", 0.85))
 
+    _trim_on   = bool(exit_d.get("trim_enabled", True))
+    _trim_thr  = float(exit_d.get("trim_profit_threshold", 0.20))
+    _harv_thr  = float(exit_d.get("harvest_profit_threshold", 0.30))
+    _full_tp   = float(sell.get("take_profit_pct", 0.81))
+
     rows = [
         {
-            "Dimension":         "Take-profit",
-            "Live behavior":     f"Trim at +{exit_d.get('trim_profit_threshold', 0.08):.0%}, harvest at +{exit_d.get('harvest_profit_threshold', 0.15):.0%}",
-            "Backtest behavior": f"Full exit at +{sell.get('take_profit_pct', 0.60):.0%}",
-            "Gap":               "CRITICAL — different strategies",
+            "Dimension":         "Take-profit / partial exits",
+            "Live behavior":     f"Trim at +{_trim_thr:.0%}, harvest at +{_harv_thr:.0%}, full-exit backstop +{_full_tp:.0%}",
+            "Backtest behavior": (
+                f"Trim at +{_trim_thr:.0%}, harvest at +{_harv_thr:.0%}, full-exit +{_full_tp:.0%}"
+                if _trim_on else
+                f"Trim DISABLED — full exit at +{_full_tp:.0%} only"
+            ),
+            "Gap":               (
+                "FIXED — backtest mirrors live trim+harvest ladder (since 2026-05 patch)"
+                if _trim_on else
+                "CRITICAL — trim disabled, backtest will full-exit only"
+            ),
         },
         {
             "Dimension":         "Weekly contributions",
             "Live behavior":     f"Split by index_pct ({index_pct:.0%} ETF / {1-index_pct:.0%} stocks)",
-            "Backtest behavior": "Now fixed — split by index_pct since 2026-05-25 patch",
+            "Backtest behavior": "Split by index_pct (matches live since 2026-05-25 patch)",
             "Gap":               "FIXED",
         },
         {
@@ -502,9 +515,12 @@ def render() -> None:
         },
         {
             "Dimension":         "Harvest partial exit",
-            "Live behavior":     f"Harvest {cfg.get('harvest', {}).get('profit_harvest_pct', 0.4):.0%} of position at threshold",
-            "Backtest behavior": "No partial exits — only full exits",
-            "Gap":               "MODERATE",
+            "Live behavior":     f"Harvest {cfg.get('harvest', {}).get('profit_harvest_pct', 0.4):.0%} of position at +{_harv_thr:.0%}",
+            "Backtest behavior": (
+                f"Harvest fraction of position at +{_harv_thr:.0%}, routes to ETFs (mirrors live HarvestManager)"
+                if _trim_on else "Disabled"
+            ),
+            "Gap":               "FIXED — backtest harvest wired" if _trim_on else "MODERATE",
         },
         {
             "Dimension":         "Sentiment override",
@@ -515,7 +531,7 @@ def render() -> None:
         {
             "Dimension":         "Stop-loss value",
             "Live behavior":     f"sell_rules.stop_loss_pct = {sell.get('stop_loss_pct', -0.20):.0%}",
-            "Backtest behavior": "Hardcoded _STOP_LOSS_PCT = -20% in backtest.py",
+            "Backtest behavior": f"_STOP_LOSS_PCT reads sell_rules.stop_loss_pct = {sell.get('stop_loss_pct', -0.20):.0%}",
             "Gap":               "LOW — currently match, fragile if config changes",
         },
     ]
@@ -541,13 +557,18 @@ def render() -> None:
         "index_pct":              float(cfg.get("index_pct", 0.85)),
     }
 
-    # Default tuner bounds (from tuner.py BOUNDS)
+    # Default tuner bounds — import the REAL bounds from tuning.constants so this
+    # table never drifts from the actual optimizer search space (the prior
+    # hardcoded copy fell out of sync and falsely flagged in-bounds params).
+    from tuning.constants import BOUNDS as _REAL_BOUNDS
+    from tuning.constants import PARAM_NAMES as _PN
+    _name_to_idx = {n: i for i, n in enumerate(_PN)}
     default_bounds = {
-        "score_weights.value":    (0.05, 0.80),
-        "score_weights.quality":  (0.05, 0.60),
-        "score_weights.income":   (0.00, 0.40),
-        "score_weights.momentum": (0.00, 0.40),
-        "index_pct":              (float(cfg.get("risk", {}).get("min_index_pct", 0.60)), 0.95),
+        "score_weights.value":    _REAL_BOUNDS[_name_to_idx["sw_value"]],
+        "score_weights.quality":  _REAL_BOUNDS[_name_to_idx["sw_quality"]],
+        "score_weights.income":   _REAL_BOUNDS[_name_to_idx["sw_income"]],
+        "score_weights.momentum": _REAL_BOUNDS[_name_to_idx["sw_momentum"]],
+        "index_pct":              _REAL_BOUNDS[_name_to_idx["index_pct"]],
     }
 
     for path, live_val in param_map.items():
