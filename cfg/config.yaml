@@ -50,7 +50,12 @@ risk:
   min_index_pct: 0.65
   min_candidate_allocation_pct: 0.12
 sell_rules:
-  stop_loss_pct: -0.2
+  # stop_loss_pct widened to -30% (2026-05): with trim OFF + harvest +50%,
+  # positions need more room. Full-universe holdout sweep showed -30% beats
+  # -20%: pct-beat 50%->56%, excess +2.3%->+3.1%, Sharpe 1.28->1.42,
+  # drawdown even improves (-25.6%->-24.9%) — wider stop reduces false exits
+  # on names that would have recovered and compounded.
+  stop_loss_pct: -0.3
   trailing_stop_pct: -0.39
   # take_profit_pct raised to 1.50 (2026-05): with harvest now at +50%,
   # full-exit threshold raised to +150% to avoid collision and let true
