@@ -142,13 +142,13 @@ def _save_variant(cfg: dict, name: str) -> Path:
 
 def _run_variant(cfg: dict, n_days: int, mode: str) -> dict:
     try:
-        from backtesting.data_loader import load_and_precompute
         from backtesting.simulator import run_simulation, split_price_window
+        from ui.services.backtest_service import load_precomp
 
         params    = _params_from_cfg(cfg)
         cs_params = _cs_params_from_cfg(cfg)
         bt_kw     = _backtest_kwargs(cfg)
-        precomp   = load_and_precompute(n_days, mode=mode)
+        precomp   = load_precomp(n_days, mode=mode)
         actual_n  = precomp.prices.shape[0]
 
         train_pct   = float(cfg.get("backtest", {}).get("train_pct", 0.70))

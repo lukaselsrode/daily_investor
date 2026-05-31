@@ -284,9 +284,9 @@ def render() -> None:
     if st.button("▶ Run A/B/C backtest comparison", key="cdiag_bt_run"):
         with st.spinner("Running three simulations…"):
             try:
-                from backtesting.data_loader import load_and_precompute
                 from backtesting.simulator import compare_candidate_selection_modes
-                precomp = load_and_precompute(n_days_bt, mode=bt_mode)
+                from ui.services.backtest_service import load_precomp
+                precomp = load_precomp(n_days_bt, mode=bt_mode)
                 cmp = compare_candidate_selection_modes(precomp)
                 st.session_state["cdiag_comparison"] = cmp
                 st.success("Done.")

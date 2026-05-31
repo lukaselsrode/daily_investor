@@ -650,8 +650,8 @@ Config bounds from `tuning.parameter_bounds` are respected when enabled.
     if st.button("▶ Run Random Search", type="primary", key="at_run"):
         bar = st.progress(0, text="Loading data…")
         try:
-            from backtesting.data_loader import load_and_precompute
-            precomp = load_and_precompute(int(n_days_load), mode=mode)
+            from ui.services.backtest_service import load_precomp
+            precomp = load_precomp(int(n_days_load), mode=mode)
         except Exception as exc:
             bar.empty()
             st.error(f"Failed to load data: {exc}")
@@ -1053,8 +1053,8 @@ def _render_scipy_mode(scope: str = "overall_strategy", preset: str | None = Non
         if use_random_windows:
             bar = st.progress(0, text="Loading data…")
             try:
-                from backtesting.data_loader import load_and_precompute
-                precomp = load_and_precompute(int(n_days_load), mode=mode)
+                from ui.services.backtest_service import load_precomp
+                precomp = load_precomp(int(n_days_load), mode=mode)
             except Exception as exc:
                 bar.empty()
                 st.error(f"Failed to load data: {exc}")
@@ -1374,6 +1374,20 @@ def render() -> None:
     )
 
     st.divider()
+
+    # Data cache status — shows whether the 35s yfinance download is already
+    # in memory for the current session. Saves the download on 2nd+ runs.
+    _cache = st.session_state.get("_precomp_cache", {})
+    if _cache:
+        _keys = sorted(_cache.keys())
+        _desc = ", ".join(f"{d}d/{m or 'default'}" for d, m in _keys)
+        _col1, _col2 = st.columns([4, 1])
+        _col1.caption(f"💾 Data cached for: {_desc} — 2nd+ runs skip the download (~35s saved)")
+        if _col2.button("Clear data cache", key="wt_clear_cache"):
+            st.session_state["_precomp_cache"] = {}
+            st.rerun()
+    else:
+        st.caption("💾 No data cached yet — first run will download price history (~35s)")
 
     if mode.startswith("🎛️"):
         _render_manual_mode()
