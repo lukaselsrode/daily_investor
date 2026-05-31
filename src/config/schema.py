@@ -218,6 +218,9 @@ class RegimeDefensiveConfig:
     index_pct_override: float | None = 0.85
     max_buys_override: int | None = 3
     stop_loss_tighten: float = 0.05
+    backtest_derisk_frac: float = 0.0
+    backtest_derisk_switch_bps: float = 20.0
+    backtest_derisk_lag: int = 0
 
 
 @dataclass(frozen=True)

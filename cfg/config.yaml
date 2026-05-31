@@ -149,6 +149,21 @@ regime:
     index_pct_override: 0.85
     max_buys_override: 3
     stop_loss_tighten: 0.05
+    # Backtest regime de-risk overlay (frozen off = 0.0; behavior-preserving).
+    # The LIVE path already de-risks on defensive regime via index_pct_override
+    # (new capital routes to the index sleeve). The backtest historically ignored
+    # this, overstating active-sleeve risk in downturns. When > 0, on the
+    # transition INTO a defensive regime (SPY > 5% below its 200DMA) this fraction
+    # of the held stock book is rotated into the benchmark instrument and held
+    # there until the regime clears, then unwound back to cash. Validated PoC:
+    # de-risk-to-INDEX (not cash) on defensive-only days is robust across the 730d
+    # OOS and 1400d in-sample substrates (shrinks drawdowns, never hurts bull
+    # 1.0 = fully track the benchmark while defensive. lag=1 is the realistic
+    # execution default (observe regime at close d, act at d+1); lag=0 is same-bar
+    # and mildly optimistic. See .session_tmp/overlay_lag_sweep.py for sensitivity.
+    backtest_derisk_frac: 0.0
+    backtest_derisk_switch_bps: 20.0
+    backtest_derisk_lag: 1
     # Contrarian mean-reversion blend in fear regimes (0.0 = off; validated lever,
     # left off in the recommended config — see research notes).
     mean_reversion_blend: 0.0

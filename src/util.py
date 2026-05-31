@@ -597,6 +597,14 @@ REGIME_PARAMS: dict = {
             if _rg_def.get("max_buys_override") is not None else None
         ),
         "stop_loss_tighten": float(_rg_def.get("stop_loss_tighten", 0.05)),
+        # Backtest regime de-risk overlay (frozen off). frac>0 rotates this fraction
+        # of the held stock book into the benchmark on defensive-regime entry and
+        # holds it there until the regime clears. switch_bps charges friction on each
+        # rotation; lag delays acting on the regime signal by N days. See simulator
+        # _do_regime_overlay and .session_tmp/regime_real_pinned.py.
+        "backtest_derisk_frac": float(_rg_def.get("backtest_derisk_frac", 0.0)),
+        "backtest_derisk_switch_bps": float(_rg_def.get("backtest_derisk_switch_bps", 20.0)),
+        "backtest_derisk_lag": int(_rg_def.get("backtest_derisk_lag", 1)),
         # Contrarian mean-reversion blend in fear regimes (0.0 = off).
         "mean_reversion_blend": float(_rg_def.get("mean_reversion_blend", 0.0)),
         # Falling-knife / value-trap guard: multiplicatively penalize the composite of

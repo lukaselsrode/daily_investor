@@ -18,6 +18,7 @@ from util import (
     EXIT_DECISION_PARAMS,
     INDEX_PCT,
     METRIC_THRESHOLD,
+    REGIME_PARAMS,
     RISK_LIMITS,
     SCORE_WEIGHTS,
     SCORING_PARAMS,
@@ -977,6 +978,25 @@ def run_simulation(
     stock_stopout   = np.zeros(n_stocks, dtype=bool)
     etf_shares      = np.zeros(n_etfs)
 
+    # ── Regime de-risk overlay (frozen off by default) ────────────────────────
+    # On entry into a defensive regime (SPY > 5% below its 200DMA, optionally
+    # lagged) rotate `_ro_frac` of the held stock book into the benchmark
+    # instrument and hold it in a dedicated overlay bucket until the regime
+    # clears, then unwind to cash. The overlay bucket is part of the ACTIVE
+    # sleeve (it is added to port_val and is NOT part of etf_value), so the
+    # active-equity curve `port_val - etf_value` tracks the benchmark return on
+    # the de-risked capital — matching the validated return-space PoC
+    # (.session_tmp/regime_real_pinned.py). This closes a live-vs-backtest gap:
+    # the LIVE path already de-risks defensively via regime.defensive
+    # .index_pct_override, but the backtest historically ignored it.
+    _ro_cfg       = REGIME_PARAMS.get("defensive", {}) if REGIME_PARAMS else {}
+    _ro_frac      = float(_ro_cfg.get("backtest_derisk_frac", 0.0))
+    _ro_switch    = float(_ro_cfg.get("backtest_derisk_switch_bps", 20.0)) / 10000.0
+    _ro_lag       = int(_ro_cfg.get("backtest_derisk_lag", 0))
+    _ro_enabled   = _ro_frac > 0.0
+    _overlay_units = 0.0      # benchmark units held by the overlay
+    _ro_active     = False    # currently de-risked?
+
     cash                = float(starting_capital)
     daily_values        = np.zeros(n_days)
     ca_daily_values     = np.zeros(n_days)
@@ -1540,6 +1560,45 @@ def run_simulation(
                                 etf_shares[j] += per_etf / p_etf[j]
                                 cash           -= per_etf
 
+        # ── Regime de-risk overlay: rotate book <-> benchmark on regime edges ──
+        # Frozen off unless regime.defensive.backtest_derisk_frac > 0. The overlay
+        # bucket (_overlay_units of the benchmark instrument) is part of the ACTIVE
+        # sleeve, so its mark-to-market rides the benchmark return while de-risked.
+        _bench_px_d = precomp.benchmark_prices[d] if precomp.benchmark_prices is not None else float("nan")
+        if _ro_enabled and np.isfinite(_bench_px_d) and _bench_px_d > 0:
+            _sig_day = max(0, d - _ro_lag)
+            _is_def  = _detect_regime(precomp, _sig_day) == "defensive"
+            if _is_def and not _ro_active:
+                # ENTER defensive: rotate _ro_frac of the held book into benchmark.
+                _rot_notional = 0.0
+                _held_idx = np.where(stock_shares > 0)[0]
+                for i in _held_idx:
+                    _sh = stock_shares[i] * _ro_frac
+                    if _sh <= 0:
+                        continue
+                    _p_i  = prices[i] if valid_price[i] else stock_avg_cost[i]
+                    _slip = _effective_slippage(i)
+                    _proceeds = float(_sh * _p_i * (1.0 - _slip))
+                    total_friction   += float(_sh * _p_i * _slip)
+                    _rot_notional    += _proceeds
+                    stock_shares[i]  -= _sh
+                if _rot_notional > 0:
+                    _rot_net = _rot_notional * (1.0 - _ro_switch)
+                    _overlay_units += _rot_net / _bench_px_d
+                    total_friction        += _rot_notional * _ro_switch
+                    total_traded_notional += _rot_notional
+                _ro_active = True
+            elif (not _is_def) and _ro_active:
+                # EXIT defensive: unwind overlay back to cash (redeployed by _do_buy).
+                _unwind = _overlay_units * _bench_px_d
+                if _unwind > 0:
+                    _unwind_net = _unwind * (1.0 - _ro_switch)
+                    cash                  += _unwind_net
+                    total_friction        += _unwind * _ro_switch
+                    total_traded_notional += _unwind
+                _overlay_units = 0.0
+                _ro_active = False
+
         is_contrib_day       = d > 0 and d % rebalance_frequency_days == 0
         contrib_today        = weekly_contribution if is_contrib_day else 0.0
         active_contrib_today = (
@@ -1619,16 +1678,33 @@ def run_simulation(
                 _cur_sv2 = float(np.sum(stock_shares * np.where(valid_price, prices, stock_avg_cost)))
                 _svo_budget_cap = max(0.0, _target_sv - _cur_sv2)
 
+            # While de-risked, sweep free cash (contributions + any sell proceeds)
+            # into the overlay so the active sleeve STAYS de-risked instead of
+            # re-buying stocks during the downturn. Sweeps _ro_frac of free cash;
+            # the remaining (1-frac) is deployable to stocks (partial de-risk).
+            if _ro_active and np.isfinite(_bench_px_d) and _bench_px_d > 0:
+                _sweep = cash * _ro_frac
+                if _sweep >= min_order:
+                    _sweep_net = _sweep * (1.0 - _ro_switch)
+                    _overlay_units        += _sweep_net / _bench_px_d
+                    total_friction        += _sweep * _ro_switch
+                    total_traded_notional += _sweep
+                    cash                  -= _sweep
+
             if cash >= min_order:
                 _buy_budget = cash if _svo_budget_cap is None else min(cash, _svo_budget_cap)
                 if _buy_budget >= min_order:
                     _do_buy(d, _buy_budget)
 
+        _overlay_value = _overlay_units * _bench_px_d if (_ro_enabled and np.isfinite(_bench_px_d) and _bench_px_d > 0) else 0.0
         etf_value   = float(np.sum(etf_shares * precomp.etf_prices[d])) if n_etfs > 0 else 0.0
         stock_value = float(np.sum(stock_shares * np.where(valid_price, prices, stock_avg_cost)))
-        port_val    = cash + stock_value + etf_value
+        port_val    = cash + stock_value + etf_value + _overlay_value
         daily_values[d] = port_val
         if _active_daily is not None:
+            # Overlay is part of the ACTIVE sleeve (de-risked active capital riding
+            # the benchmark), so it stays in the active curve: only the index sleeve
+            # (etf_value) is excluded.
             _active_daily[d] = port_val - etf_value
 
         if accounting_trace is not None:
@@ -1637,6 +1713,7 @@ def run_simulation(
                 "cash": cash,
                 "stock_value": stock_value,
                 "etf_value": etf_value,
+                "overlay_value": _overlay_value,
                 "port_val": port_val,
                 "active_equity": port_val - etf_value,
             })

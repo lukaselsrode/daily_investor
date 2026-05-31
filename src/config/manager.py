@@ -372,6 +372,9 @@ class ConfigManager:
                 index_pct_override=(float(d["index_pct_override"]) if d.get("index_pct_override") not in (None, "None", "") else None),
                 max_buys_override=(int(d["max_buys_override"]) if d.get("max_buys_override") not in (None, "None", "") else None),
                 stop_loss_tighten=float(d.get("stop_loss_tighten", 0.05)),
+                backtest_derisk_frac=float(d.get("backtest_derisk_frac", 0.0)),
+                backtest_derisk_switch_bps=float(d.get("backtest_derisk_switch_bps", 20.0)),
+                backtest_derisk_lag=int(d.get("backtest_derisk_lag", 0)),
             ),
             neutral=RegimeNeutralConfig(
                 index_pct_override=(float(n["index_pct_override"]) if n.get("index_pct_override") not in (None, "None", "") else None),
