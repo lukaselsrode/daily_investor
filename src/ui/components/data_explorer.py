@@ -147,6 +147,18 @@ def render() -> None:
 def _render_preset(df: pd.DataFrame, preset: str, num_cols: list[str]) -> None:
     score_cols = [c for c in _SCORE_COLS if c in df.columns]
 
+    # Presets below depend on factor-score columns; many CSVs (e.g. stock_tickers,
+    # holdings) don't have them. Guard with a friendly message instead of crashing.
+    _needs_scores = {
+        "Score distributions (all factors)",
+        "Sector-level mean scores",
+        "Correlation matrix (factor scores)",
+    }
+    if preset in _needs_scores and not score_cols:
+        st.info("This view needs factor-score columns (value_metric, *_score). "
+                "Pick a scored dataset like `agg_data` to use it.")
+        return
+
     if preset == "Top composite score by sector" and "sector" in df.columns and "value_metric" in df.columns:
         grouped = df.groupby("sector")["value_metric"].mean().sort_values(ascending=False)
         st.subheader("Mean composite score by sector")
@@ -193,3 +205,9 @@ def _render_preset(df: pd.DataFrame, preset: str, num_cols: list[str]) -> None:
     elif preset == "Volume distribution" and "volume" in df.columns:
         vol = df["volume"].dropna()
         st.bar_chart(fmt_bin_index(vol.clip(upper=vol.quantile(0.95)).value_counts(bins=30, sort=False).sort_index()))
+
+    else:
+        # Preset selected but this dataset lacks the columns it needs.
+        st.info(f"'{preset}' isn't available for this dataset — it needs columns "
+                "this CSV doesn't have (e.g. sector / specific factor scores / volume). "
+                "Try the `agg_data` dataset or the — custom — view.")

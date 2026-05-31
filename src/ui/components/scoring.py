@@ -146,20 +146,20 @@ def render() -> None:
                 if "owned" in r:
                     st.metric("owned", "✅ Yes" if r["owned"] else "No")
 
-        # Holdings detail for owned symbols
-        if "owned" in r and r["owned"] and holdings_df is not None:
-            h = holdings_df[holdings_df["symbol"] == chosen]
-            if not h.empty:
-                st.divider()
-                st.markdown("**Holdings detail**")
-                hr = h.iloc[0]
-                hc1, hc2, hc3, hc4 = st.columns(4)
-                for col in ["equity", "percent_change", "equity_change", "average_buy_price"]:
-                    if col in hr:
-                        hr[col] = pd.to_numeric(hr[col], errors="coerce")
-                hc1.metric("Equity", f"${float(hr['equity']):,.2f}" if pd.notna(hr.get("equity")) else "—")
-                hc2.metric("Qty", f"{float(hr['quantity']):.4f}" if pd.notna(hr.get("quantity")) else "—")
-                hc3.metric("Avg buy price", f"${float(hr['average_buy_price']):,.2f}" if pd.notna(hr.get("average_buy_price")) else "—")
-                hc4.metric("% change", f"{float(hr['percent_change']):+.2f}%" if pd.notna(hr.get("percent_change")) else "—")
+            # Holdings detail for owned symbols (inside not-row.empty so r is defined)
+            if "owned" in r and r["owned"] and holdings_df is not None:
+                h = holdings_df[holdings_df["symbol"] == chosen]
+                if not h.empty:
+                    st.divider()
+                    st.markdown("**Holdings detail**")
+                    hr = h.iloc[0]
+                    hc1, hc2, hc3, hc4 = st.columns(4)
+                    for col in ["equity", "percent_change", "equity_change", "average_buy_price"]:
+                        if col in hr:
+                            hr[col] = pd.to_numeric(hr[col], errors="coerce")
+                    hc1.metric("Equity", f"${float(hr['equity']):,.2f}" if pd.notna(hr.get("equity")) else "—")
+                    hc2.metric("Qty", f"{float(hr['quantity']):.4f}" if pd.notna(hr.get("quantity")) else "—")
+                    hc3.metric("Avg buy price", f"${float(hr['average_buy_price']):,.2f}" if pd.notna(hr.get("average_buy_price")) else "—")
+                    hc4.metric("% change", f"{float(hr['percent_change']):+.2f}%" if pd.notna(hr.get("percent_change")) else "—")
     else:
         st.info("No symbols match current filters.")
