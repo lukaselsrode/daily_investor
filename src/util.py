@@ -389,6 +389,34 @@ BACKTEST_PARAMS: dict = {
 }
 
 # ---------------------------------------------------------------------------
+# Barroso–Santa-Clara active-sleeve volatility-scaling overlay
+# ---------------------------------------------------------------------------
+# Frozen-by-default risk overlay. When enabled, the active STOCK sleeve's
+# exposure is scaled by w_t = clip(target_vol / realized_vol_{t-1}, 0, w_max),
+# where realized_vol is the trailing annualized stdev of the active sleeve's
+# OWN contribution-adjusted daily returns (lagged, so only past data is used).
+# The de-risked fraction (1 - w_t) parks in CASH. Applied at rebalance cadence
+# with a deadband to limit turnover.
+#
+# Validation (2026-05-31, multi-substrate paired control, park=cash pure timing):
+#   timed-vs-matched-static-exposure beats in 36/45 windows (80%), sign p<1e-4,
+#   survives weekly cadence + small deadband. Edge is drawdown reduction + a
+#   small consistent excess, NOT an alpha multiplier. See Obsidian findings note.
+#
+# enabled=false preserves behavior exactly (no-op). Keep false unless a fresh
+# robust multi-substrate validation re-confirms the edge on the live substrate.
+_svo = _bt.get("sleeve_vol_overlay", {})
+SLEEVE_VOL_OVERLAY: dict = {
+    "enabled":      bool(_svo.get("enabled",      False)),
+    "target_vol":   float(_svo.get("target_vol",   0.15)),
+    "lookback":     int(_svo.get("lookback",       63)),
+    "w_max":        float(_svo.get("w_max",        1.0)),
+    "deadband":     float(_svo.get("deadband",     0.08)),
+    "min_history":  int(_svo.get("min_history",    63)),
+    "switch_bps":   float(_svo.get("switch_bps",   20.0)),
+}
+
+# ---------------------------------------------------------------------------
 # Sell rules
 # ---------------------------------------------------------------------------
 

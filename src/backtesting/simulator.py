@@ -22,6 +22,7 @@ from util import (
     SCORE_WEIGHTS,
     SCORING_PARAMS,
     SELL_RULES,
+    SLEEVE_VOL_OVERLAY,
 )
 
 from .types import BacktestReport, CandidatePoolDiagnostics, PrecomputedData, SimResult
@@ -820,6 +821,19 @@ def run_simulation(
     if scope == "active_sleeve_compounding":
         _trim_to_etfs_pct = 0.0
 
+    # ── Barroso–Santa-Clara vol-scaling overlay (frozen by default)
+    # Scope-independent: scales the stock book's exposure by clip(tv/realized_vol).
+    # No-op unless explicitly enabled in config. See util.SLEEVE_VOL_OVERLAY.
+    _svo_cfg     = SLEEVE_VOL_OVERLAY
+    _svo_enabled = bool(_svo_cfg.get("enabled", False))
+    _svo_tv      = float(_svo_cfg.get("target_vol", 0.15))
+    _svo_lb      = int(_svo_cfg.get("lookback", 63))
+    _svo_wmax    = float(_svo_cfg.get("w_max", 1.0))
+    _svo_band    = float(_svo_cfg.get("deadband", 0.08))
+    _svo_minhist = int(_svo_cfg.get("min_history", 63))
+    _svo_switch  = float(_svo_cfg.get("switch_bps", 20.0)) / 10_000.0
+    _svo_cur_w   = _svo_wmax  # current applied exposure weight (starts fully invested)
+
     base_slippage   = slippage_bps / 10_000.0
     bp_cfg          = BACKTEST_PARAMS
     use_vol_slip    = bp_cfg.get("vol_slippage_scaling", True)
@@ -958,6 +972,9 @@ def run_simulation(
     ca_daily_values     = np.zeros(n_days)
     _active_daily       = np.zeros(n_days) if scope == "active_sleeve_compounding" else None
     _ca_active_daily    = np.zeros(n_days) if scope == "active_sleeve_compounding" else None
+    # Flow-free daily mark-to-market return of the held stock book, used by the
+    # vol-scaling overlay. Scope-independent (works in overall_strategy too).
+    _svo_rets           = np.full(n_days, np.nan)
     total_contributions = float(starting_capital)
 
     trades_made          = 0
@@ -1235,6 +1252,19 @@ def run_simulation(
         _cur_day = d
         prices   = precomp.prices[d]
         held     = stock_shares > 0
+
+        # Flow-free book return: mark-to-market change of the CURRENTLY held shares
+        # from yesterday's close to today's, computed BEFORE any trades today (so no
+        # contribution/buy/sell flow contaminates it). Scope-independent vol signal
+        # for the BSC overlay. Uses constant shares across the d-1 -> d boundary.
+        if _svo_enabled and d > 0:
+            _pp = precomp.prices[d - 1]
+            _vp = np.isfinite(prices) & (prices > 0) & np.isfinite(_pp) & (_pp > 0) & held
+            if _vp.any():
+                _v_prev = float(np.sum(stock_shares[_vp] * _pp[_vp]))
+                _v_now  = float(np.sum(stock_shares[_vp] * prices[_vp]))
+                if _v_prev > 0:
+                    _svo_rets[d] = _v_now / _v_prev - 1.0
 
         if d > 0 and (d - week_start_day) >= rebalance_frequency_days:
             trades_this_week = 0
@@ -1530,8 +1560,46 @@ def run_simulation(
                             etf_shares[j] += per_etf_c / p_etf[j]
                             cash           -= per_etf_c
 
+            # ── BSC vol-scaling overlay: set target exposure, de-risk pro-rata,
+            # cap the buy budget so the stock book holds w*(stock+cash) in stock
+            # and (1-w) in cash. Scope-independent. No-op unless enabled (frozen).
+            _svo_budget_cap = None
+            if _svo_enabled and d > _svo_minhist:
+                _hist = _svo_rets[max(0, d - _svo_lb):d]
+                _hist = _hist[np.isfinite(_hist)]
+                if len(_hist) > max(5, _svo_lb // 2):
+                    _rv = float(np.std(_hist)) * np.sqrt(252.0)
+                    if _rv > 1e-6:
+                        _w_new = max(0.0, min(_svo_wmax, _svo_tv / _rv))
+                        if abs(_w_new - _svo_cur_w) > _svo_band:
+                            _svo_cur_w = _w_new
+                _cur_sv = float(np.sum(stock_shares * np.where(valid_price, prices, stock_avg_cost)))
+                _active_eq = _cur_sv + cash
+                _target_sv = _svo_cur_w * _active_eq
+                if _cur_sv > _target_sv and _cur_sv > 0:
+                    _f = min(1.0, max(0.0, 1.0 - (_target_sv / _cur_sv)))
+                    if _f > 0:
+                        _derisk_notional = 0.0
+                        for _i in np.where(stock_shares > 0)[0]:
+                            _sh = stock_shares[_i] * _f
+                            if _sh <= 0:
+                                continue
+                            _p_i  = prices[_i] if valid_price[_i] else stock_avg_cost[_i]
+                            _slip = _effective_slippage(_i)
+                            _proceeds = float(_sh * _p_i * (1.0 - _slip))
+                            total_friction   += float(_sh * _p_i * _slip)
+                            _derisk_notional += _proceeds
+                            cash             += _proceeds
+                            stock_shares[_i] -= _sh
+                        cash                  -= _derisk_notional * _svo_switch
+                        total_traded_notional += _derisk_notional
+                _cur_sv2 = float(np.sum(stock_shares * np.where(valid_price, prices, stock_avg_cost)))
+                _svo_budget_cap = max(0.0, _target_sv - _cur_sv2)
+
             if cash >= min_order:
-                _do_buy(d, cash)
+                _buy_budget = cash if _svo_budget_cap is None else min(cash, _svo_budget_cap)
+                if _buy_budget >= min_order:
+                    _do_buy(d, _buy_budget)
 
         etf_value   = float(np.sum(etf_shares * precomp.etf_prices[d])) if n_etfs > 0 else 0.0
         stock_value = float(np.sum(stock_shares * np.where(valid_price, prices, stock_avg_cost)))

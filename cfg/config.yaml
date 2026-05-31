@@ -333,6 +333,28 @@ backtest:
   cooldown_days_after_stopout: 7
   vol_slippage_scaling: true
   vol_slippage_multiplier: 2.0
+  # Barroso–Santa-Clara volatility-scaling overlay (FROZEN: enabled=false).
+  # Scales the active STOCK book's exposure by clip(target_vol/realized_vol_{t-1}, 0, w_max),
+  # parking the de-risked fraction in cash; applied at rebalance cadence with a deadband.
+  # Realized vol = trailing annualized stdev of the held book's flow-free mark-to-market
+  # return (scope-independent, computed before trades so no flow contamination).
+  #
+  # VALIDATION (2026-05-31): works ONLY in active_sleeve_compounding scope — there it beats
+  # matched-avg-static exposure in 36/45 windows (sign p<1e-4) and cuts active-sleeve DD in
+  # 9/10 windows (-13.1% -> -11.6%). But in OVERALL_STRATEGY scope (live-equivalent, index/ETF
+  # sleeve present) it FAILS: ON vs OFF over 45 windows = +0.32pp DD (noise) but -2.3pp excess
+  # and excess_better only 11/45. Root cause: it only scales the ~15% active stock book, so the
+  # DD benefit dilutes to nothing while the active book still pays the full timing cost.
+  # DECISION: NOT wired into live buy_cycle(); keep frozen. Backtest/research feature only.
+  # Useful for active-sleeve drawdown study. Do not enable for live trading.
+  sleeve_vol_overlay:
+    enabled: false
+    target_vol: 0.15
+    lookback: 63
+    w_max: 1.0
+    deadband: 0.08
+    min_history: 63
+    switch_bps: 20.0
 tuning:
   frozen_parameters:
   - score_weights.value
