@@ -46,17 +46,19 @@ _NON_ARCHETYPE_PATHS: tuple[str, ...] = (
     "scoring.momentum_inputs.weights.risk_adj_3m",
     "scoring.momentum_inputs.weights.trend_structure",
     "scoring.momentum_inputs.weights.return_1m",
+    "scoring.momentum_inputs.weights.return_5d",
 )
 
 
 _PRESETS: dict[str, dict] = {
     # ── Phase 1 — working ────────────────────────────────────────────────────
     "active_core_weights": {
-        "description": "All 4 score weights (value, quality, income, momentum). "
-                       "Unfreezes value + income from the global frozen list.",
+        "description": "All 4 score weights (value, quality, income, momentum).",
         "unfreeze": [
             "score_weights.value",
+            "score_weights.quality",
             "score_weights.income",
+            "score_weights.momentum",
         ],
         "freeze_extra": [],
         "phase2": False,
@@ -99,7 +101,9 @@ _PRESETS: dict[str, dict] = {
                        "Leaves momentum-input internals frozen. Conservative but broad.",
         "unfreeze": [
             "score_weights.value",
+            "score_weights.quality",
             "score_weights.income",
+            "score_weights.momentum",
             "metric_threshold",
             "sell_rules.take_profit_pct",
             "sell_rules.sell_weak_value_below",
@@ -310,15 +314,25 @@ def apply_preset_to_frozen(base_frozen: set[int], preset_name: str) -> set[int]:
     """
     Return a modified frozen-index set after applying the named preset.
 
-    Unfreezes params listed in preset["unfreeze"] and re-freezes those in
-    preset["freeze_extra"]. Called before ACTIVE_SLEEVE_FROZEN is applied.
+    Self-contained semantics: the preset's `unfreeze` list is the AUTHORITATIVE
+    definition of its tunable surface. We seed the frozen set with the full base
+    tunable space (all _NON_ARCHETYPE_PATHS), then unfreeze exactly what the
+    preset lists and apply any explicit freeze_extra. This makes presets
+    independent of config.tuning.frozen_parameters (now empty) — presets define
+    the surface, OOS validation gates catch overfitting.
     """
     from .constants import _CONFIG_PATH_TO_PARAM_IDX
 
     validate_preset(preset_name)
     spec = _PRESETS[preset_name]
 
+    # Seed with the full base tunable set frozen, so a preset only opens what it
+    # explicitly unfreezes (no reliance on the global config frozen list).
     result = set(base_frozen)
+    for path in _NON_ARCHETYPE_PATHS:
+        idx = _CONFIG_PATH_TO_PARAM_IDX.get(path)
+        if idx is not None:
+            result.add(idx)
 
     for path in spec.get("unfreeze", []):
         idx = _CONFIG_PATH_TO_PARAM_IDX.get(path)

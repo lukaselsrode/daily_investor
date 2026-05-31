@@ -146,14 +146,21 @@ def test_full_safe_keeps_index_pct_frozen():
 # No preset — baseline active_sleeve behavior
 # ---------------------------------------------------------------------------
 
-def test_no_preset_active_sleeve_only_quality_momentum():
-    """Without a preset, only quality (1) and momentum (3) are tunable in active_sleeve."""
+def test_no_preset_active_sleeve_tunes_full_base_space():
+    """Without a preset, the full base param space (slots 0-15) is tunable.
+
+    Philosophy change (2026-05): config.tuning.frozen_parameters is now empty;
+    presets define the tunable surface per-run and OOS validation gates catch
+    overfitting. So a no-preset tune optimizes the whole base space. Only the
+    unconditionally-frozen active-sleeve params (index_pct + ETF routing) and the
+    archetype/regime/cs/sizing tail slots stay frozen.
+    """
     active = _active(scope="active_sleeve_compounding", preset=None)
-    assert 1 in active, "quality (index 1) should be active without preset"
-    assert 3 in active, "momentum (index 3) should be active without preset"
-    # Everything else should be frozen
-    for idx in [0, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]:
-        assert idx not in active, f"index {idx} should be frozen without preset in active_sleeve"
+    # Core scoring + exit params are all tunable now
+    for idx in [0, 1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]:
+        assert idx in active, f"index {idx} should be tunable without preset (full base space)"
+    # index_pct (4) stays frozen in active_sleeve scope (ACTIVE_SLEEVE_FROZEN)
+    assert 4 not in active, "index_pct must stay frozen in active_sleeve scope"
 
 
 # ---------------------------------------------------------------------------

@@ -367,20 +367,11 @@ backtest:
     min_history: 63
     switch_bps: 20.0
 tuning:
-  frozen_parameters:
-  - score_weights.value
-  - score_weights.income
-  - metric_threshold
-  - sell_rules.take_profit_pct
-  - sell_rules.sell_weak_value_below
-  - sell_rules.trailing_stop_pct
-  - scoring.factors.value.pe_weight
-  - scoring.momentum_inputs.weights.rs_3m
-  - scoring.momentum_inputs.weights.rs_6m
-  - scoring.momentum_inputs.weights.risk_adj_3m
-  - scoring.momentum_inputs.weights.trend_structure
-  - scoring.momentum_inputs.weights.return_1m
-  - scoring.momentum_inputs.weights.return_5d
+  # frozen_parameters intentionally empty: presets define the tunable surface
+  # per-run, and OOS validation gates catch overfitting. A no-preset tune now
+  # optimizes the full base param space (slots 0-15); archetype/regime/cs/sizing
+  # tail slots remain frozen-by-default until their preset unfreezes them.
+  frozen_parameters: []
 reliability:
   enabled: false
   min_reliability_score: 0.7

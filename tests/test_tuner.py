@@ -40,10 +40,11 @@ class TestActiveIndices:
         for idx in active:
             assert idx not in frozen_indices
 
-    def test_active_count_matches_3_free_params(self):
+    def test_active_count_matches_full_base_space(self):
         active = _get_active_indices()
-        # With current config: sw_quality, sw_momentum, index_pct = 3 active
-        assert len(active) == 3
+        # frozen_parameters is now empty (presets define surface per-run); a
+        # no-preset overall_strategy tune optimizes the full 16-slot base space.
+        assert len(active) == 16
 
     def test_active_param_names(self):
         active = _get_active_indices()
@@ -51,6 +52,10 @@ class TestActiveIndices:
         assert "sw_quality" in active_names
         assert "sw_momentum" in active_names
         assert "index_pct" in active_names
+        # full base space now includes value/income/exits/momentum-internals
+        assert "sw_value" in active_names
+        assert "sw_income" in active_names
+        assert "metric_threshold" in active_names
 
 
 @pytest.mark.skipif(not _HAS_TUNER, reason="tuner.py not importable")
