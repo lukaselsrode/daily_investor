@@ -161,7 +161,7 @@ regime:
     # 1.0 = fully track the benchmark while defensive. lag=1 is the realistic
     # execution default (observe regime at close d, act at d+1); lag=0 is same-bar
     # and mildly optimistic. See .session_tmp/overlay_lag_sweep.py for sensitivity.
-    backtest_derisk_frac: 0.0
+    backtest_derisk_frac: 1.0
     backtest_derisk_switch_bps: 20.0
     backtest_derisk_lag: 1
     # Contrarian mean-reversion blend in fear regimes (0.0 = off; validated lever,
