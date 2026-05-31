@@ -224,9 +224,15 @@ def render() -> None:
         graph_syms = sorted(feats2["symbol"].tolist()) if not feats2.empty else []
         default_sym = next((s for s in held if s in graph_syms), graph_syms[0] if graph_syms else "")
         with c2:
-            sym = st.selectbox("Symbol", graph_syms,
-                               index=graph_syms.index(default_sym) if default_sym in graph_syms else 0,
-                               key="ng_ego_sym") if graph_syms else ""
+            # Always instantiate the selectbox (disabled when the graph is empty) so the
+            # widget key is stable across reruns and dates.
+            options = graph_syms if graph_syms else ["—"]
+            sel = st.selectbox(
+                "Symbol", options,
+                index=options.index(default_sym) if default_sym in options else 0,
+                key="ng_ego_sym", disabled=not graph_syms,
+            )
+            sym = sel if graph_syms else ""
         with c3:
             hops = st.select_slider("Hops", [1, 2, 3], value=1, key="ng_ego_hops")
         if sym:
