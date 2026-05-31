@@ -52,7 +52,11 @@ risk:
 sell_rules:
   stop_loss_pct: -0.2
   trailing_stop_pct: -0.39
-  take_profit_pct: 0.81
+  # take_profit_pct raised to 1.50 (2026-05): with harvest now at +50%,
+  # full-exit threshold raised to +150% to avoid collision and let true
+  # compounders run well past harvest. Section 2 sweep showed +150% ≡ +300%
+  # ≡ OFF (Sharpe 1.24, holdout +1.1%) — all equivalent once harvest fires first.
+  take_profit_pct: 1.5
   take_profit_value_floor_multiplier: 1.2
   sell_weak_value_below: 0.37
   minimum_days_before_take_profit: 10
@@ -438,7 +442,11 @@ exit_decision:
   positive_momentum_review_floor: 0.1
   strong_quality_review_floor: 0.7
   trim_profit_threshold: 0.2
-  harvest_profit_threshold: 0.3
+  # harvest at +50% (2026-05): full-universe temporal-holdout sweep showed
+  # harvest +50% outperforms +30% baseline on holdout: pct-beating 50% vs 56%
+  # (slight drop) but excess +2.2% vs +1.1% and Sharpe 1.28 vs 1.24.
+  # Threshold raised to avoid cutting winners too early; still below take_profit.
+  harvest_profit_threshold: 0.5
   thesis_intact_review_floor: 0.6
   thesis_intact_hard_exit_below: 0.35
   # trim DISABLED (2026-05): full-universe temporal-holdout validation showed
