@@ -113,17 +113,82 @@ def _article_key(art: dict) -> str:
 
 
 
+def _parse_articles(art_iter):
+    """Yield (sentiment, related_symbols, article_key) for each dict article."""
+    for art in art_iter:
+        if not isinstance(art, dict):
+            continue
+        yield (
+            title_sentiment(art.get("title", "")),
+            art.get("related_symbols") or [],
+            _article_key(art),
+        )
+
+
+def _accumulate_news(news_df: pd.DataFrame | None):
+    """Single pass over the news table -> the accumulators the graph is built from.
+
+    Returns (edges, node_sent, node_articles, article_syms, article_sent):
+      edges          Counter[(a,b)] of related_symbols co-mention edges
+      node_sent      symbol -> list[float] of attributed title sentiments
+      node_articles  Counter[symbol] of article counts
+      article_syms   article-identity -> set of symbols carrying it (shared-article edges)
+      article_sent   article-identity -> its title sentiment (computed once)
+    """
+    edges: collections.Counter = collections.Counter()
+    node_sent: dict[str, list[float]] = collections.defaultdict(list)
+    node_articles: collections.Counter = collections.Counter()
+    article_syms: dict[str, set[str]] = collections.defaultdict(set)
+    article_sent: dict[str, float] = {}
+
+    if news_df is None or news_df.empty or "news" not in news_df.columns:
+        return edges, node_sent, node_articles, article_syms, article_sent
+
+    for _, row in news_df.iterrows():
+        sym = str(row.get("symbol", "")).strip().upper()
+        if not sym:
+            continue
+        raw = row.get("news")
+        try:
+            articles = json.loads(raw) if isinstance(raw, str) else (raw or [])
+        except Exception:
+            articles = []
+        for s, related, akey in _parse_articles(articles):
+            node_sent[sym].append(s)
+            node_articles[sym] += 1
+
+            # (1) Structured related_symbols edges (kept when the feed provides them).
+            touched = {sym}
+            for other in related:
+                o = str(other).strip().upper()
+                if not o or o == sym:
+                    continue
+                edges[tuple(sorted((sym, o)))] += 1
+                touched.add(o)
+            for o in touched - {sym}:
+                node_sent[o].append(s)
+
+            # (2) Shared-article-identity co-mention: register under the article key.
+            if akey:
+                article_syms[akey].add(sym)
+                if akey not in article_sent:
+                    article_sent[akey] = s
+
+    return edges, node_sent, node_articles, article_syms, article_sent
+
+
 def build_comention_graph(
     news_df: pd.DataFrame | None = None,
     held_symbols: set[str] | None = None,
     persist: bool = True,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Build (edges_df, nodes_df) from the news cache's ``related_symbols`` field.
+    """Build (edges_df, nodes_df) from the news table.
 
-    news_df: the persisted news table (symbol, news=json[list[article]]). When None,
-    it is read from the data cache. Each article contributes:
-      - an edge (article-symbol -- each related_symbol), weight summed over articles
-      - title sentiment attributed to every node it touches
+    Edges come from two complementary mechanisms (see _accumulate_news): structured
+    ``related_symbols`` when the feed provides them, plus shared article identity
+    (the same story under multiple tickers) which is what makes the graph dense and
+    source-agnostic. Each article's title sentiment is attributed to every node it
+    touches. When news_df is None it is read from the data cache.
 
     Returns the two DataFrames and (when persist) writes them to the data dir.
     """
@@ -131,57 +196,7 @@ def build_comention_graph(
         from data.cache import read_data_as_pd
         news_df = read_data_as_pd("news")
 
-    edges: collections.Counter = collections.Counter()
-    node_sent: dict[str, list[float]] = collections.defaultdict(list)
-    node_articles: collections.Counter = collections.Counter()
-
-    # Map an article identity -> set of symbols whose news lists carry it. The same
-    # article surfacing under multiple tickers IS a co-mention, regardless of whether
-    # the upstream feed populated the structured related_symbols field (yfinance, the
-    # primary source, never does). This title/link-identity mechanism is what makes the
-    # graph dense and source-agnostic; related_symbols (when present) is added on top.
-    article_syms: dict[str, set[str]] = collections.defaultdict(set)
-    # Per-article-identity sentiment (computed once from the title), so we can attribute
-    # a shared article's sentiment to every symbol it touches.
-    article_sent: dict[str, float] = {}
-
-    if news_df is not None and not news_df.empty and "news" in news_df.columns:
-        for _, row in news_df.iterrows():
-            sym = str(row.get("symbol", "")).strip().upper()
-            if not sym:
-                continue
-            raw = row.get("news")
-            try:
-                articles = json.loads(raw) if isinstance(raw, str) else (raw or [])
-            except Exception:
-                articles = []
-            for art in articles:
-                if not isinstance(art, dict):
-                    continue
-                s = title_sentiment(art.get("title", ""))
-                node_sent[sym].append(s)
-                node_articles[sym] += 1
-
-                # (1) Structured related_symbols edges (kept for when the feed provides them)
-                related = art.get("related_symbols") or []
-                touched = {sym}
-                for other in related:
-                    o = str(other).strip().upper()
-                    if not o or o == sym:
-                        continue
-                    edges[tuple(sorted((sym, o)))] += 1
-                    touched.add(o)
-                # attribute this title's sentiment to related-symbol nodes too
-                for o in touched - {sym}:
-                    node_sent[o].append(s)
-
-                # (2) Shared-article-identity co-mention: register this symbol under the
-                # article's identity key (normalized link if present, else title).
-                akey = _article_key(art)
-                if akey:
-                    article_syms[akey].add(sym)
-                    if akey not in article_sent:
-                        article_sent[akey] = s
+    edges, node_sent, node_articles, article_syms, article_sent = _accumulate_news(news_df)
 
     # Build co-mention edges from shared article identity. Every pair of distinct
     # symbols carrying the same article gets an edge (weight = number of shared

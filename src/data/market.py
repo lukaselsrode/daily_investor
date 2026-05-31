@@ -73,35 +73,39 @@ def get_data(refresh: bool = False) -> pd.DataFrame:
         except Exception as e:
             logger.warning("market-structure enrichment skipped: %s", e)
 
-    # Build the news co-mention graph artifact from the freshly-fetched news, so it
-    # is a first-class ETL output (persisted), then derive per-node structural features
-    # and merge them into the enriched block as columns (pure-consumer engine reads
-    # them; never builds a graph at decision time). Best-effort: failures leave the
-    # graph columns null/absent.
+    # Build the news co-mention graph artifact from the freshly-fetched news, then
+    # derive per-node structural features and merge them into the enriched block as
+    # columns (pure-consumer engine reads them; never builds a graph at decision time).
     if refresh and news_df is not None and not news_df.empty:
-        try:
-            from .comention_graph import (
-                GRAPH_FEATURE_COLS,
-                build_and_persist_features,
-                build_comention_graph,
-            )
-            edges_df, nodes_df = build_comention_graph(
-                news_df=news_df, held_symbols=held or None
-            )
-            feats = build_and_persist_features()
-            if not result.empty and feats is not None and not feats.empty:
-                add_cols = [c for c in GRAPH_FEATURE_COLS if c not in result.columns]
-                if add_cols:
-                    result = result.merge(
-                        feats[["symbol", *add_cols]], on="symbol", how="left"
-                    )
-        except Exception as e:
-            logger.warning("co-mention graph build skipped: %s", e)
+        result = _enrich_with_graph_features(result, news_df, held)
 
     if not result.empty:
         store_data_as_csv("agg_data", "", result)
         time.sleep(1)
 
+    return result
+
+
+def _enrich_with_graph_features(result, news_df, held):
+    """Build the co-mention graph artifact + per-node features and left-merge the
+    GRAPH_FEATURE_COLS into ``result``. Best-effort: any failure leaves the graph
+    columns absent and returns ``result`` unchanged."""
+    try:
+        from .comention_graph import (
+            GRAPH_FEATURE_COLS,
+            build_and_persist_features,
+            build_comention_graph,
+        )
+        build_comention_graph(news_df=news_df, held_symbols=held or None)
+        feats = build_and_persist_features()
+        if not result.empty and feats is not None and not feats.empty:
+            add_cols = [c for c in GRAPH_FEATURE_COLS if c not in result.columns]
+            if add_cols:
+                result = result.merge(
+                    feats[["symbol", *add_cols]], on="symbol", how="left"
+                )
+    except Exception as e:
+        logger.warning("co-mention graph build skipped: %s", e)
     return result
 
 
