@@ -313,7 +313,7 @@ harvest:
   - VTI
 backtest:
   default_mode: liquid_universe_sanity_test
-  universe_selection: liquid_sample
+  universe_selection: liquid_all
   max_symbols: 300
   min_volume: 500000
   random_seed: 42
