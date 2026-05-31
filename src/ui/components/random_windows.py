@@ -310,6 +310,10 @@ def render() -> None:
         total_simulations,
     )
 
+    # Surface the regime de-risk overlay state (active when frac>0).
+    from ui.utils import render_overlay_banner
+    render_overlay_banner()
+
     # ── Scope ──────────────────────────────────────────────────────────────
     scope = st.radio(
         "Backtest scope",

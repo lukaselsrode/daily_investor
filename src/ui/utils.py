@@ -58,6 +58,29 @@ def load_config_raw() -> dict:
         return {}
 
 
+def render_overlay_banner(cfg: dict | None = None) -> None:
+    """Show an st.info banner when the regime de-risk overlay is active (frac>0).
+
+    Shared by every backtest surface so the user always knows the overlay is on
+    before running — it silently changes downturn behavior. No-op when disabled.
+    """
+    import streamlit as st
+    if cfg is None:
+        cfg = load_config_raw()
+    ro = (cfg.get("regime", {}) or {}).get("defensive", {}) or {}
+    frac = float(ro.get("backtest_derisk_frac", 0.0) or 0.0)
+    if frac <= 0:
+        return
+    st.info(
+        f"🛡️ **Regime de-risk overlay ACTIVE** (frac={frac:.2f}, "
+        f"lag={int(ro.get('backtest_derisk_lag', 1))}d, "
+        f"{float(ro.get('backtest_derisk_switch_bps', 20.0)):.0f}bps switch). "
+        "On defensive-regime entry (SPY >5% below 200DMA) this fraction of the "
+        "held stock book rotates into the benchmark until the regime clears. "
+        "No-op in bull/neutral windows."
+    )
+
+
 def ui_config() -> dict:
     """Read ui: section from config, falling back to safe defaults."""
     cfg = load_config_raw()

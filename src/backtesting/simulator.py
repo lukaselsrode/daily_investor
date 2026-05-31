@@ -996,6 +996,10 @@ def run_simulation(
     _ro_enabled   = _ro_frac > 0.0
     _overlay_units = 0.0      # benchmark units held by the overlay
     _ro_active     = False    # currently de-risked?
+    _ro_days_active = 0       # telemetry: # days held in de-risked state
+    _ro_rotations   = 0       # telemetry: # of enter-defensive rotations
+    _ro_switch_cost = 0.0     # telemetry: $ switch cost attributable to overlay
+    _ro_max_value   = 0.0     # telemetry: peak overlay bucket mark-to-market
 
     cash                = float(starting_capital)
     daily_values        = np.zeros(n_days)
@@ -1587,6 +1591,8 @@ def run_simulation(
                     _overlay_units += _rot_net / _bench_px_d
                     total_friction        += _rot_notional * _ro_switch
                     total_traded_notional += _rot_notional
+                    _ro_switch_cost       += _rot_notional * _ro_switch
+                _ro_rotations += 1
                 _ro_active = True
             elif (not _is_def) and _ro_active:
                 # EXIT defensive: unwind overlay back to cash (redeployed by _do_buy).
@@ -1596,6 +1602,7 @@ def run_simulation(
                     cash                  += _unwind_net
                     total_friction        += _unwind * _ro_switch
                     total_traded_notional += _unwind
+                    _ro_switch_cost       += _unwind * _ro_switch
                 _overlay_units = 0.0
                 _ro_active = False
 
@@ -1690,6 +1697,7 @@ def run_simulation(
                     total_friction        += _sweep * _ro_switch
                     total_traded_notional += _sweep
                     cash                  -= _sweep
+                    _ro_switch_cost       += _sweep * _ro_switch
 
             if cash >= min_order:
                 _buy_budget = cash if _svo_budget_cap is None else min(cash, _svo_budget_cap)
@@ -1697,6 +1705,10 @@ def run_simulation(
                     _do_buy(d, _buy_budget)
 
         _overlay_value = _overlay_units * _bench_px_d if (_ro_enabled and np.isfinite(_bench_px_d) and _bench_px_d > 0) else 0.0
+        if _ro_active:
+            _ro_days_active += 1
+        if _overlay_value > _ro_max_value:
+            _ro_max_value = _overlay_value
         etf_value   = float(np.sum(etf_shares * precomp.etf_prices[d])) if n_etfs > 0 else 0.0
         stock_value = float(np.sum(stock_shares * np.where(valid_price, prices, stock_avg_cost)))
         port_val    = cash + stock_value + etf_value + _overlay_value
@@ -1933,6 +1945,15 @@ def run_simulation(
         harvest_count=harvest_count,
         cooldown_skips=cooldown_skips,
         regime_days=regime_days,
+        overlay_telemetry=({
+            "enabled": True,
+            "frac": _ro_frac,
+            "lag": _ro_lag,
+            "days_active": _ro_days_active,
+            "rotations": _ro_rotations,
+            "switch_cost": float(_ro_switch_cost),
+            "max_overlay_value": float(_ro_max_value),
+        } if _ro_enabled else None),
         benchmark_twr=bench_twr_val,
         pool_diagnostics=_init_diag,
         trade_log=trade_log,

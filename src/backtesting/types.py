@@ -83,6 +83,10 @@ class SimResult:
     harvest_count: int = 0          # partial profit-harvest exits
     cooldown_skips: int = 0         # buys skipped due to post-sell cooldown
     regime_days: dict | None = None  # {"bullish": N, "neutral": N, "defensive": N}
+    # Regime de-risk overlay telemetry (None when overlay disabled, frac=0.0).
+    # {"enabled": bool, "frac": float, "lag": int, "days_active": N,
+    #  "rotations": N, "switch_cost": $, "max_overlay_value": $}
+    overlay_telemetry: dict | None = None
     benchmark_twr: float = 0.0     # contribution-adjusted benchmark TWR for comparison
     pool_diagnostics: CandidatePoolDiagnostics | None = None  # day-0 candidate pool
     trade_log: list = field(default_factory=list)  # list[TradeRecord] for attribution

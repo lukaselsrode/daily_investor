@@ -189,6 +189,23 @@ def _detail_expander(rpt, train):
                 f"{rd.get('defensive', 0)}d defensive"
             )
 
+        ot = getattr(train, "overlay_telemetry", None)
+        if ot and ot.get("enabled"):
+            if ot.get("days_active", 0) > 0:
+                st.markdown(
+                    f"- **Regime de-risk overlay:** ON "
+                    f"(frac={ot['frac']:.2f}, lag={ot['lag']}d) — fired "
+                    f"{ot['rotations']} time(s), de-risked {ot['days_active']}d, "
+                    f"peak benchmark bucket ${ot['max_overlay_value']:,.0f}, "
+                    f"switch cost ${ot['switch_cost']:,.2f}"
+                )
+            else:
+                st.markdown(
+                    f"- **Regime de-risk overlay:** ON "
+                    f"(frac={ot['frac']:.2f}, lag={ot['lag']}d) — no defensive "
+                    f"regime in this window, so it stayed a no-op"
+                )
+
         if rpt.notes:
             st.markdown("**Notes:** " + "; ".join(rpt.notes))
 
@@ -268,6 +285,11 @@ def _detail_expander(rpt, train):
 def render() -> None:
     cfg    = load_config_raw()
     bt_cfg = cfg.get("backtest", {})
+
+    # Surface the regime de-risk overlay state so the user knows it's active
+    # before running (it silently changes downturn behavior).
+    from ui.utils import render_overlay_banner
+    render_overlay_banner(cfg)
 
     c1, c2, c3 = st.columns(3)
     with c1:

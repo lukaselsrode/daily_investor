@@ -206,3 +206,37 @@ class TestOverlayEngagement:
         trace = []
         _run(pc, _no_exit_params(), derisk_frac=0.0, accounting_trace=trace)
         assert all(e["overlay_value"] == 0.0 for e in trace)
+
+
+@pytest.mark.skipif(not _HAS_SIM, reason="simulator not importable")
+class TestOverlayTelemetry:
+
+    def test_telemetry_none_when_disabled(self):
+        """frac=0.0 → overlay_telemetry is None (nothing for the UI to show)."""
+        n_days = 300
+        bench = _bench_path_with_crash(n_days)
+        pc = _make_precomp(n_days, bench)
+        r = _run(pc, _no_exit_params(), derisk_frac=0.0)
+        assert r.overlay_telemetry is None
+
+    def test_telemetry_populated_when_engaged(self):
+        """frac=1.0 over a crash window → telemetry reports rotations + days_active."""
+        n_days = 300
+        bench = _bench_path_with_crash(n_days)
+        pc = _make_precomp(n_days, bench)
+        trace = []
+        r = _run(pc, _no_exit_params(), derisk_frac=1.0, lag=0, accounting_trace=trace)
+        ot = r.overlay_telemetry
+        assert ot is not None
+        assert ot["enabled"] is True
+        assert ot["frac"] == 1.0
+        assert ot["lag"] == 0
+        # The overlay engaged, so these counters must be positive.
+        assert ot["days_active"] > 0
+        assert ot["rotations"] >= 1
+        assert ot["switch_cost"] > 0.0
+        assert ot["max_overlay_value"] > 0.0
+        # days_active must equal the number of trace days with a live overlay bucket.
+        overlay_days = sum(1 for e in trace if e["overlay_value"] > 1e-6)
+        assert ot["days_active"] == overlay_days
+
