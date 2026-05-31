@@ -818,6 +818,16 @@ def run_simulation(
     _trim_score_below    = float(_trim_cfg.get("trim_score_below",
                                metric_threshold * (1.0 + float(_trim_cfg.get("trim_score_delta_threshold", -0.15)))))
     _trim_to_etfs_pct    = float(_trim_cfg.get("trim_to_etfs_pct", 0.85))
+    # Momentum veto (frozen default off => behavior-preserving). When enabled, a
+    # winner still trending up is NOT trimmed even if its cross-sectional score
+    # decayed — converts "cut winners" into "cut only STALLED winners". Validated
+    # marginal: improves rolling-window hit-rate vs SPY (30/45, sign-test p=0.036)
+    # but Wilcoxon p=0.50 (gives up right-tail in strong bulls) and no clean
+    # market-direction mechanism (non-monotonic). NOT wired live / NOT in best_alpha.
+    # Reuses the formerly-dead `trim_requires_positive_momentum` config key.
+    # Signal: a `trim_veto_ret1m_above` threshold (spare names whose trailing 1m
+    # return >= thr) if set, else coarse price>=50DMA. See .session_tmp/trim_veto*.py.
+    _trim_mom_veto       = bool(_trim_cfg.get("trim_requires_positive_momentum", False))
     if scope == "active_sleeve_compounding":
         _trim_to_etfs_pct = 0.0
 
@@ -1465,6 +1475,19 @@ def run_simulation(
                 & (current_scores >= sell_weak_below)
                 & (current_scores < _trim_score_below)
             )
+            # Momentum veto: spare winners still trending up from trimming.
+            # Trims only STALLED winners, preserving the run in still-ripping names.
+            # Signal configurable: '50dma' (price>=50DMA, coarse) or a return_1m
+            # threshold via trim_veto_ret1m_above (spare names whose last-month return
+            # exceeds the threshold — only the hottest names are spared).
+            if _trim_mom_veto:
+                _r1m_thr = _trim_cfg.get("trim_veto_ret1m_above", None)
+                if _r1m_thr is not None and precomp.return_1m_daily is not None:
+                    _still_up = precomp.return_1m_daily[d] >= float(_r1m_thr)
+                    trim_mask = trim_mask & ~_still_up
+                elif precomp.above_50dma_daily is not None:
+                    _still_up = precomp.above_50dma_daily[d].astype(bool)
+                    trim_mask = trim_mask & ~_still_up
             if trim_mask.any():
                 sell_prices_t = np.where(valid_price, prices, stock_avg_cost)
                 trim_indices  = np.where(trim_mask)[0]

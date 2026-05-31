@@ -450,7 +450,6 @@ CONTRARIAN_PENALTY_PARAMS: dict = {
     "enabled":                bool(_cp.get("enabled", True)),
     "score_multiplier":       float(_cp.get("score_multiplier", 0.92)),
     "max_position_multiplier": float(_cp.get("max_position_multiplier", 0.60)),
-    "archetype_bias":         str(_cp.get("archetype_bias", "speculative_momentum")),
 }
 
 _cl = _app.get("concentration_limits", {})
@@ -789,7 +788,7 @@ EXIT_DECISION_PARAMS: dict = {
     "trim_fraction":               float(_ed.get("trim_fraction",              0.33)),
     "trim_min_gain_pct":           float(_ed.get("trim_min_gain_pct",          0.08)),
     "trim_score_below":            _resolve_trim_score_below(_ed, _mt),
-    "trim_requires_positive_momentum": bool(_ed.get("trim_requires_positive_momentum", True)),
+    "trim_requires_positive_momentum": bool(_ed.get("trim_requires_positive_momentum", False)),
     "trim_to_etfs_pct":            float(_ed.get("trim_to_etfs_pct",           0.85)),
     "trim_profit_threshold":       float(_ed.get("trim_profit_threshold",      0.15)),
     "harvest_profit_threshold":    float(_ed.get("harvest_profit_threshold",   0.25)),

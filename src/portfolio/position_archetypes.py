@@ -396,6 +396,18 @@ def _score_quality_compounder(
     _mega = float(thr.get("market_cap_mega",  _MEGA_CAP))
     _large = float(thr.get("market_cap_large", _LARGE_CAP))
     _small = float(thr.get("market_cap_small", _SMALL_CAP))
+    _maint_low  = float(thr.get("maintenance_low",  0.25))
+    _maint_high = float(thr.get("maintenance_high", 0.27))
+    _maint_spec = float(thr.get("maintenance_speculative", 1.0))
+    _dt_normal  = float(thr.get("day_trade_normal_max", 0.25))
+    _ab_strong  = float(thr.get("analyst_buy_strong",   0.80))
+    _ab_mod     = float(thr.get("analyst_buy_moderate", 0.65))
+    _ab_weak    = float(thr.get("analyst_buy_weak",     0.40))
+    _q_high     = float(thr.get("quality_high",     0.60))
+    _q_mod      = float(thr.get("quality_moderate", 0.35))
+    _q_low      = float(thr.get("quality_low",      0.10))
+    _emp_scaled = float(thr.get("employees_scaled", 50_000))
+    _emp_small  = float(thr.get("employees_small",  2_000))
 
     maint = _sf(signals, "maintenance_ratio")
     day_trade = _sf(signals, "day_trade_ratio")
@@ -420,54 +432,54 @@ def _score_quality_compounder(
             reason_codes.append("small_cap_penalty")
 
     if maint is not None:
-        if maint <= 0.25:
+        if maint <= _maint_low:
             score += 0.25
             drivers.append(f"maintenance_ratio={maint:.2f} — institution-trusted")
             reason_codes.append("low_maintenance")
-        elif maint <= 0.27:
+        elif maint <= _maint_high:
             score += 0.08
             drivers.append(f"maintenance_ratio={maint:.2f} — low-risk margin profile")
-        elif maint >= 1.0:
+        elif maint >= _maint_spec:
             score -= 0.30
             drivers.append(f"maintenance_ratio={maint:.2f} — speculative flag (−)")
             reason_codes.append("high_maintenance_penalty")
 
-    if day_trade is not None and day_trade <= 0.25:
+    if day_trade is not None and day_trade <= _dt_normal:
         score += 0.08
         drivers.append(f"day_trade_ratio={day_trade:.2f} — normal")
 
     if buy_pct is not None:
-        if buy_pct > 0.80:
+        if buy_pct > _ab_strong:
             score += 0.22
             drivers.append(f"analyst buy%={buy_pct:.0%} — very strong consensus")
             reason_codes.append("analyst_strong")
-        elif buy_pct > 0.65:
+        elif buy_pct > _ab_mod:
             score += 0.14
             drivers.append(f"analyst buy%={buy_pct:.0%} — strong consensus")
             reason_codes.append("analyst_moderate")
-        elif buy_pct < 0.40:
+        elif buy_pct < _ab_weak:
             score -= 0.20
             drivers.append(f"analyst buy%={buy_pct:.0%} — weak consensus (−)")
             reason_codes.append("analyst_weak_penalty")
 
-    if quality >= 0.60:
+    if quality >= _q_high:
         score += 0.15
         drivers.append(f"quality_score={quality:.3f} — high")
         reason_codes.append("quality_high")
-    elif quality >= 0.35:
+    elif quality >= _q_mod:
         score += 0.07
         reason_codes.append("quality_moderate")
-    elif quality < 0.10:
+    elif quality < _q_low:
         score -= 0.10
         drivers.append(f"quality_score={quality:.3f} — low (−)")
         reason_codes.append("quality_low_penalty")
 
     if employees is not None:
-        if employees >= 50_000:
+        if employees >= _emp_scaled:
             score += 0.10
             drivers.append(f"employees={employees:,} — scaled organization")
             reason_codes.append("scaled_organization")
-        elif employees < 2_000:
+        elif employees < _emp_small:
             score -= 0.05
 
     if desc_feats["compounder"]:
@@ -489,7 +501,18 @@ def _score_legacy_turnaround(
     score = 0.0
     drivers: list[str] = []
     reason_codes: list[str] = []
-    _ = (cfg or {}).get("legacy_turnaround", {})  # threshold overrides reserved for future
+    thr = (cfg or {}).get("legacy_turnaround", {}) or {}
+    _maint_spec  = float(thr.get("maintenance_speculative",   1.0))
+    _maint_elev  = float(thr.get("maintenance_elevated",      0.40))
+    _maint_above = float(thr.get("maintenance_above_standard", 0.27))
+    _dt_elev     = float(thr.get("day_trade_elevated",        0.25))
+    _mc_mid      = float(thr.get("market_cap_mid",   _MID_CAP))
+    _mc_large    = float(thr.get("market_cap_large", _LARGE_CAP))
+    _mc_mega     = float(thr.get("market_cap_mega",  _MEGA_CAP))
+    _ab_weak     = float(thr.get("analyst_buy_weak",     0.35))
+    _ab_mod      = float(thr.get("analyst_buy_moderate", 0.55))
+    _ab_strong   = float(thr.get("analyst_buy_strong",   0.80))
+    _mom_strong  = float(thr.get("momentum_strong",      0.30))
 
     maint = _sf(signals, "maintenance_ratio")
     day_trade = _sf(signals, "day_trade_ratio")
@@ -504,40 +527,40 @@ def _score_legacy_turnaround(
 
     # Margin/risk ratios — strongest discriminators
     if maint is not None:
-        if maint >= 1.0:
+        if maint >= _maint_spec:
             score += 0.38
             drivers.append(f"maintenance_ratio={maint:.2f} — strong speculative/risk flag")
-        elif maint > 0.40:
+        elif maint > _maint_elev:
             score += 0.20
             drivers.append(f"maintenance_ratio={maint:.2f} — elevated risk ratio")
-        elif maint > 0.27:
+        elif maint > _maint_above:
             score += 0.12
             drivers.append(f"maintenance_ratio={maint:.2f} — above-standard margin requirement")
 
-    if day_trade is not None and day_trade > 0.25:
+    if day_trade is not None and day_trade > _dt_elev:
         score += 0.12
         drivers.append(f"day_trade_ratio={day_trade:.2f} — elevated day-trade requirement")
 
     # Market cap
     if market_cap is not None:
-        if market_cap < _MID_CAP:
+        if market_cap < _mc_mid:
             score += 0.15
             drivers.append(f"small/mid cap (${market_cap/1e6:.0f}M)")
-        elif market_cap < _LARGE_CAP:
+        elif market_cap < _mc_large:
             score += 0.08
-        elif market_cap >= _MEGA_CAP:
+        elif market_cap >= _mc_mega:
             score -= 0.30
             drivers.append("mega-cap disqualifies legacy archetype (−)")
 
     # Analyst consensus
     if buy_pct is not None:
-        if buy_pct < 0.35:
+        if buy_pct < _ab_weak:
             score += 0.18
             drivers.append(f"analyst buy%={buy_pct:.0%} — weak analyst conviction")
-        elif buy_pct < 0.55:
+        elif buy_pct < _ab_mod:
             score += 0.10
             drivers.append(f"analyst buy%={buy_pct:.0%} — moderate analyst support")
-        elif buy_pct > 0.80:
+        elif buy_pct > _ab_strong:
             score -= 0.20
             drivers.append(f"analyst buy%={buy_pct:.0%} — too strong for legacy archetype (−)")
 
@@ -548,7 +571,7 @@ def _score_legacy_turnaround(
         drivers.append(f"description: {', '.join(terms)}")
 
     # Strong recent momentum on a legacy name = rally pattern
-    if momentum is not None and momentum > 0.30:
+    if momentum is not None and momentum > _mom_strong:
         score += 0.10
         drivers.append(f"momentum_score={momentum:.3f} — strong rally pattern on legacy name")
 
@@ -589,7 +612,18 @@ def _score_speculative_momentum(
 ) -> tuple[float, list[str], list[str]]:
     score = 0.0
     reason_codes: list[str] = []
-    _ = (cfg or {}).get("speculative_momentum", {})
+    thr = (cfg or {}).get("speculative_momentum", {}) or {}
+    _mom_vstrong = float(thr.get("momentum_very_strong", 0.60))
+    _mom_strong  = float(thr.get("momentum_strong",      0.35))
+    _q_vlow      = float(thr.get("quality_very_low",     0.10))
+    _q_low       = float(thr.get("quality_low",          0.25))
+    _q_toohigh   = float(thr.get("quality_too_high",     0.60))
+    _maint_high  = float(thr.get("maintenance_high",     1.0))
+    _maint_elev  = float(thr.get("maintenance_elevated", 0.40))
+    _dt_high     = float(thr.get("day_trade_high",       0.40))
+    _mc_small    = float(thr.get("market_cap_small",     _SMALL_CAP))
+    _mc_mega     = float(thr.get("market_cap_mega",      _MEGA_CAP))
+    _income_min  = float(thr.get("income_minimal",       0.05))
     drivers: list[str] = []
 
     maint = _sf(signals, "maintenance_ratio")
@@ -602,10 +636,10 @@ def _score_speculative_momentum(
 
     # Momentum is the central signal
     if momentum is not None:
-        if momentum > 0.60:
+        if momentum > _mom_vstrong:
             score += 0.28
             drivers.append(f"momentum_score={momentum:.3f} — very strong")
-        elif momentum > 0.35:
+        elif momentum > _mom_strong:
             score += 0.18
             drivers.append(f"momentum_score={momentum:.3f} — strong")
         elif momentum < 0.0:
@@ -614,46 +648,46 @@ def _score_speculative_momentum(
 
     # High margin/risk ratios
     if maint is not None:
-        if maint >= 1.0:
+        if maint >= _maint_high:
             score += 0.25
             drivers.append(f"maintenance_ratio={maint:.2f} — high risk flag")
-        elif maint > 0.40:
+        elif maint > _maint_elev:
             score += 0.15
-    if day_trade is not None and day_trade > 0.40:
+    if day_trade is not None and day_trade > _dt_high:
         score += 0.12
         drivers.append(f"day_trade_ratio={day_trade:.2f} — high speculative flag")
 
     # Low quality = speculative
     if quality is not None:
-        if quality < 0.10:
+        if quality < _q_vlow:
             score += 0.20
             drivers.append(f"quality_score={quality:.3f} — very low quality")
-        elif quality < 0.25:
+        elif quality < _q_low:
             score += 0.10
             drivers.append(f"quality_score={quality:.3f} — low quality")
-        elif quality > 0.60:
+        elif quality > _q_toohigh:
             score -= 0.25
             drivers.append(f"quality_score={quality:.3f} — too high for speculative archetype (−)")
 
     # Small cap
     if market_cap is not None:
-        if market_cap < _SMALL_CAP:
+        if market_cap < _mc_small:
             score += 0.15
             drivers.append(f"small-cap (${market_cap/1e6:.0f}M) — high speculative risk")
-        elif market_cap >= _MEGA_CAP:
+        elif market_cap >= _mc_mega:
             score -= 0.25
 
     # No income / no dividend
-    if income is not None and income <= 0.05 and not yield_trap:
+    if income is not None and income <= _income_min and not yield_trap:
         score += 0.08
         drivers.append("no income/dividend — pure price return play")
 
     if desc_feats["compounder"]:
         score -= 0.15
         reason_codes.append("compounder_terms_penalty")
-    if momentum is not None and momentum > 0.60:
+    if momentum is not None and momentum > _mom_vstrong:
         reason_codes.append("momentum_very_strong")
-    if quality is not None and quality < 0.10:
+    if quality is not None and quality < _q_vlow:
         reason_codes.append("quality_very_low")
 
     # Raw-multiple character: rich/expensive or loss-making (negative PE) names
@@ -677,7 +711,14 @@ def _score_value_recovery(
     score = 0.0
     drivers: list[str] = []
     reason_codes: list[str] = []
-    _ = (cfg or {}).get("value_recovery", {})
+    thr = (cfg or {}).get("value_recovery", {}) or {}
+    _v_under  = float(thr.get("value_undervalued",     0.60))
+    _v_mod    = float(thr.get("value_moderate",        0.30))
+    _mom_imp  = float(thr.get("momentum_improving_max", 0.40))
+    _mom_fall = float(thr.get("momentum_falling_min",  -0.20))
+    _q_min    = float(thr.get("quality_min",           0.15))
+    _q_max    = float(thr.get("quality_max",           0.55))
+    _maint_distress = float(thr.get("maintenance_distress", 1.0))
 
     value = _sf(signals, "value_score", 0.0)
     quality = _sf(signals, "quality_score", 0.0)
@@ -686,40 +727,40 @@ def _score_value_recovery(
 
     # Undervaluation is the central signal
     if value is not None:
-        if value > 0.60:
+        if value > _v_under:
             score += 0.30
             drivers.append(f"value_score={value:.3f} — undervalued")
-        elif value > 0.30:
+        elif value > _v_mod:
             score += 0.15
             drivers.append(f"value_score={value:.3f} — moderate value")
 
     # Improving momentum (not strongly negative, not overextended)
     if momentum is not None:
-        if 0.0 < momentum <= 0.40:
+        if 0.0 < momentum <= _mom_imp:
             score += 0.15
             drivers.append(f"momentum_score={momentum:.3f} — improving")
-        elif momentum < -0.20:
+        elif momentum < _mom_fall:
             score -= 0.10
 
     # Moderate quality (not distressed, not compounder)
     if quality is not None:
-        if 0.15 <= quality <= 0.55:
+        if _q_min <= quality <= _q_max:
             score += 0.12
             drivers.append(f"quality_score={quality:.3f} — moderate quality / recovery profile")
 
     # High maintenance ratio = distress, reduces recovery confidence
-    if maint is not None and maint >= 1.0:
+    if maint is not None and maint >= _maint_distress:
         score -= 0.15
         drivers.append(f"maintenance_ratio={maint:.2f} — distress risk reduces recovery conviction (−)")
 
-    if desc_feats["legacy"] and value is not None and value > 0.30:
+    if desc_feats["legacy"] and value is not None and value > _v_mod:
         score += 0.08
         reason_codes.append("legacy_value_overlap")
-    if value is not None and value > 0.60:
+    if value is not None and value > _v_under:
         reason_codes.append("value_undervalued")
-    if momentum is not None and 0.0 < momentum <= 0.40:
+    if momentum is not None and 0.0 < momentum <= _mom_imp:
         reason_codes.append("momentum_improving")
-    if maint is not None and maint >= 1.0:
+    if maint is not None and maint >= _maint_distress:
         reason_codes.append("distress_penalty")
 
     # Raw-multiple valuation character (PE/PB) — cheap reinforces value_recovery.

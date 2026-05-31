@@ -107,7 +107,6 @@ contrarian_penalty:
   enabled: true
   score_multiplier: 0.92
   max_position_multiplier: 0.6
-  archetype_bias: speculative_momentum
 concentration_limits:
   enabled: true
   warn_only: false                         # ENFORCING — block/downsize cluster-cap violations
@@ -138,9 +137,6 @@ archetype_classifier:
     min_momentum_score: -0.10
     max_volatility_percentile: 0.75
     reject_falling_knife: true
-bear_market:
-  spy_ma_period: 200
-  vix_threshold: 25.0
 regime:
   spy_ma_period: 200
   vix_defensive_threshold: 30.0
@@ -436,8 +432,6 @@ portfolio_intelligence:
   exit_score_below: 0.45
   exit_rank_below_pct: 0.4
   min_holding_days_before_watch: 5
-  show_etf_rationale: true
-  show_active_rationale: true
   premature_exit_min_thesis_score: 0.65
   premature_exit_min_quality: 0.3
   premature_exit_min_momentum: 0.0
@@ -461,7 +455,10 @@ exit_decision:
   trim_fraction: 0.33
   trim_min_gain_pct: 0.08
   trim_score_below: 0.74
-  trim_requires_positive_momentum: true
+  # Momentum veto on trimming: skip trim for winners still trending up. Frozen OFF
+  # (false preserves current behavior — the key was previously inert). Validated
+  # marginal (raises rolling-window hit-rate vs SPY but Wilcoxon-neutral); not live.
+  trim_requires_positive_momentum: false
   trim_to_etfs_pct: 0.85
 decision_adjustment:
   premature_exit_threshold: 0.45
