@@ -235,6 +235,10 @@ def random_window_backtest(
     """
     n_total = precomp.prices.shape[0]
 
+    if params is None:
+        from backtesting.simulator import get_default_params
+        params = get_default_params()
+
     if n_total < window_days + 1:
         raise ValueError(
             f"PrecomputedData has only {n_total} days; need at least {window_days + 1} "
