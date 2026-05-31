@@ -71,6 +71,11 @@ def select_backtest_universe(
         logger.warning("No symbols pass min_volume filter — using all available")
         liquid = agg_df.copy()
 
+    # Sort by a stable key before any sampling so results are reproducible
+    # across agg_data refreshes (row order changes each run otherwise).
+    _sym_col = "symbol" if "symbol" in liquid.columns else str(liquid.columns[0])
+    liquid = liquid.sort_values(by=_sym_col).reset_index(drop=True)
+
     if universe_selection == "top_current_scores":
         selected = liquid.sort_values("value_metric", ascending=False).head(max_symbols)
         bias = "HIGH"

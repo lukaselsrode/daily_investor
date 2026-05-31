@@ -336,6 +336,24 @@ def render() -> None:
     if "HIGH" in bias_label:
         st.error(f"⚠️ {bias_label}")
 
+    # Mode + scope compatibility warnings
+    _wf_mode = mode == "walk_forward_price_only_test"
+    if _wf_mode and scope == "active_sleeve_compounding":
+        st.warning(
+            "⚠️ **walk_forward_price_only_test strips fundamental scores** (quality, income, "
+            "PE/PB) to eliminate lookahead bias. The active sleeve ranks stocks by those scores, "
+            "so almost nothing clears the metric threshold → 0 trades, misleading results. "
+            "Use **liquid_universe_sanity_test** (MEDIUM bias) for active-sleeve backtests, "
+            "or switch scope to Overall Strategy."
+        )
+    if cluster_tracking and _wf_mode:
+        st.warning(
+            "⚠️ Cluster tracking with walk_forward mode produces degenerate results — "
+            "zeroed feature scores collapse all stocks to one cluster. Disable cluster tracking "
+            "or switch mode."
+        )
+
+
     if st.button("▶ Run backtest", type="primary", key="bt_run"):
         with st.spinner(f"Running {n_days}-day backtest…"):
             try:

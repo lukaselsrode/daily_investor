@@ -433,6 +433,15 @@ def render() -> None:
             f"({n_days_load}d). Increase history or shorten the horizon profile."
         )
 
+    if mode == "walk_forward_price_only_test" and scope == "active_sleeve_compounding":
+        st.warning(
+            "⚠️ **walk_forward_price_only_test strips fundamental scores** — quality, income, "
+            "and PE/PB are zeroed out to eliminate lookahead bias. The active sleeve needs "
+            "those scores to rank stocks, so 0 trades will fire and results are meaningless. "
+            "Use **liquid_universe_sanity_test** for active-sleeve robustness scans."
+        )
+
+
     # ── Run ────────────────────────────────────────────────────────────────
     n_sims = total_simulations(run_matrix)
     if st.button(f"▶ Run Robust Window Scan ({n_sims} simulations)", type="primary", key="rw_run"):
