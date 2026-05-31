@@ -441,7 +441,13 @@ exit_decision:
   harvest_profit_threshold: 0.3
   thesis_intact_review_floor: 0.6
   thesis_intact_hard_exit_below: 0.35
-  trim_enabled: true
+  # trim DISABLED (2026-05): full-universe temporal-holdout validation showed
+  # trimming winners at +trim_min_gain is a structural alpha-killer — it sells
+  # the runaway compounders (NVDA-type) that drive SPY's return. Disabling trim
+  # lifted holdout pct-beating-SPY 33%->56%, excess -1.0%->+1.1%, Sharpe
+  # 1.15->1.24 (drawdown only -22.3%->-23.9%). Let winners run. See
+  # .session_tmp/let_winners_run.py + Obsidian log.
+  trim_enabled: false
   trim_fraction: 0.33
   trim_min_gain_pct: 0.08
   trim_score_below: 0.74

@@ -86,6 +86,16 @@ def _trim_min_gain() -> float:
 
 class TestTrimExitFires:
 
+    @pytest.fixture(autouse=True)
+    def _force_trim_enabled(self):
+        """Trim is disabled in production config (let-winners-run, 2026-05), but
+        these tests verify the trim MECHANISM still works when enabled. Force it
+        on for the duration of this class, then restore."""
+        _orig = EXIT_DECISION_PARAMS.get("trim_enabled", True)
+        EXIT_DECISION_PARAMS["trim_enabled"] = True
+        yield
+        EXIT_DECISION_PARAMS["trim_enabled"] = _orig
+
     def test_trim_fires_when_profitable_and_weakening(self):
         gain       = _trim_min_gain() + 0.05        # clearly profitable
         vm         = _trim_value_metric()             # below buy threshold, above sell_weak
