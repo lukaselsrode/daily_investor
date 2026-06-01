@@ -42,6 +42,12 @@ def _ego(date: str, symbol: str, hops: int):
     return node_neighborhood(date, symbol, hops)
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def _sector_evolution(group_by: str = "sector") -> pd.DataFrame:
+    from portfolio.visualization.news_graph import graph_evolution_by_sector
+    return graph_evolution_by_sector(group_by=group_by)
+
+
 def _held_symbols() -> list[str]:
     """Best-effort load of currently-held symbols for highlighting."""
     try:
@@ -161,7 +167,7 @@ def render() -> None:
 
     held = _held_symbols()
     held_t = tuple(held)
-    tabs = st.tabs(["📈 Evolution", "🕸️ Network", "🎯 Ego network"])
+    tabs = st.tabs(["📈 Evolution", "📊 Sector breakdown", "🕸️ Network", "🎯 Ego network"])
 
     # ── Evolution ─────────────────────────────────────────────────────────────
     with tabs[0]:
@@ -200,8 +206,103 @@ def render() -> None:
             with st.expander("Evolution table"):
                 st.dataframe(ev, use_container_width=True, hide_index=True)
 
-    # ── Network ───────────────────────────────────────────────────────────────
+    # ── Sector breakdown ──────────────────────────────────────────────────────
     with tabs[1]:
+        gb_choice = st.radio("Group by", ["sector", "industry"], horizontal=True,
+                             key="ng_sector_gb")
+        with st.spinner("Building sector breakdown…"):
+            sec_df = _sector_evolution(gb_choice)
+
+        if sec_df.empty:
+            st.info("No sector data available — agg_data may not have sector/industry columns yet.")
+        else:
+            import plotly.express as px
+            import plotly.graph_objects as go
+
+            # Focus on top-N groups by peak attention share (avoids clutter)
+            top_n = st.slider("Show top N sectors by peak attention", 5, 20, 10,
+                              key="ng_sector_topn")
+            peak = sec_df.groupby("group")["attention_share"].max().nlargest(top_n)
+            sec_filtered = sec_df[sec_df["group"].isin(peak.index)].copy()
+
+            dates_ord = sorted(sec_filtered["date"].unique())
+
+            # ── Chart 1: Attention share heatmap (which sectors dominate news) ──
+            st.subheader("News attention share by sector over time")
+            st.caption("Fraction of all connected graph nodes in each sector on each date. "
+                       "High attention = sector sweeping up many co-mention stories.")
+            pivot_att = (sec_filtered.pivot_table(
+                index="group", columns="date",
+                values="attention_share", aggfunc="sum", fill_value=0.0
+            ))
+            fig_att = px.imshow(
+                pivot_att,
+                color_continuous_scale="Blues",
+                aspect="auto",
+                labels=dict(x="Date", y=gb_choice.capitalize(), color="Attention share"),
+            )
+            fig_att.update_layout(height=40 * min(top_n, len(pivot_att)) + 80,
+                                  margin=dict(l=10, r=10, t=10, b=60))
+            fig_att.update_xaxes(tickangle=-45)
+            st.plotly_chart(fig_att, use_container_width=True)
+
+            # ── Chart 2: Sentiment heatmap (which sectors are positive/negative) ──
+            st.subheader("Mean sentiment by sector over time")
+            st.caption("Positive = bullish news tone in that sector. "
+                       "Diverging sectors signal rotation or concentrated risk events.")
+            pivot_sent = (sec_filtered.pivot_table(
+                index="group", columns="date",
+                values="mean_sentiment", aggfunc="mean", fill_value=0.0
+            ))
+            fig_sent = px.imshow(
+                pivot_sent,
+                color_continuous_scale="RdYlGn",
+                aspect="auto",
+                zmin=-0.3, zmax=0.3,
+                labels=dict(x="Date", y=gb_choice.capitalize(), color="Sentiment"),
+            )
+            fig_sent.update_layout(height=40 * min(top_n, len(pivot_sent)) + 80,
+                                   margin=dict(l=10, r=10, t=10, b=60))
+            fig_sent.update_xaxes(tickangle=-45)
+            st.plotly_chart(fig_sent, use_container_width=True)
+
+            # ── Chart 3: Cross-sector edges over time for top sectors ────────────
+            st.subheader("Cross-sector co-mentions over time")
+            st.caption("High cross-sector edges = macro narrative (same story links multiple sectors). "
+                       "High intra-sector = sector-specific story. Ratio tells you if it's a "
+                       "broad market event or a contained sector move.")
+            fig_cross = go.Figure()
+            for grp in peak.index[:8]:  # limit to 8 for legibility
+                g = sec_filtered[sec_filtered["group"] == grp].sort_values("date")
+                fig_cross.add_scatter(x=g["date"], y=g["cross_edges"],
+                                      name=grp, mode="lines+markers",
+                                      marker=dict(size=4))
+            fig_cross.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=60),
+                                    legend=dict(orientation="h"),
+                                    yaxis_title="Cross-sector edges")
+            fig_cross.update_xaxes(tickangle=-45)
+            st.plotly_chart(fig_cross, use_container_width=True)
+
+            # ── Latest snapshot snapshot table ────────────────────────────────
+            latest_date = sec_df["date"].max()
+            latest = (sec_df[sec_df["date"] == latest_date]
+                      .sort_values("attention_share", ascending=False)
+                      .reset_index(drop=True))
+            with st.expander(f"Latest snapshot detail — {latest_date}"):
+                st.dataframe(
+                    latest[["group", "n_nodes", "mean_sentiment",
+                             "neg_fraction", "intra_edges", "cross_edges",
+                             "attention_share"]].rename(columns={
+                        "group": gb_choice, "n_nodes": "nodes",
+                        "mean_sentiment": "sentiment", "neg_fraction": "neg %",
+                        "intra_edges": "intra-edges", "cross_edges": "cross-edges",
+                        "attention_share": "attention %",
+                    }),
+                    use_container_width=True, hide_index=True,
+                )
+
+    # ── Network ───────────────────────────────────────────────────────────────
+    with tabs[2]:
         c1, c2, c3 = st.columns([2, 2, 1])
         with c1:
             date = st.selectbox("Snapshot date", dates, index=len(dates) - 1, key="ng_date")
@@ -215,7 +316,7 @@ def render() -> None:
                       f"Co-mention network · {date}", max_nodes=max_nodes)
 
     # ── Ego network ───────────────────────────────────────────────────────────
-    with tabs[2]:
+    with tabs[3]:
         c1, c2, c3 = st.columns([2, 2, 1])
         with c1:
             date2 = st.selectbox("Snapshot date", dates, index=len(dates) - 1, key="ng_ego_date")

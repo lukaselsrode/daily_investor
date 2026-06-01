@@ -99,6 +99,79 @@ def graph_evolution_summary(held_symbols: set[str] | None = None) -> pd.DataFram
     return pd.DataFrame(rows)
 
 
+def graph_evolution_by_sector(
+    group_by: str = "sector",
+) -> pd.DataFrame:
+    """Per-date × per-sector breakdown of graph metrics.
+
+    Returns a tidy DataFrame with columns:
+        date, group (sector or industry), n_nodes, mean_sentiment,
+        neg_fraction, intra_edges, cross_edges, attention_share
+
+    ``attention_share`` = fraction of all connected nodes on that date that
+    belong to this sector — a normalised measure of how much news attention
+    the sector is capturing relative to the rest of the universe.
+    ``intra_edges`` = edges where both endpoints share the same group.
+    ``cross_edges`` = edges where endpoints are in different groups.
+    """
+    import numpy as np
+    try:
+        from util import read_data_as_pd
+        agg = read_data_as_pd("agg_data")
+        if group_by not in agg.columns or "symbol" not in agg.columns:
+            return pd.DataFrame()
+        sym_to_group = (
+            agg.dropna(subset=[group_by, "symbol"])
+            .set_index("symbol")[group_by]
+            .str.strip()
+            .to_dict()
+        )
+    except Exception:
+        return pd.DataFrame()
+
+    rows = []
+    for date in list_news_dates():
+        edges, nodes, _feats = build_graph_for_date(date)
+        if nodes.empty:
+            continue
+        connected = (
+            nodes[nodes["degree"] > 0].copy()
+            if "degree" in nodes.columns
+            else nodes.copy()
+        )
+        connected["group"] = connected["symbol"].map(sym_to_group)
+        connected = connected.dropna(subset=["group"])
+        if connected.empty:
+            continue
+        total_conn = max(len(connected), 1)
+
+        for grp, grp_nodes in connected.groupby("group"):
+            sent = grp_nodes["sentiment"] if "sentiment" in grp_nodes.columns else pd.Series(dtype=float)
+            n_nodes = len(grp_nodes)
+            # count intra/cross edges for this group
+            intra = cross = 0
+            if not edges.empty:
+                src_grps = edges["source"].map(sym_to_group)
+                tgt_grps = edges["target"].map(sym_to_group)
+                intra = int(((src_grps == grp) & (tgt_grps == grp)).sum())
+                cross = int(((src_grps == grp) | (tgt_grps == grp)).sum()) - intra
+            _sv = np.asarray(sent, dtype=float) if len(sent) else np.array([], dtype=float)
+            mean_sent = float(_sv.mean()) if len(_sv) else 0.0
+            neg_frac = float((_sv < 0).mean()) if len(_sv) else 0.0
+            rows.append({
+                "date": date,
+                "group": grp,
+                "n_nodes": n_nodes,
+                "mean_sentiment": round(mean_sent, 4),
+                "neg_fraction": round(neg_frac, 4),
+                "intra_edges": intra,
+                "cross_edges": cross,
+                "attention_share": round(n_nodes / total_conn, 4),
+            })
+
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+
 def node_neighborhood(date: str, symbol: str, hops: int = 1) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Return (sub_edges, sub_nodes) for the k-hop neighborhood of `symbol` on `date`.
 

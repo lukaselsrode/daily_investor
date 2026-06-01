@@ -39,9 +39,9 @@ That's it. The dashboard opens at `http://localhost:8501`.
 
 ## Key Features
 
-- **Multi-Factor Scoring** — Value (P/E + P/B, sector-relative v2), quality, income, and momentum → single `value_metric`
-- **Momentum v2** — Relative strength vs SPY (3m/6m), risk-adjusted return, DMA trend structure, short-term momentum — all cross-sectionally percentile-ranked per day, causal
-- **Value v2** — Sector-relative winsorized percentile ranking with distress penalties; replaces ratio-based value scoring
+- **Multi-Factor Scoring** — Value (P/E + P/B, sector-relative), quality, income, and momentum → single `value_metric`
+- **Momentum** — Relative strength vs SPY (3m/6m), risk-adjusted return, DMA trend structure, short-term momentum — all cross-sectionally percentile-ranked per day, causal
+- **Value** — Sector-relative winsorized percentile ranking with distress penalties; replaces ratio-based value scoring
 - **Three-Tier Market Regime** — Bullish / Neutral / Defensive via SPY 200DMA + VIX; raises ETF allocation, limits active buys, tightens stops in defensive mode
 - **Factor Research Platform** — `FactorResearchEngine`: multi-horizon IC (5/20/60/120/252d), factor decay curves, decile monotonicity, rolling ICIR, cumulative IC
 - **Distribution Regime Analysis** — Bimodality detection (GMM + BC test), local IC, cluster analysis, conditional alpha, threshold simulation — investigates whether alpha concentrates in score tails
@@ -171,7 +171,7 @@ daily_investor/
 │   │       ├── exposure.py           # Factor tilts and sector exposure
 │   │       ├── regime.py             # Regime inspector + effective config by regime
 │   │       ├── scoring.py            # Scored universe explorer
-│   │       ├── value_diagnostics.py  # Value v2 distribution and decile analysis
+│   │       ├── value_diagnostics.py  # Value distribution and decile analysis
 │   │       ├── factor_analysis.py    # Factor correlation and orthogonalization
 │   │       ├── rolling_ic.py         # Single-horizon rolling IC time series
 │   │       ├── factor_lab.py         # Multi-horizon IC, decay curves, decile spread
@@ -216,10 +216,13 @@ daily-investor COMMAND [OPTIONS]
 | `backtest DAYS` | Run backtest simulation |
 | `tune DAYS` | Single-objective parameter tune — prints diff, no write |
 | `auto-tune [DAYS]` | Dual-objective tune with walk-forward validation (default: 90d) |
+| `list-presets` | Print available tuning presets and exit |
 | `stability-scan` | Parameter stability scan across multiple windows — research only, no writes |
 | `report` | Run a quick 90-day backtest and print results |
 | `update-outcomes` | Backfill realized future returns for past decisions — calibration only, never touches live scoring |
 | `factor-map` | 3-D PCA/UMAP factor-space scatter of the scored universe |
+| `config <SUB>` | Config maintenance — sub: `migrate-scoring` (rewrite legacy YAML to unified scoring) |
+| `snapshots <SUB>` | Snapshot maintenance — sub: `rescore` (re-score on-disk snapshots to current model) |
 
 **Key options:**
 
@@ -318,10 +321,10 @@ See `AGENTS.md` for the full architecture contract.
 
 | Score | What it measures |
 |-------|-----------------|
-| `value_score` | Sector-relative P/E and P/B cheapness (v2: winsorized percentile ranking) |
+| `value_score` | Sector-relative P/E and P/B cheapness (winsorized percentile ranking) |
 | `income_score` | Dividend yield quality (capped; 0 if yield trap or no yield) |
 | `quality_score` | Liquidity, earnings existence, dividend health |
-| `momentum_score` | Multi-factor v2: relative strength, risk-adjusted return, DMA trend, short-term momentum |
+| `momentum_score` | Multi-factor: relative strength, risk-adjusted return, DMA trend, short-term momentum |
 
 ### Composite Score
 
@@ -342,7 +345,7 @@ score_weights:
   momentum: 0.45
 ```
 
-### Momentum Score v2
+### Momentum Score
 
 All sub-scores are **cross-sectionally percentile-ranked** across the live universe each day. Causal — no lookahead.
 
@@ -357,7 +360,7 @@ All sub-scores are **cross-sectionally percentile-ranked** across the live unive
 
 Penalties after weighting: falling-knife (3m return < −15%), overextension (52w position > 97%), high volatility (annualized vol > 50%). Final score clamped to [−1.0, 1.5].
 
-### Value Score v2
+### Value Score
 
 1. Within each sector (min 5 stocks), winsorize P/E and P/B at 5th/95th percentile
 2. Percentile-rank each stock against its sector peers (low PE → high rank)
@@ -565,7 +568,7 @@ Five top-level sections, each with tabs. Launch: `make ui`
 | Tab | Description |
 |-----|-------------|
 | 📊 Overview | Synthesized IC conclusions; factor signal strength by horizon |
-| 🔍 Factors | Scoring universe explorer + Value v2 diagnostics (PE/PB ranks, sector comparison) |
+| 🔍 Factors | Scoring universe explorer + Value diagnostics (PE/PB ranks, sector comparison) |
 | 📡 IC Analysis | Multi-horizon IC, factor decay curves, cumulative IC, ICIR; rolling IC time series |
 | 📊 Rank & Deciles | Decile monotonicity — does higher score predict better returns? |
 | 🔗 Correlations | Pairwise factor IC, VIF, OLS residualization, variance decomposition |
