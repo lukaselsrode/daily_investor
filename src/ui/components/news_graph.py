@@ -283,10 +283,17 @@ def render() -> None:
             all_dates = sorted(sec_filtered["date"].astype(str).unique())
             for grp in peak.index[:8]:  # limit to 8 for legibility
                 g = sec_filtered[sec_filtered["group"] == grp].sort_values("date")
-                if "cross_ratio" in g.columns:
-                    fig_cross.add_scatter(x=g["date"].astype(str), y=g["cross_ratio"],
-                                          name=grp, mode="lines+markers",
-                                          marker=dict(size=4))
+                if "cross_ratio" not in g.columns:
+                    continue
+                # Reindex to all dates so missing dates become explicit gaps (not
+                # interpolated lines that can shoot outside [0,1] on sparse data)
+                g_full = (pd.DataFrame({"date": all_dates})
+                          .merge(g[["date", "cross_ratio"]].assign(date=g["date"].astype(str)),
+                                 on="date", how="left"))
+                fig_cross.add_scatter(x=g_full["date"], y=g_full["cross_ratio"],
+                                      name=grp, mode="lines+markers",
+                                      marker=dict(size=4),
+                                      connectgaps=False)
             fig_cross.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=60),
                                     legend=dict(orientation="h"),
                                     yaxis=dict(title="Cross-sector ratio", range=[0, 1]),
