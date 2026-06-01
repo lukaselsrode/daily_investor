@@ -233,11 +233,15 @@ def render() -> None:
                 index="group", columns="date",
                 values="attention_share", aggfunc="sum", fill_value=0.0
             ))
+            # Ensure column labels are strings so Plotly renders dates not integers
+            pivot_att.columns = [str(c) for c in pivot_att.columns]
             fig_att = px.imshow(
                 pivot_att,
                 color_continuous_scale="Blues",
                 aspect="auto",
                 labels=dict(x="Date", y=gb_choice.capitalize(), color="Attention share"),
+                x=list(pivot_att.columns),
+                y=list(pivot_att.index),
             )
             fig_att.update_layout(height=40 * min(top_n, len(pivot_att)) + 80,
                                   margin=dict(l=10, r=10, t=10, b=60))
@@ -252,12 +256,15 @@ def render() -> None:
                 index="group", columns="date",
                 values="mean_sentiment", aggfunc="mean", fill_value=0.0
             ))
+            pivot_sent.columns = [str(c) for c in pivot_sent.columns]
             fig_sent = px.imshow(
                 pivot_sent,
                 color_continuous_scale="RdYlGn",
                 aspect="auto",
                 zmin=-0.3, zmax=0.3,
                 labels=dict(x="Date", y=gb_choice.capitalize(), color="Sentiment"),
+                x=list(pivot_sent.columns),
+                y=list(pivot_sent.index),
             )
             fig_sent.update_layout(height=40 * min(top_n, len(pivot_sent)) + 80,
                                    margin=dict(l=10, r=10, t=10, b=60))
@@ -273,16 +280,18 @@ def render() -> None:
                 "A sudden ratio spike signals a broad market event touching that sector."
             )
             fig_cross = go.Figure()
+            all_dates = sorted(sec_filtered["date"].astype(str).unique())
             for grp in peak.index[:8]:  # limit to 8 for legibility
                 g = sec_filtered[sec_filtered["group"] == grp].sort_values("date")
                 if "cross_ratio" in g.columns:
-                    fig_cross.add_scatter(x=g["date"], y=g["cross_ratio"],
+                    fig_cross.add_scatter(x=g["date"].astype(str), y=g["cross_ratio"],
                                           name=grp, mode="lines+markers",
                                           marker=dict(size=4))
             fig_cross.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=60),
                                     legend=dict(orientation="h"),
-                                    yaxis=dict(title="Cross-sector ratio", range=[0, 1]))
-            fig_cross.update_xaxes(tickangle=-45)
+                                    yaxis=dict(title="Cross-sector ratio", range=[0, 1]),
+                                    xaxis=dict(type="category", categoryorder="array",
+                                               categoryarray=all_dates, tickangle=-45))
             st.plotly_chart(fig_cross, use_container_width=True)
 
             # ── Latest snapshot snapshot table ────────────────────────────────
