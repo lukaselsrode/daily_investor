@@ -225,8 +225,6 @@ def render() -> None:
             peak = sec_df.groupby("group")["attention_share"].max().nlargest(top_n)
             sec_filtered = sec_df[sec_df["group"].isin(peak.index)].copy()
 
-            dates_ord = sorted(sec_filtered["date"].unique())
-
             # ── Chart 1: Attention share heatmap (which sectors dominate news) ──
             st.subheader("News attention share by sector over time")
             st.caption("Fraction of all connected graph nodes in each sector on each date. "
@@ -266,20 +264,24 @@ def render() -> None:
             fig_sent.update_xaxes(tickangle=-45)
             st.plotly_chart(fig_sent, use_container_width=True)
 
-            # ── Chart 3: Cross-sector edges over time for top sectors ────────────
-            st.subheader("Cross-sector co-mentions over time")
-            st.caption("High cross-sector edges = macro narrative (same story links multiple sectors). "
-                       "High intra-sector = sector-specific story. Ratio tells you if it's a "
-                       "broad market event or a contained sector move.")
+            # ── Chart 3: Cross-sector ratio over time ───────────────────────────
+            st.subheader("Cross-sector narrative ratio over time")
+            st.caption(
+                "cross_ratio = cross-sector edges ÷ (intra + cross) for each sector. "
+                "Bounded 0–1. Near 1 = sector is swept up in macro narratives linking "
+                "it to other sectors. Near 0 = sector stories are self-contained. "
+                "A sudden ratio spike signals a broad market event touching that sector."
+            )
             fig_cross = go.Figure()
             for grp in peak.index[:8]:  # limit to 8 for legibility
                 g = sec_filtered[sec_filtered["group"] == grp].sort_values("date")
-                fig_cross.add_scatter(x=g["date"], y=g["cross_edges"],
-                                      name=grp, mode="lines+markers",
-                                      marker=dict(size=4))
+                if "cross_ratio" in g.columns:
+                    fig_cross.add_scatter(x=g["date"], y=g["cross_ratio"],
+                                          name=grp, mode="lines+markers",
+                                          marker=dict(size=4))
             fig_cross.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=60),
                                     legend=dict(orientation="h"),
-                                    yaxis_title="Cross-sector edges")
+                                    yaxis=dict(title="Cross-sector ratio", range=[0, 1]))
             fig_cross.update_xaxes(tickangle=-45)
             st.plotly_chart(fig_cross, use_container_width=True)
 
@@ -292,11 +294,11 @@ def render() -> None:
                 st.dataframe(
                     latest[["group", "n_nodes", "mean_sentiment",
                              "neg_fraction", "intra_edges", "cross_edges",
-                             "attention_share"]].rename(columns={
+                             "cross_ratio", "attention_share"]].rename(columns={
                         "group": gb_choice, "n_nodes": "nodes",
                         "mean_sentiment": "sentiment", "neg_fraction": "neg %",
                         "intra_edges": "intra-edges", "cross_edges": "cross-edges",
-                        "attention_share": "attention %",
+                        "cross_ratio": "cross ratio", "attention_share": "attention %",
                     }),
                     use_container_width=True, hide_index=True,
                 )

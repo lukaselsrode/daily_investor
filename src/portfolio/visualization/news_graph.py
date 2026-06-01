@@ -145,16 +145,28 @@ def graph_evolution_by_sector(
             continue
         total_conn = max(len(connected), 1)
 
+        # Precompute group mappings once per date (outside the inner loop)
+        if not edges.empty:
+            src_grps = edges["source"].map(sym_to_group)
+            tgt_grps = edges["target"].map(sym_to_group)
+        else:
+            src_grps = tgt_grps = pd.Series(dtype=object)
+
         for grp, grp_nodes in connected.groupby("group"):
             sent = grp_nodes["sentiment"] if "sentiment" in grp_nodes.columns else pd.Series(dtype=float)
             n_nodes = len(grp_nodes)
-            # count intra/cross edges for this group
             intra = cross = 0
+            cross_ratio = 0.0
             if not edges.empty:
-                src_grps = edges["source"].map(sym_to_group)
-                tgt_grps = edges["target"].map(sym_to_group)
+                # intra: both endpoints in this group
                 intra = int(((src_grps == grp) & (tgt_grps == grp)).sum())
-                cross = int(((src_grps == grp) | (tgt_grps == grp)).sum()) - intra
+                # cross: exactly one endpoint in this group (each edge counted once)
+                cross = int(
+                    ((src_grps == grp) & (tgt_grps != grp)).sum()
+                    + ((src_grps != grp) & (tgt_grps == grp)).sum()
+                )
+                total_touching = intra + cross
+                cross_ratio = round(cross / total_touching, 4) if total_touching > 0 else 0.0
             _sv = np.asarray(sent, dtype=float) if len(sent) else np.array([], dtype=float)
             mean_sent = float(_sv.mean()) if len(_sv) else 0.0
             neg_frac = float((_sv < 0).mean()) if len(_sv) else 0.0
@@ -166,6 +178,7 @@ def graph_evolution_by_sector(
                 "neg_fraction": round(neg_frac, 4),
                 "intra_edges": intra,
                 "cross_edges": cross,
+                "cross_ratio": cross_ratio,  # cross / (intra+cross), bounded [0,1]
                 "attention_share": round(n_nodes / total_conn, 4),
             })
 
