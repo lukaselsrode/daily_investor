@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
+from core.instruments import is_fund_instrument_type
 from util import (
     BACKTEST_PARAMS,
     ETFS,
@@ -70,6 +71,21 @@ def select_backtest_universe(
     if liquid.empty:
         logger.warning("No symbols pass min_volume filter — using all available")
         liquid = agg_df.copy()
+
+    # Active-sleeve backtests must mirror live candidate selection: pooled vehicles
+    # (ETF/CEF/MLP/ETN) are not single-company alpha bets. Keep configured ETFS in
+    # the separate ETF sleeve below; exclude fund-like rows from the stock universe.
+    if "instrument_type" in liquid.columns:
+        fund_mask = liquid["instrument_type"].map(is_fund_instrument_type).fillna(False)
+        if bool(fund_mask.any()):
+            excluded = liquid.loc[fund_mask, "symbol"].astype(str).tolist()
+            liquid = liquid.loc[~fund_mask].copy()
+            logger.info(
+                "Backtest active universe fund filter: excluded %d pooled vehicles: %s",
+                len(excluded), excluded[:15],
+            )
+            if liquid.empty:
+                raise RuntimeError("No symbols remain after active-universe fund filter")
 
     # Sort by a stable key before any sampling so results are reproducible
     # across agg_data refreshes (row order changes each run otherwise).

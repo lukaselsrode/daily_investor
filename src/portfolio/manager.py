@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
+from core.instruments import is_fund_instrument_type
 from portfolio.position_archetypes import classify_archetype
 from portfolio.sell_engine import evaluate_sell_candidate
 from strategy.regimes.detector import get_current_regime
@@ -56,6 +57,23 @@ if TYPE_CHECKING:
     from portfolio.risk import RiskManager
 
 logger = logging.getLogger(__name__)
+
+
+def _exclude_pooled_vehicles_from_active_candidates(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+    """Remove pooled vehicles from active-sleeve candidate DataFrames.
+
+    Active buys are intended to be single-company alpha bets. ETF/CEF/MLP/ETN
+    wrappers are handled by ETF/index/harvest sleeves, not the stock picker.
+    ADR and REIT remain eligible by design.
+    """
+    if df.empty or "instrument_type" not in df.columns:
+        return df.copy(), []
+    fund_mask = df["instrument_type"].map(is_fund_instrument_type).fillna(False)
+    excluded = df.loc[fund_mask, "symbol"].astype(str).tolist()
+    if not excluded:
+        return df.copy(), []
+    return df.loc[~fund_mask].copy(), excluded
+
 
 _HOLDINGS_SCHEMA = [
     "symbol", "name", "quantity", "average_buy_price", "equity",
@@ -904,6 +922,20 @@ class PortfolioManager:
         )
         # --- Constant gates (not threshold-dependent) ---
         df_eligible = df.copy()
+
+        # Active sleeve is for single-company alpha bets. Pooled vehicles (ETF/CEF/MLP/ETN)
+        # belong in the ETF/index/harvest sleeves; letting them through here spends
+        # alpha budget on wrappers/bonds/index products and breaks live-vs-backtest fidelity.
+        if "instrument_type" in df_eligible.columns:
+            df_eligible, _fund_syms = _exclude_pooled_vehicles_from_active_candidates(df_eligible)
+            if _fund_syms:
+                logger.info(
+                    "Active-sleeve fund filter: excluded %d pooled vehicles: %s",
+                    len(_fund_syms), _fund_syms[:15],
+                )
+                if df_eligible.empty:
+                    logger.warning("No candidates remain after active-sleeve fund filter")
+                    return [], df["symbol"].tolist(), []
         if "strategy_bucket" in df_eligible.columns and CONTRARIAN_PENALTY_PARAMS["enabled"]:
             contrarian_mask = df_eligible["strategy_bucket"] == "contrarian_watchlist"
             contrarian_syms = df_eligible.loc[contrarian_mask, "symbol"].tolist()
