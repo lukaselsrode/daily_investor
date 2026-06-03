@@ -181,27 +181,36 @@ class DecisionAdjustmentEngine:
                 diagnostic_summary="Thesis intact" if inp.raw_action == "HOLD" else "Buy signal",
             )
 
-        # Determine whether the raw exit is hard (mechanical safety rule)
+        # Determine whether the raw exit is hard (mechanical safety rule). The
+        # opportunity-cost cull is treated as hard: its progress-guard has already
+        # established the position is dead money, so the soft-exit floors must NOT
+        # resurrect a good-but-dead name (the guard never reaches a running winner).
         is_hard = (
             inp.exit_severity == "hard"
-            or inp.exit_type in ("stop_loss", "trailing_stop")
+            or inp.exit_type in ("stop_loss", "trailing_stop", "opportunity_cost")
             or inp.raw_reason.lower().startswith(("stop loss", "trailing stop"))
         )
 
         if inp.raw_action == "EXIT" and is_hard:
+            _is_oc = inp.exit_type == "opportunity_cost"
             return DecisionOutput(
                 action="EXIT",
                 confidence="HIGH",
                 adjustment_applied=False,
-                adjustment_reason="Hard mechanical stop — never moderated",
+                adjustment_reason=(
+                    "Opportunity-cost cull — no progress; recycling capital"
+                    if _is_oc else "Hard mechanical stop — never moderated"
+                ),
                 raw_sell_trigger=inp.raw_reason,
                 is_hard_exit=True,
                 premature_exit_probability=0.0,
                 thesis_intact_score=tis,
                 signal_deterioration_velocity=sdv,
                 rank_decay=rdec,
-                badges=["SAFE EXIT"],
-                diagnostic_summary=f"Hard stop: {inp.raw_reason}",
+                badges=["OPPORTUNITY COST"] if _is_oc else ["SAFE EXIT"],
+                diagnostic_summary=(
+                    f"Opportunity-cost: {inp.raw_reason}" if _is_oc else f"Hard stop: {inp.raw_reason}"
+                ),
             )
 
         if inp.raw_action == "EXIT":

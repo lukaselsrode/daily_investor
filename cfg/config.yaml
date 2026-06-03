@@ -74,7 +74,7 @@ archetype_management:
     trim_profit_threshold: 0.3
     harvest_profit_threshold: 0.5
     trailing_stop_pct: -0.1
-    minimum_hold_days: 21
+    minimum_hold_days: 60
     thesis_exit_requires_confirmation: true
     allow_deeper_drawdown: true
   legacy_turnaround:
@@ -88,7 +88,7 @@ archetype_management:
     trim_profit_threshold: 0.1
     harvest_profit_threshold: 0.25
     trailing_stop_pct: -0.07
-    minimum_hold_days: 5
+    minimum_hold_days: 60
     thesis_exit_requires_confirmation: false
     allow_deeper_drawdown: false
   value_recovery:
@@ -321,9 +321,13 @@ harvest:
   - SPY
   - VTI
 backtest:
-  default_mode: liquid_universe_sanity_test
+  default_mode: liquid_universe_full
   universe_selection: liquid_all
-  max_symbols: 300
+  # 0 = FULL universe (all liquid symbols, ~3300+). The algo's edge is breadth of
+  # selection, so backtests/tuning/UI must span the whole universe, never a subset.
+  # A positive value caps the universe for quick smoke-tests ONLY — never for an
+  # accept/reject decision (use the full universe × multiple windows for that).
+  max_symbols: 0
   min_volume: 500000
   random_seed: 42
   benchmark_symbol: SPY
@@ -469,6 +473,18 @@ exit_decision:
   # marginal (raises rolling-window hit-rate vs SPY but Wilcoxon-neutral); not live.
   trim_requires_positive_momentum: false
   trim_to_etfs_pct: 0.85
+  # Opportunity-cost exit: cull positions that make NO progress for too long, to
+  # recycle active-sleeve capacity. NOT an absolute max-hold — the stall clock
+  # RESETS whenever the position makes progress (a fresh high within reclaim_band
+  # OR momentum >= floor), so a true winner still running is never culled. This
+  # complements "let winners run" (trim_enabled: false) by culling only dead money.
+  # Frozen OFF by default (enabled: false = behavior-preserving).
+  opportunity_cost:
+    enabled: false
+    stall_max_days: 120              # days with NO progress before culling
+    reclaim_band: 0.03               # within 3% of peak counts as a fresh high
+    progress_momentum_floor: 0.1     # momentum_score >= this counts as progress
+    require_stronger_candidate: false  # reserved for v2 — must stay false in v1
 decision_adjustment:
   premature_exit_threshold: 0.45
   review_confidence_threshold: 0.5

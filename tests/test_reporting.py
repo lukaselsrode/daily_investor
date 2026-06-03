@@ -68,7 +68,7 @@ def _make_bt_report(
         trades_made=trades_made,
     )
     return BtReport(
-        mode="liquid_universe_sanity_test",
+        mode="liquid_universe_full",
         universe_selection="liquid_all",
         lookahead_bias_level="LOW",
         n_symbols=n_symbols,
@@ -111,7 +111,7 @@ class TestBacktestResult:
             report=_make_bt_report(total_return=0.20, sharpe=1.2, max_drawdown=-0.08,
                                    benchmark_return=0.15, excess=0.05),
             n_days=365,
-            mode="liquid_universe_sanity_test",
+            mode="liquid_universe_full",
         )
 
     def test_excess_return(self):

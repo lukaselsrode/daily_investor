@@ -241,6 +241,38 @@ def _thesis_intact_score(
 
 
 # ---------------------------------------------------------------------------
+# Opportunity-cost "progress" classifier
+# ---------------------------------------------------------------------------
+
+def is_progress(
+    price: float | None,
+    peak: float | None,
+    momentum: float | None,
+    reclaim_band: float,
+    mom_floor: float,
+) -> bool:
+    """
+    Did this position make PROGRESS — i.e. is it still "working"?
+
+    Shared scalar definition for the opportunity-cost exit. The simulator holds a
+    vectorized replica (`backtesting.simulator._progress_vec`) that MUST match this
+    elementwise; the two are cross-checked in tests/test_opportunity_cost_fidelity.py.
+
+    Progress = printed a fresh high within `reclaim_band` of the peak, OR momentum is
+    at/above `mom_floor` (still cross-sectionally strong). A position making progress
+    resets its stall clock and is never culled — this is what protects "let winners run".
+    A missing peak / momentum contributes no progress on that term (treated like NaN).
+    """
+    price_term = (
+        peak is not None and peak > 0.0
+        and price is not None
+        and price >= peak * (1.0 - reclaim_band)
+    )
+    mom_term = momentum is not None and momentum >= mom_floor
+    return bool(price_term or mom_term)
+
+
+# ---------------------------------------------------------------------------
 # Premature-exit detection
 # ---------------------------------------------------------------------------
 

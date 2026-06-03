@@ -166,13 +166,20 @@ class TestArchetypePresets:
 
 class TestParamVector:
 
-    def test_vector_length_is_50(self):
+    def test_vector_length_matches_slot_layout(self):
         # 16 base + 24 archetype + 3 candidate-filter + 3 position-sizing
         # + 1 regime-tilt (46) + 1 mean-reversion blend (47) + 1 low-vol quality blend (48)
-        # + 1 residual-momentum blend (49)
-        from tuning.constants import BOUNDS, PARAM_NAMES
-        assert len(PARAM_NAMES) == 50
-        assert len(BOUNDS) == 50
+        # + 1 residual-momentum blend (49) + 4 DAE exit-floor slots (50-53)
+        # + 3 opportunity-cost slots (54-56). OC is the last group appended.
+        from tuning.constants import (
+            _OC_FIELDS,
+            _OC_SLOT_OFFSET,
+            BOUNDS,
+            PARAM_NAMES,
+        )
+        expected = _OC_SLOT_OFFSET + len(_OC_FIELDS)
+        assert len(PARAM_NAMES) == expected
+        assert len(BOUNDS) == expected
 
     def test_archetype_slots_frozen_by_default(self):
         # No preset → archetype slots stay frozen even if config doesn't list them.

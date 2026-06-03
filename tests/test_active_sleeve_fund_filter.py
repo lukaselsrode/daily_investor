@@ -30,7 +30,7 @@ def test_backtest_universe_excludes_pooled_vehicles_from_active_stock_pool() -> 
 
     selected, bias = select_backtest_universe(
         df,
-        mode="liquid_universe_sanity_test",
+        mode="liquid_universe_full",
         universe_selection="liquid_all",
         max_symbols=10,
         min_volume=500_000,

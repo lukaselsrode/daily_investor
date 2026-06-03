@@ -54,6 +54,50 @@ sell_rules:
   sell_yield_trap: true
   sell_low_quality_below: -0.25
   min_days_held_before_value_exit: 21
+archetype_management:
+  enabled: true
+  quality_compounder:
+    trim_profit_threshold: 0.3
+    harvest_profit_threshold: 0.5
+    trailing_stop_pct: -0.1
+    minimum_hold_days: 60
+    thesis_exit_requires_confirmation: true
+    allow_deeper_drawdown: true
+  legacy_turnaround:
+    trim_profit_threshold: 0.1
+    harvest_profit_threshold: 0.2
+    trailing_stop_pct: -0.06
+    minimum_hold_days: 5
+    thesis_exit_requires_confirmation: false
+    allow_deeper_drawdown: false
+  speculative_momentum:
+    trim_profit_threshold: 0.1
+    harvest_profit_threshold: 0.25
+    trailing_stop_pct: -0.07
+    minimum_hold_days: 60
+    thesis_exit_requires_confirmation: false
+    allow_deeper_drawdown: false
+  value_recovery:
+    trim_profit_threshold: 0.12
+    harvest_profit_threshold: 0.25
+    trailing_stop_pct: -0.07
+    minimum_hold_days: 7
+    thesis_exit_requires_confirmation: false
+    allow_deeper_drawdown: false
+  defensive_income:
+    trim_profit_threshold: 0.08
+    harvest_profit_threshold: 0.18
+    trailing_stop_pct: -0.06
+    minimum_hold_days: 5
+    thesis_exit_requires_confirmation: false
+    allow_deeper_drawdown: false
+  core_default:
+    trim_profit_threshold: 0.15
+    harvest_profit_threshold: 0.28
+    trailing_stop_pct: -0.07
+    minimum_hold_days: 7
+    thesis_exit_requires_confirmation: false
+    allow_deeper_drawdown: false
 bear_market:
   spy_ma_period: 200
   vix_threshold: 25.0
@@ -169,9 +213,9 @@ harvest:
   - SPY
   - VTI
 backtest:
-  default_mode: liquid_universe_sanity_test
+  default_mode: liquid_universe_full
   universe_selection: liquid_sample
-  max_symbols: 300
+  max_symbols: 0   # 0 = full universe (breadth is the edge)
   min_volume: 500000
   random_seed: 42
   benchmark_symbol: SPY

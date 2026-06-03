@@ -420,7 +420,7 @@ def cmd_experiment(
     --days 90,180,365              Comma-separated trading-day windows.
     --scope ...                    overall_strategy | active_sleeve_compounding (default).
     --variants A,E,F               Comma-separated variant IDs (defaults to all).
-    --mode liquid_universe_sanity_test   Optional precomp mode override.
+    --mode liquid_universe_full   Optional precomp mode override.
     """
     import copy as _copy
 

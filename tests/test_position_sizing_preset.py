@@ -75,7 +75,13 @@ def test_current_params_extended_length():
     cp = constants._current_params()
     # _PS_SLOT_OFFSET + 3 position-sizing + 1 regime-tilt (46) + 1 mean-reversion (47)
     # + 1 low-vol quality blend (48) + 1 residual-momentum blend (49)
-    assert len(cp) == constants._PS_SLOT_OFFSET + 7
+    # + 4 DAE exit-floor slots (50-53) + 3 opportunity-cost slots (54-56, last group)
+    assert len(cp) == constants._OC_SLOT_OFFSET + len(constants._OC_FIELDS)
+    # exit-floor slots seed from config (EXIT_DECISION_PARAMS) and sit within bounds
+    for off in range(len(constants._EXIT_FLOOR_FIELDS)):
+        idx = constants._EXIT_FLOOR_SLOT_OFFSET + off
+        lo, hi = constants.BOUNDS[idx]
+        assert lo <= cp[idx] <= hi
     # within bounds for each position-sizing slot
     for off in range(3):
         lo, hi = constants.BOUNDS[constants._PS_SLOT_OFFSET + off]

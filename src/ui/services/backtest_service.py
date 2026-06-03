@@ -21,7 +21,9 @@ def load_precomp(n_days: int, mode: str | None = None):
 
     Caches in st.session_state under key '_precomp_cache' so that subsequent
     runs with the same (n_days, mode) within the same Streamlit session skip the
-    35-second yfinance download.  Call this instead of load_and_precompute()
+    yfinance download. NOTE: backtests now span the FULL liquid universe
+    (~2700+ symbols, max_symbols=0) so the first load is multi-minute, not seconds —
+    the cache makes repeat runs instant. Call this instead of load_and_precompute()
     directly from UI code.
     """
     try:

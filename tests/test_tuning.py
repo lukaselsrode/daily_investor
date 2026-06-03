@@ -251,10 +251,10 @@ class TestParameterTunerTune:
     def test_passes_mode(self):
         p, s = _params(), _sim()
         with patch("tuning.tuner.run_tuner", return_value=(p, s)) as mock_rt:
-            ParameterTuner().tune(n_days=90, mode="liquid_universe_sanity_test")
+            ParameterTuner().tune(n_days=90, mode="liquid_universe_full")
         mock_rt.assert_called_once_with(
             n_days=90, objective="sharpe", starting_capital=10_000.0,
-            mode="liquid_universe_sanity_test",
+            mode="liquid_universe_full",
             scope="overall_strategy", preset=None,
         )
 

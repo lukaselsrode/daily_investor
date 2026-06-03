@@ -62,10 +62,14 @@ def select_backtest_universe(
     """
     Select the universe of symbols for backtesting.
 
+    Spans the FULL liquid universe by default (max_symbols=0 => all liquid, non-fund
+    symbols passing min_volume). Breadth of selection is the strategy's edge, so a
+    positive max_symbols cap is for quick smoke-tests only, never accept/reject calls.
+
     Modes and their lookahead bias levels:
-      current_universe_stress_test  → HIGH   (uses value_metric ranking)
-      liquid_universe_sanity_test   → MEDIUM (uses volume / random sample)
-      walk_forward_price_only_test  → LOW    (uses volume filter only, no scores)
+      current_universe_stress_test  → HIGH   (full universe, value_metric ranking)
+      liquid_universe_full   → MEDIUM (full liquid universe; liquid_all = deterministic)
+      walk_forward_price_only_test  → LOW    (full universe, volume filter only, no scores)
     """
     liquid = agg_df[agg_df["volume"] >= min_volume].copy()
     if liquid.empty:
@@ -92,7 +96,20 @@ def select_backtest_universe(
     _sym_col = "symbol" if "symbol" in liquid.columns else str(liquid.columns[0])
     liquid = liquid.sort_values(by=_sym_col).reset_index(drop=True)
 
-    if universe_selection == "top_current_scores":
+    # max_symbols <= 0 (or None) => FULL universe. The algo's edge is breadth of
+    # selection across the whole liquid universe, so this is the intended default;
+    # a positive cap is for quick smoke-tests only, never accept/reject validation.
+    if not max_symbols or max_symbols <= 0:
+        max_symbols = len(liquid)
+
+    # When the cap covers the whole universe, return ALL liquid symbols regardless of
+    # selection method — every method (incl. sector_balanced_sample's per-sector cap)
+    # must yield the full universe, never a subset. Selection method only matters when
+    # a positive cap is set for a deliberate smoke-test.
+    if max_symbols >= len(liquid):
+        selected = liquid
+        bias = "MEDIUM"
+    elif universe_selection == "top_current_scores":
         selected = liquid.sort_values("value_metric", ascending=False).head(max_symbols)
         bias = "HIGH"
         logger.warning(
@@ -135,7 +152,7 @@ def select_backtest_universe(
 
 def load_and_precompute(
     n_days: int,
-    max_symbols: int = 300,
+    max_symbols: int | None = None,
     mode: str | None = None,
     universe_selection: str | None = None,
     min_volume: float | None = None,
@@ -145,10 +162,19 @@ def load_and_precompute(
     """
     Load fundamentals and download price history.
 
-    Defaults for mode/universe_selection/min_volume/random_seed/benchmark_symbol
-    come from BACKTEST_PARAMS so existing callers (tuner.py) need no changes.
+    Defaults for max_symbols/mode/universe_selection/min_volume/random_seed/
+    benchmark_symbol come from BACKTEST_PARAMS so every caller (CLI, UI, tuner,
+    stability) honors config. max_symbols defaults to config `backtest.max_symbols`,
+    which is 0 = FULL universe — the algo's edge is breadth of selection, so backtests
+    must never silently run on a subset (see select_backtest_universe).
     """
+    max_symbols        = max_symbols        if max_symbols is not None else BACKTEST_PARAMS["max_symbols"]
     mode               = mode               or BACKTEST_PARAMS["default_mode"]
+    # Back-compat: the MEDIUM-bias mode was renamed liquid_universe_sanity_test ->
+    # liquid_universe_full (it now spans the full universe, not a "sanity" subset).
+    # Silently upgrade any lingering old name from a stale config or saved run.
+    if mode == "liquid_universe_sanity_test":
+        mode = "liquid_universe_full"
     universe_selection = universe_selection or BACKTEST_PARAMS["universe_selection"]
     min_volume         = min_volume         if min_volume is not None else BACKTEST_PARAMS["min_volume"]
     random_seed        = random_seed        if random_seed is not None else BACKTEST_PARAMS["random_seed"]

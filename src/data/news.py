@@ -200,7 +200,7 @@ def get_news_df(tickers: list[str], force_refresh: bool) -> pd.DataFrame | None:
 
     rb_data = read_data_as_pd("robinhood_data")
     if rb_data is not None and not rb_data.empty and "volume" in rb_data.columns:
-        liquid = rb_data[rb_data["volume"] >= 500_000]["symbol"].tolist()
+        liquid = rb_data[rb_data["volume"] >= 50_000]["symbol"].tolist()
         print(f"News filter: {len(tickers)} total → {len(liquid)} liquid tickers")
     else:
         liquid = tickers

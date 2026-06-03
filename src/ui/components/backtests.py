@@ -343,7 +343,7 @@ def render() -> None:
             "⚠️ **walk_forward_price_only_test strips fundamental scores** (quality, income, "
             "PE/PB) to eliminate lookahead bias. The active sleeve ranks stocks by those scores, "
             "so almost nothing clears the metric threshold → 0 trades, misleading results. "
-            "Use **liquid_universe_sanity_test** (MEDIUM bias) for active-sleeve backtests, "
+            "Use **liquid_universe_full** (MEDIUM bias) for active-sleeve backtests, "
             "or switch scope to Overall Strategy."
         )
     if cluster_tracking and _wf_mode:

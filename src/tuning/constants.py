@@ -16,6 +16,7 @@ import numpy as np
 from util import (
     ARCHETYPE_PARAMS,
     CANDIDATE_SELECTION_PARAMS,
+    EXIT_DECISION_PARAMS,
     INDEX_PCT,
     METRIC_THRESHOLD,
     REGIME_PARAMS,
@@ -221,6 +222,97 @@ PARAM_NAMES.append("momentum_residual_blend")
 BOUNDS.append((0.0, 1.0))
 _CONFIG_PATH_TO_PARAM_IDX["scoring.momentum_residual_blend"] = _RESIDMOM_SLOT
 
+# ── Append DAE soft-exit floor slots 50-53 ─────────────────────────────────
+# The faithful DecisionAdjustmentEngine soft-exit tree in the simulator is keyed
+# on these floors: they decide when a score-below-threshold position is held
+# (REVIEW / WATCH) versus fully exited. Previously inert in the backtest (the
+# simulator only consulted review_score_below + positive P/L), they became
+# load-bearing once the DAE tree was wired in — so they are now worth tuning.
+# Frozen by default; the `active_exit_floors` preset unfreezes them.
+_EXIT_FLOOR_SLOT_OFFSET = len(PARAM_NAMES)  # 50
+_EXIT_FLOOR_FIELDS: tuple[tuple[str, str, tuple[float, float]], ...] = (
+    # (PARAM_NAMES entry, config path, bounds)
+    ("ef_hard_exit_score_below",          "exit_decision.hard_exit_score_below",          (0.05, 0.40)),
+    ("ef_positive_momentum_review_floor", "exit_decision.positive_momentum_review_floor", (0.00, 0.30)),
+    ("ef_strong_quality_review_floor",    "exit_decision.strong_quality_review_floor",    (0.40, 0.90)),
+    ("ef_thesis_intact_review_floor",     "exit_decision.thesis_intact_review_floor",     (0.40, 0.80)),
+)
+for _i, (_name, _path, _bnd) in enumerate(_EXIT_FLOOR_FIELDS):
+    PARAM_NAMES.append(_name)
+    BOUNDS.append(_bnd)
+    _CONFIG_PATH_TO_PARAM_IDX[_path] = _EXIT_FLOOR_SLOT_OFFSET + _i
+
+
+def exit_floors_cfg_from_params(params) -> dict:
+    """
+    Build a DAE soft-exit floor override dict from the floor slots in *params*,
+    keyed by the bare `exit_decision.*` field name (e.g. "hard_exit_score_below").
+    Returns {} when params lacks the appended floor slots (len <= offset), so plain
+    backtests keep reading the floors straight from config.
+    """
+    if params is None or len(params) <= _EXIT_FLOOR_SLOT_OFFSET:
+        return {}
+    out: dict = {}
+    for _i, (_, _path, _) in enumerate(_EXIT_FLOOR_FIELDS):
+        _idx = _EXIT_FLOOR_SLOT_OFFSET + _i
+        if _idx < len(params):
+            out[_path.split(".", 1)[1]] = float(params[_idx])
+    return out
+
+
+def _exit_floor_default_frozen_indices() -> set[int]:
+    """Exit-floor slots default to frozen — unfrozen only via active_exit_floors."""
+    _paths = {p for _, p, _ in _EXIT_FLOOR_FIELDS}
+    return {
+        _idx for _path, _idx in _CONFIG_PATH_TO_PARAM_IDX.items()
+        if _path in _paths
+    }
+
+
+# ── Append opportunity-cost ("max hold without progress") slots 54-56 ──────
+# Three tunable thresholds for the stall exit (the `enabled` flag stays a config
+# toggle, not a tuned slot). Frozen by default; the `active_opportunity_cost`
+# preset unfreezes them AND the simulator force-enables the exit when these slots
+# are present, so the optimizer never moves dead knobs.
+_OC_SLOT_OFFSET = len(PARAM_NAMES)
+_OC_FIELDS: tuple[tuple[str, str, tuple[float, float]], ...] = (
+    # (PARAM_NAMES entry, config path, bounds)
+    ("oc_stall_max_days",          "exit_decision.opportunity_cost.stall_max_days",          (30.0, 252.0)),
+    ("oc_reclaim_band",            "exit_decision.opportunity_cost.reclaim_band",            (0.00, 0.10)),
+    ("oc_progress_momentum_floor", "exit_decision.opportunity_cost.progress_momentum_floor", (-0.10, 0.40)),
+)
+for _i, (_name, _path, _bnd) in enumerate(_OC_FIELDS):
+    PARAM_NAMES.append(_name)
+    BOUNDS.append(_bnd)
+    _CONFIG_PATH_TO_PARAM_IDX[_path] = _OC_SLOT_OFFSET + _i
+
+
+def opportunity_cost_cfg_from_params(params) -> dict:
+    """
+    Build an opportunity-cost override dict from the stall slots in *params*, keyed
+    by the bare field name. stall_max_days is rounded to a Python int. Returns {}
+    when params lacks the appended slots (len <= offset), so plain backtests read
+    the thresholds straight from config.
+    """
+    if params is None or len(params) <= _OC_SLOT_OFFSET:
+        return {}
+    out: dict = {}
+    for _i, (_, _path, _) in enumerate(_OC_FIELDS):
+        _idx = _OC_SLOT_OFFSET + _i
+        if _idx < len(params):
+            _field = _path.split(".")[-1]
+            out[_field] = round(float(params[_idx])) if _field == "stall_max_days" else float(params[_idx])
+    return out
+
+
+def _opportunity_cost_default_frozen_indices() -> set[int]:
+    """Opportunity-cost slots default to frozen — unfrozen only via active_opportunity_cost."""
+    _paths = {p for _, p, _ in _OC_FIELDS}
+    return {
+        _idx for _path, _idx in _CONFIG_PATH_TO_PARAM_IDX.items()
+        if _path in _paths
+    }
+
 
 def position_sizing_cfg_from_params(params) -> dict:
     """
@@ -351,6 +443,10 @@ def _get_active_indices(scope: str = "overall_strategy", preset: str | None = No
     frozen |= _position_sizing_default_frozen_indices()
     # Regime-conditional tilt slot is frozen-by-default; active_regime_tilt unfreezes it.
     frozen |= _regime_tilt_default_frozen_indices()
+    # DAE soft-exit floor slots are frozen-by-default; active_exit_floors unfreezes them.
+    frozen |= _exit_floor_default_frozen_indices()
+    # Opportunity-cost stall slots are frozen-by-default; active_opportunity_cost unfreezes them.
+    frozen |= _opportunity_cost_default_frozen_indices()
     if preset is not None:
         from .presets import apply_preset_to_frozen
         frozen = apply_preset_to_frozen(frozen, preset)
@@ -450,4 +546,21 @@ def _current_params() -> np.ndarray:
     except (TypeError, ValueError, AttributeError):
         _rm_default = 0.0
     regime_tail.append(_rm_default)
-    return np.array(base + arch_tail + cs_tail + ps_tail + regime_tail)
+    # DAE soft-exit floor slots 50-53 — read from EXIT_DECISION_PARAMS.
+    ef_tail: list[float] = []
+    for _name, _path, _bnd in _EXIT_FLOOR_FIELDS:
+        _field = _path.split(".", 1)[1]
+        _default = (EXIT_DECISION_PARAMS or {}).get(_field)
+        if _default is None:
+            _default = (_bnd[0] + _bnd[1]) / 2.0
+        ef_tail.append(float(_default))
+    # Opportunity-cost slots 54-56 — read from EXIT_DECISION_PARAMS["opportunity_cost"].
+    _oc_cfg = (EXIT_DECISION_PARAMS or {}).get("opportunity_cost", {}) or {}
+    oc_tail: list[float] = []
+    for _name, _path, _bnd in _OC_FIELDS:
+        _field = _path.split(".")[-1]
+        _default = _oc_cfg.get(_field)
+        if _default is None:
+            _default = (_bnd[0] + _bnd[1]) / 2.0
+        oc_tail.append(float(_default))
+    return np.array(base + arch_tail + cs_tail + ps_tail + regime_tail + ef_tail + oc_tail)

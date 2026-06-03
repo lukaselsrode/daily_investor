@@ -13,6 +13,10 @@ Phase 1 presets (working, no vector extension needed):
 
 Phase 2 (now wired in — slots 40-42):
   active_candidate_filters — top_percentile, min_quality_score, min_momentum_score
+  active_exit_floors       — DAE soft-exit floors (slots 50-53): hard_exit_score_below,
+                             positive_momentum / strong_quality / thesis_intact review floors
+  active_opportunity_cost  — stall exit (slots 54-56): stall_max_days, reclaim_band,
+                             progress_momentum_floor (max hold WITHOUT progress)
 
 Phase 2 stubs (still NotImplementedError; require further vector extension):
   active_rebalance_cooldown
@@ -120,6 +124,36 @@ _PRESETS: dict[str, dict] = {
             "candidate_selection.top_percentile",
             "candidate_selection.min_quality_score",
             "candidate_selection.min_momentum_score",
+        ],
+        "freeze_extra": list(_NON_ARCHETYPE_PATHS),
+        "phase2": False,
+    },
+
+    "active_exit_floors": {
+        "description": "DAE soft-exit floors (hard_exit_score_below, positive_momentum / "
+                       "strong_quality / thesis_intact review floors). These decide when a "
+                       "score-below-threshold position is held vs. fully exited. Everything "
+                       "else (weights, exit knobs, momentum internals) stays frozen.",
+        "unfreeze": [
+            "exit_decision.hard_exit_score_below",
+            "exit_decision.positive_momentum_review_floor",
+            "exit_decision.strong_quality_review_floor",
+            "exit_decision.thesis_intact_review_floor",
+        ],
+        "freeze_extra": list(_NON_ARCHETYPE_PATHS),
+        "phase2": False,
+    },
+
+    "active_opportunity_cost": {
+        "description": "Opportunity-cost stall exit (max hold WITHOUT progress): "
+                       "stall_max_days, reclaim_band, progress_momentum_floor. Culls "
+                       "stalled active names to recycle capital; never cuts a progressing "
+                       "winner. Takes effect only when exit_decision.opportunity_cost.enabled "
+                       "is true in config (set it for the tuning run). Everything else frozen.",
+        "unfreeze": [
+            "exit_decision.opportunity_cost.stall_max_days",
+            "exit_decision.opportunity_cost.reclaim_band",
+            "exit_decision.opportunity_cost.progress_momentum_floor",
         ],
         "freeze_extra": list(_NON_ARCHETYPE_PATHS),
         "phase2": False,

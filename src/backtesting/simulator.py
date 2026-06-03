@@ -16,6 +16,7 @@ from util import (
     BACKTEST_PARAMS,
     CANDIDATE_SELECTION_PARAMS,
     EXIT_DECISION_PARAMS,
+    HARVEST_PARAMS,
     INDEX_PCT,
     METRIC_THRESHOLD,
     REGIME_PARAMS,
@@ -48,10 +49,6 @@ _MIN_DAYS_BEFORE_TAKE_PROFIT = SELL_RULES.get("minimum_days_before_take_profit",
 # Harvest partial exit — mirrors live HARVEST action (partial profit-taking)
 _HARVEST_PROFIT_THRESHOLD = float(EXIT_DECISION_PARAMS.get("harvest_profit_threshold", 0.30))
 _HARVEST_FRACTION         = float(EXIT_DECISION_PARAMS.get("harvest_fraction",          0.40))
-
-# WATCH/REVIEW suppression — if profitable and score above this floor, hold rather than exit
-_REVIEW_SCORE_FLOOR    = float(EXIT_DECISION_PARAMS.get("review_score_below",         0.45))
-_POSITIVE_PNL_DOWNGRADE = bool(EXIT_DECISION_PARAMS.get("positive_pnl_exit_downgrade", True))
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +130,137 @@ def _pct_rank_vec(arr: np.ndarray) -> np.ndarray:
     ranks = (vals.argsort().argsort() + 1) / (finite.sum() + 1)
     out[finite] = ranks * 2 - 1
     return out
+
+
+def _thesis_intact_vec(
+    qual: np.ndarray,
+    mom: np.ndarray,
+    pnl: np.ndarray,
+    rank01: np.ndarray,
+) -> np.ndarray:
+    """
+    Vectorized replica of exit_analysis._thesis_intact_score (0–1).
+    Higher = thesis still looks valid despite the score-below-threshold exit signal.
+    Components mirror the live scalar formula exactly; only finite components count.
+    quality/momentum in [-1, 1]; pnl is fractional P/L; rank01 is the universe
+    percentile rank in [0, 1].
+    """
+    acc   = np.zeros_like(pnl, dtype=np.float64)
+    denom = np.zeros_like(pnl, dtype=np.float64)
+
+    q_fin = np.isfinite(qual)
+    q_norm = np.clip((qual + 0.5) / 1.5, 0.0, 1.0)
+    acc   += np.where(q_fin, q_norm, 0.0)
+    denom += q_fin
+
+    m_fin = np.isfinite(mom)
+    m_norm = np.where(mom >= 0.10, 1.0,
+              np.where(mom >= 0.0, 0.6, np.maximum(0.0, 0.5 + mom)))
+    acc   += np.where(m_fin, m_norm, 0.0)
+    denom += m_fin
+
+    p_fin = np.isfinite(pnl)
+    r_norm = np.where(pnl >= 0.05, 1.0,
+              np.where(pnl >= 0.0, 0.7, np.maximum(0.0, 0.5 + pnl * 2.0)))
+    acc   += np.where(p_fin, r_norm, 0.0)
+    denom += p_fin
+
+    k_fin = np.isfinite(rank01)
+    acc   += np.where(k_fin, rank01, 0.0)
+    denom += k_fin
+
+    with np.errstate(invalid="ignore", divide="ignore"):
+        tis = np.where(denom > 0, acc / denom, 0.5)
+    return np.round(tis, 3)
+
+
+def _progress_vec(
+    prices: np.ndarray,
+    peak: np.ndarray,
+    mom: np.ndarray,
+    reclaim_band: float,
+    mom_floor: float,
+) -> np.ndarray:
+    """
+    Vectorized replica of exit_analysis.is_progress — did each position make
+    PROGRESS today? Progress = fresh high within `reclaim_band` of peak OR momentum
+    at/above `mom_floor`. A progressing position resets its stall clock (never
+    culled). Cross-checked against the scalar in tests/test_opportunity_cost_fidelity.py.
+    NaN price/peak/momentum contribute no progress on that term (match the scalar).
+    """
+    with np.errstate(invalid="ignore"):
+        price_term = (peak > 0.0) & np.isfinite(prices) & (prices >= peak * (1.0 - reclaim_band))
+        mom_term   = mom >= mom_floor
+    return price_term | mom_term
+
+
+def _dae_soft_exit_full_exit(
+    cand: np.ndarray,
+    snw: np.ndarray,
+    pnl: np.ndarray,
+    mom: np.ndarray,
+    qual: np.ndarray,
+    tis: np.ndarray,
+    floors: dict,
+) -> np.ndarray:
+    """
+    Vectorized replica of DecisionAdjustmentEngine._evaluate_soft_exit, restricted
+    to the *full-exit* verdict over the score-below-threshold candidate set `cand`.
+
+    Mirrors the live decision tree precedence exactly:
+      1. confirmed_breakdown                          → EXIT  (full)
+      2. HARVEST (large gain + momentum/thesis alive) → downgrade (NOT a full exit)
+      3. TRIM    (moderate gain + positive momentum)  → downgrade (NOT a full exit)
+      4. REVIEW  (any positive signal)                → HOLD   (not exited)
+      5. all_negative (mom & qual bad, real loss)     → EXIT  (full)
+      6. WATCH   (score not collapsed)                → HOLD   (not exited)
+      7. EXIT    (score collapsed, no positives)      → EXIT  (full)
+
+    Returns the boolean full-exit mask. HARVEST/TRIM downgrades and REVIEW/WATCH
+    holds are deliberately excluded so they are NOT force-sold here — partial
+    profit-taking is handled by the harvest/trim rules downstream. is_premature /
+    premature-exit-probability are live-only diagnostics with no backtest analogue
+    and are treated as absent (False / 0), which can only make exits *more* likely.
+    """
+    hard_score_floor = floors["hard_exit_score_below"]
+    tis_hard_floor   = floors["thesis_intact_hard_exit_below"]
+    harvest_pct      = floors["harvest_profit_threshold"]
+    trim_pct         = floors["trim_profit_threshold"]
+    pnl_floor        = floors["positive_pnl_review_floor"]
+    mom_floor        = floors["positive_momentum_review_floor"]
+    qual_floor       = floors["strong_quality_review_floor"]
+    tis_floor        = floors["thesis_intact_review_floor"]
+    pnl_dg           = floors["positive_pnl_exit_downgrade"]
+    mom_dg           = floors["positive_momentum_exit_downgrade"]
+    qual_dg          = floors["strong_quality_exit_downgrade"]
+
+    positive_pnl = (pnl >= pnl_floor)   & pnl_dg
+    positive_mom = (mom >= mom_floor)   & mom_dg
+    strong_qual  = (qual >= qual_floor) & qual_dg
+    thesis_ok    = tis >= tis_floor
+
+    mom_bad  = mom  < -0.20
+    qual_bad = qual < -0.20
+    score_collapsed = snw < hard_score_floor
+    thesis_broken   = tis < tis_hard_floor
+
+    confirmed_breakdown = score_collapsed & thesis_broken & mom_bad & qual_bad
+    harvest_q = (pnl >= harvest_pct) & pnl_dg & (positive_mom | thesis_ok)
+    trim_q    = (pnl >= trim_pct)    & pnl_dg & positive_mom & ~harvest_q
+    has_any_positive = positive_pnl | positive_mom | strong_qual | thesis_ok
+    all_negative = mom_bad & qual_bad & (pnl < -0.05)
+
+    # Resolve the tree precedence into a single full-exit mask.
+    full_exit = confirmed_breakdown.copy()
+    remaining = cand & ~confirmed_breakdown
+    remaining = remaining & ~harvest_q          # HARVEST downgrade — not a full exit
+    remaining = remaining & ~trim_q             # TRIM downgrade — not a full exit
+    remaining = remaining & ~has_any_positive   # REVIEW — hold
+    full_exit |= remaining & all_negative
+    remaining = remaining & ~all_negative
+    remaining = remaining & score_collapsed     # WATCH (~collapsed) holds; collapsed falls through
+    full_exit |= remaining                       # EXIT — score collapsed, no positives
+    return cand & full_exit
 
 
 def _momentum_score_multifactor_vec(
@@ -819,6 +947,51 @@ def run_simulation(
     _trim_score_below    = float(_trim_cfg.get("trim_score_below",
                                metric_threshold * (1.0 + float(_trim_cfg.get("trim_score_delta_threshold", -0.15)))))
     _trim_to_etfs_pct    = float(_trim_cfg.get("trim_to_etfs_pct", 0.85))
+    _harvest_to_etfs_pct = float(HARVEST_PARAMS.get("harvest_to_etfs_pct", 1.0))
+    # ── DAE soft-exit floors (mirror DecisionAdjustmentEngine._evaluate_soft_exit) ─
+    # The faithful exit/hold/downgrade tree below is keyed on these floors. They are
+    # now load-bearing in the backtest (previously the simulator only consulted
+    # review_score_below + positive P/L, so these floors were inert).
+    _dae_floors = {
+        "hard_exit_score_below":          float(_trim_cfg.get("hard_exit_score_below",          0.20)),
+        "thesis_intact_hard_exit_below":  float(_trim_cfg.get("thesis_intact_hard_exit_below",  0.35)),
+        "harvest_profit_threshold":       _HARVEST_PROFIT_THRESHOLD,
+        "trim_profit_threshold":          float(_trim_cfg.get("trim_profit_threshold",          0.08)),
+        "positive_pnl_review_floor":      float(_trim_cfg.get("positive_pnl_review_floor",       0.00)),
+        "positive_momentum_review_floor": float(_trim_cfg.get("positive_momentum_review_floor",  0.10)),
+        "strong_quality_review_floor":    float(_trim_cfg.get("strong_quality_review_floor",     0.70)),
+        "thesis_intact_review_floor":     float(_trim_cfg.get("thesis_intact_review_floor",      0.60)),
+        "positive_pnl_exit_downgrade":    bool(_trim_cfg.get("positive_pnl_exit_downgrade",      True)),
+        "positive_momentum_exit_downgrade": bool(_trim_cfg.get("positive_momentum_exit_downgrade", True)),
+        "strong_quality_exit_downgrade":  bool(_trim_cfg.get("strong_quality_exit_downgrade",    True)),
+    }
+    # When the tuner appends exit-floor slots (active_exit_floors preset), let the
+    # optimizer move the floors; otherwise they stay at the config values above.
+    from tuning.constants import (
+        exit_floors_cfg_from_params,
+        opportunity_cost_cfg_from_params,
+    )
+    _dae_floors.update(exit_floors_cfg_from_params(params))
+
+    # ── Opportunity-cost ("max hold without progress") exit ───────────────────
+    # Culls positions that make NO progress for _oc_stall_max_days, to recycle
+    # active-sleeve capacity. The stall clock resets whenever a position makes
+    # progress (fresh high within band OR momentum >= floor), so a running winner
+    # is never culled. Frozen OFF by default — `_oc_enabled` is strictly config-
+    # driven so it can never leak into unrelated preset tunes (every tune passes
+    # the full 57-slot vector). The active_opportunity_cost preset tunes the three
+    # thresholds below; it takes effect only when opportunity_cost.enabled is true
+    # in config (set it for the tuning run).
+    _oc_cfg            = _trim_cfg.get("opportunity_cost", {}) or {}
+    _oc_enabled        = bool(_oc_cfg.get("enabled", False))
+    _oc_stall_max_days = int(_oc_cfg.get("stall_max_days", 120))
+    _oc_reclaim_band   = float(_oc_cfg.get("reclaim_band", 0.03))
+    _oc_mom_floor      = float(_oc_cfg.get("progress_momentum_floor", 0.10))
+    _oc_overrides = opportunity_cost_cfg_from_params(params)
+    if _oc_overrides:
+        _oc_stall_max_days = _oc_overrides["stall_max_days"]   # already int-rounded
+        _oc_reclaim_band   = float(_oc_overrides["reclaim_band"])
+        _oc_mom_floor      = float(_oc_overrides["progress_momentum_floor"])
     # Momentum veto (frozen default off => behavior-preserving). When enabled, a
     # winner still trending up is NOT trimmed even if its cross-sectional score
     # decayed — converts "cut winners" into "cut only STALLED winners". Validated
@@ -831,6 +1004,7 @@ def run_simulation(
     _trim_mom_veto       = bool(_trim_cfg.get("trim_requires_positive_momentum", False))
     if scope == "active_sleeve_compounding":
         _trim_to_etfs_pct = 0.0
+        _harvest_to_etfs_pct = 0.0
 
     # ── Barroso–Santa-Clara vol-scaling overlay (frozen by default)
     # Scope-independent: scales the stock book's exposure by clip(tv/realized_vol).
@@ -968,6 +1142,10 @@ def run_simulation(
 
     _cs_params     = cs_params if cs_params is not None else CANDIDATE_SELECTION_PARAMS
     current_scores = score_stocks_at_day(precomp, params, 0)
+    # Per-day momentum, cached on the same cadence as current_scores (recomputed on
+    # contribution days). Feeds the faithful DAE soft-exit tree. Quality is static
+    # (precomp.quality_scores), mirroring how the live composite consumes quality.
+    current_mom    = _momentum_score_at_day(precomp, params, 0)
     candidate_mask, _init_diag = select_candidates(0, current_scores, precomp, params, _cs_params)
 
     stock_shares    = np.zeros(n_stocks)
@@ -976,6 +1154,9 @@ def run_simulation(
     stock_day_bought= np.full(n_stocks, -1, dtype=np.int32)
     stock_day_sold  = np.full(n_stocks, -99, dtype=np.int32)
     stock_stopout   = np.zeros(n_stocks, dtype=bool)
+    # Day index of the last time each position made progress (fresh high or strong
+    # momentum). Drives the opportunity-cost stall clock. -1 = not held / no record.
+    stock_last_progress_day = np.full(n_stocks, -1, dtype=np.int32)
     etf_shares      = np.zeros(n_etfs)
 
     # ── Regime de-risk overlay (frozen off by default) ────────────────────────
@@ -1233,6 +1414,9 @@ def run_simulation(
             else:
                 stock_avg_cost[i]  = effective_price
                 stock_day_bought[i]= day
+                # A freshly bought name is "making progress" by definition (just
+                # selected as a top candidate) — seed its stall clock at buy.
+                stock_last_progress_day[i] = day
                 trades_made       += 1
                 trades_this_week  += 1
                 sym = precomp.symbols[i] if i < len(precomp.symbols) else str(i)
@@ -1325,28 +1509,54 @@ def run_simulation(
         _eff_harvest = _arch_harvest_arr       if _arch_harvest_arr       is not None else _HARVEST_PROFIT_THRESHOLD
         _eff_minhold = _arch_min_hold_arr      if _arch_min_hold_arr      is not None else _MIN_HOLD_DAYS
 
+        # Opportunity-cost stall clock: a position making progress today (fresh high
+        # within band OR momentum >= floor) resets its clock; the rest accrue stall
+        # days. _progress_vec mirrors the live exit_analysis.is_progress exactly.
+        # stock_peak already includes today's price, so a fresh high counts as progress.
+        if _oc_enabled:
+            progress_mask = held & _progress_vec(
+                prices, stock_peak, current_mom, _oc_reclaim_band, _oc_mom_floor,
+            )
+            stock_last_progress_day = np.where(progress_mask, d, stock_last_progress_day)
+            stall_days = np.where(stock_last_progress_day >= 0, d - stock_last_progress_day, 0)
+            oc_mask = (
+                held
+                & ~progress_mask
+                & (stall_days >= _oc_stall_max_days)
+                & (days_held >= _eff_minhold)
+            )
+        else:
+            oc_mask = np.zeros(len(held), dtype=bool)
+
         stop_loss_mask = held & (pct_from_avg  <= _STOP_LOSS_PCT)
         trail_mask     = held & (pct_from_peak <= _eff_stop)        & (days_held >= _eff_minhold)
         tp_mask        = held & (pct_from_avg  >= _eff_tp)          & take_profit_ok & (days_held >= _MIN_DAYS_BEFORE_TAKE_PROFIT)
-        # WATCH/REVIEW logic: live holds positions that are still profitable and
-        # not fully collapsed — don't exit on score alone when pnl > 0 and score
-        # is above the review floor (mirrors decision_adjustment_engine behaviour).
-        _watch_suppressed = (
-            _POSITIVE_PNL_DOWNGRADE
-            and _REVIEW_SCORE_FLOOR > 0
-        )
-        if _watch_suppressed:
-            _hold_not_exit = (pct_from_avg > 0) & (current_scores >= _REVIEW_SCORE_FLOOR)
-        else:
-            _hold_not_exit = np.zeros(len(held), dtype=bool)
-
-        weak_val_mask  = (
+        # Score-below-threshold soft-exit candidates. The live SellDecisionEngine
+        # raises a soft EXIT here; the DecisionAdjustmentEngine then runs its full
+        # tree (confirmed-breakdown / harvest / trim / review / watch / exit) before
+        # anything is sold. We replicate that tree faithfully so the exit floors
+        # (hard_exit_score_below, positive_momentum/strong_quality/thesis_intact
+        # review floors) are load-bearing — a weak score alone never forces an exit.
+        _weak_cand = (
             held
             & (current_scores < sell_weak_below)
             & (days_held >= _MIN_DAYS_HELD_BEFORE_VALUE_EXIT)
-            & ~_hold_not_exit
         )
-        sell_mask      = stop_loss_mask | trail_mask | tp_mask | weak_val_mask
+        if _weak_cand.any():
+            _rank01 = (_pct_rank_vec(current_scores) + 1.0) / 2.0
+            _tis    = _thesis_intact_vec(precomp.quality_scores, current_mom, pct_from_avg, _rank01)
+            weak_val_mask = _dae_soft_exit_full_exit(
+                _weak_cand,
+                snw=current_scores,
+                pnl=pct_from_avg,
+                mom=current_mom,
+                qual=precomp.quality_scores,
+                tis=_tis,
+                floors=_dae_floors,
+            )
+        else:
+            weak_val_mask = np.zeros(len(held), dtype=bool)
+        sell_mask      = stop_loss_mask | trail_mask | tp_mask | weak_val_mask | oc_mask
 
         if sell_mask.any():
             sell_prices   = np.where(valid_price, prices, stock_avg_cost)
@@ -1372,6 +1582,13 @@ def run_simulation(
                 elif tp_mask[i]:
                     _exit = "take_profit"
                     _src  = "archetype_rule" if _arch_take_profit_arr is not None else "global_rule"
+                elif weak_val_mask[i]:
+                    _exit = "weak_value"
+                    _src  = "global_rule"
+                elif oc_mask[i]:
+                    # Opportunity-cost cull — stalled, no progress for long enough.
+                    _exit = "opportunity_cost"
+                    _src  = "global_rule"
                 else:
                     _exit = "weak_value"
                     _src  = "global_rule"
@@ -1425,6 +1642,7 @@ def run_simulation(
             stock_avg_cost[sell_mask]  = 0.0
             stock_peak[sell_mask]      = 0.0
             stock_day_bought[sell_mask]= -1
+            stock_last_progress_day[sell_mask] = -1
 
         # ── Harvest exits (partial profit-taking — mirrors live HARVEST action) ─
         # Triggered when pct_from_avg >= harvest_profit_threshold.
@@ -1477,7 +1695,7 @@ def run_simulation(
             total_traded_notional += harv_notional
             sells_made            += int(harvest_mask.sum())
             # Route harvest proceeds to ETF sleeve (same as live HarvestManager)
-            etf_portion = harv_notional * _trim_to_etfs_pct
+            etf_portion = harv_notional * _harvest_to_etfs_pct
             if n_etfs > 0 and etf_portion > 0:
                 p_etf     = precomp.etf_prices[d]
                 valid_etfs = np.isfinite(p_etf) & (p_etf > 0)
@@ -1633,6 +1851,7 @@ def run_simulation(
                 logger.debug("Cluster snapshot failed at day %d: %s", d, exc)
         if is_contrib_day:
             current_scores = score_stocks_at_day(precomp, params, d)
+            current_mom    = _momentum_score_at_day(precomp, params, d)
             candidate_mask, _ = select_candidates(d, current_scores, precomp, params, _cs_params)
             cash              += weekly_contribution
             total_contributions += weekly_contribution

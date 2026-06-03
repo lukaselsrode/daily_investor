@@ -52,7 +52,7 @@ run-dry:                     ## Dry-run: skip data + no sentiment  (scoring + lo
 # ── Backtesting ───────────────────────────────────────────────────────────────
 
 DAYS    ?= 365
-BT_MODE ?= liquid_universe_sanity_test
+BT_MODE ?= liquid_universe_full
 
 .PHONY: backtest
 backtest:                    ## Backtest  (DAYS=N  BT_MODE=...)

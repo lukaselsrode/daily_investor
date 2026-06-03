@@ -183,6 +183,7 @@ def classify_state(
     buy_context: dict | None,
     peak_price: float | None,
     universe_rank_pct: float | None = None,
+    stall_days: int | None = None,
 ) -> tuple[str, str]:
     """
     Returns (state, reason) where state ∈ {BUY, HOLD, WATCH, EXIT}.
@@ -263,6 +264,26 @@ def classify_state(
                     f"rank {100*universe_rank_pct:.0f}th percentile but fundamentals appear intact."
                 )
             return "EXIT", f"Rank in bottom {100*(1-universe_rank_pct):.0f}% of universe"
+
+    # Opportunity-cost exit (max hold WITHOUT progress) — mirrors SellDecisionEngine.
+    # Culls dead money: stalled for stall_max_days with no progress (fresh high or
+    # strong momentum). A still-progressing winner is never culled.
+    if stall_days is not None:
+        from util import EXIT_DECISION_PARAMS
+        _oc = EXIT_DECISION_PARAMS.get("opportunity_cost", {}) or {}
+        if _oc.get("enabled"):
+            from portfolio.exit_analysis import is_progress
+            _progressing = is_progress(
+                _safe_float(holding.get("current_price")), peak_price, momentum_score,
+                float(_oc.get("reclaim_band", 0.03)),
+                float(_oc.get("progress_momentum_floor", 0.10)),
+            )
+            if (
+                not _progressing
+                and stall_days >= int(_oc.get("stall_max_days", 120))
+                and (days_held is None or days_held >= sr["min_days_held_before_value_exit"])
+            ):
+                return "EXIT", f"Opportunity cost: no progress for {stall_days}d — recycling capital"
 
     # ── WATCH checks ─────────────────────────────────────────────────────────
 
@@ -469,6 +490,7 @@ def build_position_rationale(
     buy_context: dict | None,
     peak_price: float | None,
     universe_rank_pct: float | None,
+    stall_days: int | None = None,
 ) -> PositionRationale:
     """
     Build a complete PositionRationale for one holding.
@@ -493,7 +515,7 @@ def build_position_rationale(
             pct_change = (cur / avg) - 1.0
 
     state, state_reason = classify_state(
-        symbol, holding, metrics, buy_context, peak_price, universe_rank_pct
+        symbol, holding, metrics, buy_context, peak_price, universe_rank_pct, stall_days
     )
 
     contribs = factor_contributions(metrics)
@@ -546,6 +568,9 @@ def build_position_rationale(
                 exit_severity, exit_type = "hard", "quality_floor"
             elif "yield trap" in reason_lower:
                 exit_severity, exit_type = "hard", "yield_trap"
+            elif "opportunity cost" in reason_lower:
+                # DAE treats opportunity_cost as hard (bypasses soft-exit floors).
+                exit_severity, exit_type = "soft", "opportunity_cost"
             else:
                 exit_severity, exit_type = "soft", "soft_thesis"
 

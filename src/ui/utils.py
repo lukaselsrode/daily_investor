@@ -130,20 +130,20 @@ MODES = {
 }
 
 BACKTEST_MODES = [
-    "liquid_universe_sanity_test",
+    "liquid_universe_full",
     "walk_forward_price_only_test",
     "current_universe_stress_test",
 ]
 
 LOOKAHEAD_LABELS = {
-    "liquid_universe_sanity_test":   "MEDIUM — top-300 by volume (liquid_all, deterministic). Fundamental scores used.",
-    "walk_forward_price_only_test":  "LOW — top-300 by volume, price-only momentum. No fundamental scores (active sleeve gets 0 trades).",
-    "current_universe_stress_test":  "HIGH — top-300 by current score, forward-looking selection bias. Not predictive.",
+    "liquid_universe_full":   "MEDIUM — full liquid universe (liquid_all, deterministic). Fundamental scores used.",
+    "walk_forward_price_only_test":  "LOW — full liquid universe, price-only momentum. No fundamental scores (active sleeve gets 0 trades).",
+    "current_universe_stress_test":  "HIGH — full universe ranked by current score, forward-looking selection bias. Not predictive.",
 }
 
 # (level_str, emoji) pairs — used where compact display is needed
 LOOKAHEAD_LEVELS = {
-    "liquid_universe_sanity_test":  ("MEDIUM", "🟡"),
+    "liquid_universe_full":  ("MEDIUM", "🟡"),
     "walk_forward_price_only_test": ("LOW",    "🟢"),
     "current_universe_stress_test": ("HIGH",   "🔴"),
 }

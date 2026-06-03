@@ -238,7 +238,7 @@ auto-tune:
   --mode MODE              Backtest universe mode
 
 all:
-  --mode MODE              liquid_universe_sanity_test | walk_forward_price_only_test | current_universe_stress_test
+  --mode MODE              liquid_universe_full | walk_forward_price_only_test | current_universe_stress_test
   --objective sharpe|calmar
   --output-dir PATH
 ```
@@ -494,8 +494,8 @@ Soft sells are sent to Claude. `HOLD` with confidence ≥ `sell_sentiment_overri
 
 | Mode | Lookahead | Universe |
 |------|-----------|----------|
-| `liquid_universe_sanity_test` | MEDIUM | Random sample of liquid stocks (default) |
-| `walk_forward_price_only_test` | LOW | Liquid sample; fundamental arrays zeroed, momentum only |
+| `liquid_universe_full` | MEDIUM | Full liquid universe, deterministic (default; `max_symbols: 0`) |
+| `walk_forward_price_only_test` | LOW | Full liquid universe; fundamental arrays zeroed, momentum only |
 | `current_universe_stress_test` | HIGH | Current `value_metric` top-N — **not predictive**, stress test only |
 
 ### Causal Rolling Features
@@ -700,7 +700,7 @@ scoring:
 
 # Backtest
 backtest:
-  default_mode: liquid_universe_sanity_test
+  default_mode: liquid_universe_full
   starting_capital: 5000.0
   weekly_contribution: 400.0
   slippage_bps: 10.0

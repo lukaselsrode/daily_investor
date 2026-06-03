@@ -55,9 +55,11 @@ _ROBINHOOD_TAGS = [
     "defense",
     "social-media",
 ]
-
+_ROBINHOOD_INSTRUMENTS_URL = "https://api.robinhood.com/instruments/"
+_ROBINHOOD_ACTIVE_STOCK_TYPES = frozenset({"stock", "adr"})
 _VALID_TICKER_RE = re.compile(r"^[A-Z]{1,5}(\.[A-Z]{1,2})?$")
 _TICKER_HEADER_KEYWORDS = frozenset({"symbol", "ticker"})
+
 
 
 def _is_valid_ticker(symbol: str) -> bool:
@@ -119,6 +121,70 @@ def _fetch_tag_with_retry(tag: str, retries: int = 3, base_delay: float = 2.0) -
     return None
 
 
+def _is_robinhood_active_stock(item: dict) -> bool:
+    """Return True for active Robinhood stock-like instruments.
+
+    Robinhood's instruments catalog includes ETFs/ETPs, warrants, units,
+    preferreds, inactive listings, test rows, and other wrappers. The active
+    stock-picking universe should only be expanded with common stocks and ADRs;
+    fund/wrapper exposure remains routed through the dedicated ETF/index sleeves.
+    """
+    return (
+        item.get("state") == "active"
+        and item.get("tradeable") is True
+        and item.get("rhs_tradability") == "tradable"
+        and item.get("type") in _ROBINHOOD_ACTIVE_STOCK_TYPES
+        and _is_valid_ticker(str(item.get("symbol", "")))
+    )
+
+
+def _fetch_robinhood_instrument_symbols(
+    retries: int = 3,
+    base_delay: float = 2.0,
+) -> set[str]:
+    """Fetch all active tradable stock/ADR symbols from Robinhood instruments.
+
+    This paginated endpoint is the broad Robinhood catalog. It is intentionally
+    best-effort: if Robinhood is unavailable, the universe still falls back to
+    Wikipedia indexes + Robinhood tags rather than failing the whole ETL run.
+    """
+    for attempt in range(1, retries + 1):
+        try:
+            session = requests.Session()
+            symbols: set[str] = set()
+            url: str | None = _ROBINHOOD_INSTRUMENTS_URL
+            pages = 0
+            while url:
+                resp = session.get(url, timeout=30)
+                resp.raise_for_status()
+                data = resp.json()
+                pages += 1
+                for item in data.get("results", []):
+                    if _is_robinhood_active_stock(item):
+                        symbols.add(str(item["symbol"]))
+                url = data.get("next")
+            logger.info(
+                "Robinhood instruments catalog: %d active tradable stocks/ADRs from %d pages",
+                len(symbols), pages,
+            )
+            return symbols
+        except Exception as e:
+            err = str(e)
+            if attempt < retries:
+                wait = base_delay * (2 ** (attempt - 1))
+                logger.warning(
+                    "Robinhood instruments attempt %d/%d failed: %s — retrying in %.0fs",
+                    attempt, retries, err[:80], wait,
+                )
+                time.sleep(wait)
+            else:
+                logger.warning(
+                    "Robinhood instruments failed after %d attempts: %s",
+                    retries, err[:120],
+                )
+    return set()
+
+
 def gen_symbols_list(
     force_refresh: bool = False,
     extra_symbols: set[str] | None = None,
@@ -141,6 +207,16 @@ def gen_symbols_list(
     for url in _INDEX_URLS:
         print(f"Scraping {url}")
         all_symbols.update(_scrape_wikipedia_tickers(url))
+
+    instrument_symbols = _fetch_robinhood_instrument_symbols()
+    if instrument_symbols:
+        before = len(all_symbols)
+        all_symbols.update(instrument_symbols)
+        print(
+            "Robinhood instruments: "
+            f"{len(instrument_symbols)} active tradable stocks/ADRs "
+            f"({len(all_symbols) - before} new)"
+        )
 
     rb_sources: list = []
     for fn, args, label in [

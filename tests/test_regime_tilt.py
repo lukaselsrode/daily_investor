@@ -116,7 +116,7 @@ def _tiny_precomp(n_days=210, n_stocks=5, bullish=True):
         baseline_scores=zeros_s,
         sector_labels=["X"] * n_stocks,
         volume_arr=np.ones(n_stocks) * 1e6,
-        mode="liquid_universe_sanity_test",
+        mode="liquid_universe_full",
         universe_selection="liquid_all",
         lookahead_bias_level="MEDIUM",
         benchmark_prices=bench,

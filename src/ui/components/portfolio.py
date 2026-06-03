@@ -145,7 +145,16 @@ def _enrich_holdings(
     Merge holdings with agg_data, buy_context, and position rationale.
     Returns enriched DataFrame with state, rationale, factor scores, etc.
     """
+    import datetime as _dt
+
     from portfolio.position_rationale import build_position_rationale, etf_role
+    from portfolio.progress_tracker import load_last_progress, stall_days_for
+
+    # Opportunity-cost stall clock (maintained by the live trading loop). Read-only
+    # here so the rationale view reflects the same cull logic; empty when the
+    # feature is off / never run.
+    _last_progress = load_last_progress()
+    _today_oc = _dt.date.today()
 
     df = holdings.copy()
     df["sleeve"] = df["symbol"].apply(lambda s: "ETF/core" if s in etfs else "active")
@@ -262,6 +271,7 @@ def _enrich_holdings(
                 buy_context=ctx,
                 peak_price=peak,
                 universe_rank_pct=rank,
+                stall_days=stall_days_for(sym, _last_progress, _today_oc),
             )
             # Archetype classification for active positions
             try:

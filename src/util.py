@@ -354,9 +354,9 @@ HARVEST_PARAMS: dict = {
 
 _bt = _app.get("backtest", {})
 BACKTEST_PARAMS: dict = {
-    "default_mode":                 str(_bt.get("default_mode",                 "liquid_universe_sanity_test")),
+    "default_mode":                 str(_bt.get("default_mode",                 "liquid_universe_full")),
     "universe_selection":           str(_bt.get("universe_selection",           "liquid_sample")),
-    "max_symbols":                  int(_bt.get("max_symbols",                  300)),
+    "max_symbols":                  int(_bt.get("max_symbols",                  0)),   # 0 = full universe
     "min_volume":                   float(_bt.get("min_volume",                 500_000)),
     "random_seed":                  int(_bt.get("random_seed",                  42)),
     "slippage_bps":                 float(_bt.get("slippage_bps",               10.0)),
@@ -803,5 +803,27 @@ EXIT_DECISION_PARAMS: dict = {
     "harvest_fraction":            float(_ed.get("harvest_fraction",           0.40)),
     "review_score_below":          float(_ed.get("review_score_below",         0.45)),
     "positive_pnl_exit_downgrade": bool(_ed.get("positive_pnl_exit_downgrade", True)),
+    # DAE soft-exit floors — consumed by the simulator's faithful DecisionAdjustment
+    # Engine soft-exit tree (defaults mirror decision_adjustment_engine.py). Exposed
+    # here so config edits to the floors reach the backtest, not just the live loop.
+    "hard_exit_score_below":           float(_ed.get("hard_exit_score_below",           0.20)),
+    "thesis_intact_hard_exit_below":   float(_ed.get("thesis_intact_hard_exit_below",   0.35)),
+    "positive_pnl_review_floor":       float(_ed.get("positive_pnl_review_floor",       0.00)),
+    "positive_momentum_review_floor":  float(_ed.get("positive_momentum_review_floor",  0.10)),
+    "strong_quality_review_floor":     float(_ed.get("strong_quality_review_floor",     0.70)),
+    "thesis_intact_review_floor":      float(_ed.get("thesis_intact_review_floor",      0.60)),
+    "positive_momentum_exit_downgrade": bool(_ed.get("positive_momentum_exit_downgrade", True)),
+    "strong_quality_exit_downgrade":    bool(_ed.get("strong_quality_exit_downgrade",    True)),
+    # Opportunity-cost ("max hold without progress") exit. Curated nested so the
+    # simulator (reads EXIT_DECISION_PARAMS) and the live engine (reads the raw
+    # exit_decision block) see identical values. enabled stays a config flag; the
+    # three thresholds below are tunable via the active_opportunity_cost preset.
+    "opportunity_cost": {
+        "enabled":                    bool(_ed.get("opportunity_cost", {}).get("enabled",                    False)),
+        "stall_max_days":             int(_ed.get("opportunity_cost", {}).get("stall_max_days",              120)),
+        "reclaim_band":               float(_ed.get("opportunity_cost", {}).get("reclaim_band",              0.03)),
+        "progress_momentum_floor":    float(_ed.get("opportunity_cost", {}).get("progress_momentum_floor",   0.10)),
+        "require_stronger_candidate": bool(_ed.get("opportunity_cost", {}).get("require_stronger_candidate", False)),
+    },
 }
 

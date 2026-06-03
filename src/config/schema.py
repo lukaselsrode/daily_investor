@@ -261,9 +261,9 @@ class EtfRiskConfig:
 
 @dataclass(frozen=True)
 class BacktestConfig:
-    default_mode: str = "liquid_universe_sanity_test"
+    default_mode: str = "liquid_universe_full"
     universe_selection: str = "liquid_sample"
-    max_symbols: int = 300
+    max_symbols: int = 0   # 0 = full universe (breadth is the edge); >0 caps for smoke-tests only
     min_volume: float = 500_000
     random_seed: int = 42
     benchmark_symbol: str = "SPY"

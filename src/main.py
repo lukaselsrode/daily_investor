@@ -342,10 +342,11 @@ BACKTEST / TUNING OPTIONS
 
   --objective METRIC   Optimization target for --tune: sharpe (default) or calmar.
 
-  --mode MODE          Backtest universe selection. Controls lookahead-bias level:
-                         liquid_universe_sanity_test   — random sample from liquid stocks  [MEDIUM bias, default]
-                         current_universe_stress_test  — top stocks by current score       [HIGH bias, not predictive]
-                         walk_forward_price_only_test  — volume filter only, momentum-only [LOW bias]
+  --mode MODE          Backtest universe selection. Controls lookahead-bias level.
+                       All modes span the FULL liquid universe (max_symbols=0) — breadth is the edge:
+                         liquid_universe_full   — full liquid universe, deterministic   [MEDIUM bias, default]
+                         current_universe_stress_test  — full universe ranked by current score [HIGH bias, not predictive]
+                         walk_forward_price_only_test  — full universe, volume filter only      [LOW bias]
 
   --stability-scan     Run the optimizer across all configured windows and objectives, then
                        generate stability heatmaps, CSV summaries, and a human-readable

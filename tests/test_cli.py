@@ -47,7 +47,7 @@ def _bt_result():
         calmar=0.8, max_drawdown=-0.08, trades_made=20,
     )
     report = BacktestReport(
-        mode="liquid_universe_sanity_test",
+        mode="liquid_universe_full",
         universe_selection="liquid_all",
         lookahead_bias_level="LOW",
         n_symbols=300, n_days=90,
@@ -56,7 +56,7 @@ def _bt_result():
         benchmark_max_drawdown=-0.05,
         excess_return=0.10, validation_benchmark_return=0.0, notes=[],
     )
-    return BacktestResult(report=report, n_days=90, mode="liquid_universe_sanity_test")
+    return BacktestResult(report=report, n_days=90, mode="liquid_universe_full")
 
 
 def _tune_result(objective="sharpe"):
@@ -109,8 +109,8 @@ class TestCmdBacktest:
 
     def test_passes_mode(self):
         with patch("backtesting.engine.BacktestEngine.run", return_value=_bt_result()) as mock_run:
-            cmd_backtest(n_days=90, mode="liquid_universe_sanity_test")
-        mock_run.assert_called_once_with(n_days=90, params=None, mode="liquid_universe_sanity_test", scope="overall_strategy")
+            cmd_backtest(n_days=90, mode="liquid_universe_full")
+        mock_run.assert_called_once_with(n_days=90, params=None, mode="liquid_universe_full", scope="overall_strategy")
 
     def test_default_scope_is_overall_strategy(self):
         with patch("backtesting.engine.BacktestEngine.run", return_value=_bt_result()) as mock_run:

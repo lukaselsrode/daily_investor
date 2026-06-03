@@ -72,7 +72,7 @@ summary = run_random_windows(n_days=..., n_windows=..., window_days=..., mode=..
 
 1. **No lookahead bias.** All rolling features (`rs_3m`, `vol_3m`, `return_1m`, etc.) must be computed from data available only up to day `d`. Cross-sectional percentile ranking at one point in time is not lookahead.
 2. **Walk-forward cluster fitting only.** When `cluster_tracker.py` is used in backtests, PCA+KMeans must be fitted only from data available at each rebalance date — never from future data.
-3. **Backtest modes:** `liquid_universe_sanity_test` (MEDIUM lookahead), `walk_forward_price_only_test` (LOW lookahead), `current_universe_stress_test` (HIGH — not predictive, stress test only).
+3. **Backtest modes:** `liquid_universe_full` (MEDIUM lookahead), `walk_forward_price_only_test` (LOW lookahead), `current_universe_stress_test` (HIGH — not predictive, stress test only).
 
 ---
 

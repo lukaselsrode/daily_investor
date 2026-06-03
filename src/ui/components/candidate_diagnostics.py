@@ -278,7 +278,7 @@ def render() -> None:
         n_days_bt = st.number_input("Days", 60, 365, 180, step=30, key="cdiag_bt_days")
     with c2:
         bt_mode = st.selectbox(
-            "Mode", ["liquid_universe_sanity_test", "walk_forward_price_only_test"],
+            "Mode", ["liquid_universe_full", "walk_forward_price_only_test"],
             key="cdiag_bt_mode",
         )
     if st.button("▶ Run A/B/C backtest comparison", key="cdiag_bt_run"):

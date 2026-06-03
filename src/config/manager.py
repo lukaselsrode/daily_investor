@@ -413,9 +413,9 @@ class ConfigManager:
     def backtest(self) -> BacktestConfig:
         bt = self._raw.get("backtest", {})
         return BacktestConfig(
-            default_mode=str(bt.get("default_mode", "liquid_universe_sanity_test")),
+            default_mode=str(bt.get("default_mode", "liquid_universe_full")),
             universe_selection=str(bt.get("universe_selection", "liquid_sample")),
-            max_symbols=int(bt.get("max_symbols", 300)),
+            max_symbols=int(bt.get("max_symbols", 0)),   # 0 = full universe
             min_volume=float(bt.get("min_volume", 500_000)),
             random_seed=int(bt.get("random_seed", 42)),
             benchmark_symbol=str(bt.get("benchmark_symbol", "SPY")),

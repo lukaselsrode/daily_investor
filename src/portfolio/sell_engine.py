@@ -22,6 +22,7 @@ from typing import Any
 import pandas as pd
 
 from core.types import SellDecision
+from portfolio.exit_analysis import is_progress
 from portfolio.position_archetypes import ArchetypePolicy
 from util import ARCHETYPE_PARAMS, EXIT_DECISION_PARAMS, METRIC_THRESHOLD, SELL_RULES, safe_float
 
@@ -43,6 +44,7 @@ class SellDecisionEngine:
         metrics_row: pd.Series | None,
         peak_price: float | None = None,
         archetype_policy: ArchetypePolicy | None = None,
+        stall_days: int | None = None,
     ) -> SellDecision:
         # Derive percent_change — Robinhood returns it as a percentage string e.g. "-15.3"
         percent_change: float | None = None
@@ -225,6 +227,37 @@ class SellDecisionEngine:
                     **base,
                 )
 
+        # ── Opportunity-cost exit (max hold WITHOUT progress) ────────────────
+        # Cull a position that has made NO progress for stall_max_days, to recycle
+        # active-sleeve capital. The stall clock (days since last progress) is
+        # maintained by manager.py via portfolio.progress_tracker; we re-check
+        # progress here so a name that is still working is never culled. Placed
+        # AFTER thesis_exit so a weak-score name is labelled by its score reason —
+        # mirrors the simulator's exit-type precedence.
+        _oc = EXIT_DECISION_PARAMS.get("opportunity_cost", {}) or {}
+        if _oc.get("enabled") and stall_days is not None:
+            cur_price = safe_float(holding.get("price"))
+            momentum  = safe_float(metrics_row.get("momentum_score")) if metrics_row is not None else None
+            progressing = is_progress(
+                cur_price, peak_price, momentum,
+                float(_oc.get("reclaim_band", 0.03)),
+                float(_oc.get("progress_momentum_floor", 0.10)),
+            )
+            if (
+                not progressing
+                and stall_days >= int(_oc.get("stall_max_days", 120))
+                and (days_held is None or days_held >= min_days)
+            ):
+                return SellDecision(
+                    symbol=symbol,
+                    should_sell=True,
+                    reason=f"opportunity-cost: no progress for {stall_days}d — recycling capital",
+                    severity="soft",
+                    exit_type="opportunity_cost",
+                    decision_source="global_rule",
+                    **base,
+                )
+
         return SellDecision(
             symbol=symbol,
             should_sell=False,
@@ -284,13 +317,14 @@ def evaluate_sell_candidate(
     metrics_row: pd.Series | None,
     peak_price: float | None = None,
     archetype_policy: ArchetypePolicy | None = None,
+    stall_days: int | None = None,
 ) -> dict:
     """
     Module-level wrapper around SellDecisionEngine.evaluate() that returns a
     plain dict. Keeps main.py callers working while the class-based API is
     the canonical interface going forward.
     """
-    d = _engine.evaluate(symbol, holding, metrics_row, peak_price, archetype_policy)
+    d = _engine.evaluate(symbol, holding, metrics_row, peak_price, archetype_policy, stall_days)
     return {
         "should_sell":    d.should_sell,
         "reason":         d.reason,

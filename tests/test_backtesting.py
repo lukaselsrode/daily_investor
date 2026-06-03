@@ -49,7 +49,7 @@ def _report(
     excess: float = 0.04,
 ) -> BacktestReport:
     return BacktestReport(
-        mode="liquid_universe_sanity_test",
+        mode="liquid_universe_full",
         universe_selection="liquid_all",
         lookahead_bias_level="LOW",
         n_symbols=50,
@@ -347,7 +347,7 @@ class TestBacktestEngine:
     def _precomp(self):
         pc = MagicMock()
         pc.prices = np.zeros((self._PRECOMP_DAYS, 5))
-        pc.mode = "liquid_universe_sanity_test"
+        pc.mode = "liquid_universe_full"
         return pc
 
     def _good_report(self):

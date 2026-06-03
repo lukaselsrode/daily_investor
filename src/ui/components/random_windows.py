@@ -438,7 +438,7 @@ def render() -> None:
             "⚠️ **walk_forward_price_only_test strips fundamental scores** — quality, income, "
             "and PE/PB are zeroed out to eliminate lookahead bias. The active sleeve needs "
             "those scores to rank stocks, so 0 trades will fire and results are meaningless. "
-            "Use **liquid_universe_sanity_test** for active-sleeve robustness scans."
+            "Use **liquid_universe_full** for active-sleeve robustness scans."
         )
 
 

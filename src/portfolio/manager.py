@@ -518,6 +518,19 @@ class PortfolioManager:
                     peaks[symbol] = max(peaks[symbol], current_p)
         self._save_peak_prices(peaks)
 
+        # Opportunity-cost stall tracking: maintain the per-symbol "last progress"
+        # store so SellDecisionEngine can cull dead money (max hold WITHOUT progress).
+        # Only active when the feature is enabled — otherwise no store is touched
+        # (behavior-preserving). First-seen symbols are seeded to today below, so the
+        # feature never retroactively culls a long-standing holding on its first run.
+        _oc_cfg     = EXIT_DECISION_PARAMS.get("opportunity_cost", {}) or {}
+        _oc_enabled = bool(_oc_cfg.get("enabled", False))
+        _oc_today   = datetime.date.today()
+        _last_progress: dict[str, datetime.date] = {}
+        if _oc_enabled:
+            from portfolio.progress_tracker import load_last_progress
+            _last_progress = load_last_progress()
+
         pending_sells = self._get_pending_sell_symbols()
         if pending_sells:
             logger.info(
@@ -583,10 +596,26 @@ class PortfolioManager:
                 except Exception as _exc:
                     logger.debug("Archetype classification failed for %s: %s", symbol, _exc)
 
+            # Update the stall clock: reset to today if the position made progress
+            # (fresh high or strong momentum) or is first-seen; else it accrues.
+            _stall_days: int | None = None
+            if _oc_enabled:
+                from portfolio.exit_analysis import is_progress
+                _mom = safe_float(metrics_row.get("momentum_score")) if metrics_row is not None else None
+                _progressing = is_progress(
+                    safe_float(data.get("price")), peaks.get(symbol), _mom,
+                    float(_oc_cfg.get("reclaim_band", 0.03)),
+                    float(_oc_cfg.get("progress_momentum_floor", 0.10)),
+                )
+                if _progressing or symbol not in _last_progress:
+                    _last_progress[symbol] = _oc_today
+                _stall_days = (_oc_today - _last_progress[symbol]).days
+
             decision = evaluate_sell_candidate(
                 symbol, data, metrics_row,
                 peak_price=peaks.get(symbol),
                 archetype_policy=_arch_policy,
+                stall_days=_stall_days,
             )
 
             _all_evaluated[symbol] = {
@@ -603,6 +632,10 @@ class PortfolioManager:
                 hard_sells[symbol] = decision
             else:
                 soft_sells[symbol] = decision
+
+        if _oc_enabled:
+            from portfolio.progress_tracker import save_last_progress
+            save_last_progress(_last_progress)
 
         logger.info(
             f"Sell scan: {scanned} holdings scanned | "

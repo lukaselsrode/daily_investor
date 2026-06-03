@@ -339,7 +339,7 @@ def render_candidate_drift() -> None:
                 cs_a      = _cs_params_from_cfg(cfg_a)
                 cs_b      = _cs_params_from_cfg(cfg_b)
 
-                precomp = _lp(30, mode="liquid_universe_sanity_test")
+                precomp = _lp(30, mode="liquid_universe_full")
                 scores_a = score_stocks(precomp, params_a)
                 scores_b = score_stocks(precomp, params_b)
                 mask_a, diag_a = select_candidates(0, scores_a, precomp, params_a, cs_a)
