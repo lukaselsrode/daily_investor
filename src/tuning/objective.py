@@ -29,7 +29,7 @@ from .constants import (
 
 def make_objective(
     precomp: PrecomputedData,
-    objective: Literal["sharpe", "calmar"] = "sharpe",
+    objective: Literal["sharpe", "calmar", "info_ratio"] = "sharpe",
     starting_capital: float = 10_000.0,
     slippage_bps: float = 0.0,
     commission_per_trade: float = 0.0,
@@ -56,10 +56,21 @@ def make_objective(
             return 10.0
 
         if scope == "active_sleeve_compounding":
-            score_val = result.active_sharpe if objective == "sharpe" else result.active_calmar
+            if objective == "info_ratio":
+                score_val = result.active_information_ratio
+            elif objective == "calmar":
+                score_val = result.active_calmar
+            else:
+                score_val = result.active_sharpe
             score = float(score_val) if score_val is not None else 0.0
         else:
-            score = result.sharpe if objective == "sharpe" else result.calmar
+            # info_ratio (excess vs SPY) is only meaningful for the active stock sleeve;
+            # at overall scope the index allocation makes it near-benchmark by construction,
+            # so fall back to sharpe. Use --scope active_sleeve_compounding with info_ratio.
+            if objective == "info_ratio":
+                score = result.sharpe
+            else:
+                score = result.sharpe if objective == "sharpe" else result.calmar
 
         if not np.isfinite(score):
             return 10.0
@@ -93,7 +104,7 @@ def make_objective(
 
 def _run_single(
     precomp: PrecomputedData,
-    objective: Literal["sharpe", "calmar"],
+    objective: Literal["sharpe", "calmar", "info_ratio"],
     starting_capital: float,
     maxiter: int,
     popsize: int,
@@ -132,10 +143,26 @@ def _run_single(
         )
         return frozen_vals, best_result
 
+    # DOF advisory: more active params on the same window = higher overfit risk.
+    # Rule of thumb: aim for >= ~10 days of history per tuned parameter. The robust
+    # multi-window objective + OOS validation gates are the real guard; this only
+    # flags risk (e.g. when composing several presets into a large joint surface).
+    _hist_days = int(precomp.prices.shape[0])
+    _dof_ratio = _hist_days / max(n_active, 1)
+    if n_active >= 12 and _dof_ratio < 10:
+        print(
+            f"⚠ DOF advisory: {n_active} active params over {_hist_days}d "
+            f"(~{_dof_ratio:.0f} d/param). Overfit risk is high — prefer the robust "
+            f"multi-window objective + OOS validation, or co-tune fewer params."
+        )
+    # Scale DE iterations mildly with the search dimension (population already scales
+    # as popsize × n_active); aids convergence on larger composed surfaces.
+    eff_maxiter = maxiter if n_active <= 8 else min(maxiter + (n_active - 8), maxiter * 2)
+
     result = differential_evolution(
         _obj,
         bounds=active_bounds,
-        maxiter=maxiter,
+        maxiter=eff_maxiter,
         popsize=popsize,
         tol=0.02,
         seed=42,

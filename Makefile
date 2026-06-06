@@ -105,6 +105,63 @@ auto-tune-active-full:       ## Active sleeve tune — weights + exits preset  (
 auto-tune-active-factors:    ## Active sleeve tune — factor internals preset  (AUTO_DAYS=N)
 	$(DI) auto-tune $(AUTO_DAYS) --scope active_sleeve_compounding --preset active_factor_internals $(if $(MODE),--mode $(MODE),)
 
+.PHONY: auto-tune-active-exit-floors
+auto-tune-active-exit-floors: ## Active sleeve tune — DAE soft-exit floors preset  (AUTO_DAYS=N)
+	$(DI) auto-tune $(AUTO_DAYS) --scope active_sleeve_compounding --preset active_exit_floors $(if $(MODE),--mode $(MODE),)
+
+.PHONY: auto-tune-active-opportunity-cost
+auto-tune-active-opportunity-cost: ## Active sleeve tune — opportunity-cost stall exit (needs opportunity_cost.enabled)  (AUTO_DAYS=N)
+	$(DI) auto-tune $(AUTO_DAYS) --scope active_sleeve_compounding --preset active_opportunity_cost $(if $(MODE),--mode $(MODE),)
+
+.PHONY: auto-tune-active-candidate-filters
+auto-tune-active-candidate-filters: ## Active sleeve tune — candidate selection filters preset  (AUTO_DAYS=N)
+	$(DI) auto-tune $(AUTO_DAYS) --scope active_sleeve_compounding --preset active_candidate_filters $(if $(MODE),--mode $(MODE),)
+
+.PHONY: auto-tune-active-sizing
+auto-tune-active-sizing:     ## Active sleeve tune — position sizing / breadth preset  (AUTO_DAYS=N)
+	$(DI) auto-tune $(AUTO_DAYS) --scope active_sleeve_compounding --preset active_position_sizing $(if $(MODE),--mode $(MODE),)
+
+.PHONY: auto-tune-active-cooldown
+auto-tune-active-cooldown:   ## Active sleeve tune — rebalance cadence + cooldowns preset  (AUTO_DAYS=N)
+	$(DI) auto-tune $(AUTO_DAYS) --scope active_sleeve_compounding --preset active_rebalance_cooldown $(if $(MODE),--mode $(MODE),)
+
+.PHONY: auto-tune-active-regime
+auto-tune-active-regime:     ## Active sleeve tune — regime bull momentum tilt preset  (AUTO_DAYS=N)
+	$(DI) auto-tune $(AUTO_DAYS) --scope active_sleeve_compounding --preset active_regime_tilt $(if $(MODE),--mode $(MODE),)
+
+.PHONY: auto-tune-active-alpha
+auto-tune-active-alpha:      ## Active sleeve tune — full alpha engine (high DOF) preset  (AUTO_DAYS=N)
+	$(DI) auto-tune $(AUTO_DAYS) --scope active_sleeve_compounding --preset active_alpha_engine $(if $(MODE),--mode $(MODE),)
+
+.PHONY: auto-tune-active-blends
+auto-tune-active-blends:     ## Active sleeve tune — low-vol + residual-momentum blends (re-test)  (AUTO_DAYS=N)
+	$(DI) auto-tune $(AUTO_DAYS) --scope active_sleeve_compounding --preset active_scoring_blends $(if $(MODE),--mode $(MODE),)
+
+.PHONY: auto-tune-active-archetypes
+auto-tune-active-archetypes: ## Active sleeve tune — all 24 archetype lifecycle thresholds  (AUTO_DAYS=N)
+	$(DI) auto-tune $(AUTO_DAYS) --scope active_sleeve_compounding --preset active_archetype_lifecycle $(if $(MODE),--mode $(MODE),)
+
+# ── Interaction-cluster joint tunes (co-tune params that share a decision surface) ─
+.PHONY: auto-tune-cluster-buy-gate
+auto-tune-cluster-buy-gate:  ## Joint tune — buy-gate cluster (weights+threshold+filters)  (AUTO_DAYS=N)
+	$(DI) auto-tune $(AUTO_DAYS) --scope active_sleeve_compounding --preset active_buy_gate $(if $(MODE),--mode $(MODE),)
+
+.PHONY: auto-tune-cluster-momentum
+auto-tune-cluster-momentum:  ## Joint tune — momentum-engine cluster (weight+subweights+tilt)  (AUTO_DAYS=N)
+	$(DI) auto-tune $(AUTO_DAYS) --scope active_sleeve_compounding --preset active_momentum_engine $(if $(MODE),--mode $(MODE),)
+
+.PHONY: auto-tune-cluster-exit-ladder
+auto-tune-cluster-exit-ladder: ## Joint tune — exit-ladder cluster (exits+floors+opp-cost)  (AUTO_DAYS=N)
+	$(DI) auto-tune $(AUTO_DAYS) --scope active_sleeve_compounding --preset active_exit_ladder $(if $(MODE),--mode $(MODE),)
+
+.PHONY: auto-tune-cluster-breadth
+auto-tune-cluster-breadth:   ## Joint tune — breadth/turnover cluster (sizing+filters+cadence)  (AUTO_DAYS=N)
+	$(DI) auto-tune $(AUTO_DAYS) --scope active_sleeve_compounding --preset active_breadth_turnover $(if $(MODE),--mode $(MODE),)
+
+.PHONY: auto-tune-cluster-quality
+auto-tune-cluster-quality:   ## Joint tune — quality-stack cluster (weight+low_vol+min_q+floor)  (AUTO_DAYS=N)
+	$(DI) auto-tune $(AUTO_DAYS) --scope active_sleeve_compounding --preset active_quality_stack $(if $(MODE),--mode $(MODE),)
+
 # ── Research / diagnostics ────────────────────────────────────────────────────
 
 OUTPUT_DIR ?= reports
@@ -112,6 +169,14 @@ OUTPUT_DIR ?= reports
 .PHONY: stability
 stability:                   ## Parameter stability scan across multiple windows  (research only, no writes)
 	$(DI) stability-scan $(if $(MODE),--mode $(MODE),) --output-dir $(OUTPUT_DIR)
+
+.PHONY: interaction-screen
+interaction-screen:          ## Screen which param clusters synergize/clash when co-tuned  (PROFILE=quick|standard|deep, research only)
+	$(DI) interaction-screen --profile $(if $(PROFILE),$(PROFILE),standard) $(if $(MODE),--mode $(MODE),) --output-dir $(OUTPUT_DIR)
+
+.PHONY: auto-tune-all
+auto-tune-all:               ## Staged coordinate-ascent over interaction clusters + full windowed validation  (PROFILE=quick|standard|deep, research only)
+	$(DI) auto-tune-all --profile $(if $(PROFILE),$(PROFILE),standard) $(if $(MODE),--mode $(MODE),) $(if $(CLUSTERS),--clusters $(CLUSTERS),)
 
 .PHONY: report
 report:                      ## Quick 90-day backtest → print results + stability hint

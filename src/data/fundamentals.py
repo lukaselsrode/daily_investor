@@ -583,6 +583,25 @@ def get_fundamentals_df(
 
     compute_metric(df_raw, regime=_regime)
 
+    # Strategy-bucket classification. Every row is seeded "core_candidate" in
+    # _compute_stock_row(); reclassify confirmed DOWNTREND names (below their 200-day
+    # moving average) as "contrarian_watchlist". This is the only place the two buckets
+    # are distinguished — without it strategy_bucket is a constant, which (a) makes the
+    # factor-map "candidate centroid" the centroid of the whole cheap universe rather
+    # than the genuine momentum-confirmed candidates, and (b) leaves the contrarian
+    # soft-penalty + position cap in PortfolioManager permanently inert. Names with no
+    # 200DMA coverage (NaN) stay "core_candidate" — we only down-weight a confirmed downtrend.
+    if "above_200dma" in df_raw.columns:
+        _below_200dma = df_raw["above_200dma"].map(
+            lambda v: v is False or v == 0 or str(v).strip().lower() == "false"
+        ).fillna(False).astype(bool)
+        df_raw.loc[_below_200dma, "strategy_bucket"] = "contrarian_watchlist"
+        logger.info(
+            "strategy_bucket: %d core_candidate / %d contrarian_watchlist (below 200DMA)",
+            int((df_raw["strategy_bucket"] == "core_candidate").sum()),
+            int(_below_200dma.sum()),
+        )
+
     vm = df_raw["value_metric"].dropna()
     logger.info(
         "value_metric: mean=%.3f  p25=%.3f  p50=%.3f  p75=%.3f  "

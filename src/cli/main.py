@@ -46,10 +46,12 @@ def main(argv: list[str] | None = None) -> None:
 
     from cli.commands import (
         cmd_auto_tune,
+        cmd_auto_tune_all,
         cmd_backtest,
         cmd_config,
         cmd_factor_map,
         cmd_fetch_data,
+        cmd_interaction_screen,
         cmd_list_presets,
         cmd_report,
         cmd_run,
@@ -81,7 +83,7 @@ def main(argv: list[str] | None = None) -> None:
 
     elif cmd == "tune":
         if not rest or not rest[0].isdigit():
-            print("Usage: tune DAYS [--objective sharpe|calmar] [--scope ...] [--preset ...]")
+            print("Usage: tune DAYS [--objective sharpe|calmar|info_ratio] [--scope ...] [--preset ...]")
             sys.exit(1)
         n_days = int(rest[0])
         objective = _flag_value(rest, "--objective") or "sharpe"
@@ -104,6 +106,23 @@ def main(argv: list[str] | None = None) -> None:
         mode = _flag_value(rest, "--mode")
         out_dir = _flag_value(rest, "--output-dir")
         cmd_stability_scan(mode=mode, output_dir=out_dir)
+
+    elif cmd == "interaction-screen":
+        mode = _flag_value(rest, "--mode")
+        out_dir = _flag_value(rest, "--output-dir")
+        profile = _flag_value(rest, "--profile") or "standard"
+        _nd = _flag_value(rest, "--days")
+        n_days = int(_nd) if _nd else 730
+        cmd_interaction_screen(profile=profile, n_days=n_days, mode=mode, output_dir=out_dir)
+
+    elif cmd == "auto-tune-all":
+        mode = _flag_value(rest, "--mode")
+        profile = _flag_value(rest, "--profile") or "standard"
+        _nd = _flag_value(rest, "--days")
+        n_days = int(_nd) if _nd else 730
+        _cl = _flag_value(rest, "--clusters")
+        clusters = [c.strip() for c in _cl.split(",") if c.strip()] if _cl else None
+        cmd_auto_tune_all(profile=profile, n_days=n_days, mode=mode, clusters=clusters)
 
     elif cmd == "report":
         out_dir = _flag_value(rest, "--output-dir") or "reports"
@@ -196,7 +215,11 @@ COMMANDS
   backtest DAYS            Run backtest simulation (--archetype-compare for A/B vs uniform)
   tune DAYS                Single-objective parameter tune (prints diff, no write)
   auto-tune [DAYS]         Dual-objective tune with walk-forward validation (default: 90d)
-  list-presets             Print available tuning presets and exit
+  auto-tune-all            Staged coordinate-ascent over interaction clusters + windowed
+                           validation (--profile quick|standard|deep, --clusters a,b; research only)
+  interaction-screen       Screen which param clusters synergize/clash when co-tuned
+                           (--profile quick|standard|deep; research only)
+  list-presets             Print available tuning presets and exit (presets compose with '+')
   stability-scan           Parameter stability scan (research only, no writes)
   report                   Generate diagnostics report
   update-outcomes          Backfill future returns for past decisions (calibration only)
@@ -213,14 +236,24 @@ OPTIONS (tune / auto-tune)
   --force-apply            Write config.yaml unconditionally
   --llm-review             Add Claude second-opinion review
   --scope SCOPE            overall_strategy (default) or active_sleeve_compounding
-  --preset NAME            Restrict tunable params to a named preset (see list-presets)
+  --preset NAME[+NAME...]  Restrict tunable params to a preset; compose several with '+'
+                           to co-tune their union (e.g. active_exits+active_exit_floors)
+
+OPTIONS (auto-tune-all / interaction-screen)
+  --profile P              quick | standard | deep  (default: standard)
+  --days N                 history window to load (default: 730)
+  --clusters a,b,c         auto-tune-all only: which interaction clusters to co-tune
 
 OPTIONS (any command)
   --config PATH            Use a different YAML config (default: cfg/config.yaml).
                            Useful for cfg/config_<name>.yaml A/B comparisons.
 
+OPTIONS (tune only)
+  --objective sharpe|calmar|info_ratio  Optimization target (default: sharpe). info_ratio = excess-vs-SPY
+                             / tracking-error (active scope). NOTE: `auto-tune` is dual-objective
+                             (averages sharpe+calmar) and ignores --objective.
+
 OPTIONS (all)
-  --objective sharpe|calmar  Optimization target (default: sharpe)
   --mode MODE                Backtest universe selection mode
   --output-dir PATH          Report output directory
 """)

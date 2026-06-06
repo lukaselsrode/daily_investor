@@ -244,6 +244,113 @@ def cmd_stability_scan(
     print(result.summary())
 
 
+def cmd_auto_tune_all(
+    profile: str = "standard",
+    n_days: int = 730,
+    mode: str | None = None,
+    clusters: list[str] | None = None,
+) -> None:
+    """
+    Auto-tune All — staged coordinate-ascent over interaction clusters, then a full
+    windowed validation confirmation. RESEARCH ONLY — never writes config (review the
+    trace + verdict, then apply via the UI or auto-tune --apply on a chosen preset).
+    """
+    from backtesting.data_loader import load_and_precompute
+    from tuning.interaction_screen import DEFAULT_CLUSTERS
+    from tuning.profiles import expand_run_matrix
+    from tuning.staged_tune import run_staged_tune, validate_full_windowed
+
+    _profiles = {
+        "quick":    dict(robustness="quick",    horizon="short", maxiter=6,  popsize=4),
+        "standard": dict(robustness="standard", horizon="mixed", maxiter=10, popsize=6),
+        "deep":     dict(robustness="deep",     horizon="mixed", maxiter=14, popsize=8),
+    }
+    cfg = _profiles.get(profile, _profiles["standard"])
+    sel = clusters or list(DEFAULT_CLUSTERS)
+    run_matrix = expand_run_matrix(cfg["robustness"], cfg["horizon"])
+
+    print(f"\nAuto-tune All — profile={profile}, {n_days}d, clusters={sel}")
+    print("Loading full-universe data …")
+    precomp = load_and_precompute(n_days, mode=mode)
+
+    def _cb(done: int, total: int, label: str) -> None:
+        print(f"  [{done}/{total}] {label}", flush=True)
+
+    staged = run_staged_tune(
+        precomp, clusters=sel, run_matrix=run_matrix, scope="active_sleeve_compounding",
+        maxiter=cfg["maxiter"], popsize=cfg["popsize"], progress_callback=_cb,
+    )
+    print("\nStaged trace:")
+    print(staged.trace_df().to_string(index=False))
+    print(f"\nrobust score: {staged.baseline_score:.4f} (baseline) → {staged.final_score:.4f} "
+          f"(final); accepted clusters: {staged.accepted_clusters or 'none'}")
+
+    print("\nValidating (full windowed confirmation) …")
+    v = validate_full_windowed(precomp, staged.final_params, run_matrix=run_matrix,
+                               scope="active_sleeve_compounding")
+    badge = "✅ CONFIRMED" if v["confirmed"] else "❌ NOT CONFIRMED"
+    print(f"\n{badge}  —  OOS gate: {'pass' if v.get('oos_passed') else 'FAIL'} "
+          f"({'; '.join(v.get('oos_reasons', [])) or 'all gates pass'}); "
+          f"robust={v.get('robust_score', 0):.3f}, overfit={v.get('overfit_score', 1):.0%}")
+    if v.get("horizon_df") is not None:
+        print("\nPer-horizon robustness:")
+        print(v["horizon_df"].to_string(index=False))
+
+
+def cmd_interaction_screen(
+    profile: str = "standard",
+    n_days: int = 730,
+    mode: str | None = None,
+    output_dir: str | None = None,
+) -> None:
+    """
+    Parameter-interaction screener — RESEARCH ONLY, never writes config.
+
+    Measures which interaction-cluster pairs SYNERGIZE vs CLASH when co-tuned, on
+    the full universe with the robust multi-window objective. The full screen is an
+    overnight job; --profile quick runs a fast smoke version.
+    """
+    import os
+
+    from backtesting.data_loader import load_and_precompute
+    from tuning.interaction_screen import DEFAULT_CLUSTERS, screen_interactions
+    from tuning.profiles import expand_run_matrix
+
+    _profiles = {
+        "quick":    dict(robustness="quick",    horizon="short",  maxiter=5,  popsize=4),
+        "standard": dict(robustness="standard", horizon="mixed",  maxiter=8,  popsize=6),
+        "deep":     dict(robustness="deep",     horizon="mixed",  maxiter=12, popsize=8),
+    }
+    cfg = _profiles.get(profile, _profiles["standard"])
+    run_matrix = expand_run_matrix(cfg["robustness"], cfg["horizon"])
+
+    print(f"\nInteraction screen — profile={profile}, {n_days}d, clusters={len(DEFAULT_CLUSTERS)}")
+    print("Loading full-universe data …")
+    precomp = load_and_precompute(n_days, mode=mode)
+
+    def _cb(done: int, total: int) -> None:
+        print(f"  [{done}/{total}] tunes complete", flush=True)
+
+    result = screen_interactions(
+        precomp, run_matrix=run_matrix, scope="active_sleeve_compounding",
+        maxiter=cfg["maxiter"], popsize=cfg["popsize"], progress_callback=_cb,
+    )
+
+    print("\nInteraction matrix (diagonal = marginal robust score; off-diagonal = interaction):")
+    print(result.matrix_df().to_string())
+    print("\nPair verdicts (sorted by synergy):")
+    print(result.pairs_df().to_string(index=False))
+
+    out_dir = output_dir or "reports"
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+        path = os.path.join(out_dir, "interaction_screen.csv")
+        result.pairs_df().to_csv(path, index=False)
+        print(f"\nWrote {path}")
+    except Exception as exc:
+        print(f"Could not write CSV: {exc}")
+
+
 def cmd_report(output_dir: str = "reports") -> None:
     """Run a quick 90-day backtest and print results."""
     from backtesting.engine import BacktestEngine

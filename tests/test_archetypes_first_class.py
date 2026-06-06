@@ -127,9 +127,11 @@ class TestArchetypePresets:
 
     _NAMES = (
         "active_quality_compounders",
+        "active_legacy_turnaround",
         "active_speculative_momentum",
         "active_value_recovery",
         "active_defensive_income",
+        "active_core_default",
         "active_archetype_lifecycle",
         "active_archetype_rotation",
         "active_archetype_alpha",
@@ -148,16 +150,26 @@ class TestArchetypePresets:
 
     def test_lifecycle_unfreezes_24_archetype_slots(self):
         from tuning.constants import _CONFIG_PATH_TO_PARAM_IDX, _get_active_indices
-        active = _get_active_indices(
+        active = set(_get_active_indices(
             scope="active_sleeve_compounding",
             preset="active_archetype_lifecycle",
-        )
-        arch_indices = {
+        ))
+        _bool_suffixes = ("thesis_exit_requires_confirmation", "allow_deeper_drawdown")
+        # The 24 NUMERIC archetype slots (6 archetypes × 4 numeric fields) are unfrozen.
+        numeric_arch = {
             i for p, i in _CONFIG_PATH_TO_PARAM_IDX.items()
-            if p.startswith("archetype_management.")
+            if p.startswith("archetype_management.") and not p.endswith(_bool_suffixes)
         }
-        # All 24 archetype slots should be active under this preset
-        assert arch_indices.issubset(set(active))
+        assert len(numeric_arch) == 24
+        assert numeric_arch.issubset(active)
+        # The appended policy-switch BOOLEAN slots stay frozen — they track config only
+        # and the optimizer must never flip a qualitative switch on noise.
+        bool_arch = {
+            i for p, i in _CONFIG_PATH_TO_PARAM_IDX.items()
+            if p.startswith("archetype_management.") and p.endswith(_bool_suffixes)
+        }
+        assert len(bool_arch) == 12
+        assert bool_arch.isdisjoint(active)
 
 
 # ---------------------------------------------------------------------------
@@ -170,14 +182,16 @@ class TestParamVector:
         # 16 base + 24 archetype + 3 candidate-filter + 3 position-sizing
         # + 1 regime-tilt (46) + 1 mean-reversion blend (47) + 1 low-vol quality blend (48)
         # + 1 residual-momentum blend (49) + 4 DAE exit-floor slots (50-53)
-        # + 3 opportunity-cost slots (54-56). OC is the last group appended.
+        # + 3 opportunity-cost slots (54-56) + 3 rebalance/cooldown slots (57-59)
+        # + 12 appended archetype-boolean slots (60-71, last group: 6 archetypes × 2 flags).
         from tuning.constants import (
-            _OC_FIELDS,
-            _OC_SLOT_OFFSET,
+            _ARCH_BOOL_FIELDS,
+            _ARCH_BOOL_SLOT_OFFSET,
+            _ARCH_KEYS,
             BOUNDS,
             PARAM_NAMES,
         )
-        expected = _OC_SLOT_OFFSET + len(_OC_FIELDS)
+        expected = _ARCH_BOOL_SLOT_OFFSET + len(_ARCH_KEYS) * len(_ARCH_BOOL_FIELDS)
         assert len(PARAM_NAMES) == expected
         assert len(BOUNDS) == expected
 

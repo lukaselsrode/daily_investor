@@ -38,9 +38,36 @@ def _glossary():
 # Public render
 # ---------------------------------------------------------------------------
 
+def _survivorship_toggle() -> None:
+    """Session-level switch: route every backtest AND tune below through the survivorship-free
+    FMP cache (current universe + delisted names) instead of the survivor-only yfinance path.
+    Flips backtest.survivorship_free at runtime so load_and_precompute (and thus all callers —
+    backtests, random windows, the tuner) honour it without per-call plumbing."""
+    import os
+
+    from util import BACKTEST_PARAMS
+    cache_ok = os.path.isdir(
+        os.path.join(os.environ.get("FMP_CACHE_DIR", "data/fmp_cache_adj"), "prices")
+    )
+    sf = st.checkbox(
+        "🧬 Survivorship-free data — include delisted names (removes ~35% bias)",
+        value=bool(BACKTEST_PARAMS.get("survivorship_free", False)),
+        disabled=not cache_ok,
+        help="Loads split-adjusted prices for the current universe PLUS the ~1,890 delisted names "
+             "from the FMP cache (≈2021-2026). The honest view — slower, fewer days available. "
+             "Applies to all backtests and tuning in this section.",
+    )
+    BACKTEST_PARAMS["survivorship_free"] = bool(sf and cache_ok)
+    if not cache_ok:
+        st.caption("⚠ FMP cache (data/fmp_cache_adj/) not found — survivorship-free unavailable.")
+    elif sf:
+        st.caption("✓ Survivorship-free active: backtests & tuning include delisted names.")
+
+
 def render() -> None:
     st.header("✅ Validation")
     _glossary()
+    _survivorship_toggle()
 
     tabs = st.tabs(["▶ Run", "🎯 Tune", "⚙️ Config"])
 
@@ -56,7 +83,7 @@ def render() -> None:
         _wt()
 
     with tabs[2]:
-        inner = st.tabs(["🔍 Diagnostics", "📋 Compare", "🔭 Stability"])
+        inner = st.tabs(["🔍 Diagnostics", "📋 Compare", "🔭 Stability", "🔗 Interactions"])
         with inner[0]:
             from ui.components.config_diagnostics import render as _r
             _r()
@@ -65,4 +92,7 @@ def render() -> None:
             _r()
         with inner[2]:
             from ui.components.stability import render as _r
+            _r()
+        with inner[3]:
+            from ui.components.config_interactions import render as _r
             _r()

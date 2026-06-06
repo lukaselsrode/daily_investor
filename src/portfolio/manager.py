@@ -531,6 +531,16 @@ class PortfolioManager:
             from portfolio.progress_tracker import load_last_progress
             _last_progress = load_last_progress()
 
+        # Consecutive-weak-evaluation streaks for the archetype
+        # `thesis_exit_requires_confirmation` switch. Rewritten each run (below) from the
+        # symbols still signalling weak, so sold / recovered names drop out.
+        _arch_on = ARCHETYPE_PARAMS.get("enabled", False)
+        _weak_prev: dict[str, int] = {}
+        _weak_next: dict[str, int] = {}
+        if _arch_on:
+            from portfolio.thesis_confirm_tracker import load_weak_streak
+            _weak_prev = load_weak_streak()
+
         pending_sells = self._get_pending_sell_symbols()
         if pending_sells:
             logger.info(
@@ -616,7 +626,14 @@ class PortfolioManager:
                 peak_price=peaks.get(symbol),
                 archetype_policy=_arch_policy,
                 stall_days=_stall_days,
+                weak_streak=_weak_prev.get(symbol, 0),
             )
+
+            # Carry forward the thesis-weak streak; symbols not in a weak streak (sold,
+            # recovered, or never weak) simply don't get re-added and so drop from the store.
+            _wk_next = decision.get("weak_streak_next")
+            if _wk_next:
+                _weak_next[symbol] = int(_wk_next)
 
             _all_evaluated[symbol] = {
                 "data": data,
@@ -636,6 +653,10 @@ class PortfolioManager:
         if _oc_enabled:
             from portfolio.progress_tracker import save_last_progress
             save_last_progress(_last_progress)
+
+        if _arch_on:
+            from portfolio.thesis_confirm_tracker import save_weak_streak
+            save_weak_streak(_weak_next)
 
         logger.info(
             f"Sell scan: {scanned} holdings scanned | "

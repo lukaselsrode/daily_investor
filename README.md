@@ -216,7 +216,9 @@ daily-investor COMMAND [OPTIONS]
 | `backtest DAYS` | Run backtest simulation |
 | `tune DAYS` | Single-objective parameter tune — prints diff, no write |
 | `auto-tune [DAYS]` | Dual-objective tune with walk-forward validation (default: 90d) |
-| `list-presets` | Print available tuning presets and exit |
+| `auto-tune-all` | Staged coordinate-ascent over interaction clusters + full windowed validation (`--profile`, `--clusters`) — research only |
+| `interaction-screen` | Screen which param clusters synergize/clash when co-tuned (`--profile quick\|standard\|deep`) — research only |
+| `list-presets` | Print available tuning presets and exit (presets compose with `+`) |
 | `stability-scan` | Parameter stability scan across multiple windows — research only, no writes |
 | `report` | Run a quick 90-day backtest and print results |
 | `update-outcomes` | Backfill realized future returns for past decisions — calibration only, never touches live scoring |
@@ -239,9 +241,15 @@ auto-tune:
 
 all:
   --mode MODE              liquid_universe_full | walk_forward_price_only_test | current_universe_stress_test
-  --objective sharpe|calmar
+  --objective sharpe|calmar|info_ratio   (info_ratio = excess-vs-SPY / tracking-error; active scope)
   --output-dir PATH
 ```
+
+**Survivorship-free backtesting.** Set `backtest.survivorship_free: true` in `cfg/config.yaml`
+(or tick the "🧬 Survivorship-free data" box in the UI Validation tab) to run every backtest and
+tune against split-adjusted prices for the current universe **plus the delisted names** from the
+FMP cache (`data/fmp_cache_adj/`), removing the ~35% survivorship inflation. Requires the cache to
+be populated (see `src/data/fmp_client.py`); falls back to yfinance with a warning if it is absent.
 
 ---
 

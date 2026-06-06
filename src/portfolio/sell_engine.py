@@ -24,9 +24,23 @@ import pandas as pd
 from core.types import SellDecision
 from portfolio.exit_analysis import is_progress
 from portfolio.position_archetypes import ArchetypePolicy
-from util import ARCHETYPE_PARAMS, EXIT_DECISION_PARAMS, METRIC_THRESHOLD, SELL_RULES, safe_float
+from util import (
+    ARCHETYPE_PARAMS,
+    CONVICTION_HOLDS,
+    EXIT_DECISION_PARAMS,
+    METRIC_THRESHOLD,
+    SELL_RULES,
+    safe_float,
+)
 
 logger = logging.getLogger(__name__)
+
+# Archetype `allow_deeper_drawdown`: widen the catastrophic hard stop for flagged
+# archetypes. Archetype `thesis_exit_requires_confirmation`: a soft thesis exit must
+# persist this many consecutive sell-scans before it fires. Same keys/defaults as the
+# simulator (backtesting.simulator), so live and backtest stay in lock-step.
+_DEEPER_DD_FACTOR = float(SELL_RULES.get("allow_deeper_drawdown_factor", 1.5))
+_THESIS_CONFIRM_EVALS = int(SELL_RULES.get("thesis_exit_confirm_evals", 2))
 
 
 class SellDecisionEngine:
@@ -45,6 +59,7 @@ class SellDecisionEngine:
         peak_price: float | None = None,
         archetype_policy: ArchetypePolicy | None = None,
         stall_days: int | None = None,
+        weak_streak: int = 0,
     ) -> SellDecision:
         # Derive percent_change — Robinhood returns it as a percentage string e.g. "-15.3"
         percent_change: float | None = None
@@ -101,18 +116,39 @@ class SellDecisionEngine:
             yield_trap_flag=yield_trap_flag,
         )
 
+        # ── Conviction hold (discretionary override) ────────────────────────
+        # Symbols the human has pinned (config `discretionary.conviction_holds`) are NEVER auto-sold —
+        # their forward thesis (turnaround, AI inflection, …) is something the momentum-based rules
+        # below cannot see. This wins over every sell condition, including stop-loss.
+        if symbol.upper() in CONVICTION_HOLDS:
+            return SellDecision(
+                symbol=symbol,
+                should_sell=False,
+                reason="conviction hold (discretionary.conviction_holds) — sell rules skipped",
+                severity=None,
+                exit_type=None,
+                **base,
+            )
+
         # ── Hard sells ──────────────────────────────────────────────────────
 
         _arch_active = _arch_enabled and archetype_policy is not None
 
-        if percent_change is not None and percent_change <= stop_loss:
+        # Archetype allow_deeper_drawdown: widen the catastrophic hard stop for flagged
+        # archetypes so high-conviction names get room before a failure exit.
+        _eff_stop_loss = stop_loss
+        _stop_source = "global_rule"
+        if _arch_active and archetype_policy.allow_deeper_drawdown:
+            _eff_stop_loss = stop_loss * _DEEPER_DD_FACTOR
+            _stop_source = "archetype_rule"
+        if percent_change is not None and percent_change <= _eff_stop_loss:
             return SellDecision(
                 symbol=symbol,
                 should_sell=True,
-                reason=f"stop loss breached ({percent_change:.1%} ≤ {stop_loss:.1%})",
+                reason=f"stop loss breached ({percent_change:.1%} ≤ {_eff_stop_loss:.1%})",
                 severity="hard",
                 exit_type="failure_exit",
-                decision_source="global_rule",
+                decision_source=_stop_source,
                 **base,
             )
 
@@ -217,13 +253,36 @@ class SellDecisionEngine:
         if value_metric is not None and value_metric < sell_weak:
             if days_held is None or days_held >= min_days:
                 days_str = f"{days_held}d" if days_held is not None else "unknown days"
+                _new_streak = int(weak_streak or 0) + 1
+                # Archetype thesis_exit_requires_confirmation: a flagged position must show
+                # the weak signal for _THESIS_CONFIRM_EVALS consecutive sell-scans before it
+                # exits — a single weak reading never dumps a compounder. Persist the streak.
+                if (
+                    _arch_active
+                    and archetype_policy.thesis_exit_requires_confirmation
+                    and _new_streak < _THESIS_CONFIRM_EVALS
+                ):
+                    return SellDecision(
+                        symbol=symbol,
+                        should_sell=False,
+                        reason=(
+                            f"thesis weakening (value_metric={value_metric:.3f} < {sell_weak}) "
+                            f"— awaiting confirmation ({_new_streak}/{_THESIS_CONFIRM_EVALS})"
+                        ),
+                        severity=None,
+                        exit_type=None,
+                        decision_source="archetype_rule",
+                        weak_streak_next=_new_streak,
+                        **base,
+                    )
                 return SellDecision(
                     symbol=symbol,
                     should_sell=True,
                     reason=f"value_metric={value_metric:.3f} < {sell_weak} (held {days_str})",
                     severity="soft",
                     exit_type="thesis_exit",
-                    decision_source="global_rule",
+                    decision_source=("archetype_rule" if _arch_active else "global_rule"),
+                    weak_streak_next=_new_streak,
                     **base,
                 )
 
@@ -318,13 +377,16 @@ def evaluate_sell_candidate(
     peak_price: float | None = None,
     archetype_policy: ArchetypePolicy | None = None,
     stall_days: int | None = None,
+    weak_streak: int = 0,
 ) -> dict:
     """
     Module-level wrapper around SellDecisionEngine.evaluate() that returns a
     plain dict. Keeps main.py callers working while the class-based API is
     the canonical interface going forward.
     """
-    d = _engine.evaluate(symbol, holding, metrics_row, peak_price, archetype_policy, stall_days)
+    d = _engine.evaluate(
+        symbol, holding, metrics_row, peak_price, archetype_policy, stall_days, weak_streak,
+    )
     return {
         "should_sell":    d.should_sell,
         "reason":         d.reason,
@@ -336,4 +398,5 @@ def evaluate_sell_candidate(
         "quality_score":  d.quality_score,
         "yield_trap_flag": d.yield_trap_flag,
         "decision_source": d.decision_source,
+        "weak_streak_next": d.weak_streak_next,
     }

@@ -15,6 +15,7 @@ import numpy as np
 
 from util import (
     ARCHETYPE_PARAMS,
+    BACKTEST_PARAMS,
     CANDIDATE_SELECTION_PARAMS,
     EXIT_DECISION_PARAMS,
     INDEX_PCT,
@@ -57,6 +58,15 @@ _ARCH_FIELDS: tuple[tuple[str, str, tuple[float, float]], ...] = (
     ("trim_profit_threshold",    "trim",    (0.05, 0.50)),
     ("trailing_stop_pct",        "trail",   (-0.25, -0.04)),
     ("minimum_hold_days",        "hold",    (1.0, 60.0)),
+)
+# Per-archetype policy-switch BOOLEANS. They live in a SEPARATE slot group appended at
+# the very end of the vector (not interleaved into _ARCH_FIELDS) so the existing slot
+# layout — and the many index-based reads in the simulator hot path — never shift.
+# Round-tripped as 0/1 so config changes flow into the backtest faithfully; frozen by
+# default (the optimizer must never flip a qualitative policy switch on noise).
+_ARCH_BOOL_FIELDS: tuple[tuple[str, str], ...] = (
+    ("thesis_exit_requires_confirmation", "confirm"),
+    ("allow_deeper_drawdown",             "deepdd"),
 )
 
 _MIN_TRADES_HARD = 20
@@ -314,6 +324,69 @@ def _opportunity_cost_default_frozen_indices() -> set[int]:
     }
 
 
+# ── Append rebalance-cadence / cooldown slots 57-59 ────────────────────────
+# Backtest rebalance cadence + post-sell/post-stopout re-buy cooldowns — the
+# params the simulator actually consumes (NOT candidate_rotation.buy_cooldown_days,
+# which is a live-only key the sim does not read). All ints. Frozen by default;
+# the `active_rebalance_cooldown` preset unfreezes them.
+_REBAL_SLOT_OFFSET = len(PARAM_NAMES)
+_REBAL_FIELDS: tuple[tuple[str, str, tuple[float, float]], ...] = (
+    # (PARAM_NAMES entry, config path, bounds)
+    ("rb_rebalance_frequency_days",    "backtest.rebalance_frequency_days",    (1.0, 21.0)),
+    ("rb_cooldown_days_after_sell",    "backtest.cooldown_days_after_sell",    (0.0, 15.0)),
+    ("rb_cooldown_days_after_stopout", "backtest.cooldown_days_after_stopout", (0.0, 30.0)),
+)
+for _i, (_name, _path, _bnd) in enumerate(_REBAL_FIELDS):
+    PARAM_NAMES.append(_name)
+    BOUNDS.append(_bnd)
+    _CONFIG_PATH_TO_PARAM_IDX[_path] = _REBAL_SLOT_OFFSET + _i
+
+
+def rebalance_cfg_from_params(params) -> dict:
+    """
+    Build a rebalance-cadence / cooldown override dict from the slots in *params*,
+    keyed by the bare field name (all values rounded to int). Returns {} when params
+    lacks the appended slots (len <= offset), so plain backtests read config.
+    """
+    if params is None or len(params) <= _REBAL_SLOT_OFFSET:
+        return {}
+    out: dict = {}
+    for _i, (_, _path, _) in enumerate(_REBAL_FIELDS):
+        _idx = _REBAL_SLOT_OFFSET + _i
+        if _idx < len(params):
+            out[_path.split(".")[-1]] = max(0, round(float(params[_idx])))
+    # rebalance cadence must be >= 1 day
+    if "rebalance_frequency_days" in out:
+        out["rebalance_frequency_days"] = max(1, out["rebalance_frequency_days"])
+    return out
+
+
+def _rebalance_default_frozen_indices() -> set[int]:
+    """Rebalance/cooldown slots default to frozen — unfrozen only via active_rebalance_cooldown."""
+    _paths = {p for _, p, _ in _REBAL_FIELDS}
+    return {
+        _idx for _path, _idx in _CONFIG_PATH_TO_PARAM_IDX.items()
+        if _path in _paths
+    }
+
+
+# ── Append per-archetype policy-switch BOOLEAN slots (a single group at the very END
+# of the vector, so no existing slot index moves and the simulator's many index-based
+# tail reads stay valid). 6 archetypes × 2 booleans = 12 slots. Paths reuse the
+# archetype_management.<arch>.<field> convention so the classifier + archetype_cfg_from_params
+# pick them up; they are frozen by default (already covered by _archetype_default_frozen_indices,
+# which freezes every archetype_management.* path) and intentionally NOT in presets._ARCH_FIELDS.
+_ARCH_BOOL_SLOT_OFFSET = len(PARAM_NAMES)
+for _ai, _alabel in enumerate(_ARCH_KEYS):
+    _short = _ARCH_SHORT[_alabel]
+    for _fi, (_field, _suffix) in enumerate(_ARCH_BOOL_FIELDS):
+        PARAM_NAMES.append(f"arch_{_short}_{_suffix}")
+        BOUNDS.append((0.0, 1.0))
+        _CONFIG_PATH_TO_PARAM_IDX[f"archetype_management.{_alabel}.{_field}"] = (
+            _ARCH_BOOL_SLOT_OFFSET + _ai * len(_ARCH_BOOL_FIELDS) + _fi
+        )
+
+
 def position_sizing_cfg_from_params(params) -> dict:
     """
     Build a position-sizing override dict from the sizing slots in *params*.
@@ -390,6 +463,12 @@ def archetype_cfg_from_params(params) -> dict:
                     entry[_field] = min(_v, -0.01)
                 else:
                     entry[_field] = _v
+        # Policy-switch booleans from the appended tail group (absent in legacy vectors,
+        # in which case the classifier falls back to its hardcoded per-archetype defaults).
+        for _bi, (_bfield, _) in enumerate(_ARCH_BOOL_FIELDS):
+            _bidx = _ARCH_BOOL_SLOT_OFFSET + _ai * len(_ARCH_BOOL_FIELDS) + _bi
+            if _bidx < len(params):
+                entry[_bfield] = bool(round(float(params[_bidx])))
         trim = entry.get("trim_profit_threshold")
         harv = entry.get("harvest_profit_threshold")
         if trim is not None and harv is not None and harv < trim + 0.01:
@@ -447,6 +526,8 @@ def _get_active_indices(scope: str = "overall_strategy", preset: str | None = No
     frozen |= _exit_floor_default_frozen_indices()
     # Opportunity-cost stall slots are frozen-by-default; active_opportunity_cost unfreezes them.
     frozen |= _opportunity_cost_default_frozen_indices()
+    # Rebalance/cooldown slots are frozen-by-default; active_rebalance_cooldown unfreezes them.
+    frozen |= _rebalance_default_frozen_indices()
     if preset is not None:
         from .presets import apply_preset_to_frozen
         frozen = apply_preset_to_frozen(frozen, preset)
@@ -563,4 +644,22 @@ def _current_params() -> np.ndarray:
         if _default is None:
             _default = (_bnd[0] + _bnd[1]) / 2.0
         oc_tail.append(float(_default))
-    return np.array(base + arch_tail + cs_tail + ps_tail + regime_tail + ef_tail + oc_tail)
+    # Rebalance/cooldown slots 57-59 — read from BACKTEST_PARAMS.
+    rb_tail: list[float] = []
+    for _name, _path, _bnd in _REBAL_FIELDS:
+        _field = _path.split(".", 1)[1]
+        _default = (BACKTEST_PARAMS or {}).get(_field)
+        if _default is None:
+            _default = (_bnd[0] + _bnd[1]) / 2.0
+        rb_tail.append(float(_default))
+    # Appended per-archetype policy-switch booleans (0/1), read from config. Absent in
+    # config → 0.0 (False); the shipped config sets all of them explicitly.
+    arch_bool_tail: list[float] = []
+    for _alabel in _ARCH_KEYS:
+        entry = (ARCHETYPE_PARAMS or {}).get(_alabel, {}) or {}
+        for _bfield, _ in _ARCH_BOOL_FIELDS:
+            arch_bool_tail.append(1.0 if bool(entry.get(_bfield, False)) else 0.0)
+    return np.array(
+        base + arch_tail + cs_tail + ps_tail + regime_tail
+        + ef_tail + oc_tail + rb_tail + arch_bool_tail
+    )

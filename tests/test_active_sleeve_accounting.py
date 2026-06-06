@@ -486,3 +486,53 @@ class TestActiveEquityCurveCABasis:
             assert abs(indexed_start - 100.0) < 1e-6, (
                 f"{label} curve does not normalize to 100 at start: {indexed_start:.6f}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Tests: params=None resolves to the LIVE 60-slot config, not the 16-slot base
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(not _HAS_SIM, reason="simulator not importable")
+class TestReportDefaultParamsAreLiveConfig:
+    """Regression: run_backtest_report(params=None) must simulate the strategy that
+    would actually trade — the full 60-slot ``tuning.constants._current_params`` (which
+    bakes in archetypes + the extended exit/opp-cost/rebalance config) — NOT the stripped
+    16-slot ``get_default_params`` base.
+
+    Bug history: the UI/CLI Validation backtest defaulted params to get_default_params()
+    (16-slot, archetypes OFF), so the displayed numbers reflected a *different* strategy
+    than the deployed one. Pin the seam so a None default can never silently revert.
+    """
+
+    def _rising_precomp(self):
+        # Mild upward drift so the two configs produce a non-trivial, comparable result.
+        row = np.linspace(100.0, 115.0, _N_DAYS)
+        prices = np.column_stack([row] * _N_STOCKS)
+        return _make_precomp(stock_prices=prices)
+
+    def test_none_params_match_current_params_not_default(self):
+        from backtesting.simulator import run_backtest_report, split_price_window
+        from tuning.constants import _current_params
+        from util import BACKTEST_PARAMS
+
+        precomp = self._rising_precomp()
+        train_sl, val_sl = split_price_window(_N_DAYS, train_pct=BACKTEST_PARAMS["train_pct"])
+
+        rep_none    = run_backtest_report(precomp, None, train_sl, val_sl)
+        rep_current = run_backtest_report(precomp, _current_params(), train_sl, val_sl)
+
+        # The None-default seam is the LIVE 60-slot config: identical results.
+        assert rep_none.train_result.total_return == pytest.approx(
+            rep_current.train_result.total_return, abs=1e-9
+        )
+        assert rep_none.train_result.trades_made == rep_current.train_result.trades_made
+        assert rep_none.train_result.sharpe == pytest.approx(
+            rep_current.train_result.sharpe, abs=1e-9
+        )
+
+    def test_default_params_vector_is_full_slot_space(self):
+        from tuning.constants import PARAM_NAMES, _current_params
+
+        # The live config vector the report defaults to is the full slot space
+        # (kept layout-derived so it survives appended slot groups).
+        assert len(_current_params()) == len(PARAM_NAMES)

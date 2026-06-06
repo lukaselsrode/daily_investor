@@ -74,8 +74,14 @@ class TestSellRulesFromConfig:
     def test_take_profit_is_positive(self):
         assert SELL_RULES["take_profit_pct"] > 0
 
-    def test_sell_weak_value_is_positive(self):
-        assert SELL_RULES["sell_weak_value_below"] > 0
+    def test_sell_weak_value_in_valid_score_range(self):
+        # sell_weak_value_below is a threshold on the peer-relative composite score, which is
+        # clamped to ~[-1, 1.5]. It must be a valid point on that scale to be a meaningful gate.
+        # NOT required to be positive: a negative threshold ("only sell clearly-below-median
+        # names, hold the rest") is a valid, tuned exit policy (regime-robust exit tune, 2026-06).
+        clamp_lo = SCORING_PARAMS["momentum_inputs"]["clamp_low"]
+        clamp_hi = SCORING_PARAMS["momentum_inputs"]["clamp_high"]
+        assert clamp_lo <= SELL_RULES["sell_weak_value_below"] <= clamp_hi
 
     def test_minimum_hold_days_is_nonnegative(self):
         assert RISK_LIMITS["minimum_hold_days"] >= 0

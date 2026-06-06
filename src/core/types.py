@@ -65,6 +65,10 @@ class SellDecision:
     yield_trap_flag: bool | None
     trim_fraction: float | None = None
     decision_source: str = ""   # "global_rule" | "archetype_rule" | "both" | ""
+    # Updated consecutive-weak-evaluation streak to persist, for the archetype
+    # `thesis_exit_requires_confirmation` switch. None → the position is not in a weak
+    # streak (caller resets to 0); an int → the new streak count to store.
+    weak_streak_next: int | None = None
 
 
 # ---------------------------------------------------------------------------

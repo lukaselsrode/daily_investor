@@ -82,17 +82,44 @@ def _add_diversification_scores(df: pd.DataFrame, factors: list[str]) -> pd.Data
 
 
 def _classify(df: pd.DataFrame, metric_threshold: float) -> pd.DataFrame:
+    """
+    Tag each row with `_role` ∈ {owned, candidate, universe}, matching the LIVE buy
+    gate. A candidate is an UNOWNED name in the top `top_percentile` of value_metric
+    that clears the quality + momentum floors and is not on the contrarian watchlist
+    (CANDIDATE_SELECTION_PARAMS — the same gate select_candidates() uses).
+
+    NB: value_metric is peer-relative, normalized to roughly [-1, 1]; the old code
+    compared it to `metric_threshold` (~1.15, a backtest-scale composite cutoff), which
+    is unreachable on this scale and produced ZERO candidates — an empty centroid and
+    no candidate features. `metric_threshold` is retained only as a display caption.
+    """
     df = df.copy()
     owned_mask = df["owned"].astype(bool) if "owned" in df.columns else pd.Series(False, index=df.index)
 
     cand_mask = pd.Series(False, index=df.index)
-    if "strategy_bucket" in df.columns and "value_metric" in df.columns:
-        vm = pd.to_numeric(df["value_metric"], errors="coerce").fillna(-999)
-        cand_mask = (
-            (df["strategy_bucket"] == "core_candidate")
-            & (vm >= metric_threshold)
-            & ~owned_mask
-        )
+    if "value_metric" in df.columns:
+        from util import CANDIDATE_SELECTION_PARAMS as _cs
+        vm = pd.to_numeric(df["value_metric"], errors="coerce")
+        unowned_vm = vm[~owned_mask].dropna()
+        if not unowned_vm.empty:
+            top_pct = float(_cs.get("top_percentile", 0.15))
+            cutoff = float(unowned_vm.quantile(max(0.0, min(1.0, 1.0 - top_pct))))
+            min_q = float(_cs.get("min_quality_score", 0.30))
+            min_m = float(_cs.get("min_momentum_score", -0.10))
+            qual = (pd.to_numeric(df["quality_score"], errors="coerce")
+                    if "quality_score" in df.columns else pd.Series(min_q, index=df.index))
+            mom = (pd.to_numeric(df["momentum_score"], errors="coerce")
+                   if "momentum_score" in df.columns else pd.Series(min_m, index=df.index))
+            cand_mask = (
+                (vm >= cutoff)
+                & (qual.fillna(min_q - 1.0) >= min_q)
+                & (mom.fillna(min_m - 1.0) >= min_m)
+                & ~owned_mask
+            )
+            # Exclude contrarian/downtrend names — the core candidate set is the
+            # momentum-confirmed buys, not the whole top-percentile cheap cohort.
+            if "strategy_bucket" in df.columns:
+                cand_mask &= (df["strategy_bucket"] == "core_candidate")
 
     df["_role"] = "universe"
     df.loc[cand_mask,  "_role"] = "candidate"
@@ -430,7 +457,7 @@ def _render_portfolio_lens(df: pd.DataFrame, metric_threshold: float) -> None:
 
     st.caption(
         f"**Universe** {n_univ:,}  ·  "
-        f"**Candidates** {n_cand} ▲ (score ≥ {metric_threshold}, unowned)  ·  "
+        f"**Candidates** {n_cand} ▲ (top-percentile value, momentum+quality floors, unowned, non-contrarian)  ·  "
         f"**Owned** {n_owned} ◆"
     )
 
@@ -489,7 +516,7 @@ def _render_portfolio_lens(df: pd.DataFrame, metric_threshold: float) -> None:
     with t1:
         cands = df[df["_role"] == "candidate"].copy()
         if cands.empty:
-            st.info(f"No unowned candidates above score threshold ({metric_threshold}).")
+            st.info("No unowned candidates clear the live buy gate (top-percentile value + momentum/quality floors, non-contrarian).")
         else:
             show = [c for c in [
                 "symbol", "sector",

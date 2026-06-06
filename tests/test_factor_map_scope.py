@@ -63,11 +63,18 @@ def _make_universe(n_stocks: int = 24) -> pd.DataFrame:
         rng.uniform(0.2, 0.5, len(_ETF_TICKERS)),
         rng.uniform(0.0, 0.6, n_stocks),
     ])
-    # Two unowned candidate stocks that clear the threshold.
+    quality_score = rng.uniform(-0.4, 0.9, n)
+    momentum_score = rng.uniform(-0.5, 0.8, n)
+    # Two unowned candidate stocks that clear the live candidate gate: top-percentile
+    # value_metric + quality ≥ min_quality_score + momentum ≥ min_momentum_score
+    # (CANDIDATE_SELECTION_PARAMS). Set the gate inputs explicitly so they pass
+    # deterministically. The remaining stocks stay bucket="core" → never candidates.
     cand_idx = [len(_ETF_TICKERS) + 5, len(_ETF_TICKERS) + 6]
     for ci in cand_idx:
         bucket[ci] = "core_candidate"
-        value_metric[ci] = 0.85
+        value_metric[ci] = 0.85    # top of the distribution
+        quality_score[ci] = 0.70   # clears min_quality_score (0.30)
+        momentum_score[ci] = 0.50  # clears min_momentum_score (-0.10)
 
     return pd.DataFrame({
         "symbol":          symbols,
@@ -76,8 +83,8 @@ def _make_universe(n_stocks: int = 24) -> pd.DataFrame:
         "sector":          ["Index"] * len(_ETF_TICKERS) + ["Technology"] * n_stocks,
         "value_metric":    value_metric,
         "value_score":     rng.uniform(-0.5, 0.8, n),
-        "quality_score":   rng.uniform(-0.4, 0.9, n),
-        "momentum_score":  rng.uniform(-0.5, 0.8, n),
+        "quality_score":   quality_score,
+        "momentum_score":  momentum_score,
         "income_score":    rng.uniform(0.0, 0.8, n),
     })
 
@@ -195,6 +202,32 @@ def test_active_sleeve_excludes_etfs():
     sleeve, _ = apply_scope(df, "Active sleeve only", _CONFIG, _METRIC_THRESHOLD)
     assert not set(sleeve["symbol"]) & set(_ETF_TICKERS)
     assert set(sleeve["_role"]) <= {"owned", "candidate"}
+
+
+def test_classify_candidates_are_percentile_based_not_absolute_threshold():
+    """Regression: value_metric is peer-relative (~[-1,1]); candidate selection must be
+    percentile/gate-based, NOT an absolute `value_metric >= metric_threshold` test.
+    A high metric_threshold (1.15, unreachable on this scale) must STILL find candidates."""
+    from ui.components.factor_map import _classify
+    df = _make_universe()
+    out = _classify(df, metric_threshold=1.15)  # 1.15 > max value_metric (0.85)
+    cands = out[out["_role"] == "candidate"]
+    assert len(cands) == 2, "percentile gate must still surface candidates (old absolute threshold gave 0)"
+    assert (cands["value_metric"] < 1.15).all()  # proves it's not the absolute test
+
+
+def test_classify_excludes_contrarian_watchlist():
+    """A contrarian_watchlist (downtrend) name must NOT be a core candidate even if its
+    value_metric is top-of-distribution and it clears the floors."""
+    from ui.components.factor_map import _classify
+    df = _make_universe()
+    # flip one of the two core_candidates to the contrarian bucket
+    cand_syms = df[df["strategy_bucket"] == "core_candidate"]["symbol"].tolist()
+    df.loc[df["symbol"] == cand_syms[0], "strategy_bucket"] = "contrarian_watchlist"
+    out = _classify(df, metric_threshold=_METRIC_THRESHOLD)
+    roles = dict(zip(out["symbol"], out["_role"]))
+    assert roles[cand_syms[0]] != "candidate"   # contrarian excluded
+    assert roles[cand_syms[1]] == "candidate"    # core candidate still in
 
 
 def test_full_universe_unchanged():

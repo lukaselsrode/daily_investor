@@ -1,0 +1,27 @@
+{
+  "run_label": "backtest_2026-06-03_20-23_4e784279e6ae",
+  "config_hash": "4e784279e6ae",
+  "run_timestamp": "2026-06-03T20:23:07",
+  "scope": "active_sleeve_compounding",
+  "mode": "liquid_universe_full",
+  "universe": "liquid_all",
+  "lookahead_bias": "MEDIUM",
+  "n_symbols": 2157,
+  "n_days": 489,
+  "notes": [
+    "Lookahead bias: MEDIUM",
+    "Archetype-aware exit thresholds active"
+  ],
+  "train_return": 0.35579155613830027,
+  "benchmark_return": 0.49292276309337524,
+  "excess_return": -0.13713120695507497,
+  "files": {
+    "metrics": "backtest_2026-06-03_20-23_4e784279e6ae_metrics.csv",
+    "equity": "backtest_2026-06-03_20-23_4e784279e6ae_equity.csv",
+    "trades": "backtest_2026-06-03_20-23_4e784279e6ae_trades.csv"
+  },
+  "active_total_return": 0.09603042641294501,
+  "active_sharpe": 0.3574059884080358,
+  "active_max_drawdown": -0.16725121107543472,
+  "active_excess_return": -0.39689233668042934
+}

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+import os
 
 import numpy as np
 import pandas as pd
@@ -158,6 +159,7 @@ def load_and_precompute(
     min_volume: float | None = None,
     random_seed: int | None = None,
     benchmark_symbol: str | None = None,
+    survivorship_free: bool | None = None,
 ) -> PrecomputedData:
     """
     Load fundamentals and download price history.
@@ -179,6 +181,20 @@ def load_and_precompute(
     min_volume         = min_volume         if min_volume is not None else BACKTEST_PARAMS["min_volume"]
     random_seed        = random_seed        if random_seed is not None else BACKTEST_PARAMS["random_seed"]
     benchmark_symbol   = benchmark_symbol   or BACKTEST_PARAMS["benchmark_symbol"]
+    # Survivorship-free flag: explicit arg wins, else the config default (so UI/CLI/tuner/engine all
+    # honour `backtest.survivorship_free` without each call site needing to pass it). Degrade to the
+    # yfinance path with a warning if the FMP cache is absent, so a missing cache never hard-fails.
+    if survivorship_free is None:
+        survivorship_free = bool(BACKTEST_PARAMS.get("survivorship_free", False))
+    if survivorship_free:
+        _sf_dir = os.environ.get("FMP_CACHE_DIR", "data/fmp_cache_adj")
+        if not os.path.isdir(os.path.join(_sf_dir, "prices")):
+            logger.warning(
+                "survivorship_free requested but FMP cache %s missing — falling back to yfinance. "
+                "Populate the cache (data.fmp_client backfill) to enable survivorship-free backtests.",
+                _sf_dir,
+            )
+            survivorship_free = False
 
     agg_df = read_data_as_pd("agg_data")
     if agg_df is None or agg_df.empty:
@@ -204,35 +220,54 @@ def load_and_precompute(
     etf_list          = [e for e in ETFS if e not in set(symbols)]
     benchmark_tickers = [benchmark_symbol] if benchmark_symbol not in set(symbols + etf_list) else []
 
-    n_cal_days = int(n_days * 1.6) + 30
-    end_date   = datetime.date.today()
-    start_date = end_date - datetime.timedelta(days=n_cal_days)
+    _sf_dollar_vol = None  # survivorship-free causal dollar-volume (symbol-keyed DataFrame)
+    if survivorship_free:
+        # Survivorship-free path: split-adjusted prices from the FMP cache for the current
+        # universe PLUS the liquid delisted names (prices to delisting). Replaces the yfinance
+        # download; downstream array machinery is unchanged. See backtesting/survivorship.py.
+        from .survivorship import assemble
+        closes, agg_df, _sf_dollar_vol = assemble(agg_df, symbols, etf_list, benchmark_symbol, n_days)
+        symbols = agg_df["symbol"].tolist()
+        lookahead_bias = "SURVIVORSHIP_FREE"
+        # The FMP cache spans ~2021-2026; if the caller asked for more days than exist, cap to what
+        # we have (with a warning) instead of hard-failing the downstream `len(closes) < n_days` check.
+        if len(closes) < n_days:
+            logger.warning(
+                "survivorship_free: requested %d days but FMP cache has %d — capping to %d.",
+                n_days, len(closes), len(closes),
+            )
+            n_days = len(closes)
+        print(f"Survivorship-free load: {closes.shape[1]} symbols × {len(closes)} days (FMP cache)")
+    else:
+        n_cal_days = int(n_days * 1.6) + 30
+        end_date   = datetime.date.today()
+        start_date = end_date - datetime.timedelta(days=n_cal_days)
 
-    all_tickers = symbols + etf_list + benchmark_tickers
-    yf_map      = {_yf_ticker(t): t for t in all_tickers}
-    yf_tickers  = list(yf_map.keys())
+        all_tickers = symbols + etf_list + benchmark_tickers
+        yf_map      = {_yf_ticker(t): t for t in all_tickers}
+        yf_tickers  = list(yf_map.keys())
 
-    print(
-        f"Downloading price history for {len(yf_tickers)} tickers "
-        f"({n_days} trading days, mode={mode}, bias={lookahead_bias}) …"
-    )
+        print(
+            f"Downloading price history for {len(yf_tickers)} tickers "
+            f"({n_days} trading days, mode={mode}, bias={lookahead_bias}) …"
+        )
 
-    raw = yf.download(
-        yf_tickers,
-        start=start_date.isoformat(),
-        end=end_date.isoformat(),
-        progress=False,
-        auto_adjust=True,
-        threads=False,
-    )
-    if raw.empty:
-        raise RuntimeError("yfinance returned no data.")
+        raw = yf.download(
+            yf_tickers,
+            start=start_date.isoformat(),
+            end=end_date.isoformat(),
+            progress=False,
+            auto_adjust=True,
+            threads=False,
+        )
+        if raw.empty:
+            raise RuntimeError("yfinance returned no data.")
 
-    closes = _extract_closes(raw, yf_tickers)
+        closes = _extract_closes(raw, yf_tickers)
 
-    rename_back = {yf_t: orig for yf_t, orig in yf_map.items() if yf_t != orig}
-    if rename_back:
-        closes.rename(columns=rename_back, inplace=True)
+        rename_back = {yf_t: orig for yf_t, orig in yf_map.items() if yf_t != orig}
+        if rename_back:
+            closes.rename(columns=rename_back, inplace=True)
 
     if len(closes) < n_days:
         raise RuntimeError(
@@ -242,7 +277,13 @@ def load_and_precompute(
     closes = closes.iloc[-n_days:]
 
     stock_cols = [s for s in symbols  if s in closes.columns and closes[s].notna().any()]
-    etf_cols   = [e for e in etf_list if e in closes.columns and closes[e].notna().any()]
+    # ETFs back the index sleeve and are routed into from day 0, so a sparse ETF that is NaN at the
+    # window start (e.g. a recently-listed ETF in a survivorship-free load) would poison the portfolio
+    # mark-to-market into NaN. Require ETFs to have a valid price for most of the window AND at day 0.
+    etf_cols   = [
+        e for e in etf_list
+        if e in closes.columns and pd.notna(closes[e].iloc[0]) and closes[e].notna().mean() > 0.8
+    ]
 
     if not stock_cols:
         raise RuntimeError("No usable stock price data after download.")
@@ -259,6 +300,12 @@ def load_and_precompute(
     stock_cols = agg_df["symbol"].tolist()
 
     stock_prices    = closes[stock_cols].values.astype(np.float64)
+    # Causal daily dollar-volume aligned to the final stock order (survivorship-free path only).
+    dollar_volume_daily = None
+    if _sf_dollar_vol is not None:
+        dollar_volume_daily = (
+            _sf_dollar_vol.reindex(index=closes.index, columns=stock_cols).values.astype(np.float64)
+        )
     etf_prices_arr  = (
         closes[etf_cols].values.astype(np.float64)
         if etf_cols
@@ -286,6 +333,21 @@ def load_and_precompute(
         if "industry" in agg_df.columns
         else ("Unknown",) * len(agg_df)
     )
+    # Discretionary NEVER-BUY mask (industry/sector), mirroring the live gate in
+    # data/fundamentals.py so the backtest evaluates the same investable universe. Gated by
+    # backtest.apply_discretionary_exclusions (default on for live/backtest parity); set
+    # False for full-universe research. None when off → select_candidates skips the gate.
+    excluded_mask_arr = None
+    if bool(BACKTEST_PARAMS.get("apply_discretionary_exclusions", True)):
+        from util import EXCLUDED_STOCK_INDUSTRIES, EXCLUDED_STOCK_SECTORS
+        excluded_mask_arr = np.array(
+            [
+                (industry_labels[i] in EXCLUDED_STOCK_INDUSTRIES)
+                or (sector_labels[i] in EXCLUDED_STOCK_SECTORS)
+                for i in range(len(industry_labels))
+            ],
+            dtype=bool,
+        )
     market_caps_arr = (
         pd.to_numeric(agg_df.get("market_cap"), errors="coerce").values.astype(np.float64)
         if "market_cap" in agg_df.columns
@@ -464,4 +526,6 @@ def load_and_precompute(
         industry_labels=industry_labels,
         market_caps=market_caps_arr,
         momentum_scores=cur_mom,
+        dollar_volume_daily=dollar_volume_daily,
+        excluded_mask=excluded_mask_arr,
     )

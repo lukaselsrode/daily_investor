@@ -61,13 +61,21 @@ ETFS:                 list  = _app.get("etfs", ["SPY", "VOO", "VTI", "QQQ", "SCH
 # Instruments that look like stocks in the universe but behave like funds.
 # Excluded from all stock scoring and buy decisions; ETF exposure remains
 # intentional via the explicit ETFS list above.
+# Discretionary overlay (config `discretionary:` block) — the human judgment the quant can't encode:
+#   excluded_industries/sectors  → hard NEVER-BUY (e.g. structurally-declining industries the
+#                                   backward-looking factors score well but have no terminal upside)
+#   conviction_holds             → hard NEVER-AUTO-SELL (thesis/turnaround positions whose forward
+#                                   catalyst the momentum rules can't see)
+_disc = _app.get("discretionary", {}) or {}
 EXCLUDED_STOCK_INDUSTRIES: frozenset[str] = frozenset({
     "Investment Trusts Or Mutual Funds",
     "Investment Trusts/Mutual Funds",
-})
-EXCLUDED_STOCK_SECTORS: frozenset[str] = frozenset({
-    "Miscellaneous",
-})
+} | {str(x) for x in _disc.get("excluded_industries", [])})
+EXCLUDED_STOCK_SECTORS: frozenset[str] = frozenset(
+    str(x) for x in _disc.get("excluded_sectors", [])
+)
+# Symbols the sell engine must never auto-exit (discretionary conviction).
+CONVICTION_HOLDS: frozenset[str] = frozenset({str(x).upper() for x in _disc.get("conviction_holds", [])})
 
 # ---------------------------------------------------------------------------
 # Score weights — weights must sum to 1.0; fall back to defaults otherwise
@@ -109,6 +117,10 @@ _rl = _app.get("risk", {})
 RISK_LIMITS: dict = {
     "max_single_position_pct":              float(_rl.get("max_single_position_pct",              0.05)),
     "max_sector_pct":                       float(_rl.get("max_sector_pct",                       0.25)),
+    # Position sizing: False = size ∝ score (legacy); True = size ∝ dollar-volume (cap-proxy).
+    # Cap-proxy weighting tilts toward larger/more-liquid names WITHIN the per-name cap — the
+    # survivorship-free edge lever (score/equal weighting loses to SPY; cap-proxy beats it).
+    "size_by_dollar_volume":                bool(_rl.get("size_by_dollar_volume",                 False)),
     "max_order_pct_of_cash":                float(_rl.get("max_order_pct_of_cash",                0.10)),
     "min_order_amount":                     float(_rl.get("min_order_amount",                     5.00)),
     "min_liquidity_volume":                 float(_rl.get("min_liquidity_volume",                 500_000)),
@@ -364,6 +376,14 @@ BACKTEST_PARAMS: dict = {
     "train_pct":                    float(_bt.get("train_pct",                  0.70)),
     "benchmark_symbol":             str(_bt.get("benchmark_symbol",             "SPY")),
     "starting_capital":             float(_bt.get("starting_capital",           5_000.0)),
+    # Survivorship-free backtesting: when True, every backtest path (UI/CLI/tuner/engine) loads
+    # split-adjusted prices for the current universe PLUS the delisted names from the FMP cache
+    # (data/fmp_cache_adj/), removing the ~35% survivorship inflation. Requires that cache to be
+    # populated; load_and_precompute falls back to yfinance (with a warning) if it is missing.
+    "survivorship_free":            bool(_bt.get("survivorship_free",           False)),
+    # Apply the discretionary never-buy industry/sector exclusions to the backtest candidate
+    # universe (live/backtest parity). False = full-universe research. See data_loader.
+    "apply_discretionary_exclusions": bool(_bt.get("apply_discretionary_exclusions", True)),
     "weekly_contribution":          float(_bt.get("weekly_contribution",        400.0)),
     "rebalance_frequency_days":     int(_bt.get("rebalance_frequency_days",     5)),
     "deploy_initial_cash":          bool(_bt.get("deploy_initial_cash",         True)),

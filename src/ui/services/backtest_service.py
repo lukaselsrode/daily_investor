@@ -28,8 +28,12 @@ def load_precomp(n_days: int, mode: str | None = None):
     """
     try:
         import streamlit as st
+
+        from util import BACKTEST_PARAMS
         cache = st.session_state.setdefault("_precomp_cache", {})
-        key = (n_days, mode)
+        # Include the survivorship-free flag in the cache key so the UI toggle actually takes effect —
+        # otherwise flipping it would return the stale precomp loaded under the previous setting.
+        key = (n_days, mode, bool(BACKTEST_PARAMS.get("survivorship_free", False)))
         if key not in cache:
             from backtesting.data_loader import load_and_precompute
             cache[key] = load_and_precompute(n_days, mode=mode)

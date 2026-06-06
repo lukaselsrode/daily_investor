@@ -19,6 +19,106 @@ def _active(scope="active_sleeve_compounding", preset=None):
     return set(_get_active_indices(scope=scope, preset=preset))
 
 
+def test_preset_composition_unions_slots():
+    """`a+b` (and `a,b`) compose into the UNION of both presets' active slots."""
+    assert _active(preset="active_exits+active_exit_floors") == {5, 6, 7, 8, 50, 51, 52, 53}
+    assert _active(preset="active_core_weights,active_factor_internals") == {
+        0, 1, 2, 3, 9, 10, 11, 12, 13, 14, 15,
+    }
+    # idempotent: composing a preset with itself == itself
+    assert _active(preset="active_exits+active_exits") == _active(preset="active_exits")
+
+
+def test_composition_validation():
+    from tuning.presets import split_preset_names, validate_preset
+    assert split_preset_names("a+b , c") == ["a", "b", "c"]
+    validate_preset("active_exits+active_exit_floors")  # ok
+    with pytest.raises(ValueError, match="Unknown preset"):
+        validate_preset("active_exits+bogus")
+
+
+def test_interaction_cluster_presets_slots():
+    """The 5 curated interaction-cluster presets unfreeze exactly their mapped slots."""
+    expected = {
+        "active_buy_gate":         {0, 1, 2, 3, 5, 40, 41, 42},
+        "active_momentum_engine":  {3, 10, 11, 12, 13, 14, 15, 46, 49},
+        "active_exit_ladder":      {6, 7, 8, 50, 51, 52, 53, 54, 55, 56},
+        "active_breadth_turnover": {8, 40, 41, 42, 43, 44, 45, 57, 58, 59},
+        "active_quality_stack":    {1, 41, 48, 52},
+    }
+    for name, slots in expected.items():
+        assert _active(preset=name) == slots, name
+
+
+def test_interaction_screener_report_helpers():
+    """Screener verdict + matrix logic (no data / no tuning needed)."""
+    import numpy as np
+
+    from tuning.interaction_screen import (
+        InteractionResult,
+        MarginalResult,
+        PairResult,
+        _verdict,
+    )
+    assert _verdict(0.05, 0.0) == "🟢 synergy"
+    assert _verdict(-0.05, 0.0) == "🔴 clash"
+    assert _verdict(0.0, 0.30) == "↔ compromise"
+    assert _verdict(0.0, 0.0) == "⚪ ~independent"
+    res = InteractionResult()
+    res.marginals = {
+        "A": MarginalResult("A", 0.5, np.zeros(60), [0]),
+        "B": MarginalResult("B", 0.4, np.zeros(60), [1]),
+    }
+    res.pairs = [PairResult("A", "B", 0.5, 0.4, 0.7, 0.2, 0.1, "🟢 synergy")]
+    m = res.matrix_df()
+    assert m.loc["A", "A"] == 0.5 and m.loc["A", "B"] == 0.2 and m.loc["B", "A"] == 0.2
+    assert not res.pairs_df().empty
+
+
+def test_staged_tune_helpers():
+    """Staged-tune ordering + trace report (no data / no tuning)."""
+    from tuning.staged_tune import _CLUSTER_ORDER, StagedTuneResult, StageResult
+    # leverage order covers all 5 interaction clusters, scoring/momentum first.
+    assert _CLUSTER_ORDER[0] == "active_momentum_engine"
+    assert set(_CLUSTER_ORDER) == {
+        "active_momentum_engine", "active_quality_stack", "active_buy_gate",
+        "active_exit_ladder", "active_breadth_turnover",
+    }
+    res = StagedTuneResult(
+        stages=[
+            StageResult("active_momentum_engine", 0.1, 0.5, True),
+            StageResult("active_exit_ladder", 0.5, 0.4, False),
+        ],
+    )
+    df = res.trace_df()
+    assert len(df) == 2
+    assert df.iloc[0]["result"] == "✅ accepted"
+    assert df.iloc[1]["result"] == "— kept prior"
+
+
+def test_auto_tune_all_cli_importable():
+    import inspect
+
+    from cli.commands import cmd_auto_tune_all
+    params = inspect.signature(cmd_auto_tune_all).parameters
+    assert "profile" in params and "clusters" in params
+
+
+def test_tuner_active_param_names_honor_preset():
+    """Regression: ParameterTuner active-param resolution must reflect scope+preset,
+    not silently return the 16 base names (which made the UI tune panel mark the
+    wrong rows as 'tuned')."""
+    from tuning.tuner import ParameterTuner
+    names = ParameterTuner._active_param_names("active_sleeve_compounding", "active_exits")
+    assert set(names) == {"metric_threshold", "take_profit_pct", "sell_weak_below", "trailing_stop"}
+    # an extended-slot preset resolves to its slots too (not base 16)
+    floor_names = ParameterTuner._active_param_names("active_sleeve_compounding", "active_exit_floors")
+    assert set(floor_names) == {
+        "ef_hard_exit_score_below", "ef_positive_momentum_review_floor",
+        "ef_strong_quality_review_floor", "ef_thesis_intact_review_floor",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Preset definitions
 # ---------------------------------------------------------------------------
@@ -39,13 +139,47 @@ def test_unknown_preset_raises_value_error():
         validate_preset("does_not_exist")
 
 
-def test_phase2_preset_raises_not_implemented():
+def test_validate_preset_mechanism():
+    from tuning import presets as P
     from tuning.presets import validate_preset
-    with pytest.raises(NotImplementedError, match="Phase 2"):
-        validate_preset("active_rebalance_cooldown")
-
-    # active_position_sizing was revived (no longer Phase 2) — it must NOT raise.
+    # Revived presets must NOT raise (no longer stubs).
+    validate_preset("active_rebalance_cooldown")
     validate_preset("active_position_sizing")
+    # Unknown preset raises ValueError.
+    with pytest.raises(ValueError, match="Unknown preset"):
+        validate_preset("does_not_exist")
+    # The Phase-2-stub mechanism still works for any future stub.
+    P._PRESETS["__tmp_stub__"] = {"description": "tmp", "phase2": True}
+    try:
+        with pytest.raises(NotImplementedError):
+            validate_preset("__tmp_stub__")
+    finally:
+        del P._PRESETS["__tmp_stub__"]
+
+
+def test_no_preset_has_dead_freeze_extra():
+    """freeze_extra was vestigial (the seed already freezes base paths) — it's removed."""
+    from tuning.presets import _PRESETS
+    for name, spec in _PRESETS.items():
+        assert "freeze_extra" not in spec, f"{name} still carries dead freeze_extra"
+
+
+def test_rebalance_cooldown_active_slots():
+    active = set(_active(preset="active_rebalance_cooldown"))
+    from tuning.constants import _REBAL_FIELDS, _REBAL_SLOT_OFFSET
+    expected = {_REBAL_SLOT_OFFSET + i for i in range(len(_REBAL_FIELDS))}
+    assert active == expected, f"active_rebalance_cooldown should be {expected}, got {active}"
+
+
+def test_new_menu_presets_validate_and_unfreeze():
+    from tuning.presets import _PRESETS, validate_preset
+    for name in ("active_legacy_turnaround", "active_core_default", "active_scoring_blends"):
+        validate_preset(name)
+        assert _PRESETS[name]["unfreeze"], f"{name} must unfreeze something"
+    # scoring_blends opens exactly slots 48/49.
+    assert set(_active(preset="active_scoring_blends")) == {48, 49}
+    # regularized regime_tilt_plus_weights = momentum_tilt (46) + 4 weights + 4 exits.
+    assert set(_active(preset="active_regime_tilt_plus_weights")) == {0, 1, 2, 3, 5, 6, 7, 8, 46}
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +222,8 @@ def test_exits_preset_active_indices():
 
 def test_exits_preset_freezes_score_weights():
     active = _active(preset="active_exits")
-    # score weights (0,1,2,3) should all be frozen — preset adds quality+momentum to freeze_extra
+    # score weights (0,1,2,3) should all be frozen — the seed freezes all base paths,
+    # and active_exits unfreezes only the exit knobs (not the weights)
     for idx in [0, 1, 2, 3]:
         assert idx not in active, f"score weight index {idx} should be frozen for active_exits"
 

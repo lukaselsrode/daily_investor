@@ -56,6 +56,13 @@ class PrecomputedData(NamedTuple):
     # Static per-stock momentum score (warmup-bin scoring at day 0). Used by the
     # archetype classifier to seed `momentum_score`; live recomputes momentum daily.
     momentum_scores: np.ndarray | None = None  # (n_stocks,) momentum proxy at sim start
+    # (n_days, n_stocks) CAUSAL daily dollar-volume (close × volume) for cap-proxy position
+    # sizing without the static-market_caps look-ahead. Populated by the survivorship-free loader.
+    dollar_volume_daily: np.ndarray | None = None
+    # (n_stocks,) bool — discretionary NEVER-BUY mask (industry/sector exclusions), mirroring
+    # the live gate in data/fundamentals.py. True → never enters candidate selection. None →
+    # no exclusions applied (full-universe research). Built by load_and_precompute.
+    excluded_mask: np.ndarray | None = None
 
 
 @dataclass
@@ -132,6 +139,7 @@ class SimResult:
     active_calmar: float | None = None
     active_max_drawdown: float | None = None
     active_excess_return: float | None = None
+    active_information_ratio: float | None = None
 
 
 @dataclass

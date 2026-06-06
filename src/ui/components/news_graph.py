@@ -43,6 +43,18 @@ def _ego(date: str, symbol: str, hops: int):
 
 
 @st.cache_data(ttl=300, show_spinner=False)
+def _ego_evolution(symbol: str, hops: int, max_dates: int):
+    from portfolio.visualization.news_graph import ego_network_evolution
+    return ego_network_evolution(symbol, hops=hops, max_dates=max_dates)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _ego_articles(date: str, symbol: str, neighbors: tuple[str, ...]) -> pd.DataFrame:
+    from portfolio.visualization.news_graph import ego_articles_for_date
+    return ego_articles_for_date(date, symbol, set(neighbors))
+
+
+@st.cache_data(ttl=300, show_spinner=False)
 def _sector_evolution(group_by: str = "sector") -> pd.DataFrame:
     from portfolio.visualization.news_graph import graph_evolution_by_sector
     return graph_evolution_by_sector(group_by=group_by)
@@ -149,6 +161,117 @@ def _draw_network(edges: pd.DataFrame, feats: pd.DataFrame, color_by: str,
     fig.update_layout(title=title, height=620, showlegend=bool(hx),
                       xaxis=dict(visible=False), yaxis=dict(visible=False),
                       margin=dict(l=10, r=10, t=40, b=10))
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _draw_ego_timelapse(
+    edges: pd.DataFrame,
+    nodes: pd.DataFrame,
+    summary: pd.DataFrame,
+    symbol: str,
+    held: set[str],
+):
+    """Animated date-by-date ego graph with stable positions across frames."""
+    import plotly.graph_objects as go
+
+    if summary.empty or nodes.empty:
+        st.info(f"{symbol} does not appear in the available co-mention snapshots.")
+        return
+
+    all_syms = sorted(nodes["symbol"].astype(str).unique())
+    pos = _spring_layout(edges, all_syms)
+    ordered_dates = summary["date"].astype(str).tolist()
+
+    def frame_traces(date: str):
+        n = nodes[nodes["date"].astype(str) == date].copy()
+        e = edges[edges["date"].astype(str) == date].copy() if not edges.empty else pd.DataFrame()
+        present = set(n["symbol"].astype(str))
+        ex, ey = [], []
+        for r in e.itertuples(index=False):
+            if r.source in pos and r.target in pos:
+                x0, y0 = pos[r.source]
+                x1, y1 = pos[r.target]
+                ex += [x0, x1, None]
+                ey += [y0, y1, None]
+        edge_trace = go.Scatter(
+            x=ex, y=ey, mode="lines",
+            line=dict(width=1.0, color="rgba(150,150,150,0.35)"),
+            hoverinfo="none", showlegend=False,
+        )
+
+        nx_, ny_, color, size, hovertext = [], [], [], [], []
+        line_width, line_color, labels = [], [], []
+        nmap = n.set_index("symbol") if "symbol" in n.columns else pd.DataFrame()
+        for sym in sorted(present):
+            if sym not in pos or sym not in nmap.index:
+                continue
+            row = nmap.loc[sym]
+            x, y = pos[sym]
+            nx_.append(x)
+            ny_.append(y)
+            deg = float(row.get("news_degree", 1))
+            is_ego = sym == symbol
+            is_new = row.get("status", "") == "new"
+            size.append(22 if is_ego else 9 + 3 * np.sqrt(max(deg, 1)))
+            color.append(float(row.get("news_sentiment", 0.0)))
+            line_width.append(4 if is_ego else (2.5 if is_new else 0.8))
+            line_color.append("gold" if is_ego else ("deepskyblue" if is_new else "#222"))
+            labels.append(sym if is_ego else "")
+            held_tag = " ★HELD" if sym in held else ""
+            new_tag = " NEW" if is_new and not is_ego else ""
+            hovertext.append(
+                f"{sym}{held_tag}{new_tag}<br>date={date}<br>"
+                f"deg={int(deg)} sent={row.get('news_sentiment', 0):.2f}<br>"
+                f"peer_sent={row.get('news_peer_sentiment', 0):.2f} "
+                f"first_seen={row.get('first_seen', '')}"
+            )
+        node_trace = go.Scatter(
+            x=nx_, y=ny_, mode="markers+text", text=labels,
+            hovertext=hovertext, hoverinfo="text", textposition="top center",
+            marker=dict(
+                size=size, color=color, colorscale="RdYlGn", cmin=-1, cmax=1,
+                showscale=True, colorbar=dict(title="sentiment"),
+                line=dict(width=line_width, color=line_color),
+            ),
+            showlegend=False,
+        )
+        return [edge_trace, node_trace]
+
+    initial = ordered_dates[0]
+    frames = [go.Frame(data=frame_traces(d), name=d) for d in ordered_dates]
+    fig = go.Figure(data=frame_traces(initial), frames=frames)
+    fig.update_layout(
+        title=f"{symbol} ego-network evolution · auto timelapse",
+        height=650,
+        xaxis=dict(visible=False), yaxis=dict(visible=False),
+        margin=dict(l=10, r=10, t=45, b=10),
+        updatemenus=[{
+            "type": "buttons",
+            "showactive": False,
+            "x": 0.02,
+            "y": 1.08,
+            "buttons": [
+                {"label": "▶ Play", "method": "animate", "args": [None, {
+                    "frame": {"duration": 900, "redraw": True},
+                    "transition": {"duration": 250},
+                    "fromcurrent": True,
+                }]},
+                {"label": "⏸ Pause", "method": "animate", "args": [[None], {
+                    "frame": {"duration": 0, "redraw": False},
+                    "mode": "immediate",
+                }]},
+            ],
+        }],
+        sliders=[{
+            "active": 0,
+            "currentvalue": {"prefix": "Snapshot: "},
+            "steps": [{
+                "label": d,
+                "method": "animate",
+                "args": [[d], {"frame": {"duration": 0, "redraw": True}, "mode": "immediate"}],
+            } for d in ordered_dates],
+        }],
+    )
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -335,32 +458,116 @@ def render() -> None:
 
     # ── Ego network ───────────────────────────────────────────────────────────
     with tabs[3]:
-        c1, c2, c3 = st.columns([2, 2, 1])
+        mode = st.radio(
+            "View mode",
+            ["Auto timelapse", "Single date"],
+            horizontal=True,
+            key="ng_ego_mode",
+        )
+
+        # Prefer latest graph symbols for the picker; auto mode still walks every
+        # available date where the selected symbol appears.
+        latest_date = dates[-1]
+        _, _, latest_feats = _graph(latest_date, held_t)
+        latest_syms = sorted(latest_feats["symbol"].tolist()) if not latest_feats.empty else []
+        default_sym = next((s for s in held if s in latest_syms), latest_syms[0] if latest_syms else "")
+
+        c1, c2, c3 = st.columns([2, 1, 1])
         with c1:
-            date2 = st.selectbox("Snapshot date", dates, index=len(dates) - 1, key="ng_ego_date")
-        # prefer held names in the picker
-        _, _, feats2 = _graph(date2, held_t)
-        graph_syms = sorted(feats2["symbol"].tolist()) if not feats2.empty else []
-        default_sym = next((s for s in held if s in graph_syms), graph_syms[0] if graph_syms else "")
-        with c2:
-            # Always instantiate the selectbox (disabled when the graph is empty) so the
-            # widget key is stable across reruns and dates.
-            options = graph_syms if graph_syms else ["—"]
+            options = latest_syms if latest_syms else ["—"]
             sel = st.selectbox(
-                "Symbol", options,
+                "Symbol",
+                options,
                 index=options.index(default_sym) if default_sym in options else 0,
-                key="ng_ego_sym", disabled=not graph_syms,
+                key="ng_ego_sym",
+                disabled=not latest_syms,
             )
-            sym = sel if graph_syms else ""
-        with c3:
+            sym = sel if latest_syms else ""
+        with c2:
             hops = st.select_slider("Hops", [1, 2, 3], value=1, key="ng_ego_hops")
-        if sym:
+        with c3:
+            max_dates = st.select_slider(
+                "Timelapse dates",
+                [10, 20, 40, 80, 120],
+                value=40,
+                key="ng_ego_max_dates",
+                disabled=mode != "Auto timelapse",
+            )
+
+        if not sym:
+            st.info("No symbols available in the latest news graph snapshot.")
+        elif mode == "Auto timelapse":
+            st.caption(
+                "Auto mode walks available news snapshots — no date picking required. "
+                "Gold ring = ego company; blue ring = newly appeared neighbor on that date."
+            )
+            with st.spinner(f"Building {sym} ego-network timelapse…"):
+                summary, e_all, n_all = _ego_evolution(sym, hops, max_dates)
+            if summary.empty:
+                st.info(f"{sym} has no ego-network history in the available snapshots.")
+            else:
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Frames", len(summary))
+                m2.metric("Latest neighbors", int(summary["n_neighbors"].iloc[-1]))
+                m3.metric("Latest edge weight", int(summary["total_edge_weight"].iloc[-1]))
+                m4.metric("Latest articles", int(summary["n_articles"].iloc[-1]))
+
+                _draw_ego_timelapse(e_all, n_all, summary, sym, {sym} | set(held))
+
+                import plotly.graph_objects as go
+                fig = go.Figure()
+                fig.add_scatter(x=summary["date"], y=summary["n_neighbors"], name="neighbors")
+                fig.add_scatter(x=summary["date"], y=summary["news_sentiment"], name="ego sentiment", yaxis="y2")
+                fig.add_scatter(x=summary["date"], y=summary["news_peer_sentiment"], name="peer sentiment", yaxis="y2")
+                fig.update_layout(
+                    title=f"{sym} ego metrics over time",
+                    height=300,
+                    yaxis=dict(title="neighbors"),
+                    yaxis2=dict(title="sentiment", overlaying="y", side="right", range=[-1, 1]),
+                    margin=dict(l=10, r=10, t=40, b=60),
+                    legend=dict(orientation="h"),
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+                with st.expander("Evolution table"):
+                    st.dataframe(summary, use_container_width=True, hide_index=True)
+
+                st.subheader("Linked article evidence by date")
+                st.caption(
+                    "Rows are article identities available in the dated news snapshots. "
+                    "matched_neighbors shows which displayed neighbors the article supports."
+                )
+                recent_dates = summary["date"].astype(str).tail(12).tolist()
+                for d in reversed(recent_dates):
+                    frame_nodes = n_all[n_all["date"].astype(str) == d]
+                    neighbors = tuple(sorted(set(frame_nodes["symbol"].astype(str)) - {sym}))
+                    arts = _ego_articles(d, sym, neighbors)
+                    with st.expander(f"{d} · {len(arts)} articles · neighbors: {', '.join(neighbors[:8])}"):
+                        if arts.empty:
+                            st.info("No article records available for this frame.")
+                        else:
+                            cols = ["title", "publisher", "pub_date", "matched_neighbors", "symbols", "link"]
+                            try:
+                                st.dataframe(
+                                    arts[cols],
+                                    use_container_width=True,
+                                    hide_index=True,
+                                    column_config={"link": st.column_config.LinkColumn("link")},
+                                )
+                            except Exception:
+                                st.dataframe(arts[cols], use_container_width=True, hide_index=True)
+        else:
+            cdate, _ = st.columns([2, 3])
+            with cdate:
+                date2 = st.selectbox("Snapshot date", dates, index=len(dates) - 1, key="ng_ego_date")
             e, n = _ego(date2, sym, hops)
             if e.empty:
                 st.info(f"{sym} has no co-mention edges on {date2}.")
             else:
-                _draw_network(e, n, "sentiment", {sym} | set(held),
-                              f"{sym} · {hops}-hop co-mention neighborhood · {date2}",
-                              max_nodes=200)
+                _draw_network(
+                    e, n, "sentiment", {sym} | set(held),
+                    f"{sym} · {hops}-hop co-mention neighborhood · {date2}",
+                    max_nodes=200,
+                )
                 st.dataframe(e.sort_values("weight", ascending=False),
                              use_container_width=True, hide_index=True)

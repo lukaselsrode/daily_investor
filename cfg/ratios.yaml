@@ -1,22 +1,22 @@
 Consumer Services:
   default:
-  - 29.87
-  - 4.65
+  - 28.92
+  - 4.5
   Other Consumer Services:
   - 20
   - 5.5
   Broadcasting:
-  - 32.81
-  - 1.66
+  - 33.31
+  - 1.68
   Casinos:
   - 18
   - 11
   Entertainment:
-  - 30.97
+  - 30.99
   - 3.69
   Restaurants:
-  - 28.12
-  - 20.99
+  - 28.21
+  - 21.06
   Resorts:
   - 15
   - 11
@@ -25,21 +25,21 @@ Consumer Services:
   - null
 Technology Services:
   default:
-  - 41.49
-  - 11.92
+  - 38.3
+  - 10.97
   Software:
   - 37
   - 9
   Information Technology Services:
-  - 18.37
-  - 3.59
+  - 17.74
+  - 3.47
 Retail Trade:
   default:
-  - 29.87
-  - 4.65
+  - 28.92
+  - 4.5
   Discount Stores:
-  - 38.35
-  - 9.14
+  - 38.91
+  - 9.27
   Specialty Stores:
   - null
   - 7.4
@@ -57,31 +57,31 @@ Retail Trade:
   - 2.92
 Health Technology:
   default:
-  - 28.25
-  - 4.28
+  - 29.23
+  - 4.44
   Pharmaceuticals:
   - 80
   - 5.2
   Biotechnology:
-  - 52.1
-  - 4.42
+  - 52.86
+  - 4.49
   Medical:
   - 35
   - 5.12
 Communications:
   default:
-  - 37.24
-  - 7.82
+  - 37.43
+  - 7.86
   Wireless Telecommunications:
   - 36
   - 5
 Electronic Technology:
   default:
-  - 41.49
-  - 11.92
+  - 38.3
+  - 10.97
   Semiconductors:
-  - 48.39
-  - 15.9
+  - 42.77
+  - 14.24
   Telecommunications Equipment:
   - 48
   - 5.14
@@ -102,15 +102,15 @@ Electronic Technology:
   - 5.08
 Consumer Durables:
   default:
-  - 29.87
-  - 4.65
+  - 28.92
+  - 4.5
   Motor Vehicles:
   - 12.3
   - 4.6
 Transportation:
   default:
-  - 32.93
-  - 5.81
+  - 32.53
+  - 5.74
 Basic Materials:
   default:
   - 16.5
@@ -119,11 +119,11 @@ Basic Materials:
   - 28.0
   - 2.0
   Steel:
-  - 25.09
-  - 1.42
+  - 23.98
+  - 1.36
   Chemicals:
-  - 248.87
-  - 1.59
+  - 233.51
+  - 1.49
   Construction Materials:
   - 19.0
   - 2.8
@@ -135,8 +135,8 @@ Financial:
   - 12.0
   - 1.2
   Asset Management:
-  - 27.46
-  - 2.94
+  - 28.19
+  - 3.03
   Insurance:
   - 14.0
   - 1.5
@@ -144,12 +144,12 @@ Financial:
   - 11.0
   - 1.8
   Capital Markets:
-  - 21.9
-  - 3.25
+  - 21.75
+  - 3.22
 Real Estate:
   default:
-  - 32.33
-  - 2.45
+  - 32.81
+  - 2.48
   Diversified REITs:
   - 34.0
   - 1.6
@@ -173,17 +173,17 @@ Real Estate:
   - 1.9
 Energy:
   default:
-  - 19.57
-  - 2.27
+  - 19.09
+  - 2.22
   Oil & Gas Exploration & Production:
   - 12.0
   - 1.5
   Oil & Gas Integrated:
-  - 18.76
-  - 1.95
+  - 18.29
+  - 1.9
   Oil & Gas Midstream:
-  - 20.91
-  - 3.5
+  - 20.82
+  - 3.49
   Oil & Gas Services:
   - 18.0
   - 1.6
@@ -192,23 +192,23 @@ Energy:
   - 2.2
 Industrials:
   default:
-  - 32.93
-  - 5.81
+  - 32.53
+  - 5.74
   Aerospace Defense:
   - 26.0
   - 4.5
   Airlines:
-  - 12.58
-  - 2.68
+  - 12.45
+  - 2.65
   Railroads:
-  - 25.03
-  - 4.67
+  - 25.09
+  - 4.68
   Trucking:
-  - 65.54
-  - 4.97
+  - 66.56
+  - 5.05
   Waste Management:
-  - 34.04
-  - 5.52
+  - 34.82
+  - 5.65
   Engineering & Construction:
-  - 47.03
-  - 7.95
+  - 45.4
+  - 7.69

@@ -20,6 +20,8 @@ dependencies = [
     "numpy>=1.24",
     "pandas>=2.0",
     "scipy>=1.10",
+    # Parquet engine — required by portfolio.outcome_tracker (decision_outcomes.parquet)
+    "pyarrow>=14.0",
 
     # Graph analytics (news co-mention graph + structural signals)
     "networkx>=3.0",

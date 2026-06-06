@@ -84,7 +84,7 @@ def should_apply_tuned_config(
 
 def run_tuner(
     n_days: int = 90,
-    objective: Literal["sharpe", "calmar"] = "sharpe",
+    objective: Literal["sharpe", "calmar", "info_ratio"] = "sharpe",
     starting_capital: float = 10_000.0,
     maxiter: int = 25,
     popsize: int = 8,
@@ -352,10 +352,15 @@ class ParameterTuner:
     def param_names(self) -> list[str]:
         return list(PARAM_NAMES)
 
+    @staticmethod
+    def _active_param_names(scope: str = "overall_strategy", preset: str | None = None) -> list[str]:
+        """Names of the slots actually tunable for the given scope/preset."""
+        active_idx = set(_get_active_indices(scope, preset=preset))
+        return [PARAM_NAMES[i] for i in sorted(active_idx)]
+
     @property
     def active_params(self) -> list[str]:
-        active_idx = set(_get_active_indices())
-        return [PARAM_NAMES[i] for i in sorted(active_idx)]
+        return self._active_param_names()
 
     @property
     def frozen_params(self) -> list[str]:
@@ -391,7 +396,7 @@ class ParameterTuner:
             sim=sim,
             objective=objective,
             n_days=n_days,
-            active_params=self.active_params,
+            active_params=self._active_param_names(scope, preset),
         )
 
     def auto_tune(
@@ -453,7 +458,7 @@ class ParameterTuner:
             validation_passed=validation_passed,
             validation_reasons=validation_reasons,
             config_written=config_written,
-            active_params=self.active_params,
+            active_params=self._active_param_names(scope, preset),
         )
 
     def apply_params(self, params: np.ndarray) -> None:

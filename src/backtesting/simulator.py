@@ -42,6 +42,12 @@ logger = logging.getLogger(__name__)
 _TAKE_PROFIT_FLOOR_MULTIPLIER = 1.2
 # Read stop-loss from config so live and backtest always stay in sync
 _STOP_LOSS_PCT = float(SELL_RULES.get("stop_loss_pct", -0.20))
+# Archetype `allow_deeper_drawdown`: widen the catastrophic hard stop for flagged
+# archetypes so high-conviction names get room to breathe before a failure exit.
+_DEEPER_DD_FACTOR = float(SELL_RULES.get("allow_deeper_drawdown_factor", 1.5))
+# Archetype `thesis_exit_requires_confirmation`: a soft weak-value exit must persist
+# this many consecutive evaluations before it fires for a flagged archetype.
+_THESIS_CONFIRM_EVALS = int(SELL_RULES.get("thesis_exit_confirm_evals", 2))
 _MIN_DAYS_HELD_BEFORE_VALUE_EXIT = SELL_RULES.get("min_days_held_before_value_exit", 21)
 _MIN_HOLD_DAYS = RISK_LIMITS.get("minimum_hold_days", 0)
 _MIN_DAYS_BEFORE_TAKE_PROFIT = SELL_RULES.get("minimum_days_before_take_profit", 0)
@@ -360,6 +366,29 @@ def compute_performance_metrics(daily_values: np.ndarray) -> dict:
     return {"sharpe": sharpe, "calmar": calmar, "max_drawdown": max_drawdown, "total_return": total_return}
 
 
+def information_ratio(active_values: np.ndarray, bench_values: np.ndarray) -> float:
+    """Annualized information ratio: mean(daily active-minus-benchmark) / std of same.
+
+    The honest 'beats SPY' metric — rewards CONSISTENT outperformance of the benchmark,
+    not just a higher raw number, and resists the lever-up-beta degenerate solution (a
+    concentrated bet that wins a bull also inflates tracking-error variance → no free IR).
+    Both inputs must be same-length, same-cadence equity series on the SAME basis
+    (here both contribution-adjusted). Returns 0.0 when undefined.
+    """
+    n = min(len(active_values), len(bench_values))
+    if n < 3 or active_values[0] <= 0 or bench_values[0] <= 0:
+        return 0.0
+    a = np.asarray(active_values[:n], dtype=np.float64)
+    b = np.asarray(bench_values[:n], dtype=np.float64)
+    a_ret = np.diff(a) / a[:-1]
+    b_ret = np.diff(b) / b[:-1]
+    excess = a_ret - b_ret
+    excess = excess[np.isfinite(excess)]
+    if len(excess) < 3 or excess.std() <= 0:
+        return 0.0
+    return float((excess.mean() / excess.std()) * np.sqrt(252))
+
+
 # ---------------------------------------------------------------------------
 # Scoring
 # ---------------------------------------------------------------------------
@@ -657,7 +686,13 @@ def select_candidates(
     income_trap_gate = ~income_at_risk | (allow_def & is_defensive)
     income_trap_excluded = int((score_mask & quality_gate & mom_gate & ~income_trap_gate).sum())
 
-    final_mask = score_mask & quality_gate & mom_gate & income_trap_gate
+    # Discretionary NEVER-BUY exclusions (industry/sector) — mirrors the live gate in
+    # data/fundamentals.py so the backtest evaluates the same investable universe. Applied
+    # as a candidate gate: excluded names never get bought (existing holds still managed).
+    _disc_mask = getattr(precomp, "excluded_mask", None)
+    disc_gate = ~_disc_mask if _disc_mask is not None else np.ones(n, dtype=bool)
+
+    final_mask = score_mask & quality_gate & mom_gate & income_trap_gate & disc_gate
 
     n_sel = int(final_mask.sum())
     if n_sel > max_cands:
@@ -838,6 +873,8 @@ def _build_archetype_thresholds(
     pos_mult_arr  = np.ones(n,                         dtype=np.float64)
     max_sleeve_arr= np.full(n, np.nan,                 dtype=np.float64)
     min_score_arr = np.full(n, np.nan,                 dtype=np.float64)
+    confirm_arr   = np.zeros(n,                        dtype=bool)   # thesis_exit_requires_confirmation
+    deepdd_arr    = np.zeros(n,                        dtype=bool)   # allow_deeper_drawdown
     labels        = [""] * n
     buckets       = [""] * n   # confidence bucket per stock (for attribution rollups)
 
@@ -849,7 +886,8 @@ def _build_archetype_thresholds(
         return {
             "tp": tp_arr, "stop": stop_arr, "harvest": harvest_arr, "min_hold": min_hold_arr,
             "enabled": enabled_arr, "score_mult": score_mult_arr, "pos_mult": pos_mult_arr,
-            "max_sleeve": max_sleeve_arr, "min_score": min_score_arr, "labels": labels,
+            "max_sleeve": max_sleeve_arr, "min_score": min_score_arr,
+            "confirm": confirm_arr, "deepdd": deepdd_arr, "labels": labels,
             "buckets": buckets,
         }
 
@@ -896,6 +934,8 @@ def _build_archetype_thresholds(
                 max_sleeve_arr[i] = float(policy.max_active_weight)
             if policy.min_score_to_buy is not None:
                 min_score_arr[i] = float(policy.min_score_to_buy)
+            confirm_arr[i]   = bool(policy.thesis_exit_requires_confirmation)
+            deepdd_arr[i]    = bool(policy.allow_deeper_drawdown)
             labels[i]        = policy.archetype
         except Exception:
             pass
@@ -903,7 +943,8 @@ def _build_archetype_thresholds(
     return {
         "tp": tp_arr, "stop": stop_arr, "harvest": harvest_arr, "min_hold": min_hold_arr,
         "enabled": enabled_arr, "score_mult": score_mult_arr, "pos_mult": pos_mult_arr,
-        "max_sleeve": max_sleeve_arr, "min_score": min_score_arr, "labels": labels,
+        "max_sleeve": max_sleeve_arr, "min_score": min_score_arr,
+        "confirm": confirm_arr, "deepdd": deepdd_arr, "labels": labels,
         "buckets": buckets,
     }
 
@@ -970,7 +1011,15 @@ def run_simulation(
     from tuning.constants import (
         exit_floors_cfg_from_params,
         opportunity_cost_cfg_from_params,
+        rebalance_cfg_from_params,
     )
+    # Rebalance cadence + post-sell/stopout cooldowns (active_rebalance_cooldown preset).
+    # Overrides the rebalance_frequency_days arg and the cooldown_sell/stop locals (read
+    # below) when the slots are present; otherwise config/arg values are used. NOTE:
+    # rebalance_frequency_days also gates contribution timing (is_contrib_day).
+    _rebal_override = rebalance_cfg_from_params(params)
+    if "rebalance_frequency_days" in _rebal_override:
+        rebalance_frequency_days = int(_rebal_override["rebalance_frequency_days"])
     _dae_floors.update(exit_floors_cfg_from_params(params))
 
     # ── Opportunity-cost ("max hold without progress") exit ───────────────────
@@ -1023,8 +1072,8 @@ def run_simulation(
     bp_cfg          = BACKTEST_PARAMS
     use_vol_slip    = bp_cfg.get("vol_slippage_scaling", True)
     vol_slip_mult   = bp_cfg.get("vol_slippage_multiplier", 2.0)
-    cooldown_sell   = bp_cfg.get("cooldown_days_after_sell", 3)
-    cooldown_stop   = bp_cfg.get("cooldown_days_after_stopout", 7)
+    cooldown_sell   = int(_rebal_override.get("cooldown_days_after_sell",    bp_cfg.get("cooldown_days_after_sell", 3)))
+    cooldown_stop   = int(_rebal_override.get("cooldown_days_after_stopout", bp_cfg.get("cooldown_days_after_stopout", 7)))
     max_trades_week = bp_cfg.get("max_trades_per_week", 10)
 
     min_order      = RISK_LIMITS["min_order_amount"]
@@ -1032,6 +1081,10 @@ def run_simulation(
     max_sector_pct = RISK_LIMITS["max_sector_pct"]
     max_order_pct  = RISK_LIMITS["max_order_pct_of_cash"]
     max_buys       = RISK_LIMITS["max_buys_per_rebalance"]
+    # Cap-proxy sizing: when on, budget is allocated ∝ dollar-volume (size) instead of ∝ score.
+    # Ranking still by score (momentum-dominant); only the WEIGHTING changes. The per-name/sector/
+    # cluster caps still bind, so this is a size-TILT within diversification, not concentration.
+    _size_by_dv    = bool(RISK_LIMITS.get("size_by_dollar_volume", False))
 
     # Position-sizing override: the active_position_sizing preset appends sizing
     # slots 43-45; when present they take precedence over live RISK_LIMITS.
@@ -1063,6 +1116,8 @@ def run_simulation(
         _arch_pos_mult_arr      = _arch["pos_mult"]
         _arch_max_sleeve_arr    = _arch["max_sleeve"]
         _arch_min_score_arr     = _arch["min_score"]
+        _arch_confirm_arr       = _arch["confirm"]
+        _arch_deepdd_arr        = _arch["deepdd"]
         _arch_labels            = _arch["labels"]
         _arch_buckets           = _arch.get("buckets", [""] * len(_arch_labels))
     else:
@@ -1075,6 +1130,8 @@ def run_simulation(
         _arch_pos_mult_arr = None
         _arch_max_sleeve_arr = None
         _arch_min_score_arr = None
+        _arch_confirm_arr = None
+        _arch_deepdd_arr = None
         _arch_labels = []
         _arch_buckets = []
     _arch_pnl: dict = {}
@@ -1157,6 +1214,10 @@ def run_simulation(
     # Day index of the last time each position made progress (fresh high or strong
     # momentum). Drives the opportunity-cost stall clock. -1 = not held / no record.
     stock_last_progress_day = np.full(n_stocks, -1, dtype=np.int32)
+    # Consecutive evaluations a held position has signalled a soft weak-value exit.
+    # Drives archetype `thesis_exit_requires_confirmation`. Resets to 0 whenever the
+    # weak signal is absent (incl. when not held), so a sold/rebought name starts fresh.
+    stock_weak_streak = np.zeros(n_stocks, dtype=np.int32)
     etf_shares      = np.zeros(n_etfs)
 
     # ── Regime de-risk overlay (frozen off by default) ────────────────────────
@@ -1281,6 +1342,24 @@ def run_simulation(
         if total_score <= 0:
             return 0.0
 
+        # Cap-proxy budget weights: dollar-volume (static volume × causal day price) as a size tilt.
+        # Selection/ranking is unchanged (still by score); only how budget is split changes.
+        if _size_by_dv:
+            if precomp.dollar_volume_daily is not None:
+                # CAUSAL trailing 21-day dollar-volume — the honest size proxy (no look-ahead).
+                _w0 = max(0, day - 20)
+                with np.errstate(invalid="ignore"):
+                    _dv = np.nanmean(precomp.dollar_volume_daily[_w0:day + 1], axis=0)
+                _dv = np.where(np.isfinite(_dv) & (_dv > 0), _dv, 0.0)
+            else:
+                # Fallback (default loader has no daily volume): static volume × day price.
+                _pd_day = precomp.prices[day]
+                _dv = np.where(np.isfinite(_pd_day) & (_pd_day > 0), precomp.volume_arr * _pd_day, 0.0)
+            _total_dv = _dv[eligible].sum()
+        else:
+            _dv = None
+            _total_dv = 0.0
+
         portfolio_value = _current_portfolio_value(day)
         sector_exp      = _sector_exposures(day)
         spent           = 0.0
@@ -1303,7 +1382,10 @@ def run_simulation(
                 cooldown_skips += 1
                 continue
 
-            alloc = (eff_scores[i] / total_score) * budget
+            if _size_by_dv and _total_dv > 0:
+                alloc = (_dv[i] / _total_dv) * budget
+            else:
+                alloc = (eff_scores[i] / total_score) * budget
 
             max_by_cash = cash * max_order_pct
             if alloc > max_by_cash:
@@ -1528,7 +1610,14 @@ def run_simulation(
         else:
             oc_mask = np.zeros(len(held), dtype=bool)
 
-        stop_loss_mask = held & (pct_from_avg  <= _STOP_LOSS_PCT)
+        # Archetype allow_deeper_drawdown: widen the catastrophic hard stop for flagged
+        # archetypes so high-conviction names get room before a failure exit.
+        _eff_stoploss: np.ndarray | float
+        if _arch_deepdd_arr is not None:
+            _eff_stoploss = np.where(_arch_deepdd_arr, _STOP_LOSS_PCT * _DEEPER_DD_FACTOR, _STOP_LOSS_PCT)
+        else:
+            _eff_stoploss = _STOP_LOSS_PCT
+        stop_loss_mask = held & (pct_from_avg  <= _eff_stoploss)
         trail_mask     = held & (pct_from_peak <= _eff_stop)        & (days_held >= _eff_minhold)
         tp_mask        = held & (pct_from_avg  >= _eff_tp)          & take_profit_ok & (days_held >= _MIN_DAYS_BEFORE_TAKE_PROFIT)
         # Score-below-threshold soft-exit candidates. The live SellDecisionEngine
@@ -1556,6 +1645,17 @@ def run_simulation(
             )
         else:
             weak_val_mask = np.zeros(len(held), dtype=bool)
+        # Archetype thesis_exit_requires_confirmation: a flagged position must show the
+        # soft weak-value exit across _THESIS_CONFIRM_EVALS consecutive rebalance
+        # evaluations before it fires — a single weak reading never dumps a compounder.
+        # The streak advances once per rebalance cycle (scores are piecewise-constant
+        # between them) and resets to 0 whenever the weak signal clears at a checkpoint.
+        # Hard sells (stop-loss / trailing) are unaffected.
+        if _arch_confirm_arr is not None:
+            if d > 0 and d % rebalance_frequency_days == 0:
+                stock_weak_streak = np.where(weak_val_mask, stock_weak_streak + 1, 0)
+            _confirmed_exit = (~_arch_confirm_arr) | (stock_weak_streak >= _THESIS_CONFIRM_EVALS)
+            weak_val_mask = weak_val_mask & _confirmed_exit
         sell_mask      = stop_loss_mask | trail_mask | tp_mask | weak_val_mask | oc_mask
 
         if sell_mask.any():
@@ -2132,6 +2232,7 @@ def run_simulation(
     _active_calmar:       float | None = None
     _active_max_drawdown: float | None = None
     _active_excess_return: float | None = None
+    _active_information_ratio: float | None = None
     _active_equity_curve: np.ndarray | None = None
     if _active_daily is not None and _active_daily[0] > 0:
         _am = compute_performance_metrics(_ca_active_daily)
@@ -2141,6 +2242,9 @@ def run_simulation(
         _active_calmar        = _am["calmar"]
         _active_max_drawdown  = _am["max_drawdown"]
         _active_excess_return = _active_total_return - bench_twr_val
+        # Information ratio vs the SAME-basis (contribution-adjusted) benchmark series.
+        if bench_ca_equity is not None and len(bench_ca_equity) >= 3:
+            _active_information_ratio = information_ratio(_ca_active_daily, bench_ca_equity)
 
     return SimResult(
         final_value=final_value,
@@ -2212,6 +2316,7 @@ def run_simulation(
         active_calmar=_active_calmar,
         active_max_drawdown=_active_max_drawdown,
         active_excess_return=_active_excess_return,
+        active_information_ratio=_active_information_ratio,
     )
 
 
@@ -2239,10 +2344,13 @@ def run_backtest_report(
 ) -> BacktestReport:
     """
     Run strategy on train window, optionally evaluate on validation window.
-    params=None uses current config values via get_default_params().
+    params=None uses the FULL live config (``tuning.constants._current_params``,
+    60-slot, archetype-aware) so the report reflects the strategy that would
+    actually trade — not the stripped 16-slot ``get_default_params()`` base.
     """
     if params is None:
-        params = get_default_params()
+        from tuning.constants import _current_params
+        params = _current_params()
     bp = BACKTEST_PARAMS
     _arch_enabled = bool(ARCHETYPE_PARAMS.get("enabled", False))
 

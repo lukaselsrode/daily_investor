@@ -25,23 +25,58 @@ etfs:
 - VNQ
 - IWM
 - DRAM
+# 2026-06: quality-momentum blend from regime-robust DE tune (maximize worst-of[bear,bull]
+# info ratio on the 1250d split). Lifted worst-regime IR +0.177 -> +0.321 (bear +0.18->+0.39,
+# bull held). MUST be paired with the wider breadth below (max_buys 8 / top_percentile 0.19 /
+# max_candidates 12) — attribution shows neither works alone (breadth-only and quality-only
+# both go negative); only the quality+breadth COMBINATION is regime-robust (quality screens the
+# junk that breadth adds). CAVEAT: quality_scores are a static current snapshot, so the quality
+# benefit is partly look-ahead-inflated (quality persists ~0.7 yr/yr, so partial not total);
+# +0.321 is an optimistic ceiling. PROVISIONAL pending point-in-time quality + survivorship-free data.
 score_weights:
-  value: 0.1121
-  quality: 0.1121
-  income: 0.0374
-  momentum: 0.7383
+  value: 0.064
+  quality: 0.323
+  income: 0.051
+  momentum: 0.562
 valuation_guardrails:
   max_pe_component: 5.0
   max_pb_component: 5.45
   min_pe_ratio: 1.0
   min_pb_ratio: 0.1
+# Discretionary overlay — the human judgment the backward-looking quant factors can't encode.
+discretionary:
+  # Hard NEVER-BUY. The factors (quality/value/momentum) are backward-looking, so a structurally
+  # declining industry can still screen well (stable margins, cheap, recent price bounce) even when
+  # it has no terminal upside. List industries/sectors to exclude from all buying. (Investment
+  # trusts / mutual funds are always excluded regardless, via the industry list in util.py.)
+  excluded_industries:
+    - Broadcasting              # satellite radio / SIRI — secular decline, no terminal upside
+    - "Cable/Satellite TV"      # cord-cutting; same disruption thesis as SIRI
+    - "Publishing: Newspapers"  # canonical internet-disrupted value trap
+    # NOTE: "Department Stores" removed — the label catches e-commerce momentum names
+    # (e.g. PDD/Pinduoduo) the picker was profitably trading; the blunt exclusion cost more
+    # than it saved. The "Miscellaneous" sector exclusion was also dropped (its names are
+    # funds already covered by the Investment Trusts industry exclusion).
+    - "Commercial Printing/Forms"  # paper/print secular decline
+    - "Office Equipment/Supplies"  # paper-era office hardware (Xerox-type)
+    # NOTE: "Textiles" removed — the label catches misclassified industrials like AIN
+    # (Albany International, aerospace composites, strong momentum), not just apparel textile.
+  excluded_sectors: []
+  # Hard NEVER-AUTO-SELL. Conviction/thesis positions whose forward catalyst the momentum-based sell
+  # rules can't see (a turnaround, an AI inflection, etc.). The sell engine skips these entirely.
+  conviction_holds:
+    - BABA                  # Qwen inflection + deep-value turnaround — a thesis the algo can't quantify
+    - BABU                  # 2x-leveraged BABA — high-conviction expression of the same thesis
+                            # (note: leveraged ETFs decay in choppy/sideways tapes — sized for conviction)
 risk:
   max_single_position_pct: 0.09
   max_sector_pct: 0.25
   max_order_pct_of_cash: 0.5
   min_order_amount: 30.0
   min_liquidity_volume: 500000
-  max_buys_per_rebalance: 3
+  # 2026-06: 3 -> 8 (breadth). Pairs with the quality-momentum score_weights + candidate_selection
+  # widening below; the combination lifts worst-regime info ratio (see score_weights note).
+  max_buys_per_rebalance: 8
   max_sentiment_candidates: 20
   minimum_hold_days: 10
   allow_whole_share_fallback: true
@@ -63,7 +98,13 @@ sell_rules:
   # ≡ OFF (Sharpe 1.24, holdout +1.1%) — all equivalent once harvest fires first.
   take_profit_pct: 1.5
   take_profit_value_floor_multiplier: 1.2
-  sell_weak_value_below: 0.37
+  # 2026-06: 0.37 -> -0.18 (regime-robust exit-ladder DE tune). Was dumping merely-okay names
+  # (score 0..0.37) on weakness; now only sells the genuinely-bad (< -0.18), holding the rest.
+  # Lifted worst-regime info ratio +0.321 -> +0.383 (BOTH regimes up). Structural change — no
+  # look-ahead / survivorship dependency — confirms the 'stop selling winners' finding. stop_loss
+  # still cuts price-crashers; this only relaxes the SCORE-based exit. Other ladder knobs
+  # (take_profit/trailing/stop_loss) optimized to ~unchanged (noise) and left as-is.
+  sell_weak_value_below: -0.18
   minimum_days_before_take_profit: 10
   sell_yield_trap: true
   sell_low_quality_below: -0.25
@@ -72,8 +113,8 @@ archetype_management:
   enabled: true
   quality_compounder:
     trim_profit_threshold: 0.3
-    harvest_profit_threshold: 0.5
-    trailing_stop_pct: -0.1
+    harvest_profit_threshold: 0.7
+    trailing_stop_pct: -0.22
     minimum_hold_days: 60
     thesis_exit_requires_confirmation: true
     allow_deeper_drawdown: true
@@ -86,8 +127,8 @@ archetype_management:
     allow_deeper_drawdown: false
   speculative_momentum:
     trim_profit_threshold: 0.1
-    harvest_profit_threshold: 0.25
-    trailing_stop_pct: -0.07
+    harvest_profit_threshold: 0.7
+    trailing_stop_pct: -0.22
     minimum_hold_days: 60
     thesis_exit_requires_confirmation: false
     allow_deeper_drawdown: false
@@ -153,6 +194,11 @@ regime:
   bullish:
     # Momentum-alpha tilt: in confirmed-bull regime shift this fraction of score
     # weight from value/quality/income into momentum (alpha engine — chase winners).
+    # 2026-06: regime/factor-internals tune found NOTHING robust here — left at 0.36. The DE's
+    # +0.844 worst-IR (all blends on) was overfit to the 50/50 split (collapsed to +0.01 mean on
+    # 7 independent rolling windows). The off-by-default blends (mean_rev/low_vol/residual_mom) are
+    # noise-to-negative alone. Bumping tilt to 0.465 IMPROVED rolling windows but REGRESSED the
+    # 50/50 split (+0.373->+0.173) — opposite verdicts = window-dependent noise, not an edge. Reverted.
     momentum_tilt: 0.36
   defensive:
     index_pct_override: 0.85
@@ -255,13 +301,20 @@ scoring:
       enabled: false
       peer_relative: true
   momentum_inputs:
+    # 2026-06: leaned toward longer-horizon momentum (rs_6m + risk_adj_3m up, short-horizon
+    # return_1m/return_5d cut). Regime-split test (1250d, train=2022 bear / val=24-26 bull):
+    # this lifts the BEAR-window info ratio (+0.11 -> ~+0.35) while giving up bull-window IR.
+    # Rationale is survivorship-aware: the universe has a 34.8% delisting hole, so the bull
+    # numbers are inflated (they reward high-flyers that survived) while the bear regime —
+    # where blowups actually happen — is the more honest test. Longer-horizon momentum avoids
+    # the recent-rocket cohort the data hides. PROVISIONAL until survivorship-free data exists.
     weights:
-      rs_3m: 0.2479
-      rs_6m: 0.4793
-      risk_adj_3m: 0.1901
-      trend_structure: 0.0083
-      return_1m: 0.0165
-      return_5d: 0.0579
+      rs_3m: 0.20
+      rs_6m: 0.55
+      risk_adj_3m: 0.22
+      trend_structure: 0.01
+      return_1m: 0.0
+      return_5d: 0.02
     penalties:
       falling_knife_3m_threshold: -0.15
       falling_knife_penalty: 0.25
@@ -323,6 +376,19 @@ harvest:
 backtest:
   default_mode: liquid_universe_full
   universe_selection: liquid_all
+  # Survivorship-free backtesting (2026-06): when true, ALL backtest paths (UI / tuner / CLI /
+  # engine) load split-adjusted prices for the current universe PLUS the ~1,890 delisted names
+  # from the FMP cache (data/fmp_cache_adj/), removing the ~35% survivorship inflation. The honest
+  # but ~2021-2026-bounded view. Default false (opt-in): toggle here or via the UI checkbox. Falls
+  # back to yfinance with a warning if the cache is absent. See backtesting/survivorship.py.
+  survivorship_free: false
+  # Apply the discretionary NEVER-BUY industry/sector exclusions (discretionary.excluded_*,
+  # funds/trusts, and the "Miscellaneous" sector) to the backtest candidate universe, mirroring
+  # the live gate in data/fundamentals.py. Default true = live/backtest parity. Set false for
+  # full-universe research (e.g. measuring what the exclusions actually cost). NOTE: the live
+  # universe labels come from Robinhood and the backtest's from the FMP cache — mostly the same
+  # taxonomy, but "Miscellaneous" is populated very differently (~550 live vs ~7 in the cache).
+  apply_discretionary_exclusions: true
   # 0 = FULL universe (all liquid symbols, ~3300+). The algo's edge is breadth of
   # selection, so backtests/tuning/UI must span the whole universe, never a subset.
   # A positive value caps the universe for quick smoke-tests ONLY — never for an
@@ -494,8 +560,10 @@ outcome_tracking:
   fill_returns_on_run: true
 candidate_selection:
   mode: percentile
-  top_percentile: 0.07
-  max_candidates: 10
+  # 2026-06: top_percentile 0.07->0.19, max_candidates 10->12 (breadth). Pairs with quality-momentum
+  # score_weights + max_buys_per_rebalance=8 — regime-robust only as a package (see score_weights note).
+  top_percentile: 0.19
+  max_candidates: 12
   min_candidates: 4
   use_absolute_score_floor: false
   absolute_score_floor: 0.45

@@ -175,6 +175,33 @@ def _format_news(news_data: dict, symbol: str) -> str:
     return "\n".join(lines) if lines else "No news articles found"
 
 
+def _forward_signals_text(symbol: str) -> str:
+    """Forward-looking catalyst signals the backward quant factors can't see — earnings surprise +
+    analyst consensus, from FMP (cache-first, best-effort). Lets the LLM weigh whether a beaten-down
+    name (negative momentum) actually has the market pricing in an inflection. Never raises."""
+    try:
+        from data import fmp_client as fmp
+        parts: list[str] = []
+        earn = fmp.statement(symbol, "earnings", allow_fetch=True)
+        if earn is not None and "epsActual" in earn.columns:
+            rep = earn[earn["epsActual"].notna()]
+            if len(rep):
+                r = rep.iloc[0]
+                act, est = r.get("epsActual"), r.get("epsEstimated")
+                if act is not None and est:
+                    parts.append(f"last earnings {r.get('date')}: EPS {act} vs est {est} "
+                                 f"({(float(act) - float(est)) / abs(float(est)) * 100:+.0f}% surprise)")
+        grades = fmp.statement(symbol, "grades-consensus", allow_fetch=True)
+        if grades is not None and len(grades):
+            g = grades.iloc[0]
+            buy = int(g.get("strongBuy", 0) or 0) + int(g.get("buy", 0) or 0)
+            sell = int(g.get("sell", 0) or 0) + int(g.get("strongSell", 0) or 0)
+            parts.append(f"analyst consensus: {buy} buy / {int(g.get('hold', 0) or 0)} hold / {sell} sell")
+        return "; ".join(parts) if parts else "no forward signals available"
+    except Exception:
+        return "forward signals unavailable"
+
+
 def _valuation_block(symbol: str, f: dict, news_text: str) -> str:
     return (
         f"STOCK: {symbol}\n"
@@ -191,7 +218,8 @@ def _valuation_block(symbol: str, f: dict, news_text: str) -> str:
         f"  PE_COMP={f.get('pe_comp','N/A')}  PB_COMP={f.get('pb_comp','N/A')}\n"
         f"  YIELD_TRAP_FLAG={f.get('yield_trap_flag','N/A')}\n"
         f"  FINAL_VALUE_METRIC={f.get('value_metric','N/A')}\n\n"
-        f"ANALYST: Buy/Sell Ratio={f.get('buy_to_sell_ratio','N/A')}\n\n"
+        f"ANALYST: Buy/Sell Ratio={f.get('buy_to_sell_ratio','N/A')}\n"
+        f"FORWARD SIGNALS (catalysts the momentum factor can't see): {_forward_signals_text(symbol)}\n\n"
         f"NEWS:\n{news_text}"
     )
 

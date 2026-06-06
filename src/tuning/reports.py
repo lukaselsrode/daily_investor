@@ -17,8 +17,10 @@ from .constants import (
     _ARCH_FIELDS,
     _ARCH_KEYS,
     _ARCH_SLOT_OFFSET,
+    _CONFIG_PATH_TO_PARAM_IDX,
     PARAM_NAMES,
     _current_params,
+    archetype_cfg_from_params,
 )
 
 logger = logging.getLogger(__name__)
@@ -72,35 +74,65 @@ def apply_config_params(params: np.ndarray) -> None:
     for k, v in zip(mom_keys, mom_norm):
         mi_w[k] = round(float(v), 4)
 
-    # Position-sizing slots 43-45 (active_position_sizing preset) — persist when present.
-    if len(params) > 45:
+    # Tail slots (sizing / regime / blends) are written by CONFIG PATH, not hardcoded
+    # index — the param layout shifts whenever fields are added to a slot group, and
+    # hardcoded indices silently wrote the wrong slot once the archetype block grew.
+    def _by_path(path: str):
+        i = _CONFIG_PATH_TO_PARAM_IDX.get(path)
+        if i is None or i >= len(params):
+            return None
+        return float(params[i])
+
+    _v = _by_path("risk.max_single_position_pct")
+    if _v is not None:
         cfg.setdefault("risk", {})
-        cfg["risk"]["max_single_position_pct"] = round(float(params[43]), 4)
-        cfg["risk"]["max_buys_per_rebalance"]  = round(float(params[44]))
+        cfg["risk"]["max_single_position_pct"] = round(_v, 4)
+    _v = _by_path("risk.max_buys_per_rebalance")
+    if _v is not None:
+        cfg.setdefault("risk", {})
+        cfg["risk"]["max_buys_per_rebalance"] = round(_v)
+    _v = _by_path("candidate_selection.max_candidates")
+    if _v is not None:
         cfg.setdefault("candidate_selection", {})
-        cfg["candidate_selection"]["max_candidates"] = round(float(params[45]))
+        cfg["candidate_selection"]["max_candidates"] = round(_v)
 
-    # Regime-conditional momentum tilt slot 46 (active_regime_tilt preset) — persist when present.
-    if len(params) > 46:
-        cfg.setdefault("regime", {})
-        cfg["regime"].setdefault("bullish", {})
-        cfg["regime"]["bullish"]["momentum_tilt"] = round(float(params[46]), 4)
-
-    # Regime-conditional mean-reversion blend slot 47 (active_alpha_engine) — persist when present.
-    if len(params) > 47:
-        cfg.setdefault("regime", {})
-        cfg["regime"].setdefault("defensive", {})
-        cfg["regime"]["defensive"]["mean_reversion_blend"] = round(float(params[47]), 4)
-
-    # Low-vol quality blend slot 48 — persist when present.
-    if len(params) > 48:
+    _v = _by_path("regime.bullish.momentum_tilt")
+    if _v is not None:
+        cfg.setdefault("regime", {}).setdefault("bullish", {})
+        cfg["regime"]["bullish"]["momentum_tilt"] = round(_v, 4)
+    _v = _by_path("regime.defensive.mean_reversion_blend")
+    if _v is not None:
+        cfg.setdefault("regime", {}).setdefault("defensive", {})
+        cfg["regime"]["defensive"]["mean_reversion_blend"] = round(_v, 4)
+    _v = _by_path("scoring.quality_low_vol_blend")
+    if _v is not None:
         cfg.setdefault("scoring", {})
-        cfg["scoring"]["quality_low_vol_blend"] = round(float(params[48]), 4)
-
-    # Residual-momentum blend slot 49 — persist when present.
-    if len(params) > 49:
+        cfg["scoring"]["quality_low_vol_blend"] = round(_v, 4)
+    _v = _by_path("scoring.momentum_residual_blend")
+    if _v is not None:
         cfg.setdefault("scoring", {})
-        cfg["scoring"]["momentum_residual_blend"] = round(float(params[49]), 4)
+        cfg["scoring"]["momentum_residual_blend"] = round(_v, 4)
+
+    # Archetype lifecycle slots — persist when the vector includes them (previously
+    # dropped, so a tuned active_archetype_lifecycle run never reached config). Reuse the
+    # canonical extractor so booleans become real bools, minimum_hold_days rounds to int,
+    # and the harvest>=trim sanity is applied; untuned per-archetype keys are preserved.
+    if len(params) > _ARCH_SLOT_OFFSET:
+        _arch_cfg = archetype_cfg_from_params(params)
+        _am = cfg.setdefault("archetype_management", {})
+        for _label, _entry in _arch_cfg.items():
+            if _label == "enabled" or not isinstance(_entry, dict):
+                continue
+            _dst = _am.setdefault(_label, {})
+            for _k, _val in _entry.items():
+                if _k == "minimum_hold_days":
+                    _dst[_k] = int(_val)
+                elif isinstance(_val, bool):
+                    _dst[_k] = _val
+                elif isinstance(_val, float):
+                    _dst[_k] = round(_val, 4)
+                else:
+                    _dst[_k] = _val
 
     with open(CONFIG_FILE, "w") as f:
         yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)

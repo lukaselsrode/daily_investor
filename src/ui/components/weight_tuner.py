@@ -33,8 +33,11 @@ def _normalized_weights(raw: dict[str, float]) -> dict[str, float]:
 
 
 def _params_from_weights(weights: dict[str, float]) -> np.ndarray:
-    from backtesting.simulator import get_default_params
-    params = get_default_params()
+    # Full 60-slot vector (extended slots at config seeds) so previews run in the
+    # SAME regime as the tuner (archetype/regime overrides applied), not the 16-slot
+    # path which silently skips them.
+    from tuning.constants import _current_params
+    params = _current_params()
     params[0] = weights["value"]
     params[1] = weights["quality"]
     params[2] = weights["income"]
@@ -422,11 +425,16 @@ def _render_manual_mode():
 
 def _run_full_history_weight_search(precomp, n_samples: int, seed: int, respect_bounds: bool, progress_callback, scope: str = "overall_strategy", preset: str | None = None) -> list[dict]:
     """Evaluate N parameter combos on full history, rank by Sharpe. Respects preset active indices."""
-    from backtesting.simulator import get_default_params, run_simulation
-    from tuning.constants import PARAM_NAMES, _effective_bounds, _get_active_indices
+    from backtesting.simulator import run_simulation
+    from tuning.constants import (
+        PARAM_NAMES,
+        _current_params,
+        _effective_bounds,
+        _get_active_indices,
+    )
     from tuning.random_tune import _weight_bounds_from_config, sample_weight_simplex
 
-    base        = get_default_params()
+    base        = _current_params()   # full 60-slot vector — supports any active slot index
     active_idxs = _get_active_indices(scope=scope, preset=preset)
     eff_bounds  = _effective_bounds(scope=scope, preset=preset)
 
@@ -932,7 +940,16 @@ def _render_scipy_mode(scope: str = "overall_strategy", preset: str | None = Non
     )
 
     st.subheader("scipy Optimizer")
-    st.caption("Differential evolution over all 15 parameters. Slower but explores the full param space.")
+    from tuning.constants import PARAM_NAMES as _PN
+    from tuning.constants import _get_active_indices as _gai
+    from util import BACKTEST_PARAMS as _BP
+    _n_active = len(_gai(scope=scope, preset=preset))
+    _univ = "full liquid universe" if not _BP.get("max_symbols") else f"capped at {_BP['max_symbols']} (smoke-test)"
+    st.caption(
+        f"Differential evolution over the **{_n_active}** active parameter(s) "
+        f"({'preset: ' + preset if preset else 'scope default'}, {len(_PN)} total slots). "
+        f"Runs on the **{_univ}**."
+    )
 
     optimize_over = st.radio(
         "Optimize over",
@@ -1148,9 +1165,9 @@ def _render_scipy_mode(scope: str = "overall_strategy", preset: str | None = Non
     if sp.get("mode") == "random_windows":
         import pandas as pd
 
-        from backtesting.simulator import get_default_params
+        from tuning.constants import _current_params
         params = sp["params"]
-        cur = get_default_params()
+        cur = _current_params()   # 60-slot current config — matches optimized vector length
         active_set = set(sp.get("active_params", []))
 
         # --- Summary metrics ---
@@ -1273,8 +1290,8 @@ def _render_scipy_mode(scope: str = "overall_strategy", preset: str | None = Non
             ])
 
         # --- Weight change charts ---
-        from backtesting.simulator import get_default_params
-        cur = get_default_params()
+        from tuning.constants import _current_params
+        cur = _current_params()   # 60-slot current config — matches optimized vector length
         active_set = set(result.active_params)
         candidates = [
             ("Sharpe-opt", result.sharpe_params, "#4c8ef5"),
@@ -1312,10 +1329,176 @@ def _render_scipy_mode(scope: str = "overall_strategy", preset: str | None = Non
 
 
 # ---------------------------------------------------------------------------
+# Auto-tune All — staged coordinate-ascent + windowed validation (primary flow)
+# ---------------------------------------------------------------------------
+
+_CLUSTER_LABELS = {
+    "active_momentum_engine":  "Momentum engine — score weight + sub-weights + regime tilt",
+    "active_quality_stack":    "Quality stack — quality weight + low-vol + min-quality + floor",
+    "active_buy_gate":         "Buy gate — all weights + threshold + candidate filters",
+    "active_exit_ladder":      "Exit ladder — take-profit/sell-weak/trailing + floors + opp-cost",
+    "active_breadth_turnover": "Breadth / turnover — sizing + filters + cadence/cooldowns",
+}
+_ATA_PROFILES = {
+    "quick":    dict(robustness="quick",    horizon="short", maxiter=6,  popsize=4, note="fast smoke"),
+    "standard": dict(robustness="standard", horizon="mixed", maxiter=10, popsize=6, note="normal research"),
+    "deep":     dict(robustness="deep",     horizon="mixed", maxiter=14, popsize=8, note="overnight — strongest"),
+}
+
+
+def _render_auto_tune_all() -> None:
+    st.subheader("🚀 Auto-tune All → Validate")
+    st.caption(
+        "Pick the cluster *sections* to co-tune. Staged coordinate-ascent tunes them in "
+        "leverage order on the full universe (each validated winner frozen before the next, "
+        "then a final joint re-tune), followed by a full windowed validation. "
+        "Active sleeve · research only — review and Apply."
+    )
+    from tuning.interaction_screen import DEFAULT_CLUSTERS
+
+    clusters = st.multiselect(
+        "Cluster sections to co-tune",
+        list(DEFAULT_CLUSTERS),
+        default=list(DEFAULT_CLUSTERS),
+        format_func=lambda c: _CLUSTER_LABELS.get(c, c),
+        key="ata_clusters",
+        help="Each cluster groups parameters that share a decision surface. Staged ascent "
+             "co-tunes the selected ones; deselect any you want left at config defaults.",
+    )
+    c1, c2 = st.columns(2)
+    with c1:
+        profile = st.selectbox("Profile", list(_ATA_PROFILES),
+                               format_func=lambda k: f"{k} — {_ATA_PROFILES[k]['note']}", key="ata_profile")
+    with c2:
+        n_days = int(st.number_input("History (days)", min_value=180, max_value=1500,
+                                     value=730, step=60, key="ata_days"))
+    st.caption(f"{len(clusters)} staged tunes + 1 final joint = **{len(clusters) + 1} robust tunes**.")
+    if profile != "quick":
+        st.warning("⚠️ Non-quick profiles are long-running. For the full overnight run prefer the CLI: "
+                   "`make auto-tune-all PROFILE=deep`.")
+
+    if st.button("▶ Auto-tune All → Validate", type="primary", key="ata_run"):
+        if not clusters:
+            st.error("Select at least one cluster section.")
+        else:
+            bar = st.progress(0, text="Loading full-universe data…")
+            try:
+                from ui.services.backtest_service import load_precomp
+                precomp = load_precomp(n_days, mode=BACKTEST_MODES[0])
+            except Exception as exc:
+                bar.empty()
+                st.error(f"Failed to load data: {exc}")
+                return
+            from tuning.profiles import expand_run_matrix
+            from tuning.staged_tune import run_staged_tune, validate_full_windowed
+            cfg = _ATA_PROFILES[profile]
+            run_matrix = expand_run_matrix(cfg["robustness"], cfg["horizon"])
+
+            def _cb(done, total, label):
+                bar.progress(min(int(done / max(total, 1) * 100), 99), text=f"{label} ({done}/{total})")
+
+            try:
+                with st.spinner("Staged tuning…"):
+                    staged = run_staged_tune(
+                        precomp, clusters=clusters, run_matrix=run_matrix,
+                        scope="active_sleeve_compounding",
+                        maxiter=cfg["maxiter"], popsize=cfg["popsize"], progress_callback=_cb,
+                    )
+                bar.progress(99, text="Validating (full windowed confirmation)…")
+                with st.spinner("Validating…"):
+                    validation = validate_full_windowed(
+                        precomp, staged.final_params, run_matrix=run_matrix,
+                        scope="active_sleeve_compounding",
+                    )
+                bar.empty()
+                st.session_state["ata_result"] = {"staged": staged, "validation": validation, "clusters": clusters}
+            except Exception as exc:
+                bar.empty()
+                st.error(f"Auto-tune All failed: {exc}")
+                st.exception(exc)
+                return
+
+    r = st.session_state.get("ata_result")
+    if r is None:
+        st.info("No run yet. Pick clusters and click **Auto-tune All → Validate** (start with the quick profile).")
+        return
+
+    staged, validation = r["staged"], r["validation"]
+    st.divider()
+
+    # Validation badge + headline.
+    if validation.get("confirmed"):
+        st.success("✅ CONFIRMED — passes the out-of-sample gate and is robust across horizons.")
+    else:
+        why = "; ".join(validation.get("oos_reasons", [])) or f"overfit score {validation.get('overfit_score', 1):.0%}"
+        st.error(f"❌ NOT CONFIRMED — {why}. Do not apply without further work.")
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Robust score", f"{staged.final_score:.3f}",
+              delta=f"{staged.final_score - staged.baseline_score:+.3f} vs config")
+    m2.metric("OOS gate", "✅ pass" if validation.get("oos_passed") else "❌ fail")
+    m3.metric("Overfit score", f"{validation.get('overfit_score', 1):.0%}")
+    m4.metric("Clusters accepted", f"{len(staged.accepted_clusters)}/{len(r['clusters'])}")
+
+    st.subheader("Staged trace")
+    st.dataframe(staged.trace_df(), use_container_width=True, hide_index=True)
+
+    hdf = validation.get("horizon_df")
+    if hdf is not None and not hdf.empty:
+        st.subheader("Per-horizon robustness (validated config)")
+        st.dataframe(hdf, use_container_width=True, hide_index=True)
+
+    # Parameter changes table (tuned slots = union of selected clusters).
+    st.subheader("Parameter changes")
+    from tuning.constants import PARAM_NAMES, _current_params, _get_active_indices
+    cur = _current_params()
+    active_idx = _get_active_indices("active_sleeve_compounding", preset="+".join(r["clusters"]))
+    active_set = {PARAM_NAMES[i] for i in active_idx}
+    pdf = _build_param_df(cur, [("Tuned", staged.final_params)], active_set)
+    pdf = pdf[pdf["Status"] == "✅ tuned"].copy()
+    pdf["Current"] = pdf["Current"].map("{:.4f}".format)
+    pdf["Tuned"] = pdf["Tuned"].map("{:.4f}".format)
+    pdf["Δ Tuned"] = pdf["Δ Tuned"].map("{:+.4f}".format)
+    st.dataframe(pdf, use_container_width=True, hide_index=True)
+
+    # Apply — gated by config-write permission AND a confirmed result.
+    from ui.utils import ui_config
+    _allow = ui_config().get("allow_config_writes", False)
+    with st.expander("Apply tuned params to config.yaml (requires confirmation)"):
+        if not validation.get("confirmed"):
+            st.warning("Result is NOT confirmed — applying is blocked.")
+        elif not _allow:
+            st.info("Config writes are disabled in UI settings (allow_config_writes=false).")
+        else:
+            st.markdown("Writes the tuned active-sleeve params into `config.yaml` (all other slots unchanged).")
+            confirm = st.text_input("Type CONFIRM to proceed:", key="ata_confirm")
+            if st.button("Apply to config.yaml", key="ata_apply"):
+                if confirm.strip().upper() != "CONFIRM":
+                    st.error("Type CONFIRM to proceed.")
+                else:
+                    try:
+                        from tuning.tuner import ParameterTuner
+                        ParameterTuner().apply_params(staged.final_params)
+                        st.success("✅ Applied tuned params to config.yaml.")
+                    except Exception as exc:
+                        st.error(f"Failed to apply: {exc}")
+
+
+# ---------------------------------------------------------------------------
 # Public render
 # ---------------------------------------------------------------------------
 
 def render() -> None:
+    _render_auto_tune_all()
+    st.divider()
+    # Toggle (not an expander) so the advanced modes — which use their own expanders —
+    # don't nest expanders (Streamlit forbids that).
+    if st.toggle("⚙️ Show advanced tuning — manual preview / random search / scipy / per-preset",
+                 value=False, key="wt_show_advanced"):
+        _render_advanced_tuning()
+
+
+def _render_advanced_tuning() -> None:
     scope = st.radio(
         "Backtest scope",
         ["overall_strategy", "active_sleeve_compounding"],
@@ -1329,35 +1512,40 @@ def render() -> None:
 
     preset: str | None = None
     if scope == "active_sleeve_compounding":
-        from tuning.presets import list_presets
-        _preset_names = [name for name, _ in list_presets() if not name.endswith("_filters")
-                         and not name.endswith("_cooldown") and not name.endswith("_sizing")]
-        # Group: Core (non-archetype) first, then Archetype-targeted
-        _archetype_names = [n for n in _preset_names if "archetype" in n
-                            or n in ("active_quality_compounders",
-                                     "active_speculative_momentum",
-                                     "active_value_recovery",
-                                     "active_defensive_income")]
-        _core_names = [n for n in _preset_names if n not in _archetype_names]
-        _preset_opts = (
-            ["(none — use config frozen_parameters)"]
-            + (["── Core ──"] if _core_names else []) + _core_names
-            + (["── Archetype ──"] if _archetype_names else []) + _archetype_names
-        )
-        _sel = st.selectbox(
-            "Tuning preset",
-            _preset_opts,
+        from tuning.presets import _PRESETS, list_presets
+        _CLUSTERS = [
+            "active_buy_gate", "active_momentum_engine", "active_exit_ladder",
+            "active_breadth_turnover", "active_quality_stack",
+        ]
+        _arch_set = {
+            "active_quality_compounders", "active_legacy_turnaround",
+            "active_speculative_momentum", "active_value_recovery",
+            "active_defensive_income", "active_core_default",
+        }
+        _all = [name for name, _ in list_presets() if not _PRESETS[name].get("phase2")]
+        _archetype = [n for n in _all if "archetype" in n or n in _arch_set]
+        _cluster = [n for n in _all if n in _CLUSTERS]
+        _core = [n for n in _all if n not in _archetype and n not in _cluster]
+        # Interaction-cluster presets first (the recommended joins), then core, then archetype.
+        _ordered = _cluster + _core + _archetype
+        _sel = st.multiselect(
+            "Tuning preset(s) — pick 1, or several to CO-TUNE their union (joint search)",
+            _ordered,
             key="wt_preset",
-            help="Presets override which parameters are tunable for this run. "
-                 "Archetype presets tune lifecycle slots 15-38 (24 archetype thresholds).",
+            help="Each preset opens a subset of tunable params. Selecting MULTIPLE joins "
+                 "their parameter sets into one search (composition). The interaction-cluster "
+                 "presets (buy_gate / momentum_engine / exit_ladder / breadth_turnover / "
+                 "quality_stack) co-tune params that share a decision surface. "
+                 "Empty = scope default (base score weights only).",
         )
-        if _sel.startswith("── "):
-            # Section header — ignore as a selection
-            _sel = _preset_opts[0]
-        if _sel != _preset_opts[0]:
-            preset = _sel
-            from tuning.presets import _PRESETS
-            st.caption(f"**{preset}** — {_PRESETS[preset]['description']}")
+        if _sel:
+            preset = "+".join(_sel)
+            from tuning.constants import PARAM_NAMES, _get_active_indices
+            _n_active = len(_get_active_indices(scope=scope, preset=preset))
+            _dof = " — ⚠ high DOF, prefer the robust **Random Windows** objective" if _n_active >= 12 else ""
+            st.caption(f"**{len(_sel)} preset(s)** → **{_n_active}** active param(s) of {len(PARAM_NAMES)}{_dof}")
+            if len(_sel) == 1:
+                st.caption(f"_{_PRESETS[_sel[0]]['description']}_")
 
         st.info(
             "Active Sleeve: `index_pct` and ETF routing params are always frozen. "
@@ -1368,26 +1556,26 @@ def render() -> None:
         "Mode",
         ["🎛️ Manual — set weights and preview",
          "🎲 Random Search — sample weight combos",
-         "⚙️ scipy — differential evolution (all 15 params)"],
+         "⚙️ scipy — differential evolution (scope/preset params)"],
         horizontal=False,
         key="wt_mode",
     )
 
     st.divider()
 
-    # Data cache status — shows whether the 35s yfinance download is already
-    # in memory for the current session. Saves the download on 2nd+ runs.
+    # Data cache status — the full-universe price download (~2700+ symbols) is the
+    # slow part (multi-minute); the in-session cache makes 2nd+ runs instant.
     _cache = st.session_state.get("_precomp_cache", {})
     if _cache:
         _keys = sorted(_cache.keys())
         _desc = ", ".join(f"{d}d/{m or 'default'}" for d, m in _keys)
         _col1, _col2 = st.columns([4, 1])
-        _col1.caption(f"💾 Data cached for: {_desc} — 2nd+ runs skip the download (~35s saved)")
+        _col1.caption(f"💾 Full-universe data cached for: {_desc} — 2nd+ runs skip the download")
         if _col2.button("Clear data cache", key="wt_clear_cache"):
             st.session_state["_precomp_cache"] = {}
             st.rerun()
     else:
-        st.caption("💾 No data cached yet — first run will download price history (~35s)")
+        st.caption("💾 No data cached yet — first run downloads the full-universe price history (multi-minute); later runs are instant")
 
     if mode.startswith("🎛️"):
         _render_manual_mode()
