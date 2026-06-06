@@ -705,6 +705,59 @@ def cmd_snapshots(
     print(report.pretty())
 
 
+def cmd_fmp(
+    action: str,
+    *,
+    symbols_source: str = "current",
+    start: str = "2015-01-01",
+    end: str = "2030-01-01",
+    kinds: list[str] | None = None,
+    limit: int = 44,
+    max_symbols: int | None = None,
+    max_pages: int = 50,
+    min_adv: float = 500_000.0,
+    force: bool = False,
+    allow_fetch_prices: bool = False,
+) -> None:
+    """FMP cache operations: status, backfill, dead-universe build, validation."""
+    from data import fmp_ops
+
+    if action == "status":
+        print(fmp_ops.fmp_cache_status().pretty())
+        return
+    if action == "validate-cache":
+        print(fmp_ops.validate_cache().pretty())
+        return
+    if action == "backfill-delisted":
+        print(fmp_ops.backfill_delisted_roster(max_pages=max_pages).pretty())
+        return
+    if action == "build-dead-universe":
+        print(fmp_ops.build_dead_universe(
+            min_adv=min_adv,
+            start=start,
+            end=end,
+            max_symbols=max_symbols,
+            allow_fetch_prices=allow_fetch_prices,
+        ).pretty())
+        return
+
+    if action in {"backfill-prices", "backfill-statements"}:
+        symbols = fmp_ops.load_symbol_list(symbols_source, max_symbols=max_symbols)
+        print(f"Loaded {len(symbols)} symbols from {symbols_source!r}")
+        if action == "backfill-prices":
+            print(fmp_ops.backfill_prices(symbols, start=start, end=end, force=force).pretty())
+        else:
+            print(fmp_ops.backfill_statements(
+                symbols,
+                kinds=kinds,
+                limit=limit,
+                force=force,
+            ).pretty())
+        return
+
+    print(f"Unknown fmp action: {action!r}")
+
+
 def cmd_factor_map(
     method: str = "pca",
     color_by: str | None = None,

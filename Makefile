@@ -31,6 +31,38 @@ fetch-data:                  ## Fetch all data: valuations, dividends, holdings,
 update-outcomes:             ## Backfill future return outcomes for past decisions (calibration only — never touches live scoring)
 	$(DI) update-outcomes
 
+FMP_SYMBOLS ?= current
+FMP_START   ?= 2015-01-01
+FMP_END     ?= 2030-01-01
+FMP_MAX     ?=
+FMP_KINDS   ?= income-statement,balance-sheet-statement,cash-flow-statement
+FMP_PAGES   ?= 50
+FMP_MIN_ADV ?= 500000
+
+.PHONY: fmp-status
+fmp-status:                  ## Show FMP cache/key/quota/coverage status
+	$(DI) fmp status
+
+.PHONY: fmp-validate-cache
+fmp-validate-cache:          ## Read-only sanity check of FMP price/statement/dead-universe cache
+	$(DI) fmp validate-cache
+
+.PHONY: fmp-backfill-prices
+fmp-backfill-prices:         ## Backfill FMP adjusted prices (FMP_SYMBOLS=current|AAPL,MSFT|path.csv)
+	$(DI) fmp backfill-prices --symbols $(FMP_SYMBOLS) --start $(FMP_START) --end $(FMP_END) $(if $(FMP_MAX),--max-symbols $(FMP_MAX),)
+
+.PHONY: fmp-backfill-statements
+fmp-backfill-statements:     ## Backfill FMP statements (FMP_SYMBOLS=current|AAPL,MSFT|path.csv  FMP_KINDS=a,b)
+	$(DI) fmp backfill-statements --symbols $(FMP_SYMBOLS) --kinds $(FMP_KINDS) $(if $(FMP_MAX),--max-symbols $(FMP_MAX),)
+
+.PHONY: fmp-backfill-delisted
+fmp-backfill-delisted:       ## Backfill FMP delisted-company roster (FMP_PAGES=N)
+	$(DI) fmp backfill-delisted --max-pages $(FMP_PAGES)
+
+.PHONY: fmp-build-dead-universe
+fmp-build-dead-universe:     ## Build dead_universe.parquet from delisted roster + cached prices
+	$(DI) fmp build-dead-universe --start $(FMP_START) --end $(FMP_END) --min-adv $(FMP_MIN_ADV) $(if $(FMP_MAX),--max-symbols $(FMP_MAX),)
+
 # ── Live trading ──────────────────────────────────────────────────────────────
 
 .PHONY: run

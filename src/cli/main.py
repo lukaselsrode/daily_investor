@@ -51,6 +51,7 @@ def main(argv: list[str] | None = None) -> None:
         cmd_config,
         cmd_factor_map,
         cmd_fetch_data,
+        cmd_fmp,
         cmd_interaction_screen,
         cmd_list_presets,
         cmd_report,
@@ -172,6 +173,44 @@ def main(argv: list[str] | None = None) -> None:
                   "[--dry-run] [--input PATH] [--output PATH] [--in-place-with-backup] [--overwrite-existing]")
             sys.exit(2)
 
+    elif cmd == "fmp":
+        sub = rest[0] if rest else "status"
+        sub_rest = rest[1:] if len(rest) > 1 else []
+        if sub == "status":
+            cmd_fmp(action="status")
+        elif sub == "validate-cache":
+            cmd_fmp(action="validate-cache")
+        elif sub == "backfill-prices":
+            source = _flag_value(sub_rest, "--symbols") or "current"
+            start = _flag_value(sub_rest, "--start") or "2015-01-01"
+            end = _flag_value(sub_rest, "--end") or "2030-01-01"
+            max_symbols = _int_flag(sub_rest, "--max-symbols")
+            cmd_fmp(action="backfill-prices", symbols_source=source, start=start, end=end,
+                    max_symbols=max_symbols, force="--force" in sub_rest)
+        elif sub == "backfill-statements":
+            source = _flag_value(sub_rest, "--symbols") or "current"
+            kinds_s = _flag_value(sub_rest, "--kinds")
+            kinds = [k.strip() for k in kinds_s.split(",") if k.strip()] if kinds_s else None
+            max_symbols = _int_flag(sub_rest, "--max-symbols")
+            limit = _int_flag(sub_rest, "--limit") or 44
+            cmd_fmp(action="backfill-statements", symbols_source=source, kinds=kinds,
+                    max_symbols=max_symbols, limit=limit, force="--force" in sub_rest)
+        elif sub == "backfill-delisted":
+            cmd_fmp(action="backfill-delisted", max_pages=_int_flag(sub_rest, "--max-pages") or 50)
+        elif sub == "build-dead-universe":
+            cmd_fmp(
+                action="build-dead-universe",
+                start=_flag_value(sub_rest, "--start") or "2015-01-01",
+                end=_flag_value(sub_rest, "--end") or "2030-01-01",
+                min_adv=float(_flag_value(sub_rest, "--min-adv") or 500_000.0),
+                max_symbols=_int_flag(sub_rest, "--max-symbols"),
+                allow_fetch_prices="--fetch-prices" in sub_rest,
+            )
+        else:
+            print("Usage: fmp status | validate-cache | backfill-prices | backfill-statements | "
+                  "backfill-delisted | build-dead-universe")
+            sys.exit(2)
+
     elif cmd == "factor-map":
         method   = _flag_value(rest, "--method") or "pca"
         color    = _flag_value(rest, "--color")
@@ -205,6 +244,17 @@ def _flag_value(args: list[str], flag: str) -> str | None:
     return None
 
 
+def _int_flag(args: list[str], flag: str) -> int | None:
+    value = _flag_value(args, flag)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        print(f"{flag} requires an integer, got {value!r}")
+        sys.exit(2)
+
+
 def _print_help() -> None:
     print("""
 daily-investor CLI
@@ -224,6 +274,7 @@ COMMANDS
   report                   Generate diagnostics report
   update-outcomes          Backfill future returns for past decisions (calibration only)
   factor-map               3-D PCA/UMAP factor-space scatter of the scored universe
+  fmp <SUB>                FMP cache operations (status, backfill, validate)
   config <SUB>             config maintenance (sub: migrate-scoring)
   snapshots <SUB>          snapshot maintenance (sub: rescore)
 
@@ -243,6 +294,16 @@ OPTIONS (auto-tune-all / interaction-screen)
   --profile P              quick | standard | deep  (default: standard)
   --days N                 history window to load (default: 730)
   --clusters a,b,c         auto-tune-all only: which interaction clusters to co-tune
+
+OPTIONS (fmp)
+  fmp status
+  fmp validate-cache
+  fmp backfill-prices --symbols current|AAPL,MSFT|path.csv [--start YYYY-MM-DD] [--end YYYY-MM-DD]
+                      [--max-symbols N] [--force]
+  fmp backfill-statements --symbols current|AAPL,MSFT|path.csv [--kinds income-statement,...]
+                          [--limit N] [--max-symbols N] [--force]
+  fmp backfill-delisted [--max-pages N]
+  fmp build-dead-universe [--min-adv N] [--fetch-prices] [--max-symbols N]
 
 OPTIONS (any command)
   --config PATH            Use a different YAML config (default: cfg/config.yaml).

@@ -19,6 +19,7 @@ RB_ACCT=your_robinhood_email
 RB_CREDS=your_robinhood_password
 RB_MFA_SECRET=your_totp_secret        # optional — skips interactive MFA prompt
 ANTHROPIC_API_KEY=your_anthropic_key  # required for sentiment + LLM tune review
+FMP_KEY=your_fmp_key                  # optional — enables FMP backfills / survivorship-free cache refresh
 EOF
 
 # 3. Verify setup — fetch data and save first snapshot (no trades placed)
@@ -223,6 +224,7 @@ daily-investor COMMAND [OPTIONS]
 | `report` | Run a quick 90-day backtest and print results |
 | `update-outcomes` | Backfill realized future returns for past decisions — calibration only, never touches live scoring |
 | `factor-map` | 3-D PCA/UMAP factor-space scatter of the scored universe |
+| `fmp <SUB>` | FMP cache operations: `status`, `validate-cache`, `backfill-prices`, `backfill-statements`, `backfill-delisted`, `build-dead-universe` |
 | `config <SUB>` | Config maintenance — sub: `migrate-scoring` (rewrite legacy YAML to unified scoring) |
 | `snapshots <SUB>` | Snapshot maintenance — sub: `rescore` (re-score on-disk snapshots to current model) |
 
@@ -249,7 +251,20 @@ all:
 (or tick the "🧬 Survivorship-free data" box in the UI Validation tab) to run every backtest and
 tune against split-adjusted prices for the current universe **plus the delisted names** from the
 FMP cache (`data/fmp_cache_adj/`), removing the ~35% survivorship inflation. Requires the cache to
-be populated (see `src/data/fmp_client.py`); falls back to yfinance with a warning if it is absent.
+be populated; falls back to yfinance with a warning if it is absent. Use the first-class FMP cache
+commands to maintain it:
+
+```bash
+make fmp-status
+make fmp-backfill-prices FMP_SYMBOLS=current FMP_START=2015-01-01
+make fmp-backfill-statements FMP_SYMBOLS=current FMP_MAX=500
+make fmp-backfill-delisted
+make fmp-build-dead-universe
+make fmp-validate-cache
+```
+
+All backfill commands are cache-first and quota-aware. Reads inside backtests are cache-only; only
+these explicit `fmp backfill-*` commands spend FMP calls.
 
 ---
 
@@ -259,6 +274,12 @@ be populated (see `src/data/fmp_client.py`); falls back to yfinance with a warni
 # Data
 make fetch-data            # Fetch fresh fundamentals + news, save CSVs + snapshot (no trades)
 make update-outcomes       # Backfill future return labels for past decisions (calibration only)
+make fmp-status            # FMP cache/key/quota/coverage status
+make fmp-validate-cache    # Read-only FMP cache sanity check
+make fmp-backfill-prices FMP_SYMBOLS=current FMP_MAX=100
+make fmp-backfill-statements FMP_SYMBOLS=current FMP_MAX=100
+make fmp-backfill-delisted
+make fmp-build-dead-universe
 
 # Live trading
 make run                   # Safe mode — manual confirmation at each step

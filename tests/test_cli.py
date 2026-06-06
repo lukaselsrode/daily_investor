@@ -390,6 +390,47 @@ class TestCliDispatch:
             cli_main(["stability-scan", "--mode", "walk_forward_price_only_test"])
         mock_cmd.assert_called_once_with(mode="walk_forward_price_only_test", output_dir=None)
 
+    def test_dispatch_fmp_status_default(self):
+        with patch("cli.commands.cmd_fmp") as mock_cmd:
+            cli_main(["fmp"])
+        mock_cmd.assert_called_once_with(action="status")
+
+    def test_dispatch_fmp_backfill_prices(self):
+        with patch("cli.commands.cmd_fmp") as mock_cmd:
+            cli_main([
+                "fmp", "backfill-prices",
+                "--symbols", "AAPL,MSFT",
+                "--start", "2020-01-01",
+                "--end", "2024-01-01",
+                "--max-symbols", "2",
+                "--force",
+            ])
+        mock_cmd.assert_called_once_with(
+            action="backfill-prices",
+            symbols_source="AAPL,MSFT",
+            start="2020-01-01",
+            end="2024-01-01",
+            max_symbols=2,
+            force=True,
+        )
+
+    def test_dispatch_fmp_build_dead_universe(self):
+        with patch("cli.commands.cmd_fmp") as mock_cmd:
+            cli_main([
+                "fmp", "build-dead-universe",
+                "--min-adv", "750000",
+                "--max-symbols", "10",
+                "--fetch-prices",
+            ])
+        mock_cmd.assert_called_once_with(
+            action="build-dead-universe",
+            start="2015-01-01",
+            end="2030-01-01",
+            min_adv=750000.0,
+            max_symbols=10,
+            allow_fetch_prices=True,
+        )
+
     def test_dispatch_unknown_exits(self):
         with pytest.raises(SystemExit):
             cli_main(["no-such-command"])
