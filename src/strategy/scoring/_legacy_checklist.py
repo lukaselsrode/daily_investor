@@ -54,20 +54,3 @@ def _checklist_quality(
     return round(score, 3)
 
 
-def _checklist_income(dividend_yield: float) -> tuple[float, bool]:
-    """Return (income_score, yield_trap_flag).
-
-    yield_trap_flag=True if yield >= yield_trap_threshold (suspiciously high).
-    income_score=0       for no dividend or yield trap.
-    income_score=scaled  min(yield / dividend_threshold, income_score_cap)
-    """
-    from util import DIVIDEND_THRESHOLD, SCORING_PARAMS
-
-    qc = SCORING_PARAMS["quality_checklist"]
-    if not dividend_yield or dividend_yield <= 0:
-        return 0.0, False
-    if dividend_yield >= qc["yield_trap_threshold"]:
-        return 0.0, True
-    if dividend_yield >= DIVIDEND_THRESHOLD:
-        return min(dividend_yield / DIVIDEND_THRESHOLD, qc["income_score_cap"]), False
-    return 0.0, False

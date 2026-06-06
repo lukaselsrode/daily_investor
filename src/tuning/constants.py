@@ -414,21 +414,6 @@ def _position_sizing_default_frozen_indices() -> set[int]:
     }
 
 
-def candidate_cfg_from_params(params) -> dict:
-    """
-    Build a candidate-selection override dict from filter slots in *params*.
-    Returns {} when params has only the original 40 slots (no cs filters appended).
-    """
-    if params is None or len(params) <= _CS_FILTER_SLOT_OFFSET:
-        return {}
-    out: dict = {}
-    for _i, (_, _cs_field, _) in enumerate(_CS_FILTER_FIELDS):
-        _idx = _CS_FILTER_SLOT_OFFSET + _i
-        if _idx < len(params):
-            out[_cs_field] = float(params[_idx])
-    return out
-
-
 def _candidate_filter_default_frozen_indices() -> set[int]:
     """All candidate-filter slots default to frozen — unfrozen only via active_candidate_filters preset."""
     return {

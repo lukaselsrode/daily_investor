@@ -22,6 +22,12 @@ import pandas as pd
 from core.instruments import is_fund_instrument_type
 from portfolio.position_archetypes import classify_archetype
 from portfolio.sell_engine import evaluate_sell_candidate
+from portfolio.sleeve_tracker import (
+    log_cash_sweep,
+    log_exit_proceeds,
+    log_harvest_proceeds,
+    log_trim_proceeds,
+)
 from strategy.regimes.detector import get_current_regime
 from util import (
     ARCHETYPE_PARAMS,
@@ -675,6 +681,10 @@ class PortfolioManager:
                     self._broker.sell(symbol, quantity).success:
                 sold.append(symbol)
                 self._record_sell_event(symbol, was_loss=(pct is not None and pct < 0))
+                log_exit_proceeds(
+                    symbol, safe_float(holdings[symbol].get("equity"), 0.0) or 0.0,
+                    etf_pct=0.0, notes=decision.get("reason"),
+                )
 
         held_on_sentiment: set[str] = set()
         sentiment_results: dict[str, dict] = {}
@@ -755,6 +765,11 @@ class PortfolioManager:
                         trimmed.append(symbol)
                         trim_proceeds += equity * frac
                         self._record_sell_event(symbol, was_loss=False)
+                        log_trim_proceeds(
+                            symbol, equity * frac,
+                            etf_pct=EXIT_DECISION_PARAMS["trim_to_etfs_pct"],
+                            notes=decision.get("reason"),
+                        )
                         logger.info(
                             f"TRIM executed {symbol}: sold {sell_qty:.4f} "
                             f"shares, {remain:.4f} remain | proceeds ${equity * frac:.2f}"
@@ -766,8 +781,18 @@ class PortfolioManager:
                             self._broker.sell(symbol, quantity).success:
                         sold.append(symbol)
                         self._record_sell_event(symbol, was_loss=(pct is not None and pct < 0))
+                        _equity = safe_float(holdings[symbol].get("equity"), 0.0) or 0.0
                         if exit_type == "harvest_exit":
-                            harvest_proceeds += safe_float(holdings[symbol].get("equity"), 0.0) or 0.0
+                            harvest_proceeds += _equity
+                            log_harvest_proceeds(
+                                symbol, _equity,
+                                etf_pct=HARVEST_PARAMS["harvest_to_etfs_pct"],
+                                notes=decision.get("reason"),
+                            )
+                        else:
+                            log_exit_proceeds(
+                                symbol, _equity, etf_pct=0.0, notes=decision.get("reason"),
+                            )
 
             # Route harvest proceeds (take-profit full exits)
             if harvest_proceeds >= HARVEST_PARAMS["min_harvest_amount"]:
@@ -1684,15 +1709,19 @@ class PortfolioManager:
                     f"=== CASH SWEEP: ${sweep_amount:,.2f} → ETFs "
                     f"(${per_etf:.2f} each, ${remaining - sweep_amount:.2f} retained) ==="
                 )
+                _swept = 0.0
                 for etf in ETFS:
                     try:
                         result = self._broker.buy_fractional(etf, per_etf)
                         if result.success:
+                            _swept += per_etf
                             logger.info(f"Sweep {etf}: {result.state}")
                         else:
                             logger.warning(f"Sweep {etf}: order failed — {result.detail}")
                     except Exception as e:
                         logger.error(f"Sweep {etf} failed: {e}")
+                if _swept > 0:
+                    log_cash_sweep(_swept, notes="end-of-run ETF deficit sweep")
 
         # Run-end summary.
         try:

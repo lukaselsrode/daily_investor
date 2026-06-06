@@ -307,3 +307,28 @@ class TestPaperBrokerProtocol:
         broker = _broker(cash=100.0)
         broker.add_funds(50.0)
         assert broker.get_cash() == pytest.approx(150.0)
+
+
+# ---------------------------------------------------------------------------
+# 6. Sleeve capital-event ledger is wired into the live rebalance
+# ---------------------------------------------------------------------------
+
+def test_rebalance_records_sleeve_capital_events(tmp_path, monkeypatch):
+    """The sleeve event ledger (sleeve_tracker.log_*) is wired into PortfolioManager:
+    a rebalance that sweeps cash into ETFs records a cash_sweep capital event. Before
+    wiring, the writer API existed but the loop never called it (the UI read an empty
+    ledger). The events file is isolated to a tmp path so the test never touches data/."""
+    from portfolio import sleeve_tracker
+
+    events_file = tmp_path / "sleeve_events.parquet"
+    monkeypatch.setattr(sleeve_tracker, "_events_path", lambda: events_file)
+
+    broker = _broker(cash=1000.0)
+    _pm(broker).rebalance(_df([]), regime="bullish")
+
+    events = sleeve_tracker.load_sleeve_events()
+    assert not events.empty, "rebalance must write at least one sleeve capital event"
+    assert "cash_sweep" in set(events["event_type"]), \
+        "the ETF cash sweep should record a cash_sweep event"
+    swept = events[events["event_type"] == "cash_sweep"]["amount"].astype(float).sum()
+    assert swept > 0

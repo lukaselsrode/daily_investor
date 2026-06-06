@@ -442,39 +442,6 @@ def _append_journal_row(row: dict) -> None:
 # Backward-compat alias (old signature)
 # ---------------------------------------------------------------------------
 
-def record_decision(
-    ticker: str,
-    decision_output,
-    metrics,
-    holding_days: int | None,
-    portfolio_pnl: float | None,
-    regime_cluster: str = "unknown",
-    price_at_decision: float | None = None,
-) -> None:
-    """
-    Legacy wrapper — kept for any existing callers.
-    Prefers record_decision_holding() for new code.
-    """
-    record_decision_holding(
-        symbol=ticker,
-        decision_state=getattr(decision_output, "action", "UNKNOWN"),
-        raw_signal=getattr(decision_output, "raw_sell_trigger", ""),
-        final_action=getattr(decision_output, "action", "UNKNOWN"),
-        executed_bool=False,
-        price=price_at_decision,
-        percent_change=portfolio_pnl,
-        holding_days=holding_days,
-        current_value_metric=_sf(metrics.get("value_metric") if metrics is not None else None),
-        value_score=_sf(metrics.get("value_score")    if metrics is not None else None),
-        quality_score=_sf(metrics.get("quality_score")  if metrics is not None else None),
-        momentum_score=_sf(metrics.get("momentum_score") if metrics is not None else None),
-        income_score=_sf(metrics.get("income_score")   if metrics is not None else None),
-        thesis_intact_score=getattr(decision_output, "thesis_intact_score",        None),
-        premature_exit_probability=getattr(decision_output, "premature_exit_probability", None),
-        regime=regime_cluster,
-    )
-
-
 # ---------------------------------------------------------------------------
 # Fill future returns (backfill job)
 # ---------------------------------------------------------------------------
