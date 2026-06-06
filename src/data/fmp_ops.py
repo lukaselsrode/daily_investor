@@ -106,8 +106,10 @@ def _read_parquet_len(path: Path) -> int:
         return 0
 
 
-def _calls_remaining_from_cache(cache: Path) -> int:
-    daily_cap = int(os.environ.get("FMP_DAILY_CAP", "240"))
+def _calls_remaining_from_cache(cache: Path) -> int | None:
+    daily_cap = int(os.environ.get("FMP_DAILY_CAP", "0"))
+    if daily_cap <= 0:
+        return None
     qpath = cache / "meta" / "_quota.json"
     try:
         data = json.loads(qpath.read_text())
@@ -336,11 +338,22 @@ def build_dead_universe(
 
     out = _cache_dir() / "dead_universe.parquet"
     out.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(rows, columns=["symbol", "first_date", "delist_date", "max_adv"]).to_parquet(out)
+    new_df = pd.DataFrame(rows, columns=["symbol", "first_date", "delist_date", "max_adv"])
+    if out.exists():
+        try:
+            existing = pd.read_parquet(out)
+            if "symbol" in existing.columns and not existing.empty:
+                # Delisted roster endpoints can be plan/range-limited. Never shrink a previously
+                # richer dead-universe cache just because a later roster fetch was partial.
+                new_df = pd.concat([new_df, existing], ignore_index=True)
+                new_df = new_df.drop_duplicates(subset=["symbol"], keep="first")
+        except Exception as exc:
+            logger.warning("Could not merge existing dead universe %s: %s", out, exc)
+    new_df.to_parquet(out)
     return FMPBackfillReport(
         action="dead universe build",
         requested=scanned,
-        fetched_or_cached=len(rows),
+        fetched_or_cached=len(new_df),
         skipped=skipped,
         failed=failed,
         quota_remaining=fmp.calls_remaining(),

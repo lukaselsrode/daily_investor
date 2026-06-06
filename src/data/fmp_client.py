@@ -43,10 +43,10 @@ _STMT_DIR = os.path.join(_CACHE_DIR, "statements")
 _META_DIR = os.path.join(_CACHE_DIR, "meta")
 _QUOTA_PATH = os.path.join(_META_DIR, "_quota.json")
 
-# Leave headroom under the plan cap so an interactive session never fully exhausts it.
-# Defaults suit the FREE tier (250/day); override both for a paid per-minute plan, e.g.
-# FMP_DAILY_CAP=100000 FMP_THROTTLE_S=0.15 for a full delisted backfill in one session.
-_DAILY_CAP = int(os.environ.get("FMP_DAILY_CAP", "240"))
+# FMP paid plans are rate-limited rather than lifetime/daily-call limited. Set FMP_DAILY_CAP=0
+# (the default) for rate-limit-only behavior; set a positive value such as 240 if you want a
+# self-imposed daily safety budget for a free/conservative key.
+_DAILY_CAP = int(os.environ.get("FMP_DAILY_CAP", "0"))
 _THROTTLE_S = float(os.environ.get("FMP_THROTTLE_S", "0.4"))  # polite spacing between live calls
 
 
@@ -81,8 +81,10 @@ def _save_quota(q: dict) -> None:
         json.dump(q, fh)
 
 
-def calls_remaining() -> int:
-    """How many live FMP calls are still allowed today (cache reads are free)."""
+def calls_remaining() -> int | None:
+    """How many self-budgeted live FMP calls remain today; None means rate-limit-only."""
+    if _DAILY_CAP <= 0:
+        return None
     return max(0, _DAILY_CAP - _load_quota().get("count", 0))
 
 
@@ -138,7 +140,7 @@ def _get(url: str) -> tuple[int, object]:
     attempts fail so a long backfill can skip the symbol and retry it on the next run.
     """
     q = _load_quota()
-    if q.get("count", 0) >= _DAILY_CAP:
+    if _DAILY_CAP > 0 and q.get("count", 0) >= _DAILY_CAP:
         raise FMPQuotaExceeded(f"FMP daily cap {_DAILY_CAP} reached ({q['count']} used)")
     time.sleep(_THROTTLE_S)
     last_exc: Exception | None = None
