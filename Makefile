@@ -31,13 +31,25 @@ fetch-data:                  ## Fetch all data: valuations, dividends, holdings,
 update-outcomes:             ## Backfill future return outcomes for past decisions (calibration only — never touches live scoring)
 	$(DI) update-outcomes
 
-FMP_SYMBOLS ?= current
-FMP_START   ?= 2006-01-01
-FMP_END     ?= 2030-01-01
-FMP_MAX     ?=
-FMP_KINDS   ?= income-statement,balance-sheet-statement,cash-flow-statement
-FMP_PAGES   ?= 50
-FMP_MIN_ADV ?= 500000
+FMP_SYMBOLS      ?= current
+FMP_START        ?= 2006-01-01
+FMP_END          ?= 2030-01-01
+FMP_MAX          ?=
+FMP_KINDS        ?= income-statement,balance-sheet-statement,cash-flow-statement
+FMP_PAGES        ?= 50
+FMP_MIN_ADV      ?= 500000
+FMP_FETCH_PRICES ?=
+
+.PHONY: prepare-data
+prepare-data:                ## One-shot: fetch universe + deep-backfill ALL survivorship-free data (prices, delisted, dead-universe, statements, snapshots, VIX). Resumable — safe to re-run to finish/retry.
+	-$(MAKE) fetch-data
+	$(MAKE) fmp-backfill-delisted
+	$(MAKE) fmp-backfill-prices
+	$(MAKE) fmp-build-dead-universe FMP_FETCH_PRICES=1
+	$(MAKE) fmp-backfill-statements
+	$(MAKE) snapshot-backfill
+	$(MAKE) fmp-validate-cache
+	@echo "prepare-data complete. (^VIX is fetched automatically on the first backtest/precomp build.)"
 
 .PHONY: fmp-status
 fmp-status:                  ## Show FMP cache/key/quota/coverage status
@@ -60,8 +72,8 @@ fmp-backfill-delisted:       ## Backfill FMP delisted-company roster (FMP_PAGES=
 	$(DI) fmp backfill-delisted --max-pages $(FMP_PAGES)
 
 .PHONY: fmp-build-dead-universe
-fmp-build-dead-universe:     ## Build dead_universe.parquet from delisted roster + cached prices
-	$(DI) fmp build-dead-universe --start $(FMP_START) --end $(FMP_END) --min-adv $(FMP_MIN_ADV) $(if $(FMP_MAX),--max-symbols $(FMP_MAX),)
+fmp-build-dead-universe:     ## Build dead_universe.parquet from delisted roster (FMP_FETCH_PRICES=1 to fetch dead prices)
+	$(DI) fmp build-dead-universe --start $(FMP_START) --end $(FMP_END) --min-adv $(FMP_MIN_ADV) $(if $(FMP_FETCH_PRICES),--fetch-prices,) $(if $(FMP_MAX),--max-symbols $(FMP_MAX),)
 
 # ── Live trading ──────────────────────────────────────────────────────────────
 
@@ -121,78 +133,15 @@ auto-tune-apply:             ## auto-tune + write config.yaml if validation gate
 auto-tune-llm:               ## auto-tune + Claude second-opinion + apply
 	$(DI) auto-tune $(AUTO_DAYS) $(if $(MODE),--mode $(MODE),) --apply --llm-review
 
-.PHONY: auto-tune-active
-auto-tune-active:            ## Active sleeve tune — score weights preset  (AUTO_DAYS=N)
-	$(DI) auto-tune $(AUTO_DAYS) --scope active_sleeve_compounding --preset active_core_weights $(if $(MODE),--mode $(MODE),)
+.PHONY: list-presets
+list-presets:                ## List tunable presets (use a name with auto-tune-preset PRESET=...)
+	$(DI) list-presets
 
-.PHONY: auto-tune-active-exits
-auto-tune-active-exits:      ## Active sleeve tune — exit rules preset  (AUTO_DAYS=N)
-	$(DI) auto-tune $(AUTO_DAYS) --scope active_sleeve_compounding --preset active_exits $(if $(MODE),--mode $(MODE),)
+PRESET ?= active_core_weights
 
-.PHONY: auto-tune-active-full
-auto-tune-active-full:       ## Active sleeve tune — weights + exits preset  (AUTO_DAYS=N)
-	$(DI) auto-tune $(AUTO_DAYS) --scope active_sleeve_compounding --preset active_full_safe $(if $(MODE),--mode $(MODE),)
-
-.PHONY: auto-tune-active-factors
-auto-tune-active-factors:    ## Active sleeve tune — factor internals preset  (AUTO_DAYS=N)
-	$(DI) auto-tune $(AUTO_DAYS) --scope active_sleeve_compounding --preset active_factor_internals $(if $(MODE),--mode $(MODE),)
-
-.PHONY: auto-tune-active-exit-floors
-auto-tune-active-exit-floors: ## Active sleeve tune — DAE soft-exit floors preset  (AUTO_DAYS=N)
-	$(DI) auto-tune $(AUTO_DAYS) --scope active_sleeve_compounding --preset active_exit_floors $(if $(MODE),--mode $(MODE),)
-
-.PHONY: auto-tune-active-opportunity-cost
-auto-tune-active-opportunity-cost: ## Active sleeve tune — opportunity-cost stall exit (needs opportunity_cost.enabled)  (AUTO_DAYS=N)
-	$(DI) auto-tune $(AUTO_DAYS) --scope active_sleeve_compounding --preset active_opportunity_cost $(if $(MODE),--mode $(MODE),)
-
-.PHONY: auto-tune-active-candidate-filters
-auto-tune-active-candidate-filters: ## Active sleeve tune — candidate selection filters preset  (AUTO_DAYS=N)
-	$(DI) auto-tune $(AUTO_DAYS) --scope active_sleeve_compounding --preset active_candidate_filters $(if $(MODE),--mode $(MODE),)
-
-.PHONY: auto-tune-active-sizing
-auto-tune-active-sizing:     ## Active sleeve tune — position sizing / breadth preset  (AUTO_DAYS=N)
-	$(DI) auto-tune $(AUTO_DAYS) --scope active_sleeve_compounding --preset active_position_sizing $(if $(MODE),--mode $(MODE),)
-
-.PHONY: auto-tune-active-cooldown
-auto-tune-active-cooldown:   ## Active sleeve tune — rebalance cadence + cooldowns preset  (AUTO_DAYS=N)
-	$(DI) auto-tune $(AUTO_DAYS) --scope active_sleeve_compounding --preset active_rebalance_cooldown $(if $(MODE),--mode $(MODE),)
-
-.PHONY: auto-tune-active-regime
-auto-tune-active-regime:     ## Active sleeve tune — regime bull momentum tilt preset  (AUTO_DAYS=N)
-	$(DI) auto-tune $(AUTO_DAYS) --scope active_sleeve_compounding --preset active_regime_tilt $(if $(MODE),--mode $(MODE),)
-
-.PHONY: auto-tune-active-alpha
-auto-tune-active-alpha:      ## Active sleeve tune — full alpha engine (high DOF) preset  (AUTO_DAYS=N)
-	$(DI) auto-tune $(AUTO_DAYS) --scope active_sleeve_compounding --preset active_alpha_engine $(if $(MODE),--mode $(MODE),)
-
-.PHONY: auto-tune-active-blends
-auto-tune-active-blends:     ## Active sleeve tune — low-vol + residual-momentum blends (re-test)  (AUTO_DAYS=N)
-	$(DI) auto-tune $(AUTO_DAYS) --scope active_sleeve_compounding --preset active_scoring_blends $(if $(MODE),--mode $(MODE),)
-
-.PHONY: auto-tune-active-archetypes
-auto-tune-active-archetypes: ## Active sleeve tune — all 24 archetype lifecycle thresholds  (AUTO_DAYS=N)
-	$(DI) auto-tune $(AUTO_DAYS) --scope active_sleeve_compounding --preset active_archetype_lifecycle $(if $(MODE),--mode $(MODE),)
-
-# ── Interaction-cluster joint tunes (co-tune params that share a decision surface) ─
-.PHONY: auto-tune-cluster-buy-gate
-auto-tune-cluster-buy-gate:  ## Joint tune — buy-gate cluster (weights+threshold+filters)  (AUTO_DAYS=N)
-	$(DI) auto-tune $(AUTO_DAYS) --scope active_sleeve_compounding --preset active_buy_gate $(if $(MODE),--mode $(MODE),)
-
-.PHONY: auto-tune-cluster-momentum
-auto-tune-cluster-momentum:  ## Joint tune — momentum-engine cluster (weight+subweights+tilt)  (AUTO_DAYS=N)
-	$(DI) auto-tune $(AUTO_DAYS) --scope active_sleeve_compounding --preset active_momentum_engine $(if $(MODE),--mode $(MODE),)
-
-.PHONY: auto-tune-cluster-exit-ladder
-auto-tune-cluster-exit-ladder: ## Joint tune — exit-ladder cluster (exits+floors+opp-cost)  (AUTO_DAYS=N)
-	$(DI) auto-tune $(AUTO_DAYS) --scope active_sleeve_compounding --preset active_exit_ladder $(if $(MODE),--mode $(MODE),)
-
-.PHONY: auto-tune-cluster-breadth
-auto-tune-cluster-breadth:   ## Joint tune — breadth/turnover cluster (sizing+filters+cadence)  (AUTO_DAYS=N)
-	$(DI) auto-tune $(AUTO_DAYS) --scope active_sleeve_compounding --preset active_breadth_turnover $(if $(MODE),--mode $(MODE),)
-
-.PHONY: auto-tune-cluster-quality
-auto-tune-cluster-quality:   ## Joint tune — quality-stack cluster (weight+low_vol+min_q+floor)  (AUTO_DAYS=N)
-	$(DI) auto-tune $(AUTO_DAYS) --scope active_sleeve_compounding --preset active_quality_stack $(if $(MODE),--mode $(MODE),)
+.PHONY: auto-tune-preset
+auto-tune-preset:            ## Active-sleeve auto-tune of ONE preset  (PRESET=name  AUTO_DAYS=N). Names: make list-presets
+	$(DI) auto-tune $(AUTO_DAYS) --scope active_sleeve_compounding --preset $(PRESET) $(if $(MODE),--mode $(MODE),)
 
 # ── Research / diagnostics ────────────────────────────────────────────────────
 
