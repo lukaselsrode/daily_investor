@@ -125,6 +125,7 @@ auto-tune-preset:            ## Active-sleeve auto-tune of ONE preset  (PRESET=n
 # ── Research / diagnostics ────────────────────────────────────────────────────
 
 OUTPUT_DIR ?= reports
+REGIME ?= neutral
 
 .PHONY: stability
 stability:                   ## Parameter stability scan across multiple windows  (research only, no writes)
@@ -137,6 +138,10 @@ interaction-screen:          ## Screen which param clusters synergize/clash when
 .PHONY: auto-tune-all
 auto-tune-all:               ## Staged coordinate-ascent over interaction clusters + full windowed validation  (PROFILE=quick|standard|deep, research only)
 	$(DI) auto-tune-all --profile $(if $(PROFILE),$(PROFILE),standard) $(if $(MODE),--mode $(MODE),) $(if $(CLUSTERS),--clusters $(CLUSTERS),)
+
+.PHONY: regime-sizing
+regime-sizing:               ## Random-window regime sizing/exposure grid (REGIME=neutral; research only, no writes)
+	PYTHONPATH=$(SRC) $(PYTHON) scripts/regime_sizing_random_window.py --regime $(REGIME) --output $(OUTPUT_DIR)/regime_sizing_$(REGIME).csv
 
 .PHONY: report
 report:                      ## Quick 90-day backtest → print results + stability hint

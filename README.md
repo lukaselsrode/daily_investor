@@ -228,6 +228,13 @@ daily-investor COMMAND [OPTIONS]
 | `config <SUB>` | Config maintenance — sub: `migrate-scoring` (rewrite legacy YAML to unified scoring) |
 | `snapshots <SUB>` | Snapshot maintenance — sub: `rescore` (re-score on-disk snapshots to current model) |
 
+Research scripts:
+
+```bash
+make regime-sizing REGIME=neutral
+# runs scripts/regime_sizing_random_window.py; read-only random-window exposure grid
+```
+
 **Key options:**
 
 ```
@@ -304,6 +311,7 @@ make auto-tune-llm         # auto-tune + Claude second-opinion + apply
 make stability             # Parameter stability scan across multiple windows
 make report                # Quick 90-day backtest → reports/
 make regime                # Print current market regime (live SPY + VIX)
+make regime-sizing REGIME=neutral  # Random-window sizing/exposure grid; writes reports/regime_sizing_neutral.csv
 make ic                    # Print IC summary across default horizons (needs ≥ 2 snapshots)
 make snapshot-info         # Show snapshot store status (count, date range)
 make snapshot-backfill     # Backfill parquet snapshots from existing agg_data CSVs
