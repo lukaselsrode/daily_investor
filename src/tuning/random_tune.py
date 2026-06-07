@@ -298,6 +298,7 @@ def run_random_weight_tune(
     scope: str = "overall_strategy",
     preset: str | None = None,
     run_matrix: list[dict] | None = None,
+    regime_scope: str = "all",
 ) -> RandomTuneResult:
     """
     Sample n_samples random parameter combinations, evaluate each on either:
@@ -366,7 +367,8 @@ def run_random_weight_tune(
     def _evaluate(params_i, eval_seed):
         """Evaluate params_i via run_matrix scan or single window_backtest."""
         if run_matrix is not None:
-            scan = run_robust_scan(precomp, params_i, run_matrix, scope=scope)
+            scan = run_robust_scan(precomp, params_i, run_matrix, scope=scope,
+                                   regime_scope=regime_scope)
             rep_summary = scan.aggregate_summary()
             if rep_summary is None:
                 return None, None
@@ -383,6 +385,7 @@ def run_random_weight_tune(
                 slippage_bps=slippage_bps,
                 rebalance_frequency_days=rebalance_frequency_days,
                 scope=scope,
+                regime_scope=regime_scope,
             )
             rank_score = (
                 summary.active_robust_score

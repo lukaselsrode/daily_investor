@@ -106,7 +106,8 @@ def _verdict(interaction: float, displacement: float) -> str:
     return "⚪ ~independent"
 
 
-def _tune_subset(precomp, preset, run_matrix, scope, maxiter, popsize, seed=42, baseline=None):
+def _tune_subset(precomp, preset, run_matrix, scope, maxiter, popsize, seed=42, baseline=None,
+                 regime_scope: str = "all"):
     """
     Optimize a preset's active subset over the robust_scan objective, holding all
     other slots at `baseline` (defaults to current config). Returns a MarginalResult,
@@ -133,7 +134,8 @@ def _tune_subset(precomp, preset, run_matrix, scope, maxiter, popsize, seed=42, 
     def _obj(reduced: np.ndarray) -> float:
         full = _expand_params(reduced, active, frozen)
         try:
-            scan = run_robust_scan(precomp, params=full, run_matrix=run_matrix, scope=scope)
+            scan = run_robust_scan(precomp, params=full, run_matrix=run_matrix, scope=scope,
+                                   regime_scope=regime_scope)
             return -float(scan.overall_robust_score)
         except Exception:
             return 0.0
@@ -170,6 +172,7 @@ def screen_interactions(
     maxiter: int = 8,
     popsize: int = 6,
     progress_callback=None,
+    regime_scope: str = "all",
 ) -> InteractionResult:
     """Screen all cluster pairs for interaction. progress_callback(done, total)."""
     names = list(cluster_names)
@@ -179,7 +182,8 @@ def screen_interactions(
 
     out = InteractionResult(scope=scope)
     for n in names:
-        m = _tune_subset(precomp, n, run_matrix, scope, maxiter, popsize)
+        m = _tune_subset(precomp, n, run_matrix, scope, maxiter, popsize,
+                         regime_scope=regime_scope)
         if m is not None:
             out.marginals[n] = m
         done += 1
@@ -193,7 +197,8 @@ def screen_interactions(
             if progress_callback:
                 progress_callback(done, total)
             continue
-        joint = _tune_subset(precomp, f"{a}+{b}", run_matrix, scope, maxiter, popsize)
+        joint = _tune_subset(precomp, f"{a}+{b}", run_matrix, scope, maxiter, popsize,
+                             regime_scope=regime_scope)
         if joint is not None:
             interaction = joint.score - max(ma.score, mb.score)
             disp = _displacement(joint, ma, mb, scope)

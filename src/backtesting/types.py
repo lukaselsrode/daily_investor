@@ -63,6 +63,14 @@ class PrecomputedData(NamedTuple):
     # the live gate in data/fundamentals.py. True → never enters candidate selection. None →
     # no exclusions applied (full-universe research). Built by load_and_precompute.
     excluded_mask: np.ndarray | None = None
+    # Optional point-in-time market regime labels aligned to rows. Used when an
+    # experiment slices a regime-specific block and the simulator must not reset
+    # the 200DMA warm-up context at day 0.
+    regime_labels_daily: np.ndarray | None = None
+    # (n_days,) ^VIX close aligned to the benchmark calendar. Lets the backtest use the
+    # SAME VIX-primary regime classifier as live (strategy/regimes/classifier.py). None →
+    # the simulator falls back to the legacy SPY-vs-200DMA rule (byte-identical to pre-VIX).
+    vix_prices: np.ndarray | None = None
 
 
 @dataclass

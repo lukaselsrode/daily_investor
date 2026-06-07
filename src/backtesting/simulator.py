@@ -608,13 +608,25 @@ def _momentum_score_at_day(precomp: PrecomputedData, params: np.ndarray, day: in
 
 
 def _detect_regime(precomp: PrecomputedData, day: int) -> str:
+    labels = getattr(precomp, "regime_labels_daily", None)
+    if labels is not None and day < len(labels):
+        label = str(labels[day])
+        if label in {"bullish", "neutral", "defensive"}:
+            return label
     bench = precomp.benchmark_prices
-    if day >= 200 and np.isfinite(bench[day]) and bench[day] > 0:
-        ma200 = float(np.nanmean(bench[max(0, day - 199): day + 1]))
-        if bench[day] < ma200 * 0.95:
-            return "defensive"
-        if bench[day] < ma200:
-            return "neutral"
+    if day < 200 or not (np.isfinite(bench[day]) and bench[day] > 0):
+        return "bullish"
+    ma200 = float(np.nanmean(bench[max(0, day - 199): day + 1]))
+    # VIX present → the SHARED VIX-primary classifier, so backtest regime == live regime.
+    vix_arr = getattr(precomp, "vix_prices", None)
+    if vix_arr is not None and day < len(vix_arr) and np.isfinite(vix_arr[day]):
+        from strategy.regimes.classifier import classify_regime
+        return classify_regime(float(bench[day]), ma200, float(vix_arr[day]))
+    # No VIX → legacy SPY-vs-200DMA rule (byte-identical to pre-VIX backtests).
+    if bench[day] < ma200 * 0.95:
+        return "defensive"
+    if bench[day] < ma200:
+        return "neutral"
     return "bullish"
 
 
@@ -2373,6 +2385,7 @@ def run_backtest_report(
             vol_3m_daily=_opt(precomp.vol_3m_daily),
             above_50dma_daily=_opt(precomp.above_50dma_daily),
             above_200dma_daily=_opt(precomp.above_200dma_daily),
+            regime_labels_daily=_opt(precomp.regime_labels_daily),
         )
 
     train_precomp = _slice_precomp(train_slice)
@@ -2508,6 +2521,7 @@ def compare_archetype_modes(
             vol_3m_daily=_o(precomp.vol_3m_daily),
             above_50dma_daily=_o(precomp.above_50dma_daily),
             above_200dma_daily=_o(precomp.above_200dma_daily),
+            regime_labels_daily=_o(precomp.regime_labels_daily),
         )
 
     train = _slice(train_slice)
@@ -2608,6 +2622,7 @@ def compare_candidate_selection_modes(
             vol_3m_daily=_o(precomp.vol_3m_daily),
             above_50dma_daily=_o(precomp.above_50dma_daily),
             above_200dma_daily=_o(precomp.above_200dma_daily),
+            regime_labels_daily=_o(precomp.regime_labels_daily),
         )
 
     train_precomp = _slice(train_slice)

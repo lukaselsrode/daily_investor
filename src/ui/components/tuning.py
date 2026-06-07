@@ -24,13 +24,20 @@ def render() -> None:
 
     # ---- Settings ---------------------------------------------------------
     st.subheader("Settings")
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
-        n_days = st.number_input("Look-back days", min_value=30, max_value=1000, value=90, step=30, key="tune_n_days")
+        n_days = st.number_input("Look-back days", min_value=30, max_value=5000, value=90, step=30, key="tune_n_days")
     with c2:
         mode = st.selectbox("Backtest mode", BACKTEST_MODES, key="tune_mode")
         st.caption(LOOKAHEAD_LABELS[mode])
     with c3:
+        regime_scope = st.selectbox(
+            "Regime data scope",
+            ["all", "bullish", "neutral", "defensive"],
+            key="tune_regime_scope",
+            help="Filters training/backtest data to the regime (defensive = high-vol/risk-off, VIX≥30; 'bearish' accepted). Same definition live and backtest.",
+        )
+    with c4:
         if tune_type == "Single-Objective Tune":
             objective = st.selectbox("Objective", ["sharpe", "calmar"])
         else:
@@ -62,7 +69,7 @@ def render() -> None:
 
     # ---- CLI preview ------------------------------------------------------
     if tune_type == "Auto-Tune (Sharpe+Calmar)":
-        flags = f" --mode {mode}"
+        flags = f" --mode {mode} --regime-scope {regime_scope}"
         if apply_cfg:
             flags += " --apply"
         if force_apply:
@@ -71,7 +78,7 @@ def render() -> None:
             flags += " --llm-review"
         st.code(f"daily-investor auto-tune {n_days}{flags}", language="bash")
     else:
-        st.code(f"daily-investor tune {n_days} --objective {objective} --mode {mode}", language="bash")
+        st.code(f"daily-investor tune {n_days} --objective {objective} --mode {mode} --regime-scope {regime_scope}", language="bash")
 
     if not allow_write:
         st.info("🔒 Config writes disabled. Results will be shown but not written to config.yaml.")
@@ -84,7 +91,8 @@ def render() -> None:
         if tune_type == "Single-Objective Tune":
             with st.spinner(f"Running {n_days}-day {objective} tune…"):
                 try:
-                    result = tuner.tune(n_days=n_days, objective=objective, mode=mode)
+                    result = tuner.tune(n_days=n_days, objective=objective, mode=mode,
+                                         regime_scope=regime_scope)
                     st.session_state["tune_result"] = result
                     st.session_state["tune_type"] = "single"
                     st.success("✅ Tune complete.")
@@ -99,6 +107,7 @@ def render() -> None:
                         n_days=n_days, mode=mode,
                         apply=apply_cfg, force_apply=force_apply,
                         llm_review=llm_review,
+                        regime_scope=regime_scope,
                     )
                     st.session_state["tune_result"] = result
                     st.session_state["tune_type"] = "auto"

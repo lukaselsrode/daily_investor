@@ -16,12 +16,14 @@ from ui.utils import BACKTEST_MODES, LOOKAHEAD_LABELS, load_config_raw
 # ---------------------------------------------------------------------------
 
 def _run_backtest(n_days: int, mode: str, save_artifacts: bool = False,
-                  cluster_tracking: bool = False, scope: str = "overall_strategy"):
+                  cluster_tracking: bool = False, scope: str = "overall_strategy",
+                  regime_scope: str = "all"):
     from ui.services.backtest_service import run_single_backtest
     return run_single_backtest(n_days=n_days, mode=mode,
                                save_artifacts=save_artifacts,
                                cluster_tracking=cluster_tracking,
-                               scope=scope)
+                               scope=scope,
+                               regime_scope=regime_scope)
 
 
 def _equity_chart(train_result, val_result=None, equity_override=None, bench_override=None):
@@ -294,7 +296,7 @@ def render() -> None:
     c1, c2, c3 = st.columns(3)
     with c1:
         n_days = st.number_input(
-            "Look-back days", min_value=30, max_value=1000,
+            "Look-back days", min_value=30, max_value=5000,
             value=90, step=30, key="bt_n_days",
         )
     with c2:
@@ -316,6 +318,13 @@ def render() -> None:
         }[s],
         horizontal=True,
         key="bt_scope",
+    )
+    regime_scope = st.selectbox(
+        "Regime data scope",
+        ["all", "bullish", "neutral", "defensive"],
+        index=0,
+        key="bt_regime_scope",
+        help="Filters the data to the selected market regime (defensive = high-vol / risk-off, VIX≥30; 'bearish' is accepted as an alias). Same definition live and backtest.",
     )
 
     oc1, oc2 = st.columns(2)
@@ -358,7 +367,8 @@ def render() -> None:
         with st.spinner(f"Running {n_days}-day backtest…"):
             try:
                 result = _run_backtest(n_days, mode, save_artifacts=save_artifacts,
-                                      cluster_tracking=cluster_tracking, scope=scope)
+                                      cluster_tracking=cluster_tracking, scope=scope,
+                                      regime_scope=regime_scope)
                 st.session_state["bt_result"] = result
                 st.success("✅ Backtest complete.")
                 if save_artifacts:

@@ -95,6 +95,7 @@ def cmd_backtest(
     compare: bool = False,
     archetype_compare: bool = False,
     scope: str = "overall_strategy",
+    regime_scope: str = "all",
 ) -> None:
     """Run a single backtest and print results.
 
@@ -125,7 +126,7 @@ def cmd_backtest(
         comparison = compare_candidate_selection_modes(precomp, default_params)
         print_comparison_report(comparison)
     else:
-        result = engine.run(n_days=n_days, params=params, mode=mode, scope=scope)
+        result = engine.run(n_days=n_days, params=params, mode=mode, scope=scope, regime_scope=regime_scope)
         print_backtest_report(result.report)
 
 
@@ -176,6 +177,7 @@ def cmd_tune(
     mode: str | None = None,
     scope: str = "overall_strategy",
     preset: str | None = None,
+    regime_scope: str = "all",
 ) -> None:
     """Single-objective tune — prints diff, does NOT write config.
 
@@ -184,7 +186,10 @@ def cmd_tune(
     """
     from tuning.tuner import ParameterTuner
     tuner = ParameterTuner()
-    result = tuner.tune(n_days=n_days, objective=objective, mode=mode, scope=scope, preset=preset)
+    result = tuner.tune(
+        n_days=n_days, objective=objective, mode=mode, scope=scope,
+        preset=preset, regime_scope=regime_scope,
+    )
     _t.print_config_diff(result.params, result.sim)
 
 
@@ -196,6 +201,7 @@ def cmd_auto_tune(
     llm_review: bool = False,
     scope: str = "overall_strategy",
     preset: str | None = None,
+    regime_scope: str = "all",
 ) -> None:
     """Dual-objective auto-tune with walk-forward validation.
 
@@ -214,6 +220,7 @@ def cmd_auto_tune(
         llm_review=llm_review,
         scope=scope,
         preset=preset,
+        regime_scope=regime_scope,
     )
     _t._diff_table(
         result.avg_params,
@@ -249,6 +256,7 @@ def cmd_auto_tune_all(
     n_days: int = 730,
     mode: str | None = None,
     clusters: list[str] | None = None,
+    regime_scope: str = "all",
 ) -> None:
     """
     Auto-tune All — staged coordinate-ascent over interaction clusters, then a full
@@ -269,7 +277,7 @@ def cmd_auto_tune_all(
     sel = clusters or list(DEFAULT_CLUSTERS)
     run_matrix = expand_run_matrix(cfg["robustness"], cfg["horizon"])
 
-    print(f"\nAuto-tune All — profile={profile}, {n_days}d, clusters={sel}")
+    print(f"\nAuto-tune All — profile={profile}, {n_days}d, regime_scope={regime_scope}, clusters={sel}")
     print("Loading full-universe data …")
     precomp = load_and_precompute(n_days, mode=mode)
 
@@ -279,6 +287,7 @@ def cmd_auto_tune_all(
     staged = run_staged_tune(
         precomp, clusters=sel, run_matrix=run_matrix, scope="active_sleeve_compounding",
         maxiter=cfg["maxiter"], popsize=cfg["popsize"], progress_callback=_cb,
+        regime_scope=regime_scope,
     )
     print("\nStaged trace:")
     print(staged.trace_df().to_string(index=False))
@@ -287,7 +296,7 @@ def cmd_auto_tune_all(
 
     print("\nValidating (full windowed confirmation) …")
     v = validate_full_windowed(precomp, staged.final_params, run_matrix=run_matrix,
-                               scope="active_sleeve_compounding")
+                               scope="active_sleeve_compounding", regime_scope=regime_scope)
     badge = "✅ CONFIRMED" if v["confirmed"] else "❌ NOT CONFIRMED"
     print(f"\n{badge}  —  OOS gate: {'pass' if v.get('oos_passed') else 'FAIL'} "
           f"({'; '.join(v.get('oos_reasons', [])) or 'all gates pass'}); "
@@ -302,6 +311,7 @@ def cmd_interaction_screen(
     n_days: int = 730,
     mode: str | None = None,
     output_dir: str | None = None,
+    regime_scope: str = "all",
 ) -> None:
     """
     Parameter-interaction screener — RESEARCH ONLY, never writes config.
@@ -324,7 +334,7 @@ def cmd_interaction_screen(
     cfg = _profiles.get(profile, _profiles["standard"])
     run_matrix = expand_run_matrix(cfg["robustness"], cfg["horizon"])
 
-    print(f"\nInteraction screen — profile={profile}, {n_days}d, clusters={len(DEFAULT_CLUSTERS)}")
+    print(f"\nInteraction screen — profile={profile}, {n_days}d, regime_scope={regime_scope}, clusters={len(DEFAULT_CLUSTERS)}")
     print("Loading full-universe data …")
     precomp = load_and_precompute(n_days, mode=mode)
 
@@ -334,6 +344,7 @@ def cmd_interaction_screen(
     result = screen_interactions(
         precomp, run_matrix=run_matrix, scope="active_sleeve_compounding",
         maxiter=cfg["maxiter"], popsize=cfg["popsize"], progress_callback=_cb,
+        regime_scope=regime_scope,
     )
 
     print("\nInteraction matrix (diagonal = marginal robust score; off-diagonal = interaction):")

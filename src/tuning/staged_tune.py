@@ -63,11 +63,12 @@ class StagedTuneResult:
         return pd.DataFrame(rows)
 
 
-def _robust_score(precomp, params, run_matrix, scope) -> float:
+def _robust_score(precomp, params, run_matrix, scope, regime_scope: str = "all") -> float:
     from .robust_scan import run_robust_scan
     try:
         return float(run_robust_scan(
             precomp, params=params, run_matrix=run_matrix, scope=scope,
+            regime_scope=regime_scope,
         ).overall_robust_score)
     except Exception:
         return 0.0
@@ -82,6 +83,7 @@ def run_staged_tune(
     popsize: int = 6,
     min_improve: float = 0.0,
     progress_callback=None,
+    regime_scope: str = "all",
 ) -> StagedTuneResult:
     """Staged coordinate-ascent over the selected clusters. progress_callback(done,total,label)."""
     from .constants import _current_params
@@ -92,14 +94,15 @@ def run_staged_tune(
     ordered += [c for c in clusters if c not in _CLUSTER_ORDER]
 
     baseline = _current_params().copy()
-    orig_score = _robust_score(precomp, baseline, run_matrix, scope)
+    orig_score = _robust_score(precomp, baseline, run_matrix, scope, regime_scope)
     cur_score = orig_score
     out = StagedTuneResult(final_params=baseline, final_score=orig_score, baseline_score=orig_score)
 
     total = len(ordered) + 1  # + final joint pass
     done = 0
     for c in ordered:
-        m = _tune_subset(precomp, c, run_matrix, scope, maxiter, popsize, baseline=baseline)
+        m = _tune_subset(precomp, c, run_matrix, scope, maxiter, popsize, baseline=baseline,
+                         regime_scope=regime_scope)
         done += 1
         if progress_callback:
             progress_callback(done, total, f"stage: {c}")
@@ -117,7 +120,7 @@ def run_staged_tune(
     if len(out.accepted_clusters) >= 2:
         joint = _tune_subset(
             precomp, "+".join(out.accepted_clusters), run_matrix, scope,
-            maxiter, popsize, baseline=baseline,
+            maxiter, popsize, baseline=baseline, regime_scope=regime_scope,
         )
         if joint is not None and joint.score > cur_score + min_improve:
             baseline = joint.params.copy()
@@ -136,6 +139,7 @@ def validate_full_windowed(
     params: np.ndarray,
     run_matrix: list[dict],
     scope: str = "active_sleeve_compounding",
+    regime_scope: str = "all",
 ) -> dict:
     """
     Full windowed confirmation of a candidate config: OOS train/val gate + robust scan
@@ -145,6 +149,9 @@ def validate_full_windowed(
     from util import BACKTEST_PARAMS as bp
 
     from .robust_scan import run_robust_scan
+    if regime_scope != "all":
+        from backtesting.regime_scope import apply_regime_scope
+        precomp, _ = apply_regime_scope(precomp, regime_scope)
 
     out: dict = {}
 

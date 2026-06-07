@@ -325,6 +325,13 @@ def render() -> None:
         horizontal=True,
         key="rw_scope",
     )
+    regime_scope = st.selectbox(
+        "Regime data scope",
+        ["all", "bullish", "neutral", "defensive"],
+        index=0,
+        key="rw_regime_scope",
+        help="Only sample windows fully inside the selected regime (defensive = high-vol/risk-off, VIX≥30; 'bearish' accepted as an alias).",
+    )
 
     # ── Profile selectors ─────────────────────────────────────────────────
     col_r, col_h, col_days = st.columns([1, 1, 1])
@@ -468,6 +475,7 @@ def render() -> None:
                 mode=mode,
                 params=params,
                 scope=scope,
+                regime_scope=regime_scope,
                 progress_callback=_cb,
             )
             progress_bar.empty()

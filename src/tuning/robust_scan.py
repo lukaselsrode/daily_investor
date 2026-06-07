@@ -143,6 +143,7 @@ def run_robust_scan(
     params,
     run_matrix: list[dict],
     scope: str = "overall_strategy",
+    regime_scope: str = "all",
     progress_callback: Callable | None = None,
 ) -> RobustScanResult:
     """
@@ -181,6 +182,7 @@ def run_robust_scan(
                 window_days=horizon,
                 seed=seed,
                 scope=scope,
+                regime_scope=regime_scope,
             )
             cells.append(ScanCell(horizon_days=horizon, seed=seed, summary=summary))
         except Exception as exc:

@@ -15,6 +15,7 @@ def run_weight_tune(
     scope: str = "overall_strategy",
     preset: str | None = None,
     run_matrix: list[dict] | None = None,
+    regime_scope: str = "all",
 ):
     """Sample random parameter combinations on a pre-loaded precomp, rank by robust_score.
 
@@ -33,6 +34,7 @@ def run_weight_tune(
         scope=scope,
         preset=preset,
         run_matrix=run_matrix,
+        regime_scope=regime_scope,
     )
 
 

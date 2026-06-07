@@ -22,6 +22,14 @@ from core.logging import configure_logging
 
 def main(argv: list[str] | None = None) -> None:
     configure_logging()
+    # Load .env so EVERY subcommand has API keys/creds (FMP_KEY, etc.). Previously only
+    # src/main.py (the live-trading entry) loaded it, so `fmp`/`tune`/`backtest` ran
+    # without FMP_KEY and silently failed every fetch.
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except Exception:
+        pass
     args = argv if argv is not None else sys.argv[1:]
 
     if not args or args[0] in ("-h", "--help"):
@@ -79,19 +87,22 @@ def main(argv: list[str] | None = None) -> None:
         compare = "--compare" in rest
         archetype_compare = "--archetype-compare" in rest
         scope = _flag_value(rest, "--scope") or "overall_strategy"
+        regime_scope = _flag_value(rest, "--regime-scope") or "all"
         cmd_backtest(n_days=n_days, mode=mode, compare=compare,
-                     archetype_compare=archetype_compare, scope=scope)
+                     archetype_compare=archetype_compare, scope=scope,
+                     regime_scope=regime_scope)
 
     elif cmd == "tune":
         if not rest or not rest[0].isdigit():
-            print("Usage: tune DAYS [--objective sharpe|calmar|info_ratio] [--scope ...] [--preset ...]")
+            print("Usage: tune DAYS [--objective sharpe|calmar|info_ratio] [--scope ...] [--preset ...] [--regime-scope all|bullish|neutral|defensive]")
             sys.exit(1)
         n_days = int(rest[0])
         objective = _flag_value(rest, "--objective") or "sharpe"
         mode = _flag_value(rest, "--mode")
         scope = _flag_value(rest, "--scope") or "overall_strategy"
         preset = _flag_value(rest, "--preset")
-        cmd_tune(n_days=n_days, objective=objective, mode=mode, scope=scope, preset=preset)
+        regime_scope = _flag_value(rest, "--regime-scope") or "all"
+        cmd_tune(n_days=n_days, objective=objective, mode=mode, scope=scope, preset=preset, regime_scope=regime_scope)
 
     elif cmd == "auto-tune":
         n_days = int(rest[0]) if rest and rest[0].isdigit() else 90
@@ -101,7 +112,8 @@ def main(argv: list[str] | None = None) -> None:
         llm_review = "--llm-review" in rest
         scope = _flag_value(rest, "--scope") or "overall_strategy"
         preset = _flag_value(rest, "--preset")
-        cmd_auto_tune(n_days=n_days, mode=mode, apply=apply, force_apply=force_apply, llm_review=llm_review, scope=scope, preset=preset)
+        regime_scope = _flag_value(rest, "--regime-scope") or "all"
+        cmd_auto_tune(n_days=n_days, mode=mode, apply=apply, force_apply=force_apply, llm_review=llm_review, scope=scope, preset=preset, regime_scope=regime_scope)
 
     elif cmd == "stability-scan":
         mode = _flag_value(rest, "--mode")
@@ -114,7 +126,9 @@ def main(argv: list[str] | None = None) -> None:
         profile = _flag_value(rest, "--profile") or "standard"
         _nd = _flag_value(rest, "--days")
         n_days = int(_nd) if _nd else 730
-        cmd_interaction_screen(profile=profile, n_days=n_days, mode=mode, output_dir=out_dir)
+        regime_scope = _flag_value(rest, "--regime-scope") or "all"
+        cmd_interaction_screen(profile=profile, n_days=n_days, mode=mode, output_dir=out_dir,
+                               regime_scope=regime_scope)
 
     elif cmd == "auto-tune-all":
         mode = _flag_value(rest, "--mode")
@@ -123,7 +137,9 @@ def main(argv: list[str] | None = None) -> None:
         n_days = int(_nd) if _nd else 730
         _cl = _flag_value(rest, "--clusters")
         clusters = [c.strip() for c in _cl.split(",") if c.strip()] if _cl else None
-        cmd_auto_tune_all(profile=profile, n_days=n_days, mode=mode, clusters=clusters)
+        regime_scope = _flag_value(rest, "--regime-scope") or "all"
+        cmd_auto_tune_all(profile=profile, n_days=n_days, mode=mode, clusters=clusters,
+                          regime_scope=regime_scope)
 
     elif cmd == "report":
         out_dir = _flag_value(rest, "--output-dir") or "reports"
@@ -287,6 +303,7 @@ OPTIONS (tune / auto-tune)
   --force-apply            Write config.yaml unconditionally
   --llm-review             Add Claude second-opinion review
   --scope SCOPE            overall_strategy (default) or active_sleeve_compounding
+  --regime-scope SCOPE     all (default), bullish, neutral, or defensive (bearish accepted as an alias for defensive)
   --preset NAME[+NAME...]  Restrict tunable params to a preset; compose several with '+'
                            to co-tune their union (e.g. active_exits+active_exit_floors)
 

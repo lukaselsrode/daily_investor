@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
+from .regime_scope import eligible_window_starts
 from .simulator import run_simulation
 from .types import BacktestScope, PrecomputedData
 
@@ -191,6 +192,7 @@ def _slice_precomp(precomp: PrecomputedData, s: slice) -> PrecomputedData:
         vol_3m_daily=_opt(precomp.vol_3m_daily),
         above_50dma_daily=_opt(precomp.above_50dma_daily),
         above_200dma_daily=_opt(precomp.above_200dma_daily),
+        regime_labels_daily=_opt(precomp.regime_labels_daily),
     )
 
 
@@ -211,6 +213,7 @@ def random_window_backtest(
     rebalance_frequency_days: int = 5,
     progress_callback: Callable[[int, int], None] | None = None,
     scope: BacktestScope = "overall_strategy",
+    regime_scope: str = "all",
 ) -> RandomWindowSummary:
     """
     Sample n_windows random sub-windows of window_days each from precomp and
@@ -246,11 +249,17 @@ def random_window_backtest(
         )
 
     rng = np.random.default_rng(seed)
-    max_start = n_total - window_days
-    n_possible = max_start + 1
+    eligible_starts, _regime_meta = eligible_window_starts(precomp, window_days, regime_scope)
+    if regime_scope != "all" and precomp.regime_labels_daily is None:
+        from .regime_scope import regime_labels
+        precomp = precomp._replace(regime_labels_daily=regime_labels(precomp))
+    n_possible = len(eligible_starts)
 
     if n_possible <= 0:
-        raise ValueError(f"No valid start indices for window_days={window_days} with {n_total} total days.")
+        raise ValueError(
+            f"No valid start indices for window_days={window_days} with {n_total} total days "
+            f"and regime_scope={regime_scope!r}."
+        )
 
     actual_n = min(n_windows, n_possible)
     if actual_n < n_windows:
@@ -259,10 +268,10 @@ def random_window_backtest(
             n_possible, n_windows, actual_n,
         )
 
-    # Sample without replacement up to n_possible; then wrap if more requested
+    # Sample without replacement from eligible starts; then wrap if more requested.
     replace = actual_n > n_possible
-    raw_starts = rng.choice(n_possible, size=actual_n, replace=replace)
-    start_indices = sorted(set(int(s) for s in raw_starts))[:actual_n]
+    raw_positions = rng.choice(n_possible, size=actual_n, replace=replace)
+    start_indices = sorted(int(eligible_starts[pos]) for pos in set(int(p) for p in raw_positions))[:actual_n]
 
     results: list[WindowResult] = []
 

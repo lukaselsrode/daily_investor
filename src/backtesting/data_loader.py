@@ -294,6 +294,31 @@ def load_and_precompute(
     else:
         logger.warning(f"Benchmark {benchmark_symbol} not available in price data")
 
+    # ^VIX aligned to the benchmark calendar — lets the backtest use the SAME VIX-primary
+    # regime classifier as live (strategy/regimes/classifier.py) instead of a SPY-only proxy.
+    # None → simulator falls back to the legacy SPY-vs-200DMA rule. Source matches the price path.
+    vix_prices = None
+    try:
+        _cal = [str(d)[:10] for d in closes.index]
+        if survivorship_free:
+            from data.fmp_client import eod_prices as _eod
+            _vdf = _eod("^VIX", _cal[0], _cal[-1], allow_fetch=True, adjusted=False)
+            if _vdf is not None and len(_vdf):
+                _vs = _vdf["close"].astype(float)
+                _vs.index = [str(d)[:10] for d in _vs.index]
+                vix_prices = _vs.reindex(_cal).ffill().to_numpy(dtype=np.float64)
+        else:
+            _vraw = yf.download("^VIX", start=_cal[0], end=_cal[-1], progress=False, auto_adjust=False)
+            if not _vraw.empty:
+                _vc = _vraw["Close"]
+                if hasattr(_vc, "columns"):
+                    _vc = _vc.iloc[:, 0]
+                _vc.index = [str(d)[:10] for d in _vc.index]
+                vix_prices = _vc.reindex(_cal).ffill().to_numpy(dtype=np.float64)
+    except Exception as _vexc:
+        logger.warning("VIX load failed (%s) — backtest falls back to SPY-only regime.", _vexc)
+        vix_prices = None
+
     agg_df   = agg_df[agg_df["symbol"].isin(set(stock_cols))].copy()
     sym_order = [s for s in stock_cols if s in agg_df["symbol"].values]
     agg_df   = agg_df.set_index("symbol").loc[sym_order].reset_index()
@@ -528,4 +553,5 @@ def load_and_precompute(
         momentum_scores=cur_mom,
         dollar_volume_daily=dollar_volume_daily,
         excluded_mask=excluded_mask_arr,
+        vix_prices=vix_prices,
     )

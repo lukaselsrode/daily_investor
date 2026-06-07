@@ -341,12 +341,18 @@ def _render_manual_mode():
         horizontal=True, key="manual_run_mode",
     )
 
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     with c1:
         n_days = st.number_input("History (days)", min_value=30, max_value=1000,
                                   value=90, step=30, key="manual_n_days")
         mode   = st.selectbox("Backtest mode", BACKTEST_MODES, key="manual_bt_mode")
     with c2:
+        regime_scope = st.selectbox(
+            "Regime data scope",
+            ["all", "bullish", "neutral", "defensive"],
+            key="manual_regime_scope",
+        )
+    with c3:
         if run_mode.startswith("Randomized"):
             n_windows   = st.number_input("Windows", min_value=5, max_value=50, value=15, key="manual_n_win")
             window_days = st.number_input("Window length", min_value=20, max_value=180, value=60, key="manual_win_days")
@@ -360,7 +366,8 @@ def _render_manual_mode():
             with st.spinner("Running backtest…"):
                 try:
                     from ui.services.backtest_service import run_single_backtest
-                    result = run_single_backtest(n_days=n_days, mode=mode, params=params)
+                    result = run_single_backtest(n_days=n_days, mode=mode, params=params,
+                                                 regime_scope=regime_scope)
                     st.session_state["manual_report"] = result.report
                     st.session_state["manual_run_type"] = "single"
                     st.success("✅ Backtest complete.")
@@ -383,6 +390,7 @@ def _render_manual_mode():
                         n_windows=int(n_windows),
                         window_days=int(window_days),
                         progress_callback=_cb,
+                        regime_scope=regime_scope,
                     )
                     bar.empty()
                     st.session_state["manual_summary"] = summary
@@ -423,9 +431,16 @@ def _render_manual_mode():
 # Random search mode
 # ---------------------------------------------------------------------------
 
-def _run_full_history_weight_search(precomp, n_samples: int, seed: int, respect_bounds: bool, progress_callback, scope: str = "overall_strategy", preset: str | None = None) -> list[dict]:
+def _run_full_history_weight_search(
+    precomp, n_samples: int, seed: int, respect_bounds: bool, progress_callback,
+    scope: str = "overall_strategy", preset: str | None = None,
+    regime_scope: str = "all",
+) -> list[dict]:
     """Evaluate N parameter combos on full history, rank by Sharpe. Respects preset active indices."""
     from backtesting.simulator import run_simulation
+    if regime_scope != "all":
+        from backtesting.regime_scope import apply_regime_scope
+        precomp, _ = apply_regime_scope(precomp, regime_scope)
     from tuning.constants import (
         PARAM_NAMES,
         _current_params,
@@ -511,7 +526,8 @@ _SIGNAL_CHIP: dict[str, str] = {
 }
 
 
-def _render_random_search_mode(scope: str = "overall_strategy", preset: str | None = None):
+def _render_random_search_mode(scope: str = "overall_strategy", preset: str | None = None,
+                               regime_scope: str = "all"):
     from tuning.profiles import (
         HORIZON_PROFILES,
         ROBUSTNESS_PROFILES,
@@ -684,6 +700,7 @@ Config bounds from `tuning.parameter_bounds` are respected when enabled.
                         scope=scope,
                         preset=preset,
                         run_matrix=effective_run_matrix,
+                        regime_scope=regime_scope,
                     )
                     bar.empty()
                     st.session_state["at_result"] = tune_result
@@ -700,6 +717,7 @@ Config bounds from `tuning.parameter_bounds` are respected when enabled.
                     rows = _run_full_history_weight_search(
                         precomp, int(effective_n_samples), int(effective_seed),
                         respect_bounds, _cb, scope=scope, preset=preset,
+                        regime_scope=regime_scope,
                     )
                     bar.empty()
                     st.session_state["at_fh_rows"] = rows
@@ -932,7 +950,8 @@ Config bounds from `tuning.parameter_bounds` are respected when enabled.
 # scipy optimizer mode
 # ---------------------------------------------------------------------------
 
-def _render_scipy_mode(scope: str = "overall_strategy", preset: str | None = None):
+def _render_scipy_mode(scope: str = "overall_strategy", preset: str | None = None,
+                       regime_scope: str = "all"):
     from tuning.profiles import (
         HORIZON_PROFILES,
         ROBUSTNESS_PROFILES,
@@ -1097,6 +1116,7 @@ def _render_scipy_mode(scope: str = "overall_strategy", preset: str | None = Non
                                 params=np.array(params_arr),
                                 run_matrix=effective_run_matrix,
                                 scope=scope,
+                                regime_scope=regime_scope,
                             )
                             return -float(scan.overall_robust_score)
                         except Exception:
@@ -1117,6 +1137,7 @@ def _render_scipy_mode(scope: str = "overall_strategy", preset: str | None = Non
                             params=np.array(opt.x),
                             run_matrix=effective_run_matrix,
                             scope=scope,
+                            regime_scope=regime_scope,
                         )
                     except Exception:
                         pass
@@ -1147,6 +1168,7 @@ def _render_scipy_mode(scope: str = "overall_strategy", preset: str | None = Non
                         llm_review=llm_review,
                         scope=scope,
                         preset=preset,
+                        regime_scope=regime_scope,
                     )
                     st.session_state["sp_tuner_result"] = result
                     st.session_state["sp_result"] = {"mode": "full_history"}
@@ -1510,6 +1532,13 @@ def _render_advanced_tuning() -> None:
         key="wt_scope",
     )
 
+    regime_scope = st.selectbox(
+        "Regime data scope",
+        ["all", "bullish", "neutral", "defensive"],
+        key="wt_regime_scope",
+        help="Filters backtest/tuning data to the regime (defensive = high-vol/risk-off, VIX≥30; 'bearish' accepted as an alias).",
+    )
+
     preset: str | None = None
     if scope == "active_sleeve_compounding":
         from tuning.presets import _PRESETS, list_presets
@@ -1580,9 +1609,9 @@ def _render_advanced_tuning() -> None:
     if mode.startswith("🎛️"):
         _render_manual_mode()
     elif mode.startswith("🎲"):
-        _render_random_search_mode(scope=scope, preset=preset)
+        _render_random_search_mode(scope=scope, preset=preset, regime_scope=regime_scope)
     else:
-        _render_scipy_mode(scope=scope, preset=preset)
+        _render_scipy_mode(scope=scope, preset=preset, regime_scope=regime_scope)
 
     st.divider()
     from ui.components.config_variants import render_config_variants

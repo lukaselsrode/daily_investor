@@ -227,7 +227,7 @@ class TestParameterTunerTune:
             ParameterTuner().tune(n_days=60, objective="calmar")
         mock_rt.assert_called_once_with(
             n_days=60, objective="calmar", starting_capital=10_000.0, mode=None,
-            scope="overall_strategy", preset=None,
+            scope="overall_strategy", preset=None, regime_scope="all",
         )
 
     def test_result_params_matches_tuner_output(self):
@@ -255,7 +255,7 @@ class TestParameterTunerTune:
         mock_rt.assert_called_once_with(
             n_days=90, objective="sharpe", starting_capital=10_000.0,
             mode="liquid_universe_full",
-            scope="overall_strategy", preset=None,
+            scope="overall_strategy", preset=None, regime_scope="all",
         )
 
     def test_passes_scope_active_sleeve(self):

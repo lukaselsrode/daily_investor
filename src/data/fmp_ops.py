@@ -21,7 +21,7 @@ from core.logging import get_logger
 logger = get_logger(__name__)
 
 DEFAULT_CACHE_DIR = "data/fmp_cache_adj"
-DEFAULT_START = "2015-01-01"
+DEFAULT_START = "2006-01-01"
 DEFAULT_END = "2030-01-01"
 STATEMENT_KINDS = ("income-statement", "balance-sheet-statement", "cash-flow-statement")
 
@@ -185,7 +185,9 @@ def backfill_prices(
 
     ok = skipped = failed = 0
     for sym in symbols:
-        if not force and _price_path(sym).exists():
+        # Range-aware skip: only skip when the cache ALREADY covers [start, end]. A plain
+        # parquet-exists check would skip 2021-cached symbols on a 2006 deep-backfill request.
+        if not force and fmp.covers(sym, start, end):
             ok += 1
             continue
         try:

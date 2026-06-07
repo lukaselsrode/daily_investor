@@ -91,6 +91,7 @@ def run_tuner(
     mode: str | None = None,
     scope: str = "overall_strategy",
     preset: str | None = None,
+    regime_scope: str = "all",
 ) -> tuple[np.ndarray, SimResult]:
     """Optimize a single objective. Returns (best_params, SimResult)."""
     if preset is not None:
@@ -103,6 +104,15 @@ def run_tuner(
         raise RuntimeError("scipy is required. Install: pip install scipy") from exc
 
     precomp = load_and_precompute(n_days, mode=mode)
+    if regime_scope != "all":
+        from backtesting.regime_scope import apply_regime_scope
+        precomp, regime_meta = apply_regime_scope(precomp, regime_scope)
+        n_days = precomp.prices.shape[0]
+        print(
+            f"Regime scope: {regime_meta['requested']} → {regime_meta['effective']} "
+            f"({regime_meta['selected_days']}/{regime_meta['total_days']} days, "
+            f"slice={regime_meta['start_day']}:{regime_meta['end_day']})"
+        )
     _preset_label = f", preset={preset}" if preset else ""
     print(
         f"\nOptimizing {len(PARAM_NAMES)} parameters over {n_days} trading days "
@@ -128,6 +138,7 @@ def run_auto_tune(
     llm_review: bool = False,
     scope: str = "overall_strategy",
     preset: str | None = None,
+    regime_scope: str = "all",
 ) -> tuple:
     """
     Run Sharpe + Calmar optimizations, average the results.
@@ -150,6 +161,15 @@ def run_auto_tune(
     train_pct = bp.get("train_pct", 0.70)
 
     precomp = load_and_precompute(n_days, mode=mode)
+    if regime_scope != "all":
+        from backtesting.regime_scope import apply_regime_scope
+        precomp, regime_meta = apply_regime_scope(precomp, regime_scope)
+        n_days = precomp.prices.shape[0]
+        print(
+            f"Regime scope: {regime_meta['requested']} → {regime_meta['effective']} "
+            f"({regime_meta['selected_days']}/{regime_meta['total_days']} days, "
+            f"slice={regime_meta['start_day']}:{regime_meta['end_day']})"
+        )
 
     from backtesting.simulator import split_price_window
     train_sl, val_sl = split_price_window(n_days, train_pct)
@@ -382,6 +402,7 @@ class ParameterTuner:
         mode: str | None = None,
         scope: str = "overall_strategy",
         preset: str | None = None,
+        regime_scope: str = "all",
     ) -> TuneResult:
         params, sim = run_tuner(
             n_days=n_days,
@@ -390,6 +411,7 @@ class ParameterTuner:
             mode=mode,
             scope=scope,
             preset=preset,
+            regime_scope=regime_scope,
         )
         return TuneResult(
             params=params,
@@ -409,6 +431,7 @@ class ParameterTuner:
         starting_capital: float = 10_000.0,
         scope: str = "overall_strategy",
         preset: str | None = None,
+        regime_scope: str = "all",
     ) -> AutoTuneResult:
         raw = run_auto_tune(
             n_days=n_days,
@@ -419,6 +442,7 @@ class ParameterTuner:
             llm_review=llm_review,
             scope=scope,
             preset=preset,
+            regime_scope=regime_scope,
         )
         avg_params, sharpe_result, calmar_result, avg_result, sharpe_params, calmar_params = raw
 
@@ -432,6 +456,9 @@ class ParameterTuner:
             try:
                 from backtesting.simulator import split_price_window
                 precomp = load_and_precompute(n_days, mode=mode)
+                if regime_scope != "all":
+                    from backtesting.regime_scope import apply_regime_scope
+                    precomp, _ = apply_regime_scope(precomp, regime_scope)
                 actual_n = precomp.prices.shape[0]
                 train_pct = bp.get("train_pct", 0.70)
                 train_sl, val_sl = split_price_window(actual_n, train_pct)

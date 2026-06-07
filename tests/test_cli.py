@@ -105,12 +105,12 @@ class TestCmdBacktest:
     def test_passes_n_days(self):
         with patch("backtesting.engine.BacktestEngine.run", return_value=_bt_result()) as mock_run:
             cmd_backtest(n_days=180)
-        mock_run.assert_called_once_with(n_days=180, params=None, mode=None, scope="overall_strategy")
+        mock_run.assert_called_once_with(n_days=180, params=None, mode=None, scope="overall_strategy", regime_scope="all")
 
     def test_passes_mode(self):
         with patch("backtesting.engine.BacktestEngine.run", return_value=_bt_result()) as mock_run:
             cmd_backtest(n_days=90, mode="liquid_universe_full")
-        mock_run.assert_called_once_with(n_days=90, params=None, mode="liquid_universe_full", scope="overall_strategy")
+        mock_run.assert_called_once_with(n_days=90, params=None, mode="liquid_universe_full", scope="overall_strategy", regime_scope="all")
 
     def test_default_scope_is_overall_strategy(self):
         with patch("backtesting.engine.BacktestEngine.run", return_value=_bt_result()) as mock_run:
@@ -121,7 +121,17 @@ class TestCmdBacktest:
         with patch("backtesting.engine.BacktestEngine.run", return_value=_bt_result()) as mock_run:
             cmd_backtest(n_days=90, scope="active_sleeve_compounding")
         mock_run.assert_called_once_with(n_days=90, params=None, mode=None,
-                                         scope="active_sleeve_compounding")
+                                         scope="active_sleeve_compounding", regime_scope="all")
+
+    def test_default_regime_scope_is_all(self):
+        with patch("backtesting.engine.BacktestEngine.run", return_value=_bt_result()) as mock_run:
+            cmd_backtest(n_days=90)
+        assert mock_run.call_args.kwargs["regime_scope"] == "all"
+
+    def test_passes_regime_scope(self):
+        with patch("backtesting.engine.BacktestEngine.run", return_value=_bt_result()) as mock_run:
+            cmd_backtest(n_days=90, regime_scope="bearish")
+        assert mock_run.call_args.kwargs["regime_scope"] == "bearish"
 
     def test_prints_result(self, capsys):
         with patch("backtesting.engine.BacktestEngine.run", return_value=_bt_result()):
@@ -140,14 +150,14 @@ class TestCmdTune:
              patch.object(_t, "print_config_diff"):
             cmd_tune(n_days=90)
         mock_tune.assert_called_once_with(n_days=90, objective="sharpe", mode=None,
-                                          scope="overall_strategy", preset=None)
+                                          scope="overall_strategy", preset=None, regime_scope="all")
 
     def test_passes_objective(self):
         with patch("tuning.tuner.ParameterTuner.tune", return_value=_tune_result("calmar")) as mock_tune, \
              patch.object(_t, "print_config_diff"):
             cmd_tune(n_days=60, objective="calmar")
         mock_tune.assert_called_once_with(n_days=60, objective="calmar", mode=None,
-                                          scope="overall_strategy", preset=None)
+                                          scope="overall_strategy", preset=None, regime_scope="all")
 
     def test_passes_mode(self):
         with patch("tuning.tuner.ParameterTuner.tune", return_value=_tune_result()) as mock_tune, \
@@ -155,27 +165,33 @@ class TestCmdTune:
             cmd_tune(n_days=90, mode="walk_forward_price_only_test")
         mock_tune.assert_called_once_with(n_days=90, objective="sharpe",
                                           mode="walk_forward_price_only_test",
-                                          scope="overall_strategy", preset=None)
+                                          scope="overall_strategy", preset=None, regime_scope="all")
 
     def test_passes_scope_active_sleeve(self):
         with patch("tuning.tuner.ParameterTuner.tune", return_value=_tune_result()) as mock_tune, \
              patch.object(_t, "print_config_diff"):
             cmd_tune(n_days=90, scope="active_sleeve_compounding")
         mock_tune.assert_called_once_with(n_days=90, objective="sharpe", mode=None,
-                                          scope="active_sleeve_compounding", preset=None)
+                                          scope="active_sleeve_compounding", preset=None, regime_scope="all")
 
     def test_passes_preset(self):
         with patch("tuning.tuner.ParameterTuner.tune", return_value=_tune_result()) as mock_tune, \
              patch.object(_t, "print_config_diff"):
             cmd_tune(n_days=90, preset="active_factor_internals")
         mock_tune.assert_called_once_with(n_days=90, objective="sharpe", mode=None,
-                                          scope="overall_strategy", preset="active_factor_internals")
+                                          scope="overall_strategy", preset="active_factor_internals", regime_scope="all")
 
     def test_default_preset_is_none(self):
         with patch("tuning.tuner.ParameterTuner.tune", return_value=_tune_result()) as mock_tune, \
              patch.object(_t, "print_config_diff"):
             cmd_tune(n_days=90)
         assert mock_tune.call_args.kwargs["preset"] is None
+
+    def test_passes_regime_scope(self):
+        with patch("tuning.tuner.ParameterTuner.tune", return_value=_tune_result()) as mock_tune, \
+             patch.object(_t, "print_config_diff"):
+            cmd_tune(n_days=90, regime_scope="bullish")
+        assert mock_tune.call_args.kwargs["regime_scope"] == "bullish"
 
     def test_calls_print_config_diff_with_typed_fields(self):
         result = _tune_result()
@@ -197,7 +213,7 @@ class TestCmdAutoTune:
             cmd_auto_tune(n_days=90)
         mock_at.assert_called_once_with(
             n_days=90, apply=False, force_apply=False, mode=None, llm_review=False,
-            scope="overall_strategy", preset=None,
+            scope="overall_strategy", preset=None, regime_scope="all",
         )
 
     def test_passes_scope_active_sleeve(self):
@@ -206,7 +222,7 @@ class TestCmdAutoTune:
             cmd_auto_tune(n_days=90, scope="active_sleeve_compounding")
         mock_at.assert_called_once_with(
             n_days=90, apply=False, force_apply=False, mode=None, llm_review=False,
-            scope="active_sleeve_compounding", preset=None,
+            scope="active_sleeve_compounding", preset=None, regime_scope="all",
         )
 
     def test_passes_preset(self):
@@ -215,7 +231,7 @@ class TestCmdAutoTune:
             cmd_auto_tune(n_days=90, preset="active_core_weights")
         mock_at.assert_called_once_with(
             n_days=90, apply=False, force_apply=False, mode=None, llm_review=False,
-            scope="overall_strategy", preset="active_core_weights",
+            scope="overall_strategy", preset="active_core_weights", regime_scope="all",
         )
 
     def test_default_preset_is_none(self):
@@ -300,14 +316,14 @@ class TestCliDispatch:
         with patch("cli.commands.cmd_backtest") as mock_cmd:
             cli_main(["backtest", "180"])
         mock_cmd.assert_called_once_with(n_days=180, mode=None, compare=False,
-                                         archetype_compare=False, scope="overall_strategy")
+                                         archetype_compare=False, scope="overall_strategy", regime_scope="all")
 
     def test_dispatch_backtest_with_scope(self):
         with patch("cli.commands.cmd_backtest") as mock_cmd:
             cli_main(["backtest", "90", "--scope", "active_sleeve_compounding"])
         mock_cmd.assert_called_once_with(n_days=90, mode=None, compare=False,
                                          archetype_compare=False,
-                                         scope="active_sleeve_compounding")
+                                         scope="active_sleeve_compounding", regime_scope="all")
 
     def test_dispatch_backtest_default_scope(self):
         with patch("cli.commands.cmd_backtest") as mock_cmd:
@@ -318,32 +334,47 @@ class TestCliDispatch:
         with patch("cli.commands.cmd_tune") as mock_cmd:
             cli_main(["tune", "90", "--objective", "calmar"])
         mock_cmd.assert_called_once_with(n_days=90, objective="calmar", mode=None,
-                                         scope="overall_strategy", preset=None)
+                                         scope="overall_strategy", preset=None, regime_scope="all")
 
     def test_dispatch_tune_with_scope(self):
         with patch("cli.commands.cmd_tune") as mock_cmd:
             cli_main(["tune", "90", "--scope", "active_sleeve_compounding"])
         mock_cmd.assert_called_once_with(n_days=90, objective="sharpe", mode=None,
-                                         scope="active_sleeve_compounding", preset=None)
+                                         scope="active_sleeve_compounding", preset=None, regime_scope="all")
 
     def test_dispatch_tune_with_preset(self):
         with patch("cli.commands.cmd_tune") as mock_cmd:
             cli_main(["tune", "90", "--preset", "active_factor_internals"])
         mock_cmd.assert_called_once_with(n_days=90, objective="sharpe", mode=None,
                                          scope="overall_strategy",
-                                         preset="active_factor_internals")
+                                         preset="active_factor_internals", regime_scope="all")
 
     def test_dispatch_tune_omitted_preset_is_none(self):
         with patch("cli.commands.cmd_tune") as mock_cmd:
             cli_main(["tune", "90"])
         assert mock_cmd.call_args.kwargs["preset"] is None
 
+    def test_dispatch_tune_with_regime_scope(self):
+        with patch("cli.commands.cmd_tune") as mock_cmd:
+            cli_main(["tune", "90", "--regime-scope", "bullish"])
+        assert mock_cmd.call_args.kwargs["regime_scope"] == "bullish"
+
+    def test_dispatch_backtest_with_regime_scope(self):
+        with patch("cli.commands.cmd_backtest") as mock_cmd:
+            cli_main(["backtest", "90", "--regime-scope", "bearish"])
+        assert mock_cmd.call_args.kwargs["regime_scope"] == "bearish"
+
+    def test_dispatch_omitted_regime_scope_is_all(self):
+        with patch("cli.commands.cmd_tune") as mock_cmd:
+            cli_main(["tune", "90"])
+        assert mock_cmd.call_args.kwargs["regime_scope"] == "all"
+
     def test_dispatch_auto_tune_defaults(self):
         with patch("cli.commands.cmd_auto_tune") as mock_cmd:
             cli_main(["auto-tune"])
         mock_cmd.assert_called_once_with(
             n_days=90, mode=None, apply=False, force_apply=False, llm_review=False,
-            scope="overall_strategy", preset=None,
+            scope="overall_strategy", preset=None, regime_scope="all",
         )
 
     def test_dispatch_auto_tune_with_apply(self):
@@ -351,7 +382,7 @@ class TestCliDispatch:
             cli_main(["auto-tune", "120", "--apply"])
         mock_cmd.assert_called_once_with(
             n_days=120, mode=None, apply=True, force_apply=False, llm_review=False,
-            scope="overall_strategy", preset=None,
+            scope="overall_strategy", preset=None, regime_scope="all",
         )
 
     def test_dispatch_auto_tune_with_scope(self):
@@ -359,7 +390,7 @@ class TestCliDispatch:
             cli_main(["auto-tune", "90", "--scope", "active_sleeve_compounding"])
         mock_cmd.assert_called_once_with(
             n_days=90, mode=None, apply=False, force_apply=False, llm_review=False,
-            scope="active_sleeve_compounding", preset=None,
+            scope="active_sleeve_compounding", preset=None, regime_scope="all",
         )
 
     def test_dispatch_auto_tune_with_preset(self):
@@ -367,7 +398,7 @@ class TestCliDispatch:
             cli_main(["auto-tune", "90", "--preset", "active_core_weights"])
         mock_cmd.assert_called_once_with(
             n_days=90, mode=None, apply=False, force_apply=False, llm_review=False,
-            scope="overall_strategy", preset="active_core_weights",
+            scope="overall_strategy", preset="active_core_weights", regime_scope="all",
         )
 
     def test_dispatch_auto_tune_scope_and_preset_together(self):
@@ -377,7 +408,7 @@ class TestCliDispatch:
                       "--preset", "active_core_weights"])
         mock_cmd.assert_called_once_with(
             n_days=90, mode=None, apply=False, force_apply=False, llm_review=False,
-            scope="active_sleeve_compounding", preset="active_core_weights",
+            scope="active_sleeve_compounding", preset="active_core_weights", regime_scope="all",
         )
 
     def test_dispatch_auto_tune_omitted_preset_is_none(self):

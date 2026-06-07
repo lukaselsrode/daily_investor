@@ -85,6 +85,7 @@ class BacktestEngine:
         run_label: str | None = None,
         cluster_tracking: bool = False,
         scope: str = "overall_strategy",
+        regime_scope: str = "all",
     ) -> BacktestResult:
         """
         Load data, split window, run train + optional validation, return BacktestResult.
@@ -99,6 +100,15 @@ class BacktestEngine:
             run_label:       Optional human-readable tag appended to artifact file names.
         """
         precomp  = load_and_precompute(n_days, mode=mode)
+        if regime_scope != "all":
+            from .regime_scope import apply_regime_scope
+            precomp, regime_meta = apply_regime_scope(precomp, regime_scope)
+            logger.info(
+                "Regime-scoped backtest: %s -> %s (%s/%s days, slice=%s:%s)",
+                regime_meta["requested"], regime_meta["effective"],
+                regime_meta["selected_days"], regime_meta["total_days"],
+                regime_meta["start_day"], regime_meta["end_day"],
+            )
         actual_n = precomp.prices.shape[0]
 
         train_slice, val_slice = split_price_window(actual_n, train_pct)

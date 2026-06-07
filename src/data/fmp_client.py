@@ -121,6 +121,17 @@ def _write_meta(symbol: str, status: str, note: str = "",
         json.dump(rec, fh)
 
 
+def covers(symbol: str, start: str, end: str) -> bool:
+    """True when the cached price range already spans [start, end] — i.e. no fetch is
+    needed. Used by backfill to deepen ONLY symbols whose cache doesn't yet reach `start`
+    (a plain parquet-exists check would skip a 2021-cached symbol on a 2006 request)."""
+    if not os.path.exists(_price_path(symbol)):
+        return False
+    meta = _read_meta(symbol) or {}
+    fs, fe = meta.get("req_start"), meta.get("req_end")
+    return bool(fs and fe and fs <= start and fe >= end)
+
+
 def _api_key() -> str:
     key = os.getenv("FMP_KEY")
     if not key:
@@ -160,20 +171,31 @@ def _get(url: str) -> tuple[int, object]:
     raise FMPNetworkError(f"{url.split('?')[0]}: {last_exc}")
 
 
-def eod_prices(symbol: str, start: str, end: str, allow_fetch: bool = False) -> pd.DataFrame | None:
+def eod_prices(symbol: str, start: str, end: str, allow_fetch: bool = False,
+               adjusted: bool = True) -> pd.DataFrame | None:
     """Daily EOD prices for `symbol` over [start, end], cache-first.
 
     Returns a DataFrame indexed by date (columns: open/high/low/close/volume) or None when
     the symbol is unavailable (premium-gated, empty, or not yet cached and allow_fetch=False).
     Never spends a call for a symbol already known-bad (negative cache).
+
+    adjusted=True uses the split+dividend-adjusted endpoint (mandatory for factor backtests).
+    adjusted=False uses the raw `/full` endpoint — required for INDICES like ^VIX, which the
+    dividend-adjusted endpoint 402s (an index has no dividends to adjust).
     """
     cached = _price_path(symbol)
     meta = _read_meta(symbol)
+    # fetch_* = the span we will actually request from FMP (only the MISSING part on a
+    # re-run, so a daily top-up pulls a few bars not the whole 5000-bar history).
+    # cover_* = the union of every range ever requested, recorded in meta so the deep
+    # floor is remembered as persistently covered even though FMP serves a rolling window.
+    fetch_start, fetch_end = start, end
+    cover_start, cover_end = start, end
     if os.path.exists(cached):
         # Range-aware: the cache is keyed by symbol, so a prior NARROW fetch must NOT satisfy a
         # wider request (that bug truncated pre-probed names like NVDA to a few bars). Trust the
         # cache only when the previously-fetched window covers [start, end]; otherwise re-fetch the
-        # union range. Old meta without req_start/req_end is treated as not-covering -> re-fetch.
+        # missing span. Old meta without req_start/req_end is treated as not-covering -> re-fetch.
         fs, fe = (meta or {}).get("req_start"), (meta or {}).get("req_end")
         if fs and fe and fs <= start and fe >= end:
             df = pd.read_parquet(cached)
@@ -181,11 +203,12 @@ def eod_prices(symbol: str, start: str, end: str, allow_fetch: bool = False) -> 
         if not allow_fetch:
             df = pd.read_parquet(cached)  # best effort with what we have
             return df.loc[(df.index >= start) & (df.index <= end)]
-        # widen the fetch to the union so we never shrink coverage
-        if fs:
-            start = min(start, fs)
-        if fe:
-            end = max(end, fe)
+        if fs and fe:
+            cover_start, cover_end = min(start, fs), max(end, fe)
+            if start >= fs and end > fe:        # only the tail (recent days) is missing
+                fetch_start = fe
+            elif end <= fe and start < fs:      # only the head (deeper history) is missing
+                fetch_end = fs
 
     if meta and meta.get("status") in ("premium", "empty", "error"):
         return None  # known-bad — do not waste a call
@@ -195,24 +218,42 @@ def eod_prices(symbol: str, start: str, end: str, allow_fetch: bool = False) -> 
 
     # SPLIT+DIVIDEND-ADJUSTED prices — mandatory for factor backtests (unadjusted prices turn a
     # 10:1 split into a fake -90% crash, which corrupts momentum on exactly the winners).
-    url = f"{_BASE}/historical-price-eod/dividend-adjusted?symbol={symbol}&from={start}&to={end}&apikey={_api_key()}"
+    _endpoint = "dividend-adjusted" if adjusted else "full"
+    url = f"{_BASE}/historical-price-eod/{_endpoint}?symbol={symbol}&from={fetch_start}&to={fetch_end}&apikey={_api_key()}"
     status, payload = _get(url)
     if status == 402:
         _write_meta(symbol, "premium", "402 paywalled on current plan")
         return None
     if status != 200 or not isinstance(payload, list) or not payload:
+        # A failed/empty top-up must NOT discard or negative-cache a symbol whose deep
+        # history we already hold — return what we have and leave the cache intact.
+        if os.path.exists(cached):
+            df = pd.read_parquet(cached)
+            return df.loc[(df.index >= start) & (df.index <= end)]
         _write_meta(symbol, "empty", f"status={status}")
         return None
 
     df = pd.DataFrame(payload)
     df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
     df = df.set_index("date").sort_index()
-    df = df.rename(columns={"adjOpen": "open", "adjHigh": "high", "adjLow": "low", "adjClose": "close"})
+    if adjusted:
+        df = df.rename(columns={"adjOpen": "open", "adjHigh": "high", "adjLow": "low", "adjClose": "close"})
+    # else: the /full endpoint already returns open/high/low/close/volume.
     keep = [c for c in ("open", "high", "low", "close", "volume") if c in df.columns]
     df = df[keep]
+    # MERGE with the existing cache so the deep history PERSISTS. FMP serves a rolling
+    # most-recent ~5000 bars, so a plain overwrite erodes the deep floor on every refresh.
+    # Union old+new; new wins on overlapping dates (its dividend adjustments are current).
+    if os.path.exists(cached):
+        try:
+            prior = pd.read_parquet(cached)
+            df = pd.concat([prior, df])
+            df = df[~df.index.duplicated(keep="last")].sort_index()
+        except Exception:
+            pass
     _ensure_dirs()
     df.to_parquet(cached)
-    _write_meta(symbol, "ok", f"{len(df)} bars", req_start=start, req_end=end)
+    _write_meta(symbol, "ok", f"{len(df)} bars", req_start=cover_start, req_end=cover_end)
     return df.loc[(df.index >= start) & (df.index <= end)]
 
 

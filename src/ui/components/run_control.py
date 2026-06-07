@@ -145,7 +145,7 @@ def render() -> None:
         st.subheader("C. Simulation settings")
         c1, c2, c3 = st.columns(3)
         with c1:
-            n_days = st.number_input("Look-back days", min_value=30, max_value=1000, value=90, step=30)
+            n_days = st.number_input("Look-back days", min_value=30, max_value=5000, value=90, step=30)
         with c2:
             bt_mode = st.selectbox("Backtest mode", BACKTEST_MODES)
             st.caption(LOOKAHEAD_LABELS[bt_mode])

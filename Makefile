@@ -32,7 +32,7 @@ update-outcomes:             ## Backfill future return outcomes for past decisio
 	$(DI) update-outcomes
 
 FMP_SYMBOLS ?= current
-FMP_START   ?= 2015-01-01
+FMP_START   ?= 2006-01-01
 FMP_END     ?= 2030-01-01
 FMP_MAX     ?=
 FMP_KINDS   ?= income-statement,balance-sheet-statement,cash-flow-statement

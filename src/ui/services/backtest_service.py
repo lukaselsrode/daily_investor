@@ -51,6 +51,7 @@ def run_single_backtest(
     save_artifacts: bool = False,
     cluster_tracking: bool = False,
     scope: str = "overall_strategy",
+    regime_scope: str = "all",
 ):
     """Run one historical backtest window. Returns BacktestResult."""
     from backtesting.engine import BacktestEngine
@@ -61,6 +62,7 @@ def run_single_backtest(
         save_artifacts=save_artifacts,
         cluster_tracking=cluster_tracking,
         scope=scope,
+        regime_scope=regime_scope,
     )
 
 
@@ -73,6 +75,7 @@ def run_random_windows(
     seed: int = 42,
     progress_callback=None,
     scope: str = "overall_strategy",
+    regime_scope: str = "all",
 ):
     """Sample N random windows and aggregate results. Returns RandomWindowSummary."""
     from backtesting.random_walk import random_window_backtest
@@ -85,6 +88,7 @@ def run_random_windows(
         seed=seed,
         progress_callback=progress_callback,
         scope=scope,
+        regime_scope=regime_scope,
     )
 
 
@@ -94,13 +98,14 @@ def run_robust_scan(
     mode: str | None = None,
     params=None,
     scope: str = "overall_strategy",
+    regime_scope: str = "all",
     progress_callback=None,
 ):
     """Load precomp for n_days then run the multi-cell robust scan. Returns RobustScanResult."""
     from tuning.robust_scan import run_robust_scan as _run
     precomp = load_precomp(n_days, mode=mode)
     return _run(precomp, params=params, run_matrix=run_matrix, scope=scope,
-                progress_callback=progress_callback)
+                regime_scope=regime_scope, progress_callback=progress_callback)
 
 
 def list_saved_runs():

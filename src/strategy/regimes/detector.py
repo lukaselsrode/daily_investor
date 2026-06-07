@@ -20,6 +20,7 @@ import logging
 import pandas as pd
 import yfinance as yf
 
+from .classifier import classify_regime
 from .models import RegimeHistoryEntry, RegimeLabel, RegimeState
 
 logger = logging.getLogger(__name__)
@@ -114,10 +115,11 @@ class RegimeDetector:
             spy_vs_200dma = round((spy_price / spy_ma200) - 1.0, 4)
             spy_above_200 = spy_vs_200dma > 0
 
-        # --- Regime logic (priority order: defensive → neutral → bullish) ---
+        # --- Regime label: the SHARED classifier (same logic the backtest now uses) ---
+        raw_regime: RegimeLabel = classify_regime(spy_price, spy_ma200, vix, rc)
 
+        # --- Confidence + notes (live-only enrichment; conditions mirror classify_regime) ---
         if vix is not None and vix >= vix_def:
-            raw_regime: RegimeLabel = "defensive"
             excess = (vix - vix_def) / max(vix_def, 1.0)
             confidence = min(1.0, 0.65 + excess * 0.35)
             notes.append(f"VIX={vix:.1f} ≥ defensive threshold {vix_def}")
@@ -126,7 +128,6 @@ class RegimeDetector:
                 notes.append("SPY below 200DMA reinforces defensive")
 
         elif vix is not None and vix >= vix_neut:
-            raw_regime = "neutral"
             # Confidence scales with VIX proximity to each boundary
             t = (vix - vix_neut) / max(vix_def - vix_neut, 1.0)
             confidence = 0.55 + t * 0.15
@@ -136,7 +137,6 @@ class RegimeDetector:
                 notes.append("SPY below 200DMA pushes toward defensive end of neutral")
 
         elif spy_above_200 and (vix is None or vix < vix_neut):
-            raw_regime = "bullish"
             confidence = 0.70
             if vix is not None and vix < 15.0:
                 confidence = 0.90
@@ -147,12 +147,10 @@ class RegimeDetector:
             notes.append(f"SPY {pct_str} above 200DMA")
 
         elif not spy_above_200 and (vix is None or vix < vix_neut):
-            raw_regime = "neutral"
             confidence = 0.55
             notes.append("SPY below 200DMA with low VIX → neutral / corrective")
 
         else:
-            raw_regime = "neutral"
             confidence = 0.50
             notes.append("Insufficient data — defaulting to neutral")
 
