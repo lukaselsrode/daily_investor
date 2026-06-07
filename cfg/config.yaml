@@ -381,7 +381,7 @@ backtest:
   # from the FMP cache (data/fmp_cache_adj/), removing the ~35% survivorship inflation. The honest
   # but ~2021-2026-bounded view. Default false (opt-in): toggle here or via the UI checkbox. Falls
   # back to yfinance with a warning if the cache is absent. See backtesting/survivorship.py.
-  survivorship_free: false
+  survivorship_free: true
   # Apply the discretionary NEVER-BUY industry/sector exclusions (discretionary.excluded_*,
   # funds/trusts, and the "Miscellaneous" sector) to the backtest candidate universe, mirroring
   # the live gate in data/fundamentals.py. Default true = live/backtest parity. Set false for
