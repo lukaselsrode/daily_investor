@@ -38,42 +38,21 @@ FMP_MAX          ?=
 FMP_KINDS        ?= income-statement,balance-sheet-statement,cash-flow-statement
 FMP_PAGES        ?= 50
 FMP_MIN_ADV      ?= 500000
-FMP_FETCH_PRICES ?=
 
 .PHONY: prepare-data
-prepare-data:                ## One-shot: fetch universe + deep-backfill ALL survivorship-free data (prices, delisted, dead-universe, statements, snapshots, VIX). Resumable — safe to re-run to finish/retry.
-	-$(MAKE) fetch-data
-	$(MAKE) fmp-backfill-delisted
-	$(MAKE) fmp-backfill-prices
-	$(MAKE) fmp-build-dead-universe FMP_FETCH_PRICES=1
-	$(MAKE) fmp-backfill-statements
+prepare-data:                ## One-shot: fetch + deep-backfill ALL survivorship-free data (prices, delisted, dead-universe, statements, snapshots). Resumable.
+	-$(DI) fetch-data
+	$(DI) fmp backfill-delisted --max-pages $(FMP_PAGES)
+	$(DI) fmp backfill-prices --symbols $(FMP_SYMBOLS) --start $(FMP_START) --end $(FMP_END) $(if $(FMP_MAX),--max-symbols $(FMP_MAX),)
+	$(DI) fmp build-dead-universe --start $(FMP_START) --end $(FMP_END) --min-adv $(FMP_MIN_ADV) --fetch-prices
+	$(DI) fmp backfill-statements --symbols $(FMP_SYMBOLS) --kinds $(FMP_KINDS)
 	$(MAKE) snapshot-backfill
-	$(MAKE) fmp-validate-cache
-	@echo "prepare-data complete. (^VIX is fetched automatically on the first backtest/precomp build.)"
+	$(DI) fmp validate-cache
+	@echo "prepare-data complete. (^VIX auto-fetched on first backtest/precomp build.)"
 
 .PHONY: fmp-status
-fmp-status:                  ## Show FMP cache/key/quota/coverage status
+fmp-status:                  ## FMP cache coverage / key status  (granular backfills: daily-investor fmp <action>)
 	$(DI) fmp status
-
-.PHONY: fmp-validate-cache
-fmp-validate-cache:          ## Read-only sanity check of FMP price/statement/dead-universe cache
-	$(DI) fmp validate-cache
-
-.PHONY: fmp-backfill-prices
-fmp-backfill-prices:         ## Backfill FMP adjusted prices (FMP_SYMBOLS=current|AAPL,MSFT|path.csv)
-	$(DI) fmp backfill-prices --symbols $(FMP_SYMBOLS) --start $(FMP_START) --end $(FMP_END) $(if $(FMP_MAX),--max-symbols $(FMP_MAX),)
-
-.PHONY: fmp-backfill-statements
-fmp-backfill-statements:     ## Backfill FMP statements (FMP_SYMBOLS=current|AAPL,MSFT|path.csv  FMP_KINDS=a,b)
-	$(DI) fmp backfill-statements --symbols $(FMP_SYMBOLS) --kinds $(FMP_KINDS) $(if $(FMP_MAX),--max-symbols $(FMP_MAX),)
-
-.PHONY: fmp-backfill-delisted
-fmp-backfill-delisted:       ## Backfill FMP delisted-company roster (FMP_PAGES=N)
-	$(DI) fmp backfill-delisted --max-pages $(FMP_PAGES)
-
-.PHONY: fmp-build-dead-universe
-fmp-build-dead-universe:     ## Build dead_universe.parquet from delisted roster (FMP_FETCH_PRICES=1 to fetch dead prices)
-	$(DI) fmp build-dead-universe --start $(FMP_START) --end $(FMP_END) --min-adv $(FMP_MIN_ADV) $(if $(FMP_FETCH_PRICES),--fetch-prices,) $(if $(FMP_MAX),--max-symbols $(FMP_MAX),)
 
 # ── Live trading ──────────────────────────────────────────────────────────────
 
