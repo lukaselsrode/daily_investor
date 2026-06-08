@@ -32,6 +32,9 @@ def main() -> None:
     parser.add_argument("--index-pcts", default="", help="Comma-separated index_pct values; default uses neutral exposure grid")
     parser.add_argument("--max-buys", default="", help="Comma-separated max_buys values paired with --index-pcts")
     parser.add_argument("--output", default="", help="Optional CSV output path")
+    parser.add_argument("--paired", action="store_true", help="Evaluate all variants on identical sampled windows")
+    parser.add_argument("--segment", default="all", choices=["all", "train", "holdout"], help="Temporal segment for paired starts")
+    parser.add_argument("--split-pct", type=float, default=0.70, help="Train/holdout split day fraction for paired segment mode")
     args = parser.parse_args()
 
     import pandas as pd
@@ -43,6 +46,8 @@ def main() -> None:
         default_neutral_sizing_grid,
         result_rows,
         run_regime_sizing_grid,
+        run_regime_sizing_grid_on_starts,
+        sample_regime_window_starts,
     )
     from tuning.constants import _current_params
     from util import REGIME_PARAMS, RISK_LIMITS
@@ -84,16 +89,41 @@ def main() -> None:
         f"window_days={args.window_days}, n_windows={args.n_windows}\n",
         flush=True,
     )
-    results = run_regime_sizing_grid(
-        precomp=precomp,
-        base_params=base_params,
-        variants=variants,
-        regime_scope=args.regime,
-        n_windows=args.n_windows,
-        window_days=args.window_days,
-        seed=args.seed,
-        scope=args.scope,  # type: ignore[arg-type] argparse restricts choices
-    )
+    if args.paired:
+        split_day = int(precomp.prices.shape[0] * args.split_pct)
+        starts = sample_regime_window_starts(
+            precomp,
+            window_days=args.window_days,
+            regime_scope=args.regime,
+            n_windows=args.n_windows,
+            seed=args.seed,
+            segment=args.segment,
+            split_day=split_day,
+        )
+        print(
+            f">>> paired mode: using {len(starts)} identical {args.segment} windows "
+            f"(split_day={split_day}, starts={starts[:8].tolist()}{'...' if len(starts) > 8 else ''})",
+            flush=True,
+        )
+        results = run_regime_sizing_grid_on_starts(
+            precomp=precomp,
+            base_params=base_params,
+            variants=variants,
+            starts=starts,
+            window_days=args.window_days,
+            scope=args.scope,  # type: ignore[arg-type] argparse restricts choices
+        )
+    else:
+        results = run_regime_sizing_grid(
+            precomp=precomp,
+            base_params=base_params,
+            variants=variants,
+            regime_scope=args.regime,
+            n_windows=args.n_windows,
+            window_days=args.window_days,
+            seed=args.seed,
+            scope=args.scope,  # type: ignore[arg-type] argparse restricts choices
+        )
 
     rows = result_rows(results)
     df = pd.DataFrame(rows).sort_values("robust_score", ascending=False)

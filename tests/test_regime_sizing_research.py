@@ -73,3 +73,67 @@ def test_run_regime_sizing_grid_passes_regime_scope_and_variant_params(monkeypat
     assert [c[0][44] for c in calls] == [4.0, 8.0]
     assert all(c[1]["regime_scope"] == "neutral" for c in calls)
     assert all(c[1]["scope"] == "overall_strategy" for c in calls)
+
+
+def test_sample_regime_window_starts_splits_temporal_segments(monkeypatch):
+    from research import regime_sizing
+
+    monkeypatch.setattr(
+        regime_sizing,
+        "eligible_window_starts",
+        lambda precomp, window_days, regime_scope: (np.array([0, 10, 20, 30, 40, 50]), {}),
+    )
+
+    assert regime_sizing.sample_regime_window_starts(
+        object(), window_days=10, regime_scope="neutral", n_windows=10, seed=1,
+        segment="train", split_day=35,
+    ).tolist() == [0, 10, 20]
+    assert regime_sizing.sample_regime_window_starts(
+        object(), window_days=10, regime_scope="neutral", n_windows=10, seed=1,
+        segment="holdout", split_day=35,
+    ).tolist() == [40, 50]
+
+
+def test_run_regime_sizing_grid_on_starts_uses_identical_starts_for_variants(monkeypatch):
+    from backtesting.random_walk import WindowResult
+    from research import regime_sizing
+    from research.regime_sizing import SizingVariant, run_regime_sizing_grid_on_starts
+
+    calls = []
+
+    def fake_run_window(precomp, params, start, window_days, **kwargs):
+        calls.append((float(params[4]), int(params[44]), start, window_days, kwargs["scope"]))
+        return WindowResult(
+            window_id=0,
+            start_day=start,
+            end_day=start + window_days,
+            strategy_return=float(params[4]) + start / 1000,
+            benchmark_return=0.1,
+            excess_return=float(params[4]) - 0.1,
+            sharpe=float(params[4]),
+            max_drawdown=-0.05,
+            calmar=1.0,
+            turnover=0.1,
+            trades=1,
+            avg_positions=1,
+            wins_benchmark=True,
+        )
+
+    monkeypatch.setattr(regime_sizing, "run_single_window", fake_run_window)
+
+    base = np.zeros(60, dtype=float)
+    variants = [SizingVariant("current", 0.77, 4), SizingVariant("candidate", 0.60, 6)]
+    results = run_regime_sizing_grid_on_starts(
+        precomp=object(),
+        base_params=base,
+        variants=variants,
+        starts=np.array([5, 15]),
+        window_days=45,
+    )
+
+    assert [r.variant.name for r in results] == ["current", "candidate"]
+    assert [(c[0], c[1], c[2]) for c in calls] == [
+        (0.77, 4, 5), (0.77, 4, 15), (0.60, 6, 5), (0.60, 6, 15),
+    ]
+    assert results[0].summary.n_windows == 2
+    assert results[1].summary.n_windows == 2
