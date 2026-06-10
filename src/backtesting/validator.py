@@ -69,7 +69,10 @@ class WalkForwardValidator:
         """
         Check a BacktestReport against validation gates.
         Returns (passed, failure_reasons).
-        Mirrors tuner.validate_tuned_params() — no dependency on tuner.
+        Mirrors the ABSOLUTE gates of tuner.validate_tuned_params() — no dependency
+        on tuner. The incumbent-relative and random-window gates live only in the
+        tuner (they need the incumbent param vector and a second data load);
+        run_auto_tune stashes its full gate outcome for ParameterTuner to consume.
         """
         bp = backtest_cfg if backtest_cfg is not None else BACKTEST_PARAMS
 

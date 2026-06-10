@@ -398,6 +398,13 @@ BACKTEST_PARAMS: dict = {
     "min_validation_excess_return": float(_bt.get("min_validation_excess_return",0.0)),
     "max_validation_drawdown":      float(_bt.get("max_validation_drawdown",    -0.20)),
     "min_validation_sharpe":        float(_bt.get("min_validation_sharpe",      0.25)),
+    # Incumbent-relative gates: a tuned candidate must beat the CURRENT config's
+    # validation excess-vs-SPY on the same split (+margin) and may not exceed its
+    # turnover by more than the multiple. See tuner.validate_tuned_params.
+    "min_excess_vs_incumbent":      float(_bt.get("min_excess_vs_incumbent",    0.0)),
+    "max_turnover_multiple":        float(_bt.get("max_turnover_multiple",      2.0)),
+    # Paired random-window reproducibility gate (tuner.paired_random_window_gate).
+    "random_window_gate":           dict(_bt.get("random_window_gate",          {}) or {}),
     "llm_review_enabled":           bool(_bt.get("llm_review_enabled",         False)),
     "llm_review_top_n":             int(_bt.get("llm_review_top_n",             5)),
     "llm_review_apply":             bool(_bt.get("llm_review_apply",            False)),

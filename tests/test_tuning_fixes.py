@@ -285,6 +285,9 @@ def test_run_auto_tune_gates_at_tuned_scope(monkeypatch):
     monkeypatch.setattr(tt, "run_backtest_report", fake_report)
     monkeypatch.setattr(tt, "_run_single", lambda *a, **k: (p.copy(), _sim()))
     monkeypatch.setattr(tt, "run_simulation", lambda *a, **k: _sim())
+    # The paired random-window gate would need a real precomp; this test only
+    # checks the scope plumbing of the split-gate report calls.
+    monkeypatch.setattr(tt, "paired_random_window_gate", lambda *a, **k: (True, [], {}))
     fake_precomp = MagicMock()
     fake_precomp.mode = "test"
     fake_precomp.lookahead_bias_level = "low"

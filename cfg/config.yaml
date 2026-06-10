@@ -410,6 +410,22 @@ backtest:
   min_validation_excess_return: 0.0
   max_validation_drawdown: -0.2
   min_validation_sharpe: 0.25
+  # 2026-06 incumbent-relative gates: a tuned config once passed the absolute gates
+  # above with +0.34% validation excess while the incumbent config sat at +8.87%
+  # with 5x less turnover (classic overfit). A candidate must now BEAT the config
+  # we're already running on the same held-out split, not merely clear floors.
+  min_excess_vs_incumbent: 0.0
+  max_turnover_multiple: 2.0
+  # Reproducibility gate: tuned vs incumbent on the SAME random sub-windows (shared
+  # seed) of longer history than the tune saw. Requires paired win-rate >= min_win_rate,
+  # plus higher median excess-vs-SPY and robust_score than the incumbent.
+  random_window_gate:
+    enabled: true
+    history_days: 730
+    n_windows: 12
+    window_days: 120
+    seed: 42
+    min_win_rate: 0.5
   use_time_weighted_returns: true
   turnover_penalty_enabled: true
   turnover_penalty_trade_count: 60

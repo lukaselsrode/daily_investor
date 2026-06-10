@@ -36,6 +36,13 @@ from .results import AutoTuneResult, TuneResult
 
 logger = logging.getLogger(__name__)
 
+# Gate outcome of the most recent run_auto_tune() call — (passed, reasons).
+# ParameterTuner.auto_tune() consumes this so AutoTuneResult.validation_passed /
+# config_written mirror the EXACT predicate the write used (the gates now include
+# incumbent-relative and random-window checks that a recompute would have to
+# duplicate, including a second multi-day data load).
+_LAST_GATE_OUTCOME: tuple[bool, list[str]] | None = None
+
 
 # ---------------------------------------------------------------------------
 # Gate helpers
@@ -44,7 +51,24 @@ logger = logging.getLogger(__name__)
 def validate_tuned_params(
     report: BacktestReport,
     backtest_cfg: dict,
+    incumbent_report: BacktestReport | None = None,
 ) -> tuple[bool, list[str]]:
+    """
+    Gate a tuned candidate on its held-out validation window.
+
+    Absolute gates (min excess / max drawdown / min Sharpe) catch outright failures.
+    When *incumbent_report* is given (the CURRENT config evaluated on the SAME
+    train/val split), two relative gates are added — these exist because a tuned
+    config once passed the absolute gates with +0.34% validation excess while the
+    incumbent sat at +8.87% with 5x less turnover (overfit signature):
+
+      • tuned validation excess-vs-SPY must beat the incumbent's by at least
+        `min_excess_vs_incumbent` (default 0.0 — never apply a config that is
+        worse out-of-sample than what we already run);
+      • tuned validation turnover must not exceed the incumbent's by more than
+        `max_turnover_multiple` (default 2.0 — churn blowups are how overfit
+        configs harvest in-sample noise).
+    """
     if report.validation_result is None:
         return False, ["No validation window available — cannot validate"]
 
@@ -64,7 +88,117 @@ def validate_tuned_params(
     if vr.sharpe < min_sh:
         reasons.append(f"Validation Sharpe {vr.sharpe:.3f} < {min_sh:.3f}")
 
+    if incumbent_report is not None and incumbent_report.validation_result is not None:
+        ivr = incumbent_report.validation_result
+        inc_excess = ivr.total_return - incumbent_report.validation_benchmark_return
+
+        margin = backtest_cfg.get("min_excess_vs_incumbent", 0.0)
+        if val_excess < inc_excess + margin:
+            reasons.append(
+                f"Validation excess {val_excess:+.2%} does not beat incumbent config's "
+                f"{inc_excess:+.2%} (+{margin:.2%} margin) on the same split"
+            )
+
+        turn_mult = backtest_cfg.get("max_turnover_multiple", 2.0)
+        inc_turn = max(float(ivr.turnover_estimate), 1e-9)
+        if float(vr.turnover_estimate) > inc_turn * turn_mult:
+            reasons.append(
+                f"Validation turnover {vr.turnover_estimate:.2f} > {turn_mult:.1f}x "
+                f"incumbent's {ivr.turnover_estimate:.2f}"
+            )
+
     return len(reasons) == 0, reasons
+
+
+def paired_random_window_gate(
+    tuned_params: np.ndarray,
+    incumbent_params: np.ndarray,
+    backtest_cfg: dict,
+    mode: str | None = None,
+    scope: str = "overall_strategy",
+    precomp=None,
+) -> tuple[bool, list[str], dict]:
+    """
+    Reproducibility gate: tuned vs incumbent params on the SAME random sub-windows
+    of a longer history than the tune saw (paired comparison — shared seed ⇒ shared
+    windows). A single train/val split can be won by luck; a paired multi-window
+    sweep on unseen history cannot.
+
+    Pass requires (config under backtest.random_window_gate, defaults shown):
+      • enabled: true
+      • paired per-window win rate ≥ `min_win_rate` (0.5)
+      • tuned median excess-vs-SPY > incumbent median excess  (always on)
+      • tuned robust_score > incumbent robust_score           (always on)
+        (robust_score is excess-dominant and already penalizes turnover/std/drawdown)
+
+    Returns (passed, reasons, stats). `precomp` may be injected for tests; otherwise
+    `history_days` (default 730) of data are loaded fresh so windows cover history
+    the optimizer never trained on.
+    """
+    gw = backtest_cfg.get("random_window_gate", {}) or {}
+    if not gw.get("enabled", True):
+        return True, [], {"skipped": True}
+
+    from backtesting.random_walk import random_window_backtest
+
+    history_days = int(gw.get("history_days", 730))
+    n_windows    = int(gw.get("n_windows", 12))
+    window_days  = int(gw.get("window_days", 120))
+    seed         = int(gw.get("seed", 42))
+    min_win_rate = float(gw.get("min_win_rate", 0.5))
+
+    if precomp is None:
+        precomp = load_and_precompute(history_days, mode=mode)
+
+    common = dict(
+        n_windows=n_windows,
+        window_days=window_days,
+        seed=seed,
+        slippage_bps=backtest_cfg.get("slippage_bps", 10.0),
+        commission_per_trade=backtest_cfg.get("commission_per_trade", 0.0),
+        rebalance_frequency_days=backtest_cfg.get("rebalance_frequency_days", 5),
+        scope=scope,
+    )
+    tuned_sum     = random_window_backtest(precomp, tuned_params,     **common)
+    incumbent_sum = random_window_backtest(precomp, incumbent_params, **common)
+
+    # Shared seed on the same precomp ⇒ identical windows; pair by window_id.
+    inc_by_id = {w.window_id: w for w in incumbent_sum.window_results}
+    paired = [
+        (t, inc_by_id[t.window_id])
+        for t in tuned_sum.window_results
+        if t.window_id in inc_by_id
+    ]
+    wins = sum(1 for t, i in paired if t.excess_return > i.excess_return)
+    win_rate = wins / len(paired) if paired else 0.0
+
+    reasons: list[str] = []
+    if win_rate < min_win_rate:
+        reasons.append(
+            f"Paired win rate {win_rate:.0%} ({wins}/{len(paired)} windows) < {min_win_rate:.0%}"
+        )
+    if tuned_sum.median_excess_return <= incumbent_sum.median_excess_return:
+        reasons.append(
+            f"Median excess-vs-SPY {tuned_sum.median_excess_return:+.2%} <= "
+            f"incumbent's {incumbent_sum.median_excess_return:+.2%}"
+        )
+    if tuned_sum.robust_score <= incumbent_sum.robust_score:
+        reasons.append(
+            f"Robust score {tuned_sum.robust_score:.4f} <= incumbent's {incumbent_sum.robust_score:.4f}"
+        )
+
+    stats = {
+        "win_rate": win_rate,
+        "wins": wins,
+        "n_paired": len(paired),
+        "tuned_median_excess": tuned_sum.median_excess_return,
+        "incumbent_median_excess": incumbent_sum.median_excess_return,
+        "tuned_robust_score": tuned_sum.robust_score,
+        "incumbent_robust_score": incumbent_sum.robust_score,
+        "tuned_median_turnover": tuned_sum.median_turnover,
+        "incumbent_median_turnover": incumbent_sum.median_turnover,
+    }
+    return len(reasons) == 0, reasons, stats
 
 
 def should_apply_tuned_config(
@@ -147,6 +281,9 @@ def run_auto_tune(
 
     Returns (avg_params, sharpe_result, calmar_result, avg_result, sharpe_params, calmar_params).
     """
+    global _LAST_GATE_OUTCOME
+    _LAST_GATE_OUTCOME = None
+
     if preset is not None:
         from .presets import validate_preset
         validate_preset(preset)
@@ -225,7 +362,47 @@ def run_auto_tune(
     # so the tuned sleeve's effect is diluted ~4x and the gates pass/fail on index noise.
     train_report = run_backtest_report(precomp, avg_params, train_sl, val_slice, scope=scope)
 
-    validation_passed, reasons = validate_tuned_params(train_report, bp)
+    # Incumbent = the config we're currently running, on the SAME split/scope.
+    # The tuned candidate must beat it out-of-sample, not merely clear absolute floors.
+    incumbent_params = _current_params()
+    incumbent_report = run_backtest_report(precomp, incumbent_params, train_sl, val_slice, scope=scope)
+
+    if use_val and train_report.validation_result is not None and incumbent_report.validation_result is not None:
+        _t, _i = train_report, incumbent_report
+        _t_exc = _t.validation_result.total_return - _t.validation_benchmark_return
+        _i_exc = _i.validation_result.total_return - _i.validation_benchmark_return
+        print(
+            f"\nValidation window (excess vs SPY):  tuned {_t_exc:+.2%}  vs  incumbent {_i_exc:+.2%}"
+            f"   |  turnover: tuned {_t.validation_result.turnover_estimate:.2f}"
+            f" vs incumbent {_i.validation_result.turnover_estimate:.2f}"
+        )
+
+    validation_passed, reasons = validate_tuned_params(train_report, bp, incumbent_report)
+
+    # Reproducibility gate: paired random windows on longer, mostly-unseen history.
+    # Only worth the extra load when the split gates passed.
+    if validation_passed:
+        gw_cfg = bp.get("random_window_gate", {}) or {}
+        if gw_cfg.get("enabled", True):
+            print(
+                f"\nRandom-window gate: {gw_cfg.get('n_windows', 12)}x"
+                f"{gw_cfg.get('window_days', 120)}d paired windows over "
+                f"{gw_cfg.get('history_days', 730)}d history …"
+            )
+            rw_passed, rw_reasons, rw_stats = paired_random_window_gate(
+                avg_params, incumbent_params, bp, mode=mode, scope=scope,
+            )
+            if rw_stats and not rw_stats.get("skipped"):
+                print(
+                    f"  paired win rate {rw_stats['win_rate']:.0%} "
+                    f"({rw_stats['wins']}/{rw_stats['n_paired']})  |  median excess "
+                    f"tuned {rw_stats['tuned_median_excess']:+.2%} vs incumbent "
+                    f"{rw_stats['incumbent_median_excess']:+.2%}  |  robust score "
+                    f"tuned {rw_stats['tuned_robust_score']:.4f} vs incumbent "
+                    f"{rw_stats['incumbent_robust_score']:.4f}"
+                )
+            validation_passed = rw_passed
+            reasons.extend(rw_reasons)
 
     if reasons:
         print("\n⚠  Validation gates FAILED:")
@@ -233,6 +410,8 @@ def run_auto_tune(
             print(f"   • {r}")
     else:
         print("\n✓  Validation gates passed.")
+
+    _LAST_GATE_OUTCOME = (validation_passed, list(reasons))
 
     use_llm = llm_review or bp.get("llm_review_enabled", False)
     llm_apply = bp.get("llm_review_apply", False)
@@ -436,6 +615,11 @@ class ParameterTuner:
         preset: str | None = None,
         regime_scope: str = "all",
     ) -> AutoTuneResult:
+        # Clear any stale stash so we only consume the outcome of THIS call
+        # (run_auto_tune may be replaced in tests; it resets the stash itself
+        # when it actually runs).
+        global _LAST_GATE_OUTCOME
+        _LAST_GATE_OUTCOME = None
         raw = run_auto_tune(
             n_days=n_days,
             starting_capital=starting_capital,
@@ -455,7 +639,13 @@ class ParameterTuner:
         validation_passed = False
         validation_reasons: list[str] = []
 
-        if use_val:
+        if _LAST_GATE_OUTCOME is not None:
+            # run_auto_tune just executed and stashed the exact gate outcome it
+            # used for the write decision (absolute + incumbent-relative +
+            # random-window gates). Consume it instead of recomputing a weaker
+            # approximation that could disagree with what was actually written.
+            validation_passed, validation_reasons = _LAST_GATE_OUTCOME
+        elif use_val:
             try:
                 from backtesting.simulator import split_price_window
                 precomp = load_and_precompute(n_days, mode=mode)
