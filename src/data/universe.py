@@ -192,7 +192,10 @@ def gen_symbols_list(
     if not force_refresh:
         cached = read_data_as_pd("stock_tickers")
         if cached is not None and not cached.empty and "symbol" in cached.columns:
-            base = set(cached["symbol"].tolist())
+            # Defensive: keep only string symbols. A non-str (float NaN from a
+            # stray empty row or an over-eager NaN parser) makes sorted() raise
+            # "'<' not supported between instances of 'float' and 'str'".
+            base = {s for s in cached["symbol"].tolist() if isinstance(s, str) and s}
             if extra_symbols:
                 added = [s for s in sorted(extra_symbols) if _is_valid_ticker(s) and s not in base]
                 if added:

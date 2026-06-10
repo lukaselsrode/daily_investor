@@ -58,6 +58,19 @@ def store_data_as_csv(
     logger.info("Stored %s → %s", dataset, filename)
 
 
+# pandas' default missing-value tokens MINUS the bare "NA": the universe contains
+# the real ticker "NA" (Nano Labs), which the default parser silently turns into
+# float NaN on every cached read — crashing sorted() over the symbol set with
+# "'<' not supported between instances of 'float' and 'str'" and corrupting any
+# symbol-keyed merge. Our own CSVs (pandas to_csv / csv.writer) always write
+# missing values as the empty string, never the token "NA", so dropping it from
+# the NaN list cannot mask genuine missing data.
+_NA_TOKENS = [
+    "", "#N/A", "#N/A N/A", "#NA", "-1.#IND", "-1.#QNAN", "-NaN", "-nan",
+    "1.#IND", "1.#QNAN", "<NA>", "N/A", "NULL", "NaN", "None", "n/a", "nan", "null",
+]
+
+
 def read_data_as_pd(dataset: str) -> pd.DataFrame | None:
     """Return the most-recent matching CSV for dataset, or None if not found."""
     try:
@@ -72,6 +85,6 @@ def read_data_as_pd(dataset: str) -> pd.DataFrame | None:
 
     path = os.path.join(DATA_DIRECTORY, matches[-1])
     logger.debug("Using %s as %s data", matches[-1], dataset)
-    return pd.read_csv(path)
+    return pd.read_csv(path, keep_default_na=False, na_values=_NA_TOKENS)
 
 
