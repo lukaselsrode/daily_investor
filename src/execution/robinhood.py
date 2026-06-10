@@ -339,6 +339,25 @@ class RobinhoodBroker(BrokerAdapter):
     def clear_orders_cache(self) -> None:
         self._orders_cache = None
 
+    def resolve_instrument_symbol(self, url: str) -> str | None:
+        """Resolve an instrument URL to its ticker symbol (cached per adapter).
+
+        Raw order/position payloads carry an `instrument` URL, never a `symbol`
+        key — anything matching orders to symbols must go through here."""
+        cache = getattr(self, "_instrument_symbol_cache", None)
+        if cache is None:
+            cache = self._instrument_symbol_cache = {}
+        if url in cache:
+            return cache[url]
+        try:
+            inst = self._rb.get_instrument_by_url(url)
+            sym = (inst or {}).get("symbol") or None
+        except Exception as e:
+            logger.warning(f"Could not resolve instrument {url}: {e}")
+            sym = None
+        cache[url] = sym
+        return sym
+
     # ------------------------------------------------------------------
     # Fund management
     # ------------------------------------------------------------------

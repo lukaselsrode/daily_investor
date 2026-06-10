@@ -188,6 +188,25 @@ class PortfolioManager:
         except Exception as e:
             logger.warning(f"Could not record buy history for {symbol}: {e}")
 
+    def _load_sell_history(self) -> dict[str, tuple[datetime.date, bool]]:
+        """Latest sell per symbol → (sell_date, was_loss). Mirrors _load_buy_history;
+        feeds the live sell/stopout buy-cooldown (backtest parity — the simulator
+        enforces cooldown_days_after_sell/stopout, live previously did not, so a
+        stop-loss exit could be rebought minutes later in the same run)."""
+        try:
+            df = pd.read_csv(self._SELL_HISTORY_CSV, parse_dates=["sell_date"])
+            if "symbol" in df.columns and "sell_date" in df.columns:
+                latest = df.sort_values("sell_date").groupby("symbol").last().reset_index()
+                return {
+                    row["symbol"]: (row["sell_date"].date(), bool(row.get("was_loss", False)))
+                    for _, row in latest.iterrows()
+                }
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            logger.warning(f"Could not load sell history: {e}")
+        return {}
+
     def _record_sell_event(self, symbol: str, was_loss: bool) -> None:
         today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
         row = pd.DataFrame([{"symbol": symbol, "sell_date": today, "was_loss": was_loss}])
@@ -438,9 +457,18 @@ class PortfolioManager:
             for order in self._broker.get_open_orders():
                 if order.get("side") != "sell":
                     continue
-                if order.get("state") not in ("confirmed", "queued", "unconfirmed"):
+                # partially_filled still has the remaining shares committed.
+                if order.get("state") not in ("confirmed", "queued", "unconfirmed", "partially_filled"):
                     continue
+                # Raw order payloads carry an instrument URL, NOT a symbol key —
+                # order.get("symbol") is always None, which silently emptied this
+                # guard and let later iterations re-attempt every queued sell
+                # ("Not enough shares to sell"). Resolve the URL when needed.
                 sym = order.get("symbol")
+                if not sym and order.get("instrument"):
+                    resolver = getattr(self._broker, "resolve_instrument_symbol", None)
+                    if resolver is not None:
+                        sym = resolver(order["instrument"])
                 if sym:
                     pending.add(sym)
             return pending
@@ -1028,7 +1056,8 @@ class PortfolioManager:
                 )
                 logger.info(
                     f"Contrarian soft penalty ({_sm}×, pos cap "
-                    f"{CONTRARIAN_PENALTY_PARAMS['max_position_multiplier']}×): {contrarian_syms}"
+                    f"{CONTRARIAN_PENALTY_PARAMS['max_position_multiplier']}×): "
+                    f"{len(contrarian_syms)} symbols (e.g. {contrarian_syms[:8]})"
                 )
 
         if RELIABILITY_PARAMS["enabled"] and "reliability_score" in df_eligible.columns:
@@ -1082,12 +1111,30 @@ class PortfolioManager:
         buy_history  = self._load_buy_history() if cooldown_days > 0 else {}
         _today       = datetime.date.today()
 
+        # Sell-side cooldowns mirror the backtest (cooldown_days_after_sell /
+        # _stopout) so live and sim share exit-then-rebuy discipline. Loss exits
+        # (stop-loss / trailing-stop territory) get the longer stopout window.
+        # These are UNCONDITIONAL — no underweight/high-conviction exemptions: a
+        # name we just stopped out of must not be rebought the same run because
+        # the sleeve happens to be underweight.
+        from util import BACKTEST_PARAMS as _bp
+        _sell_cd    = int(_bp.get("cooldown_days_after_sell", 0))
+        _stopout_cd = int(_bp.get("cooldown_days_after_stopout", 0))
+        sell_history = self._load_sell_history() if (_sell_cd > 0 or _stopout_cd > 0) else {}
+
         def _apply_cooldown(frame: pd.DataFrame) -> tuple[pd.DataFrame, list]:
-            if cooldown_days <= 0 or "symbol" not in frame.columns:
+            if "symbol" not in frame.columns:
                 return frame, []
             cooled_out = []
+            sell_blocked = []
             for sym in frame["symbol"].tolist():
-                if sym not in buy_history:
+                sold = sell_history.get(sym)
+                if sold is not None:
+                    _cd = _stopout_cd if sold[1] else _sell_cd
+                    if _cd > 0 and (_today - sold[0]).days < _cd:
+                        sell_blocked.append(sym)
+                        continue
+                if cooldown_days <= 0 or sym not in buy_history:
                     continue
                 if (_today - buy_history[sym]).days >= cooldown_days:
                     continue
@@ -1097,8 +1144,14 @@ class PortfolioManager:
                 if active_is_underweight and sym in held_symbols:
                     continue  # sleeve underweight — allow topping up held names
                 cooled_out.append(sym)
-            if cooled_out:
-                frame = frame[~frame["symbol"].isin(cooled_out)].copy()
+            if sell_blocked:
+                logger.info(
+                    f"Sell cooldown ({_sell_cd}d sell / {_stopout_cd}d stopout): "
+                    f"excluded {len(sell_blocked)} recently-sold symbols: {sell_blocked[:10]}"
+                )
+            blocked = sell_blocked + cooled_out
+            if blocked:
+                frame = frame[~frame["symbol"].isin(blocked)].copy()
             return frame, cooled_out
 
         # --- Fallback threshold ladder ---
