@@ -79,7 +79,13 @@ def get_data(refresh: bool = False) -> pd.DataFrame:
     if refresh and news_df is not None and not news_df.empty:
         result = _enrich_with_graph_features(result, news_df, held)
 
-    if not result.empty:
+    # Persist ONLY on refresh: the market-structure + graph enrichments above are
+    # refresh-gated, so a refresh=False pass holds a STRIPPED frame (54 of 75
+    # cols). Re-saving it overwrote the latest enriched snapshot with the
+    # degraded one on every --skip-data run — downstream consumers (live
+    # archetype classification, backtest scoring, risk checks) silently lost
+    # market_cap / analyst / instrument_type until the next full refresh.
+    if refresh and not result.empty:
         store_data_as_csv("agg_data", "", result)
         time.sleep(1)
 

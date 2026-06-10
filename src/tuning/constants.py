@@ -109,7 +109,9 @@ BOUNDS: list[tuple[float, float]] = [
     (0.00, 0.40),  # 2 sw_income
     (0.00, 0.90),  # 3 sw_momentum (widened 0.40->0.90 for momentum-alpha engine; see active_alpha_engine preset)
     (RISK_LIMITS["min_index_pct"], 0.95),  # 4 index_pct
-    (0.30, 3.00),  # 5 metric_threshold
+    (0.30, 1.50),  # 5 metric_threshold (upper bound = scoring clamp_high 1.5: composite
+                   #   scores cannot exceed it, so the old 3.00 ceiling let the tuner
+                   #   park the threshold in unreachable territory — live max ~0.86)
     (0.15, 1.00),  # 6 take_profit_pct
     (-0.45, 0.90), # 7 sell_weak_below (lower bound extended below 0: the validated live value
                    #   is -0.18 — 2026-06 regime-robust exit-ladder DE tune, "stop selling

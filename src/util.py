@@ -715,6 +715,10 @@ CANDIDATE_SELECTION_PARAMS: dict = {
     "min_momentum_score":               float(_cs.get("min_momentum_score",            -0.10)),
     "min_conditional_momentum_score":   float(_cs.get("min_conditional_momentum_score", 0.00)),
     "allow_income_defensive_exception": bool(_cs.get("allow_income_defensive_exception",False)),
+    # Live entry gate decoupled from metric_threshold (which anchors the EXIT
+    # ladder). None = legacy behavior (ladder starts at metric_threshold).
+    "entry_threshold_override":         (float(_cs["entry_threshold_override"])
+                                         if _cs.get("entry_threshold_override") is not None else None),
     "fallback_thresholds":              [float(t) for t in _cs.get("fallback_thresholds", [])],
     "min_post_cooldown_candidates":     int(_cs.get("min_post_cooldown_candidates",     1)),
 }

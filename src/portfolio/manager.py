@@ -116,6 +116,11 @@ class PortfolioManager:
         # Set per-run by rebalance(); guards the end-of-run ETF sweep so a Claude
         # API outage never routes the undeployed active sleeve into ETFs.
         self._sentiment_failed = False
+        # Per-run sentiment verdict cache keyed by (action, symbol). Iterations
+        # within one run previously re-queried Claude for the same candidates a
+        # minute apart — duplicate spend AND nondeterministic flips (a BUY 80%
+        # became HOLD 65% between iterations on identical data).
+        self._sentiment_run_cache: dict[tuple[str, str], dict] = {}
 
     # ------------------------------------------------------------------
     # Confirmation gate
@@ -1156,10 +1161,16 @@ class PortfolioManager:
 
         # --- Fallback threshold ladder ---
         _cs            = CANDIDATE_SELECTION_PARAMS
+        # Entry gate decoupled from METRIC_THRESHOLD: metric_threshold anchors the
+        # EXIT ladder (trim / take-profit floor scaling) and is unreachable as an
+        # entry gate under peer-percentile scoring. entry_threshold_override is the
+        # explicit live entry rung; null falls back to METRIC_THRESHOLD (legacy).
+        _entry_override = _cs.get("entry_threshold_override")
+        _primary_thr    = float(_entry_override) if _entry_override is not None else METRIC_THRESHOLD
         _raw_fallbacks = _cs.get("fallback_thresholds", [])
-        _thresholds    = [float(t) for t in _raw_fallbacks] if _raw_fallbacks else [METRIC_THRESHOLD]
-        if not _thresholds or _thresholds[0] != METRIC_THRESHOLD:
-            _thresholds = [METRIC_THRESHOLD] + _thresholds
+        _thresholds    = [float(t) for t in _raw_fallbacks] if _raw_fallbacks else [_primary_thr]
+        if not _thresholds or _thresholds[0] != _primary_thr:
+            _thresholds = [_primary_thr] + _thresholds
         _min_post_cd   = int(_cs.get("min_post_cooldown_candidates", 1))
 
         candidates = pd.DataFrame()
@@ -1306,41 +1317,84 @@ class PortfolioManager:
                     logger.warning("No candidates remain after archetype buy-filter")
                     return [], df["symbol"].tolist(), []
 
+        # Allocation pre-check: if even the BEST-scored candidate cannot clear
+        # min_order at this budget, no buy can execute — skip the entire sentiment
+        # batch (a full Claude batch was previously spent on iterations that were
+        # guaranteed to buy nothing, e.g. $162 budget x 12% floor = $19 allocs).
+        if not candidates.empty:
+            _tv_pre = float(candidates["value_metric"].sum())
+            _floor_pre = stock_amount * RISK_LIMITS["min_candidate_allocation_pct"]
+            _best_alloc = max(
+                max((float(v) / _tv_pre) * stock_amount if _tv_pre > 0 else 0.0, _floor_pre)
+                for v in candidates["value_metric"]
+            )
+            _best_alloc = min(_best_alloc, stock_amount)
+            if _best_alloc < RISK_LIMITS["min_order_amount"]:
+                logger.info(
+                    f"Best possible allocation ${_best_alloc:.2f} < min order "
+                    f"${RISK_LIMITS['min_order_amount']:.2f} at budget ${stock_amount:.2f} "
+                    f"— skipping buy phase (and its sentiment batch)"
+                )
+                return [], candidates["symbol"].tolist(), []
+
         sentiment_results: dict[str, dict] = {}
         if self._use_sentiment:
-            logger.info(f"Running batch sentiment on {len(candidates)} candidates...")
             stocks_data = self._build_stocks_data(candidates, action="buy")
-            try:
-                from data.sentiment import (
-                    get_batch_sentiment_recommendations,
-                    is_api_error_sentinel,
+            # Per-run cache: a symbol already judged this run keeps its verdict —
+            # iterations re-querying identical data wasted tokens and produced
+            # nondeterministic flips (BUY 80% -> HOLD 65% a minute apart).
+            _cache = getattr(self, "_sentiment_run_cache", None)
+            if _cache is None:
+                _cache = self._sentiment_run_cache = {}
+            cached_results = {
+                item["symbol"]: _cache[("buy", item["symbol"])]
+                for item in stocks_data if ("buy", item["symbol"]) in _cache
+            }
+            to_query = [item for item in stocks_data if ("buy", item["symbol"]) not in _cache]
+            if cached_results:
+                logger.info(
+                    f"Sentiment cache: reusing {len(cached_results)} verdict(s) from "
+                    f"earlier this run: {sorted(cached_results)[:10]}"
                 )
-                sentiment_results = get_batch_sentiment_recommendations(
-                    stocks_data, action="buy", regime=regime,
-                )
-            except Exception:
-                logger.error(
-                    "Batch sentiment failed — active sleeve undeployed this run; "
-                    "leftover cash will be HELD (not swept to ETFs)",
-                    exc_info=True,
-                )
-                self._sentiment_failed = True
-                return [], candidates["symbol"].tolist(), []
-            # The sentiment layer swallows API outages and returns HOLD sentinels
-            # instead of raising. If EVERY requested symbol came back as an
-            # API-error sentinel, treat it exactly like the exception path above
-            # (partial failures keep normal per-symbol gating).
-            if stocks_data and all(
-                is_api_error_sentinel(sentiment_results.get(item["symbol"]))
-                for item in stocks_data
-            ):
-                logger.error(
-                    "Batch sentiment returned API-error sentinels for all candidates — "
-                    "active sleeve undeployed this run; leftover cash will be HELD "
-                    "(not swept to ETFs)"
-                )
-                self._sentiment_failed = True
-                return [], candidates["symbol"].tolist(), []
+            fresh_results: dict[str, dict] = {}
+            if to_query:
+                logger.info(f"Running batch sentiment on {len(to_query)} candidates...")
+                try:
+                    from data.sentiment import (
+                        get_batch_sentiment_recommendations,
+                        is_api_error_sentinel,
+                    )
+                    fresh_results = get_batch_sentiment_recommendations(
+                        to_query, action="buy", regime=regime,
+                    )
+                except Exception:
+                    logger.error(
+                        "Batch sentiment failed — active sleeve undeployed this run; "
+                        "leftover cash will be HELD (not swept to ETFs)",
+                        exc_info=True,
+                    )
+                    self._sentiment_failed = True
+                    return [], candidates["symbol"].tolist(), []
+                # The sentiment layer swallows API outages and returns HOLD sentinels
+                # instead of raising. If EVERY freshly-queried symbol came back as an
+                # API-error sentinel, treat it exactly like the exception path above
+                # (partial failures keep normal per-symbol gating).
+                if all(
+                    is_api_error_sentinel(fresh_results.get(item["symbol"]))
+                    for item in to_query
+                ):
+                    logger.error(
+                        "Batch sentiment returned API-error sentinels for all candidates — "
+                        "active sleeve undeployed this run; leftover cash will be HELD "
+                        "(not swept to ETFs)"
+                    )
+                    self._sentiment_failed = True
+                    return [], candidates["symbol"].tolist(), []
+                # Cache real verdicts only — sentinels must be retried next iteration.
+                for _sym_f, _res_f in fresh_results.items():
+                    if not is_api_error_sentinel(_res_f):
+                        _cache[("buy", _sym_f)] = _res_f
+            sentiment_results = {**cached_results, **fresh_results}
 
         sector_exposure = (
             self._risk.get_sector_exposure(holdings, agg_df) if portfolio_value > 0 else {}
@@ -1664,6 +1718,7 @@ class PortfolioManager:
         # Claude API fails, the active sleeve is left undeployed; we must NOT sweep
         # that active-sleeve cash into ETFs (it would silently violate index_pct).
         self._sentiment_failed = False
+        self._sentiment_run_cache = {}
 
         # Snapshot portfolio state at run start for diagnostics.
         try:

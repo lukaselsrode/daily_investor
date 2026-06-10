@@ -57,13 +57,27 @@ class RobinhoodBroker(BrokerAdapter):
         mfa_code = None
         if mfa_secret:
             mfa_secret = mfa_secret.strip().replace(" ", "").replace("-", "").upper()
-            try:
-                mfa_code = pyotp.TOTP(mfa_secret).now()
-                logger.info("MFA code generated from RB_MFA_SECRET")
-            except Exception as e:
+            # Base32 alphabet is A-Z and 2-7 ONLY. Name the offending characters so
+            # the .env can actually be fixed — the generic pyotp error ("Non-base32
+            # digit found") doesn't say what's wrong. Common causes: pasted a
+            # recovery/backup code or hex string instead of the TOTP setup key, or
+            # OCR-style confusions (0 vs O, 1 vs I, 8 vs B).
+            _bad = sorted({c for c in mfa_secret if c not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"})
+            if _bad:
                 logger.error(
-                    f"MFA generation failed: {e} — check RB_MFA_SECRET in .env (must be plain base32)"
+                    f"RB_MFA_SECRET contains non-base32 character(s) {_bad} — base32 "
+                    f"uses only A-Z and 2-7. Use the TOTP *setup key* from Robinhood's "
+                    f"authenticator-app enrollment (not a backup/recovery code). "
+                    f"Login will rely on the cached session until this is fixed."
                 )
+            else:
+                try:
+                    mfa_code = pyotp.TOTP(mfa_secret).now()
+                    logger.info("MFA code generated from RB_MFA_SECRET")
+                except Exception as e:
+                    logger.error(
+                        f"MFA generation failed: {e} — check RB_MFA_SECRET in .env (must be plain base32)"
+                    )
 
         try:
             self._rb.login(username=username, password=password, mfa_code=mfa_code, store_session=True)
