@@ -220,7 +220,10 @@ def run_auto_tune(
     )
 
     val_slice = val_sl if use_val else None
-    train_report = run_backtest_report(precomp, avg_params, train_sl, val_slice)
+    # Gate at the SAME scope the parameters were optimized at: an active-sleeve
+    # preset tune gated at "overall_strategy" is ~77% benchmark (index_pct frozen),
+    # so the tuned sleeve's effect is diluted ~4x and the gates pass/fail on index noise.
+    train_report = run_backtest_report(precomp, avg_params, train_sl, val_slice, scope=scope)
 
     validation_passed, reasons = validate_tuned_params(train_report, bp)
 
@@ -462,7 +465,8 @@ class ParameterTuner:
                 actual_n = precomp.prices.shape[0]
                 train_pct = bp.get("train_pct", 0.70)
                 train_sl, val_sl = split_price_window(actual_n, train_pct)
-                report = run_backtest_report(precomp, avg_params, train_sl, val_sl)
+                # Re-validate at the scope the run was tuned at (see run_auto_tune).
+                report = run_backtest_report(precomp, avg_params, train_sl, val_sl, scope=scope)
                 from backtesting.validator import WalkForwardValidator
                 validation_passed, validation_reasons = WalkForwardValidator().validate_report(report, bp)
             except Exception as e:
@@ -472,7 +476,9 @@ class ParameterTuner:
         else:
             validation_passed = True
 
-        config_written = (apply and validation_passed) or force_apply
+        # Mirror the EXACT predicate run_auto_tune uses before writing (it also
+        # writes on auto_apply_if_valid, which the old flag ignored).
+        config_written = should_apply_tuned_config(apply, validation_passed, bp, force_apply=force_apply)
 
         return AutoTuneResult(
             avg_params=avg_params,

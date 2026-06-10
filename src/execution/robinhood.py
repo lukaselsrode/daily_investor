@@ -179,11 +179,41 @@ class RobinhoodBroker(BrokerAdapter):
 
     def sell(self, symbol: str, quantity: float) -> OrderResult:
         # Re-fetch live position to guard against a stale holdings snapshot.
+        # Raw position dicts carry an instrument URL, not a symbol, so resolve the
+        # symbol's instrument URL first and match positions on it.
         try:
-            live_positions = self._rb.get_all_positions()
-            live_pos = next(
-                (p for p in live_positions if p.get("symbol") == symbol), None
+            inst_url: str | None = None
+            try:
+                instruments = self._rb.get_instruments_by_symbols(symbol) or []
+                inst_url = next(
+                    (
+                        i["url"] for i in instruments
+                        if i and i.get("url") and i.get("symbol") == symbol
+                    ),
+                    None,
+                )
+            except Exception as e:
+                logger.warning(f"Instrument URL resolution failed for {symbol}: {e}")
+
+            # Prefer open positions (cheaper; get_all_positions includes every
+            # position ever traded, with qty 0 for closed ones).
+            get_positions = (
+                getattr(self._rb, "get_open_stock_positions", None)
+                or self._rb.get_all_positions
             )
+            live_positions = get_positions() or []
+            live_pos = next(
+                (
+                    p for p in live_positions
+                    if (inst_url is not None and p.get("instrument") == inst_url)
+                    or p.get("symbol") == symbol  # fallback for sources that include it
+                ),
+                None,
+            )
+            if live_pos is None and inst_url is None:
+                # Could not resolve the instrument and nothing matched — cannot
+                # verify; fall through to the cached quantity rather than skip.
+                raise RuntimeError("instrument URL unresolved and no position matched")
             live_qty = float(live_pos.get("quantity", 0)) if live_pos else 0.0
             if live_qty <= 0:
                 logger.warning(
@@ -192,7 +222,7 @@ class RobinhoodBroker(BrokerAdapter):
                 return OrderResult(
                     symbol, "sell", 0.0, 0.0, False, None, "skipped", "position already closed"
                 )
-            quantity = live_qty  # use live quantity to avoid partial-fill mismatch
+            quantity = min(quantity, live_qty)  # clamp trims; never sell more than held
         except Exception as e:
             logger.warning(
                 f"Could not verify live position for {symbol}: {e} — using cached quantity"

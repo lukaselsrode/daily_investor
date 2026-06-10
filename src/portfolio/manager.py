@@ -113,6 +113,9 @@ class PortfolioManager:
         self._harvest = harvest
         self._auto_approve   = AUTO_APPROVE        if auto_approve  is None else auto_approve
         self._use_sentiment  = USE_SENTIMENT_ANALYSIS if use_sentiment is None else use_sentiment
+        # Set per-run by rebalance(); guards the end-of-run ETF sweep so a Claude
+        # API outage never routes the undeployed active sleeve into ETFs.
+        self._sentiment_failed = False
 
     # ------------------------------------------------------------------
     # Confirmation gate
@@ -1255,12 +1258,35 @@ class PortfolioManager:
             logger.info(f"Running batch sentiment on {len(candidates)} candidates...")
             stocks_data = self._build_stocks_data(candidates, action="buy")
             try:
-                from data.sentiment import get_batch_sentiment_recommendations
+                from data.sentiment import (
+                    get_batch_sentiment_recommendations,
+                    is_api_error_sentinel,
+                )
                 sentiment_results = get_batch_sentiment_recommendations(
                     stocks_data, action="buy", regime=regime,
                 )
             except Exception:
-                logger.error("Batch sentiment failed — all candidates skipped", exc_info=True)
+                logger.error(
+                    "Batch sentiment failed — active sleeve undeployed this run; "
+                    "leftover cash will be HELD (not swept to ETFs)",
+                    exc_info=True,
+                )
+                self._sentiment_failed = True
+                return [], candidates["symbol"].tolist(), []
+            # The sentiment layer swallows API outages and returns HOLD sentinels
+            # instead of raising. If EVERY requested symbol came back as an
+            # API-error sentinel, treat it exactly like the exception path above
+            # (partial failures keep normal per-symbol gating).
+            if stocks_data and all(
+                is_api_error_sentinel(sentiment_results.get(item["symbol"]))
+                for item in stocks_data
+            ):
+                logger.error(
+                    "Batch sentiment returned API-error sentinels for all candidates — "
+                    "active sleeve undeployed this run; leftover cash will be HELD "
+                    "(not swept to ETFs)"
+                )
+                self._sentiment_failed = True
                 return [], candidates["symbol"].tolist(), []
 
         sector_exposure = (
@@ -1581,6 +1607,11 @@ class PortfolioManager:
         """
         effective_index_pct, _ = self._resolve_regime_params(regime)
 
+        # Reset per-run sentiment-failure flag. When sentiment is enabled but the
+        # Claude API fails, the active sleeve is left undeployed; we must NOT sweep
+        # that active-sleeve cash into ETFs (it would silently violate index_pct).
+        self._sentiment_failed = False
+
         # Snapshot portfolio state at run start for diagnostics.
         try:
             _start_pv    = self._broker.get_portfolio_value()
@@ -1694,8 +1725,21 @@ class PortfolioManager:
                 break
 
         # End-of-run ETF sweep: only fill the ETF-sleeve deficit.
+        # Refresh the open-orders cache first so get_cash() subtracts buys placed
+        # in the final iteration (the cache is otherwise only cleared at the start
+        # of each iteration, so the sweep would double-count committed cash).
+        self._broker.clear_orders_cache()
         remaining = self._broker.get_cash()
-        if remaining > 0 and ETFS:
+        if self._sentiment_failed:
+            # Sentiment was enabled but the Claude API failed, so the active sleeve
+            # was never deployed. Hold the leftover cash for the next run instead of
+            # sweeping it into ETFs — otherwise an API outage silently routes the
+            # active allocation to the index sleeve, violating index_pct.
+            logger.warning(
+                f"Sentiment failed this run — retaining ${remaining:,.2f} as cash "
+                f"(ETF sweep skipped; active sleeve will be retried next run)"
+            )
+        elif remaining > 0 and ETFS:
             sweep_amount = self._compute_etf_sweep_amount(remaining, effective_index_pct)
             if sweep_amount < RISK_LIMITS["min_order_amount"]:
                 logger.info(

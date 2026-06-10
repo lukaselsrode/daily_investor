@@ -111,7 +111,10 @@ BOUNDS: list[tuple[float, float]] = [
     (RISK_LIMITS["min_index_pct"], 0.95),  # 4 index_pct
     (0.30, 3.00),  # 5 metric_threshold
     (0.15, 1.00),  # 6 take_profit_pct
-    (0.10, 0.90),  # 7 sell_weak_below
+    (-0.45, 0.90), # 7 sell_weak_below (lower bound extended below 0: the validated live value
+                   #   is -0.18 — 2026-06 regime-robust exit-ladder DE tune, "stop selling
+                   #   winners". The old (0.10, 0.90) floor silently dragged it back to +0.10
+                   #   on every re-tune, reverting that finding.)
     (-0.45, -0.05),# 8 trailing_stop (widened to -0.45 to allow ride-winners regime)
     (0.30, 0.90),  # 9 value_pe_weight
     (0.00, 0.60),  # 10 mom_rs3m
@@ -242,7 +245,11 @@ _CONFIG_PATH_TO_PARAM_IDX["scoring.momentum_residual_blend"] = _RESIDMOM_SLOT
 _EXIT_FLOOR_SLOT_OFFSET = len(PARAM_NAMES)  # 50
 _EXIT_FLOOR_FIELDS: tuple[tuple[str, str, tuple[float, float]], ...] = (
     # (PARAM_NAMES entry, config path, bounds)
-    ("ef_hard_exit_score_below",          "exit_decision.hard_exit_score_below",          (0.05, 0.40)),
+    # hard_exit must sit BELOW sell_weak_value_below (slot 7, floor -0.45) for the
+    # exit ladder to have a non-empty forced-exit zone — so its range extends below
+    # slot 7's floor. The old (0.05, 0.40) could never satisfy the ladder once
+    # sell_weak went negative.
+    ("ef_hard_exit_score_below",          "exit_decision.hard_exit_score_below",          (-0.60, 0.40)),
     ("ef_positive_momentum_review_floor", "exit_decision.positive_momentum_review_floor", (0.00, 0.30)),
     ("ef_strong_quality_review_floor",    "exit_decision.strong_quality_review_floor",    (0.40, 0.90)),
     ("ef_thesis_intact_review_floor",     "exit_decision.thesis_intact_review_floor",     (0.40, 0.80)),
@@ -468,9 +475,11 @@ def _effective_bounds(scope: str = "overall_strategy", preset: str | None = None
         idx = _CONFIG_PATH_TO_PARAM_IDX.get(path)
         if idx is None:
             continue
-        lo = float(rng.get("min", bounds[idx][0]))
-        hi = float(rng.get("max", bounds[idx][1]))
-        bounds[idx] = (lo, min(hi, bounds[idx][1]))
+        # Config bounds may only TIGHTEN the engineered interval — clamp BOTH sides
+        # (a config min below the engineered floor previously widened the space).
+        lo = max(float(rng.get("min", bounds[idx][0])), bounds[idx][0])
+        hi = min(float(rng.get("max", bounds[idx][1])), bounds[idx][1])
+        bounds[idx] = (lo, max(hi, lo))
     return bounds
 
 

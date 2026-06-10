@@ -32,6 +32,10 @@ from .types import BacktestReport, CandidatePoolDiagnostics, PrecomputedData, Si
 # Local aliases for nested scoring sub-blocks.
 MOMENTUM_WARMUP_PARAMS = SCORING_PARAMS["momentum_warmup"]
 MOMENTUM_INPUT_PARAMS = SCORING_PARAMS["momentum_inputs"]
+# Warm-up bin scores (per 52w-position bin), shared with data_loader's day-0 scoring.
+# These — NOT the params[10:16] momentum sub-weights — are what
+# _momentum_score_warmup_vec indexes by bin_indices.
+_MBIN_SCORES = np.array(MOMENTUM_WARMUP_PARAMS["position_bin_scores"], dtype=np.float64)
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +43,8 @@ logger = logging.getLogger(__name__)
 # Module-level sell constants
 # ---------------------------------------------------------------------------
 
-_TAKE_PROFIT_FLOOR_MULTIPLIER = 1.2
+# Read from config so live (sell_engine.py) and backtest can never diverge.
+_TAKE_PROFIT_FLOOR_MULTIPLIER = float(SELL_RULES.get("take_profit_value_floor_multiplier", 1.2))
 # Read stop-loss from config so live and backtest always stay in sync
 _STOP_LOSS_PCT = float(SELL_RULES.get("stop_loss_pct", -0.20))
 # Archetype `allow_deeper_drawdown`: widen the catastrophic hard stop for flagged
@@ -282,23 +287,28 @@ def _momentum_score_multifactor_vec(
     zeros = np.zeros(n)
 
     def _get(arr, default_val=0.0):
+        # No NaN imputation: NaN flows to _pct_rank_vec, which excludes it from the
+        # rank and scores it neutral 0.0 — matching live _pct_rank_series. Imputing
+        # rs→0.0 / vol→0.20 here ranked missing-data names mid-pack against real
+        # values (top-decile momentum in bear tapes). The default only fills a
+        # wholly-absent array (feature not computed for this load).
         if arr is None:
             return np.full(n, default_val)
-        row = arr[day]
-        return np.where(np.isfinite(row), row, default_val)
+        return arr[day]
 
     rs3m  = _get(precomp.rs_3m_daily)
     rs6m  = _get(precomp.rs_6m_daily)
     ret3m = _get(precomp.ret_3m_daily)
     vol3m = _get(precomp.vol_3m_daily, 0.20)
     ret1m = precomp.return_1m_daily[day]
-    ret1m = np.where(np.isfinite(ret1m), ret1m, 0.0)
     ret5d = _get(precomp.ret_5d_daily)
+    # NaN pos52/vol3m simply never trigger their penalties below (comparisons → False).
     pos52 = precomp.position_52w_daily[day]
-    pos52 = np.where(np.isfinite(pos52), pos52, 0.5)
 
+    # NaN ret3m or NaN vol3m → NaN risk_adj → neutral 0.0 rank (matching live).
     safe_vol = np.clip(vol3m, 0.01, None)
-    risk_adj = ret3m / safe_vol
+    with np.errstate(invalid="ignore"):
+        risk_adj = ret3m / safe_vol
 
     a50  = (precomp.above_50dma_daily[day]  if precomp.above_50dma_daily  is not None else zeros).astype(bool)
     a200 = (precomp.above_200dma_daily[day] if precomp.above_200dma_daily is not None else zeros).astype(bool)
@@ -549,7 +559,7 @@ def score_stocks_at_day(precomp: PrecomputedData, params: np.ndarray, day: int) 
             precomp.has_position_52w_daily[day],
             precomp.position_52w_daily[day],
             precomp.return_1m_daily[day],
-            params[10:16],
+            _MBIN_SCORES,
         )
 
     # Residual-momentum blend (slot 49, frozen-by-default = 0.0). Blends a causal
@@ -603,7 +613,7 @@ def _momentum_score_at_day(precomp: PrecomputedData, params: np.ndarray, day: in
         precomp.has_position_52w_daily[day],
         precomp.position_52w_daily[day],
         precomp.return_1m_daily[day],
-        params[10:16],
+        _MBIN_SCORES,
     )
 
 
@@ -704,7 +714,12 @@ def select_candidates(
     _disc_mask = getattr(precomp, "excluded_mask", None)
     disc_gate = ~_disc_mask if _disc_mask is not None else np.ones(n, dtype=bool)
 
-    final_mask = score_mask & quality_gate & mom_gate & income_trap_gate & disc_gate
+    # Per-day tradeability (survivorship-free loads): dead names' prices are ffilled past
+    # their delist date so held positions can mark, but they must never be BOUGHT there.
+    _alive_daily = getattr(precomp, "tradeable_mask_daily", None)
+    alive_gate = _alive_daily[day] if _alive_daily is not None else np.ones(n, dtype=bool)
+
+    final_mask = score_mask & quality_gate & mom_gate & income_trap_gate & disc_gate & alive_gate
 
     n_sel = int(final_mask.sum())
     if n_sel > max_cands:
@@ -1220,6 +1235,11 @@ def run_simulation(
     stock_shares    = np.zeros(n_stocks)
     stock_avg_cost  = np.zeros(n_stocks)
     stock_peak      = np.zeros(n_stocks)
+    # Last valid traded price per symbol (finite & > 0), updated every day a price
+    # prints and seeded from the fill price at buy. Used to mark NaN-priced positions
+    # and to fill forced exits — marking/filling at cost basis erased losses and let
+    # zero-liquidity names exit at cost. NaN until a symbol has ever printed.
+    stock_last_price = np.full(n_stocks, np.nan)
     stock_day_bought= np.full(n_stocks, -1, dtype=np.int32)
     stock_day_sold  = np.full(n_stocks, -99, dtype=np.int32)
     stock_stopout   = np.zeros(n_stocks, dtype=bool)
@@ -1292,10 +1312,26 @@ def run_simulation(
         vol = float(v[stock_idx]) if np.isfinite(v[stock_idx]) else 0.20
         return base_slippage * (1.0 + vol_slip_mult * vol)
 
+    def _mark_fallback() -> np.ndarray:
+        """Mark/fill price when today's print is missing: last valid traded price,
+        falling back to cost basis only for a held name that never printed."""
+        return np.where(np.isfinite(stock_last_price), stock_last_price, stock_avg_cost)
+
+    def _mark_prices(prices_d: np.ndarray, valid: np.ndarray) -> np.ndarray:
+        """Per-symbol mark price vector: today's print where valid, else last traded."""
+        return np.where(valid, prices_d, _mark_fallback())
+
+    def _mark_price_i(i: int, prices_d: np.ndarray, valid: np.ndarray) -> float:
+        """Scalar mark price for symbol i — same fallback chain as _mark_prices."""
+        if valid[i]:
+            return float(prices_d[i])
+        lp = stock_last_price[i]
+        return float(lp) if np.isfinite(lp) else float(stock_avg_cost[i])
+
     def _current_portfolio_value(day: int) -> float:
         prices_d = precomp.prices[day]
         valid    = np.isfinite(prices_d) & (prices_d > 0)
-        sv = float(np.sum(stock_shares * np.where(valid, prices_d, stock_avg_cost)))
+        sv = float(np.sum(stock_shares * _mark_prices(prices_d, valid)))
         ev = float(np.sum(etf_shares * precomp.etf_prices[day])) if n_etfs > 0 else 0.0
         return cash + sv + ev
 
@@ -1305,7 +1341,7 @@ def run_simulation(
         exposure: dict = {}
         for i in np.where(stock_shares > 0)[0]:
             s   = precomp.sector_labels[i] if i < len(precomp.sector_labels) else "Unknown"
-            val = float(stock_shares[i] * prices_d[i]) if valid[i] else float(stock_shares[i] * stock_avg_cost[i])
+            val = float(stock_shares[i]) * _mark_price_i(i, prices_d, valid)
             exposure[s] = exposure.get(s, 0.0) + val
         return exposure
 
@@ -1318,8 +1354,7 @@ def run_simulation(
         total = 0.0
         for k in range(len(_arch_labels)):
             if _arch_labels[k] == label and stock_shares[k] > 0:
-                p_k = prices_d[k] if valid[k] else stock_avg_cost[k]
-                total += float(stock_shares[k] * p_k)
+                total += float(stock_shares[k]) * _mark_price_i(k, prices_d, valid)
         return total
 
     def _do_buy(day: int, budget: float) -> float:
@@ -1331,6 +1366,11 @@ def run_simulation(
             return 0.0
         prices_d = precomp.prices[day]
         eligible = candidate_mask & np.isfinite(prices_d) & (prices_d > 0)
+        # Survivorship-free tradeability guard: delisted names' prices are ffilled past
+        # their delist date (so holds can mark/exit) but must never be bought there.
+        # candidate_mask is refreshed on rebalance days only, so re-gate per buy day.
+        if precomp.tradeable_mask_daily is not None:
+            eligible = eligible & precomp.tradeable_mask_daily[day]
 
         # Apply per-archetype enabled-flag and min_score_to_buy filter
         if _arch_enabled_arr is not None and _arch_labels:
@@ -1375,6 +1415,7 @@ def run_simulation(
         portfolio_value = _current_portfolio_value(day)
         sector_exp      = _sector_exposures(day)
         spent           = 0.0
+        commission_paid = 0.0
         buys_this_pass  = 0
 
         candidate_indices = sorted(np.where(eligible)[0], key=lambda i: -eff_scores[i])
@@ -1449,7 +1490,9 @@ def run_simulation(
                         if _k >= _cluster_labels_by_day.shape[1]:
                             continue
                         if str(_cluster_labels_by_day[_rebal_idx][_k]) == _cls:
-                            _p_k = prices_d[_k] if np.isfinite(prices_d[_k]) and prices_d[_k] > 0 else stock_avg_cost[_k]
+                            _p_k = prices_d[_k] if np.isfinite(prices_d[_k]) and prices_d[_k] > 0 else (
+                                stock_last_price[_k] if np.isfinite(stock_last_price[_k]) else stock_avg_cost[_k]
+                            )
                             _cur_cw += float(stock_shares[_k] * _p_k)
                     _cur_cw = _cur_cw / portfolio_value
                     _new_w = _cur_cw + (alloc / portfolio_value)
@@ -1501,6 +1544,8 @@ def run_simulation(
             shares          = alloc / effective_price
             friction        = alloc * slip + commission_per_trade
             total_friction += friction
+            commission_paid += commission_per_trade
+            stock_last_price[i] = p  # seed/refresh last traded price at the fill
 
             if stock_shares[i] > 0:
                 old_cost          = stock_avg_cost[i] * stock_shares[i]
@@ -1542,7 +1587,7 @@ def run_simulation(
             total_traded_notional += alloc
             buys_this_pass        += 1
 
-        cash -= spent
+        cash -= spent + commission_paid
         return spent
 
     # Day 0: ETF buy + initial stock deployment
@@ -1583,6 +1628,8 @@ def run_simulation(
             week_start_day   = d
 
         valid_price = np.isfinite(prices) & (prices > 0)
+        # Record today's print as the last valid traded price (in-place so closures see it).
+        np.copyto(stock_last_price, prices, where=valid_price)
         stock_peak  = np.where(held & valid_price, np.maximum(stock_peak, prices), stock_peak)
 
         with np.errstate(invalid="ignore", divide="ignore"):
@@ -1671,14 +1718,14 @@ def run_simulation(
         sell_mask      = stop_loss_mask | trail_mask | tp_mask | weak_val_mask | oc_mask
 
         if sell_mask.any():
-            sell_prices   = np.where(valid_price, prices, stock_avg_cost)
+            sell_prices   = _mark_prices(prices, valid_price)
             sell_notional = float(np.sum(stock_shares[sell_mask] * sell_prices[sell_mask]))
             sell_indices  = np.where(sell_mask)[0]
             for i in sell_indices:
                 slip       = _effective_slippage(i)
                 proceeds_i = float(stock_shares[i] * sell_prices[i] * (1.0 - slip))
                 total_friction += float(stock_shares[i] * sell_prices[i] * slip) + commission_per_trade
-                cash += proceeds_i
+                cash += proceeds_i - commission_per_trade
                 is_stopout          = bool(stop_loss_mask[i] or trail_mask[i])
                 stock_day_sold[i]   = d
                 stock_stopout[i]    = is_stopout
@@ -1767,7 +1814,7 @@ def run_simulation(
             & (days_held >= _eff_minhold)
         )
         if harvest_mask.any():
-            harv_prices   = np.where(valid_price, prices, stock_avg_cost)
+            harv_prices   = _mark_prices(prices, valid_price)
             harv_indices  = np.where(harvest_mask)[0]
             harv_notional = 0.0
             _harv_src = "archetype_rule" if _arch_harvest_arr is not None else "global_rule"
@@ -1779,7 +1826,7 @@ def run_simulation(
                 proceeds_i = float(shares_to_sell * harv_prices[i] * (1.0 - slip))
                 total_friction += float(shares_to_sell * harv_prices[i] * slip) + commission_per_trade
                 harv_notional  += proceeds_i
-                cash           += proceeds_i
+                cash           += proceeds_i - commission_per_trade
                 stock_shares[i] -= shares_to_sell
                 sym = precomp.symbols[i] if i < len(precomp.symbols) else str(i)
                 cost_basis_i = float(stock_avg_cost[i] * shares_to_sell)
@@ -1843,7 +1890,7 @@ def run_simulation(
                     _still_up = precomp.above_50dma_daily[d].astype(bool)
                     trim_mask = trim_mask & ~_still_up
             if trim_mask.any():
-                sell_prices_t = np.where(valid_price, prices, stock_avg_cost)
+                sell_prices_t = _mark_prices(prices, valid_price)
                 trim_indices  = np.where(trim_mask)[0]
                 trim_notional = 0.0
                 for i in trim_indices:
@@ -1854,7 +1901,7 @@ def run_simulation(
                     proceeds_i  = float(shares_to_sell * sell_prices_t[i] * (1.0 - slip))
                     total_friction += float(shares_to_sell * sell_prices_t[i] * slip) + commission_per_trade
                     trim_notional  += proceeds_i
-                    cash           += proceeds_i
+                    cash           += proceeds_i - commission_per_trade
                     stock_shares[i] -= shares_to_sell
                     sym = precomp.symbols[i] if i < len(precomp.symbols) else str(i)
                     cost_basis_i = float(stock_avg_cost[i] * shares_to_sell)
@@ -1910,7 +1957,7 @@ def run_simulation(
                     _sh = stock_shares[i] * _ro_frac
                     if _sh <= 0:
                         continue
-                    _p_i  = prices[i] if valid_price[i] else stock_avg_cost[i]
+                    _p_i  = _mark_price_i(i, prices, valid_price)
                     _slip = _effective_slippage(i)
                     _proceeds = float(_sh * _p_i * (1.0 - _slip))
                     total_friction   += float(_sh * _p_i * _slip)
@@ -1952,7 +1999,7 @@ def run_simulation(
                     _snap = record_cluster_snapshot(
                         day=d,
                         stock_shares=stock_shares,
-                        prices=np.where(valid_price, precomp.prices[d], stock_avg_cost),
+                        prices=_mark_prices(precomp.prices[d], valid_price),
                         cluster_labels=_cls_labels_d,
                         sector_labels=precomp.sector_labels,
                         max_cluster_weight_threshold=_max_cluster_w,
@@ -1993,7 +2040,7 @@ def run_simulation(
                         _w_new = max(0.0, min(_svo_wmax, _svo_tv / _rv))
                         if abs(_w_new - _svo_cur_w) > _svo_band:
                             _svo_cur_w = _w_new
-                _cur_sv = float(np.sum(stock_shares * np.where(valid_price, prices, stock_avg_cost)))
+                _cur_sv = float(np.sum(stock_shares * _mark_prices(prices, valid_price)))
                 _active_eq = _cur_sv + cash
                 _target_sv = _svo_cur_w * _active_eq
                 if _cur_sv > _target_sv and _cur_sv > 0:
@@ -2004,7 +2051,7 @@ def run_simulation(
                             _sh = stock_shares[_i] * _f
                             if _sh <= 0:
                                 continue
-                            _p_i  = prices[_i] if valid_price[_i] else stock_avg_cost[_i]
+                            _p_i  = _mark_price_i(_i, prices, valid_price)
                             _slip = _effective_slippage(_i)
                             _proceeds = float(_sh * _p_i * (1.0 - _slip))
                             total_friction   += float(_sh * _p_i * _slip)
@@ -2013,7 +2060,7 @@ def run_simulation(
                             stock_shares[_i] -= _sh
                         cash                  -= _derisk_notional * _svo_switch
                         total_traded_notional += _derisk_notional
-                _cur_sv2 = float(np.sum(stock_shares * np.where(valid_price, prices, stock_avg_cost)))
+                _cur_sv2 = float(np.sum(stock_shares * _mark_prices(prices, valid_price)))
                 _svo_budget_cap = max(0.0, _target_sv - _cur_sv2)
 
             # While de-risked, sweep free cash (contributions + any sell proceeds)
@@ -2041,7 +2088,7 @@ def run_simulation(
         if _overlay_value > _ro_max_value:
             _ro_max_value = _overlay_value
         etf_value   = float(np.sum(etf_shares * precomp.etf_prices[d])) if n_etfs > 0 else 0.0
-        stock_value = float(np.sum(stock_shares * np.where(valid_price, prices, stock_avg_cost)))
+        stock_value = float(np.sum(stock_shares * _mark_prices(prices, valid_price)))
         port_val    = cash + stock_value + etf_value + _overlay_value
         daily_values[d] = port_val
         if _active_daily is not None:
@@ -2098,7 +2145,7 @@ def run_simulation(
                 _ak = _arch_labels[k]
                 if not _ak or stock_shares[k] <= 0:
                     continue
-                _p = prices[k] if valid_price[k] else stock_avg_cost[k]
+                _p = _mark_price_i(k, prices, valid_price)
                 _arch_daily_value[_ak][d] += float(stock_shares[k] * _p)
 
     final_value = float(daily_values[-1])
@@ -2143,7 +2190,7 @@ def run_simulation(
                 _al = _arch_labels[i]
                 if not _al or stock_shares[i] <= 0:
                     continue
-                _p = last_prices[i] if valid_last[i] else stock_avg_cost[i]
+                _p = _mark_price_i(i, last_prices, valid_last)
                 _val = float(stock_shares[i] * _p)
                 _cost = float(stock_shares[i] * stock_avg_cost[i])
                 _arch_unrealized_pnl[_al] = _arch_unrealized_pnl.get(_al, 0.0) + (_val - _cost)
@@ -2204,7 +2251,7 @@ def run_simulation(
                     if k >= last_labels.shape[0]:
                         continue
                     cls = str(last_labels[k])
-                    _p = last_prices[k] if _valid_last[k] else stock_avg_cost[k]
+                    _p = _mark_price_i(k, last_prices, _valid_last)
                     _val = float(stock_shares[k] * _p)
                     _per_cluster_value[cls] = _per_cluster_value.get(cls, 0.0) + _val
                     if k < len(precomp.sector_labels):
@@ -2366,27 +2413,19 @@ def run_backtest_report(
     bp = BACKTEST_PARAMS
     _arch_enabled = bool(ARCHETYPE_PARAMS.get("enabled", False))
 
+    # Canonical window slicer — slices EVERY per-day array (vix/spy/dollar-volume/…)
+    # so offset windows (the validation slice!) stay calendar-aligned. Lazy import:
+    # regime_scope imports this module at load time.
+    from .regime_scope import regime_labels, slice_precomp
+
+    # Attach point-in-time regime labels computed on the FULL load before slicing, so
+    # the validation window (offset > 0) keeps its 200DMA context instead of resetting
+    # to the day<200 "bullish" fallback at its day 0.
+    if precomp.regime_labels_daily is None:
+        precomp = precomp._replace(regime_labels_daily=regime_labels(precomp))
+
     def _slice_precomp(s: slice) -> PrecomputedData:
-        def _opt(arr):
-            return arr[s] if arr is not None else None
-        return precomp._replace(
-            prices=precomp.prices[s],
-            etf_prices=precomp.etf_prices[s],
-            benchmark_prices=precomp.benchmark_prices[s],
-            position_52w_daily=precomp.position_52w_daily[s],
-            return_1m_daily=precomp.return_1m_daily[s],
-            bin_indices_daily=precomp.bin_indices_daily[s],
-            has_position_52w_daily=precomp.has_position_52w_daily[s],
-            ret_5d_daily=_opt(precomp.ret_5d_daily),
-            ret_3m_daily=_opt(precomp.ret_3m_daily),
-            ret_6m_daily=_opt(precomp.ret_6m_daily),
-            rs_3m_daily=_opt(precomp.rs_3m_daily),
-            rs_6m_daily=_opt(precomp.rs_6m_daily),
-            vol_3m_daily=_opt(precomp.vol_3m_daily),
-            above_50dma_daily=_opt(precomp.above_50dma_daily),
-            above_200dma_daily=_opt(precomp.above_200dma_daily),
-            regime_labels_daily=_opt(precomp.regime_labels_daily),
-        )
+        return slice_precomp(precomp, s)
 
     train_precomp = _slice_precomp(train_slice)
     train_n       = train_precomp.prices.shape[0]
@@ -2503,28 +2542,10 @@ def compare_archetype_modes(
     n_days = precomp.prices.shape[0]
     train_slice, _ = split_price_window(n_days, bp.get("train_pct", 0.70))
 
-    def _slice(s: slice) -> PrecomputedData:
-        def _o(a): return a[s] if a is not None else None
-        return precomp._replace(
-            prices=precomp.prices[s],
-            etf_prices=precomp.etf_prices[s],
-            benchmark_prices=precomp.benchmark_prices[s],
-            position_52w_daily=precomp.position_52w_daily[s],
-            return_1m_daily=precomp.return_1m_daily[s],
-            bin_indices_daily=precomp.bin_indices_daily[s],
-            has_position_52w_daily=precomp.has_position_52w_daily[s],
-            ret_5d_daily=_o(precomp.ret_5d_daily),
-            ret_3m_daily=_o(precomp.ret_3m_daily),
-            ret_6m_daily=_o(precomp.ret_6m_daily),
-            rs_3m_daily=_o(precomp.rs_3m_daily),
-            rs_6m_daily=_o(precomp.rs_6m_daily),
-            vol_3m_daily=_o(precomp.vol_3m_daily),
-            above_50dma_daily=_o(precomp.above_50dma_daily),
-            above_200dma_daily=_o(precomp.above_200dma_daily),
-            regime_labels_daily=_o(precomp.regime_labels_daily),
-        )
+    # Canonical slicer — slices every per-day array (vix/spy/dollar-volume/…).
+    from .regime_scope import slice_precomp
 
-    train = _slice(train_slice)
+    train = slice_precomp(precomp, train_slice)
     bench_vals = precomp.benchmark_prices[train_slice]
     bench_ret  = float(bench_vals[-1] / bench_vals[0] - 1.0) if (
         len(bench_vals) >= 2 and np.isfinite(bench_vals).all() and bench_vals[0] > 0
@@ -2604,28 +2625,10 @@ def compare_candidate_selection_modes(
     n_days      = precomp.prices.shape[0]
     train_slice, _ = split_price_window(n_days, bp.get("train_pct", 0.70))
 
-    def _slice(s: slice) -> PrecomputedData:
-        def _o(a): return a[s] if a is not None else None
-        return precomp._replace(
-            prices=precomp.prices[s],
-            etf_prices=precomp.etf_prices[s],
-            benchmark_prices=precomp.benchmark_prices[s],
-            position_52w_daily=precomp.position_52w_daily[s],
-            return_1m_daily=precomp.return_1m_daily[s],
-            bin_indices_daily=precomp.bin_indices_daily[s],
-            has_position_52w_daily=precomp.has_position_52w_daily[s],
-            ret_5d_daily=_o(precomp.ret_5d_daily),
-            ret_3m_daily=_o(precomp.ret_3m_daily),
-            ret_6m_daily=_o(precomp.ret_6m_daily),
-            rs_3m_daily=_o(precomp.rs_3m_daily),
-            rs_6m_daily=_o(precomp.rs_6m_daily),
-            vol_3m_daily=_o(precomp.vol_3m_daily),
-            above_50dma_daily=_o(precomp.above_50dma_daily),
-            above_200dma_daily=_o(precomp.above_200dma_daily),
-            regime_labels_daily=_o(precomp.regime_labels_daily),
-        )
+    # Canonical slicer — slices every per-day array (vix/spy/dollar-volume/…).
+    from .regime_scope import slice_precomp
 
-    train_precomp = _slice(train_slice)
+    train_precomp = slice_precomp(precomp, train_slice)
     bench_vals    = precomp.benchmark_prices[train_slice]
     bench_ret     = float(bench_vals[-1] / bench_vals[0] - 1.0) if (
         len(bench_vals) >= 2 and np.isfinite(bench_vals).all() and bench_vals[0] > 0

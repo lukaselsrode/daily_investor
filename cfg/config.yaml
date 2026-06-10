@@ -511,7 +511,12 @@ exit_decision:
   positive_pnl_exit_downgrade: true
   positive_momentum_exit_downgrade: true
   strong_quality_exit_downgrade: true
-  hard_exit_score_below: 0.2
+  # 2026-06: 0.2 -> -0.35. When sell_weak_value_below moved to -0.18, hard_exit was left
+  # at 0.2, inverting the exit ladder (hard_exit must sit BELOW sell_weak — config
+  # validation warned on every load and the forced-collapse zone was empty; the
+  # score-collapse leg of the DAE confirmed-breakdown check had become vacuous).
+  # -0.35 restores the original ~0.17 gap below the thesis-exit threshold.
+  hard_exit_score_below: -0.35
   review_score_below: 0.45
   positive_pnl_review_floor: 0.0
   positive_momentum_review_floor: 0.1

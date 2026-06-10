@@ -138,7 +138,11 @@ def _tune_subset(precomp, preset, run_matrix, scope, maxiter, popsize, seed=42, 
                                    regime_scope=regime_scope)
             return -float(scan.overall_robust_score)
         except Exception:
-            return 0.0
+            # differential_evolution MINIMIZES this objective and robust scores are
+            # routinely negative (so valid configs score > 0 here). Returning 0.0 made
+            # a crashing config look better than any valid negative-score config —
+            # return a large penalty so crashes always rank last.
+            return 1e6
 
     res = differential_evolution(
         _obj, active_bounds, maxiter=maxiter, popsize=popsize,

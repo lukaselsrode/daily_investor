@@ -12,10 +12,15 @@ Design choices (v1, documented):
 - Point-in-time membership = price availability. A name is selectable on date D iff it has an
   adjusted price on D; dead names' series naturally end at delisting.
 - Delisting handling = trailing forward-fill to the final price. A held position marks at its last
-  traded value (bankruptcy → ~0 captured; acquisition → deal price), and its crashed/flat momentum
-  keeps it from being re-bought. (A later version can liquidate-and-redeploy in the sim instead.)
-- Dead-name fundamentals = NEUTRAL (zero) — we don't have point-in-time fundamentals for delisted
-  names, so they are scored on price/momentum only, never on quality/value (an honest abstention).
+  traded value (bankruptcy → ~0 captured; acquisition → deal price). A per-day `tradeable` mask
+  (True until the last NATIVE price print) is returned alongside, so the simulator can refuse to
+  BUY a name after its delist date even though its ffilled price stays finite.
+- Dead-name fundamentals = cross-sectional MEDIAN of the alive universe (computed at assemble
+  time) for quality/income/pe/pb. We don't have point-in-time fundamentals for delisted names;
+  zero looked "neutral" but sat below the live min_quality_score buy gate (0.38), so every dead
+  name was auto-rejected and survivorship bias silently survived. The alive-universe median is an
+  honest neutral: gates treat dead names as AVERAGE rather than uninvestable, and selection still
+  differentiates them on price/momentum.
 - A causal trailing dollar-volume array is returned for cap-proxy position sizing (no look-ahead,
   unlike the static market_caps snapshot).
 """
@@ -35,10 +40,13 @@ _PRICE_DIR = os.path.join(_CACHE_DIR, "prices")
 _DEAD_PARQUET = os.path.join(_CACHE_DIR, "dead_universe.parquet")
 
 _NEUTRAL_FUND_COLS = {
-    "pe_comp": 0.0, "pb_comp": 0.0, "quality_score": 0.0, "income_score": 0.0,
     "value_metric": 0.0, "position_52w": np.nan, "return_1m": np.nan,
     "baseline_score": 0.0, "market_cap": np.nan,
 }
+# Fundamentals filled with the cross-sectional MEDIAN of the alive universe (see module
+# docstring): zero put dead names below the live min_quality_score buy gate, making them
+# structurally unbuyable in a run labelled survivorship-free.
+_MEDIAN_FUND_COLS = ("pe_comp", "pb_comp", "quality_score", "income_score")
 
 
 def _safe(symbol: str) -> str:
@@ -66,13 +74,16 @@ def dead_universe() -> pd.DataFrame:
 
 def assemble(agg_df: pd.DataFrame, symbols: list[str], etf_list: list[str],
              benchmark_symbol: str, n_days: int,
-             add_dead: bool = True) -> tuple[pd.DataFrame, pd.DataFrame, np.ndarray]:
-    """Build survivorship-free (closes, extended_agg_df, dollar_volume) from the FMP cache.
+             add_dead: bool = True) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Build survivorship-free (closes, extended_agg_df, dollar_volume, tradeable) from the FMP cache.
 
     closes:          date×symbol adjusted Close, dead names trailing-ffilled to final price.
-    extended_agg_df: agg_df + neutral rows for the added dead names (price/momentum-only scoring).
-    dollar_volume:   (n_days, n_stocks) causal Close×Volume, aligned to the final stock column order,
+    extended_agg_df: agg_df + rows for the added dead names — quality/income/pe/pb at the alive
+                     universe's cross-sectional median (honest neutral; see module docstring).
+    dollar_volume:   date×symbol causal Close×Volume (symbol-keyed; the caller aligns columns),
                      for cap-proxy position sizing without the static-market_caps look-ahead.
+    tradeable:       date×symbol bool, True through each symbol's LAST NATIVE price print (i.e.
+                     before the trailing ffill); the simulator must not buy past it.
     """
     # Calendar from the benchmark series (last n_days of trading days FMP has).
     bench = _load_series(benchmark_symbol)
@@ -110,18 +121,29 @@ def assemble(agg_df: pd.DataFrame, symbols: list[str], etf_list: list[str],
             dead_added.append(sym)
 
     closes = pd.DataFrame(close_cols).reindex(cal)
+    # Tradeability: True through each symbol's last NATIVE print (captured BEFORE the trailing
+    # ffill below). Post-delist ffilled prices are finite, so the simulator needs this mask to
+    # refuse buys past the delist date. Reverse-cummax marks every day <= the last native print.
+    tradeable = closes.notna().iloc[::-1].cummax().iloc[::-1]
     # Trailing forward-fill ONLY for dead names (mark held positions at final price post-delisting).
     if dead_added:
         closes[dead_added] = closes[dead_added].ffill()
     logger.info("Survivorship-free inputs: %d survivors+etfs, +%d liquid dead names",
                 len(want), len(dead_added))
 
-    # Extend agg_df with neutral rows for the dead names so compute_metric scores them on momentum.
+    # Extend agg_df with rows for the dead names: median-neutral fundamentals (so the live
+    # quality gate treats them as average, not auto-rejected) + momentum from prices.
     if dead_added:
+        medians = {
+            c: float(pd.to_numeric(agg_df.get(c), errors="coerce").median())
+            if c in agg_df.columns and np.isfinite(pd.to_numeric(agg_df.get(c), errors="coerce").median())
+            else 0.0
+            for c in _MEDIAN_FUND_COLS
+        }
         rows = []
         for sym in dead_added:
             rec = {"symbol": sym, "volume": float(np.nanmax(vol_cols[sym].reindex(cal).values) or 0.0),
-                   "sector": "Unknown", "industry": "Unknown", **_NEUTRAL_FUND_COLS}
+                   "sector": "Unknown", "industry": "Unknown", **_NEUTRAL_FUND_COLS, **medians}
             rows.append(rec)
         dead_df = pd.DataFrame(rows)
         for c in agg_df.columns:
@@ -129,7 +151,7 @@ def assemble(agg_df: pd.DataFrame, symbols: list[str], etf_list: list[str],
                 dead_df[c] = np.nan
         agg_df = pd.concat([agg_df, dead_df[agg_df.columns]], ignore_index=True)
 
-    return closes, agg_df, _dollar_volume_matrix(vol_cols, close_cols, cal)
+    return closes, agg_df, _dollar_volume_matrix(vol_cols, close_cols, cal), tradeable
 
 
 def _dollar_volume_matrix(vol_cols, close_cols, cal) -> np.ndarray:

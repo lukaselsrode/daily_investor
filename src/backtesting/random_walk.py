@@ -14,14 +14,14 @@ robust_score formula
 ---------------------
   robust_score =
       median_excess_return
-    + 0.50 * median_sharpe
-    + 0.25 * pct_beating_benchmark
-    - 0.50 * abs(worst_decile_drawdown)
-    - 0.25 * median_turnover
-    - 0.25 * std_excess_return
+    + W_SHARPE      * median_sharpe
+    + W_PCT_BEATING * pct_beating_benchmark
+    - W_DRAWDOWN    * abs(worst_decile_drawdown)
+    - W_TURNOVER    * median_turnover
+    - W_STD_EXCESS  * std_excess_return
 
-  Rewards:  excess return, risk-adjusted performance, consistency.
-  Penalizes: deep drawdowns, high turnover, return volatility.
+  Rewards:  excess return vs SPY (the dominant term), risk-adjusted performance,
+  consistency. Penalizes: deep drawdowns, high turnover, return volatility.
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from .regime_scope import eligible_window_starts
+from .regime_scope import eligible_window_starts, regime_labels, slice_precomp
 from .simulator import run_simulation
 from .types import BacktestScope, PrecomputedData
 
@@ -143,6 +143,19 @@ class RandomWindowSummary:
 # Robust score
 # ---------------------------------------------------------------------------
 
+# Term weights — terms must be in COMPARABLE UNITS so median excess-vs-SPY dominates
+# the ranking (project rule: results are judged on excess vs SPY, never isolated
+# Sharpe/Calmar). On real 45-60d windows median_excess is a per-window return ~±0.05
+# while annualized short-window sharpe is ~±2: the old 0.50 sharpe weight made the
+# score ~95% Sharpe. 0.05 * sharpe (~±0.10) and 0.10 * pct_beating (~0-0.10) keep
+# both as tie-breakers of the same magnitude as the excess term, not its master.
+ROBUST_W_SHARPE      = 0.05
+ROBUST_W_PCT_BEATING = 0.10
+ROBUST_W_DRAWDOWN    = 0.50
+ROBUST_W_TURNOVER    = 0.25
+ROBUST_W_STD_EXCESS  = 0.25
+
+
 def compute_robust_score(
     median_excess: float,
     median_sharpe: float,
@@ -152,48 +165,29 @@ def compute_robust_score(
     std_excess: float,
 ) -> float:
     """
-    Combines multiple robustness signals into a single scalar.
+    Combines multiple robustness signals into a single scalar. Higher is better.
 
-    Higher is better. Calibrated so a strategy with median_excess=0.02,
-    median_sharpe=0.5, pct_beating=0.60, worst_decile_dd=-0.10,
-    median_turnover=1.0, std_excess=0.03 scores ≈ 0.03.
+    median excess-vs-SPY is the dominant reward term; sharpe and pct_beating are
+    deliberately down-weighted (ROBUST_W_SHARPE / ROBUST_W_PCT_BEATING) so they act
+    as same-magnitude tie-breakers rather than swamping a per-window return ~±0.05
+    with an annualized Sharpe ~±2 — see the weight-constant comment above.
     """
     return (
         median_excess
-        + 0.50 * median_sharpe
-        + 0.25 * pct_beating
-        - 0.50 * abs(worst_decile_dd)
-        - 0.25 * median_turnover
-        - 0.25 * std_excess
+        + ROBUST_W_SHARPE      * median_sharpe
+        + ROBUST_W_PCT_BEATING * pct_beating
+        - ROBUST_W_DRAWDOWN    * abs(worst_decile_dd)
+        - ROBUST_W_TURNOVER    * median_turnover
+        - ROBUST_W_STD_EXCESS  * std_excess
     )
 
 
 # ---------------------------------------------------------------------------
-# Precomp window slicer (mirrors run_backtest_report._slice_precomp)
+# Precomp window slicer — the ONE canonical implementation lives in regime_scope.
+# Re-exported under the old private name for callers (research/regime_sizing).
 # ---------------------------------------------------------------------------
 
-def _slice_precomp(precomp: PrecomputedData, s: slice) -> PrecomputedData:
-    def _opt(arr: np.ndarray | None) -> np.ndarray | None:
-        return arr[s] if arr is not None else None
-
-    return precomp._replace(
-        prices=precomp.prices[s],
-        etf_prices=precomp.etf_prices[s],
-        benchmark_prices=precomp.benchmark_prices[s],
-        position_52w_daily=precomp.position_52w_daily[s],
-        return_1m_daily=precomp.return_1m_daily[s],
-        bin_indices_daily=precomp.bin_indices_daily[s],
-        has_position_52w_daily=precomp.has_position_52w_daily[s],
-        ret_5d_daily=_opt(precomp.ret_5d_daily),
-        ret_3m_daily=_opt(precomp.ret_3m_daily),
-        ret_6m_daily=_opt(precomp.ret_6m_daily),
-        rs_3m_daily=_opt(precomp.rs_3m_daily),
-        rs_6m_daily=_opt(precomp.rs_6m_daily),
-        vol_3m_daily=_opt(precomp.vol_3m_daily),
-        above_50dma_daily=_opt(precomp.above_50dma_daily),
-        above_200dma_daily=_opt(precomp.above_200dma_daily),
-        regime_labels_daily=_opt(precomp.regime_labels_daily),
-    )
+_slice_precomp = slice_precomp
 
 
 # ---------------------------------------------------------------------------
@@ -250,8 +244,11 @@ def random_window_backtest(
 
     rng = np.random.default_rng(seed)
     eligible_starts, _regime_meta = eligible_window_starts(precomp, window_days, regime_scope)
-    if regime_scope != "all" and precomp.regime_labels_daily is None:
-        from .regime_scope import regime_labels
+    # ALWAYS attach point-in-time regime labels computed on the FULL load before slicing.
+    # Short sliced windows have no 200DMA history of their own, so without precomputed
+    # labels every day of every window would default to "bullish" — structurally
+    # disabling regime tilts/defensive logic in exactly this harness.
+    if precomp.regime_labels_daily is None:
         precomp = precomp._replace(regime_labels_daily=regime_labels(precomp))
     n_possible = len(eligible_starts)
 
@@ -382,13 +379,14 @@ def random_window_backtest(
             _active_median_sharpe = float(np.median(a_sh)) if a_sh else 0.0
             _active_pct_beating   = float(np.mean(a_beat)) if a_beat else 0.0
             _active_worst_dd      = float(np.percentile(a_dd, 10)) if a_dd else 0.0
-            _active_robust = (
-                _active_median_excess
-                + 0.50 * (_active_median_sharpe or 0.0)
-                + 0.25 * (_active_pct_beating   or 0.0)
-                - 0.50 * abs(_active_worst_dd   or 0.0)
-                - 0.20 * med_turnover
-                - 0.25 * (float(np.std(a_exc)) if len(a_exc) > 1 else 0.0)
+            # Same excess-dominant weighting as the overall robust score.
+            _active_robust = compute_robust_score(
+                _active_median_excess,
+                _active_median_sharpe,
+                _active_pct_beating,
+                _active_worst_dd,
+                med_turnover,
+                float(np.std(a_exc)) if len(a_exc) > 1 else 0.0,
             )
 
     return RandomWindowSummary(

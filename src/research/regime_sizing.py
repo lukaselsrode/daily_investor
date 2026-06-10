@@ -17,7 +17,6 @@ from backtesting.random_walk import (
     RandomWindowSummary,
     WindowResult,
     compute_robust_score,
-    random_window_backtest,
 )
 from backtesting.random_walk import _slice_precomp as slice_window_precomp
 from backtesting.regime_scope import eligible_window_starts
@@ -107,21 +106,29 @@ def run_regime_sizing_grid(
     seed: int = 42,
     scope: BacktestScope = "overall_strategy",
 ) -> list[SizingResult]:
-    """Evaluate sizing variants using random windows fully inside regime_scope."""
-    results: list[SizingResult] = []
-    for i, variant in enumerate(variants):
-        params = build_sizing_params(base_params, variant)
-        summary = random_window_backtest(
-            precomp,
-            params,
-            n_windows=n_windows,
-            window_days=window_days,
-            seed=seed + i,
-            scope=scope,
-            regime_scope=regime_scope,
-        )
-        results.append(SizingResult(variant=variant, summary=summary))
-    return results
+    """Evaluate sizing variants on ONE shared set of random windows inside regime_scope.
+
+    The window starts are sampled once from `seed` and every variant is evaluated on
+    those exact starts (paired comparison via run_regime_sizing_grid_on_starts). The
+    previous per-variant seeds (seed+i) scored each variant on DIFFERENT windows, so
+    the variant deltas were confounded with window luck of the same order as the
+    sizing effect being measured.
+    """
+    starts = sample_regime_window_starts(
+        precomp,
+        window_days,
+        regime_scope=regime_scope,
+        n_windows=n_windows,
+        seed=seed,
+    )
+    return run_regime_sizing_grid_on_starts(
+        precomp,
+        base_params,
+        variants,
+        starts,
+        window_days,
+        scope=scope,
+    )
 
 
 def _summary_from_window_results(

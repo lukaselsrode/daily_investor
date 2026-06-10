@@ -38,11 +38,47 @@ _LLM_FORBIDDEN_PARAMS = frozenset([
 ])
 
 
+# Tuned slots whose YAML values are integers (counts / day-counts); every other
+# tail slot writes as a 4-decimal float. Kept in sync with the int coercions the
+# simulator applies via the *_cfg_from_params extractors in constants.py.
+_INT_CONFIG_PATHS = frozenset({
+    "risk.max_buys_per_rebalance",
+    "candidate_selection.max_candidates",
+    "exit_decision.opportunity_cost.stall_max_days",
+    "backtest.rebalance_frequency_days",
+    "backtest.cooldown_days_after_sell",
+    "backtest.cooldown_days_after_stopout",
+})
+
+
+def _set_config_path(cfg: dict, path: str, value) -> None:
+    """Write `value` at a dotted config path, creating intermediate dicts."""
+    parts = path.split(".")
+    node = cfg
+    for p in parts[:-1]:
+        node = node.setdefault(p, {})
+    node[parts[-1]] = value
+
+
 def apply_config_params(params: np.ndarray) -> None:
     """Write tuned parameters back to config.yaml, preserving all other keys."""
     with open(CONFIG_FILE) as f:
         cfg = yaml.safe_load(f)
 
+    # Score-weight normalization is GATE-EQUIVALENT without rescaling any threshold:
+    # the simulator itself normalizes the four score weights before composing the
+    # score (simulator._regime_tilted_weights divides by sum(raw_sw)) and likewise
+    # normalizes the momentum sub-weights (_momentum_score_multifactor_vec), so the
+    # composite the optimizer validated was ALREADY on the normalized-weight scale.
+    # Thresholds compared against scores therefore write UNSCALED:
+    #   - metric_threshold (slot 5) gates that normalized composite;
+    #   - hard_exit_score_below + the DAE review floors (slots 50-53) gate the
+    #     normalized composite / the unweighted quality / the normalized momentum
+    #     factor scores;
+    #   - archetype harvest/trim thresholds (and the opportunity-cost slots) compare
+    #     against position P/L fractions and day counts, not scores.
+    # None are on a raw-weight-sum scale, so none get rescaled here. Covered by
+    # tests/test_tuning_fixes.py::test_score_weight_normalization_is_gate_equivalent.
     raw_sw = params[:4]
     sw = raw_sw / max(raw_sw.sum(), 1e-9)
 
@@ -74,44 +110,28 @@ def apply_config_params(params: np.ndarray) -> None:
     for k, v in zip(mom_keys, mom_norm):
         mi_w[k] = round(float(v), 4)
 
-    # Tail slots (sizing / regime / blends) are written by CONFIG PATH, not hardcoded
-    # index — the param layout shifts whenever fields are added to a slot group, and
-    # hardcoded indices silently wrote the wrong slot once the archetype block grew.
-    def _by_path(path: str):
-        i = _CONFIG_PATH_TO_PARAM_IDX.get(path)
-        if i is None or i >= len(params):
-            return None
-        return float(params[i])
-
-    _v = _by_path("risk.max_single_position_pct")
-    if _v is not None:
-        cfg.setdefault("risk", {})
-        cfg["risk"]["max_single_position_pct"] = round(_v, 4)
-    _v = _by_path("risk.max_buys_per_rebalance")
-    if _v is not None:
-        cfg.setdefault("risk", {})
-        cfg["risk"]["max_buys_per_rebalance"] = round(_v)
-    _v = _by_path("candidate_selection.max_candidates")
-    if _v is not None:
-        cfg.setdefault("candidate_selection", {})
-        cfg["candidate_selection"]["max_candidates"] = round(_v)
-
-    _v = _by_path("regime.bullish.momentum_tilt")
-    if _v is not None:
-        cfg.setdefault("regime", {}).setdefault("bullish", {})
-        cfg["regime"]["bullish"]["momentum_tilt"] = round(_v, 4)
-    _v = _by_path("regime.defensive.mean_reversion_blend")
-    if _v is not None:
-        cfg.setdefault("regime", {}).setdefault("defensive", {})
-        cfg["regime"]["defensive"]["mean_reversion_blend"] = round(_v, 4)
-    _v = _by_path("scoring.quality_low_vol_blend")
-    if _v is not None:
-        cfg.setdefault("scoring", {})
-        cfg["scoring"]["quality_low_vol_blend"] = round(_v, 4)
-    _v = _by_path("scoring.momentum_residual_blend")
-    if _v is not None:
-        cfg.setdefault("scoring", {})
-        cfg["scoring"]["momentum_residual_blend"] = round(_v, 4)
+    # Tail slots (16+) are written GENERICALLY off the canonical slot↔config-path
+    # mapping, so EVERY tuned slot a preset can unfreeze (candidate filters 40-42,
+    # sizing 43-45, regime/scoring blends 46-49, DAE exit floors 50-53,
+    # opportunity-cost 54-56, rebalance/cooldowns 57-59, and any future group)
+    # round-trips into config. The previous hand-written per-path writer silently
+    # dropped most of these, so `auto-tune-preset --apply` validated one vector and
+    # persisted another (live reverted to the untuned values). Archetype slots are
+    # excluded here — they need the harvest>=trim sanity + bool/int coercion from
+    # archetype_cfg_from_params, handled below.
+    for _path, _idx in sorted(_CONFIG_PATH_TO_PARAM_IDX.items(), key=lambda kv: kv[1]):
+        if _idx < _ARCH_SLOT_OFFSET or _idx >= len(params):
+            continue  # base slots 0-15 handled above (normalization special cases)
+        if _path.startswith("archetype_management."):
+            continue
+        _v = float(params[_idx])
+        if _path in _INT_CONFIG_PATHS:
+            _iv = max(0, round(_v))
+            if _path == "backtest.rebalance_frequency_days":
+                _iv = max(1, _iv)  # cadence >= 1 day (mirrors rebalance_cfg_from_params)
+            _set_config_path(cfg, _path, _iv)
+        else:
+            _set_config_path(cfg, _path, round(_v, 4))
 
     # Archetype lifecycle slots — persist when the vector includes them (previously
     # dropped, so a tuned active_archetype_lifecycle run never reached config). Reuse the

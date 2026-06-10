@@ -71,6 +71,11 @@ class PrecomputedData(NamedTuple):
     # SAME VIX-primary regime classifier as live (strategy/regimes/classifier.py). None →
     # the simulator falls back to the legacy SPY-vs-200DMA rule (byte-identical to pre-VIX).
     vix_prices: np.ndarray | None = None
+    # (n_days, n_stocks) bool — True while a symbol still has NATIVE (non-ffilled) prices.
+    # Built by the survivorship-free loader: dead names' prices are forward-filled past their
+    # delist date so held positions can mark, but they must never be BOUGHT there. None →
+    # all finite-priced symbols are tradeable (default yfinance path).
+    tradeable_mask_daily: np.ndarray | None = None
 
 
 @dataclass

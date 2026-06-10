@@ -305,6 +305,25 @@ def _build_batch_prompt(batch: list[dict], action: str, regime: str | None = Non
     return system, user
 
 
+def _api_error_sentinel() -> dict:
+    """Synthetic HOLD result emitted when the Claude API fails after all retries.
+
+    The "api_error" marker lets callers distinguish a real HOLD from an outage:
+    if EVERY result in a batch is this sentinel, the caller must treat the run
+    as a sentiment failure (hold cash) rather than "all candidates rejected".
+    """
+    return {
+        "action": "HOLD", "sentiment": "neutral",
+        "confidence": 0.0, "reasoning": "API error after retries",
+        "api_error": True,
+    }
+
+
+def is_api_error_sentinel(result: dict | None) -> bool:
+    """True when `result` is a synthetic API-error sentinel, not a real Claude verdict."""
+    return bool(result) and bool(result.get("api_error", False))
+
+
 def _parse_batch_response(raw: str, batch: list[dict]) -> dict[str, dict]:
     results: dict[str, dict] = {}
     for block in re.split(r"\n---+\n?", raw.strip()):
@@ -365,13 +384,7 @@ async def _call_batch_async(
                 logger.error(f"Unrecoverable batch error: {exc}")
                 break
 
-    return {
-        item["symbol"]: {
-            "action": "HOLD", "sentiment": "neutral",
-            "confidence": 0.0, "reasoning": "API error after retries",
-        }
-        for item in batch
-    }
+    return {item["symbol"]: _api_error_sentinel() for item in batch}
 
 
 async def _run_all_batches(stocks_data: list[dict], action: str, regime: str | None = None) -> dict[str, dict]:

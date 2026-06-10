@@ -116,9 +116,29 @@ def _write_meta(symbol: str, status: str, note: str = "",
     if req_start is not None:
         rec["req_start"] = req_start
     if req_end is not None:
-        rec["req_end"] = req_end
+        # Coverage can only honestly extend to the fetch date. Recording a requested FUTURE
+        # end (e.g. the backfill default 2030-01-01) would mark the symbol as covered through
+        # 2030 forever, so every later request is served from a permanently-stale cache.
+        # Clamp to the fetch date, NOT the last bar — data through "today" was requested and
+        # received, and the last bar lags only on weekends/holidays (clamping to it would
+        # force a pointless refetch every weekend).
+        rec["req_end"] = min(req_end, rec["fetched"])
     with open(_meta_path(symbol), "w") as fh:
         json.dump(rec, fh)
+
+
+def _cover_end(meta: dict) -> str | None:
+    """Honest coverage end for a meta record: req_end capped at the fetch date.
+
+    Older metas recorded the REQUESTED end verbatim, so a backfill to 2030-01-01 marked the
+    symbol covered through 2030 forever — every later read hit the frozen cache and `covers()`
+    made backfills skip it. Capping at the fetch date heals those poisoned metas at read time
+    (no forced re-backfill needed); from the fetch date onward the cache is honestly stale and
+    a top-up triggers."""
+    fe, fetched = meta.get("req_end"), meta.get("fetched")
+    if fe and fetched and fe > fetched:
+        return fetched
+    return fe
 
 
 def covers(symbol: str, start: str, end: str) -> bool:
@@ -128,7 +148,7 @@ def covers(symbol: str, start: str, end: str) -> bool:
     if not os.path.exists(_price_path(symbol)):
         return False
     meta = _read_meta(symbol) or {}
-    fs, fe = meta.get("req_start"), meta.get("req_end")
+    fs, fe = meta.get("req_start"), _cover_end(meta)
     return bool(fs and fe and fs <= start and fe >= end)
 
 
@@ -196,7 +216,8 @@ def eod_prices(symbol: str, start: str, end: str, allow_fetch: bool = False,
         # wider request (that bug truncated pre-probed names like NVDA to a few bars). Trust the
         # cache only when the previously-fetched window covers [start, end]; otherwise re-fetch the
         # missing span. Old meta without req_start/req_end is treated as not-covering -> re-fetch.
-        fs, fe = (meta or {}).get("req_start"), (meta or {}).get("req_end")
+        # _cover_end caps future-dated req_end at the fetch date so a stale cache tops up.
+        fs, fe = (meta or {}).get("req_start"), _cover_end(meta or {})
         if fs and fe and fs <= start and fe >= end:
             df = pd.read_parquet(cached)
             return df.loc[(df.index >= start) & (df.index <= end)]
@@ -230,6 +251,10 @@ def eod_prices(symbol: str, start: str, end: str, allow_fetch: bool = False,
         if os.path.exists(cached):
             df = pd.read_parquet(cached)
             return df.loc[(df.index >= start) & (df.index <= end)]
+        if status == 429 or status >= 500:
+            # Transient (rate-limit burst / server error) — retry on a later run; permanently
+            # negative-caching it would punch holes in the universe mid-backfill.
+            raise FMPNetworkError(f"{symbol}: transient HTTP {status}")
         _write_meta(symbol, "empty", f"status={status}")
         return None
 
@@ -295,6 +320,9 @@ def statement(symbol: str, kind: str, period: str = "quarter", limit: int = 44,
     if status == 402:
         _write_meta(mkey, "premium", "402 paywalled on current plan")
         return None
+    if status == 429 or status >= 500:
+        # Transient (rate-limit burst / server error) — retry on a later run, never negative-cache.
+        raise FMPNetworkError(f"{mkey}: transient HTTP {status}")
     if status != 200 or not isinstance(payload, list) or not payload:
         _write_meta(mkey, "empty", f"status={status}")
         return None

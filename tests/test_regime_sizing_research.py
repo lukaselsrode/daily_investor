@@ -36,25 +36,48 @@ def test_default_neutral_sizing_grid_includes_current_config_first():
     assert any(v.max_buys > 4 for v in variants[1:])
 
 
-def test_run_regime_sizing_grid_passes_regime_scope_and_variant_params(monkeypatch):
-    from backtesting.random_walk import RandomWindowSummary
+def _fake_window_result(params, start, window_days):
+    """WindowResult whose benchmark return is a deterministic function of the start."""
+    from backtesting.random_walk import WindowResult
+
+    return WindowResult(
+        window_id=0,
+        start_day=int(start),
+        end_day=int(start) + int(window_days),
+        strategy_return=float(params[4]),
+        benchmark_return=float(start) / 100.0,
+        excess_return=float(params[4]) - float(start) / 100.0,
+        sharpe=float(params[4]),
+        max_drawdown=-0.05,
+        calmar=1.0,
+        turnover=0.1,
+        trades=1,
+        avg_positions=1,
+        wins_benchmark=True,
+    )
+
+
+def test_run_regime_sizing_grid_is_paired_across_variants(monkeypatch):
+    """run_regime_sizing_grid samples ONE shared start set from the seed and evaluates
+    every variant on it — deltas are paired, not confounded with window luck."""
     from research import regime_sizing
     from research.regime_sizing import SizingVariant, run_regime_sizing_grid
 
+    seen_scopes = []
+
+    def fake_eligible(precomp, window_days, regime_scope):
+        seen_scopes.append(regime_scope)
+        return np.arange(0, 120, 10), {}
+
+    monkeypatch.setattr(regime_sizing, "eligible_window_starts", fake_eligible)
+
     calls = []
 
-    def fake_random_window_backtest(precomp, params, **kwargs):
-        calls.append((params.copy(), kwargs))
-        return RandomWindowSummary(
-            n_windows=kwargs["n_windows"],
-            window_days=kwargs["window_days"],
-            params_used=params.copy(),
-            median_excess_return=float(params[4]),
-            pct_beating_benchmark=0.5,
-            robust_score=float(params[4]),
-        )
+    def fake_run_window(precomp, params, start, window_days, **kwargs):
+        calls.append((float(params[4]), int(params[44]), int(start), kwargs.get("scope")))
+        return _fake_window_result(params, start, window_days)
 
-    monkeypatch.setattr(regime_sizing, "random_window_backtest", fake_random_window_backtest)
+    monkeypatch.setattr(regime_sizing, "run_single_window", fake_run_window)
 
     base = np.zeros(60, dtype=float)
     variants = [SizingVariant("a", 0.77, 4), SizingVariant("b", 0.60, 8)]
@@ -69,10 +92,16 @@ def test_run_regime_sizing_grid_passes_regime_scope_and_variant_params(monkeypat
     )
 
     assert [r.variant.name for r in rows] == ["a", "b"]
-    assert [c[0][4] for c in calls] == [0.77, 0.60]
-    assert [c[0][44] for c in calls] == [4.0, 8.0]
-    assert all(c[1]["regime_scope"] == "neutral" for c in calls)
-    assert all(c[1]["scope"] == "overall_strategy" for c in calls)
+    assert seen_scopes == ["neutral"]
+    assert all(c[3] == "overall_strategy" for c in calls)
+    # Variant params reach the simulation (index_pct slot 4, max_buys slot 44).
+    starts_a = [c[2] for c in calls if (c[0], c[1]) == (0.77, 4)]
+    starts_b = [c[2] for c in calls if (c[0], c[1]) == (0.60, 8)]
+    assert len(starts_a) == 3 and len(starts_b) == 3
+    # PAIRED: both variants evaluated on the identical window starts …
+    assert starts_a == starts_b
+    # … hence identical benchmark medians (the natural pairing invariant).
+    assert rows[0].summary.median_benchmark_return == rows[1].summary.median_benchmark_return
 
 
 def test_sample_regime_window_starts_splits_temporal_segments(monkeypatch):

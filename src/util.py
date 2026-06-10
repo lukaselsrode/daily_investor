@@ -248,6 +248,11 @@ def _factor(name: str, defaults: dict) -> dict:
 
 SCORING_PARAMS: dict = {
     "enabled": bool(_sc.get("enabled", True)),
+    # Price-derived factor blend overlays (param slots 48/49, 0.0 = off). Passed
+    # through so config edits reach tuning.constants._current_params — previously
+    # the curated dict dropped them and the param vector always seeded 0.0.
+    "quality_low_vol_blend":   float(_sc.get("quality_low_vol_blend",   0.0)),
+    "momentum_residual_blend": float(_sc.get("momentum_residual_blend", 0.0)),
     "peer_standardization": {
         "group_by":          str(_sc_ps.get("group_by",          "industry")),
         "fallback_group_by": str(_sc_ps.get("fallback_group_by", "sector")),
@@ -636,8 +641,14 @@ REGIME_PARAMS: dict = {
         "falling_knife_top_frac": float(_rg_def.get("falling_knife_top_frac", 0.5)),
     },
     "neutral": {
-        "index_pct_override": None,
-        "max_buys_override":  None,
+        "index_pct_override": (
+            float(_rg_neu["index_pct_override"])
+            if _rg_neu.get("index_pct_override") is not None else None
+        ),
+        "max_buys_override": (
+            int(_rg_neu["max_buys_override"])
+            if _rg_neu.get("max_buys_override") is not None else None
+        ),
     },
 }
 

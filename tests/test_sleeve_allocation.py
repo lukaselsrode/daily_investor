@@ -332,3 +332,77 @@ def test_rebalance_records_sleeve_capital_events(tmp_path, monkeypatch):
         "the ETF cash sweep should record a cash_sweep event"
     swept = events[events["event_type"] == "cash_sweep"]["amount"].astype(float).sum()
     assert swept > 0
+
+
+# ---------------------------------------------------------------------------
+# 7. Sentiment failure must NOT route the active sleeve into ETFs
+# ---------------------------------------------------------------------------
+
+class TestSentimentFailureHoldsCash:
+    """When sentiment is enabled but the Claude API fails, the undeployed active
+    sleeve must be held as cash — never swept into ETFs, which would silently
+    violate index_pct. Regression for the 'API error → all cash to ETF' bug."""
+
+    @staticmethod
+    def _pm_sentiment(broker: PaperBroker) -> PortfolioManager:
+        return PortfolioManager(
+            broker=broker,
+            risk=RiskManager(),
+            harvest=HarvestManager(),
+            auto_approve=True,
+            use_sentiment=True,
+        )
+
+    def test_active_cash_held_when_sentiment_fails(self, monkeypatch):
+        import data.sentiment as sentiment_mod
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("Claude API down")
+        monkeypatch.setattr(sentiment_mod, "get_batch_sentiment_recommendations", _boom)
+
+        broker = _broker(cash=1000.0, stock_prices={"AAA": 50.0, "BBB": 50.0})
+        pm = self._pm_sentiment(broker)
+
+        # Simulate the buggy/aggressive sweep that would dump ALL remaining cash
+        # into ETFs. The fix must skip the sweep entirely when sentiment failed,
+        # so this stub is never acted upon.
+        monkeypatch.setattr(pm, "_compute_etf_sweep_amount", lambda remaining, _idx: remaining)
+
+        pm.rebalance(_df(["AAA", "BBB"]), regime="bullish")
+
+        assert pm._sentiment_failed is True
+        # Active-sleeve cash (left over after the iter-1 ETF buy) must be retained,
+        # not swept into ETFs.
+        assert broker.get_cash() > RISK_LIMITS["min_order_amount"], (
+            "active-sleeve cash must be held as cash when sentiment fails, "
+            "not swept into ETFs"
+        )
+
+    def test_active_cash_held_when_sentiment_returns_all_sentinels(self, monkeypatch):
+        """The dominant outage mode does NOT raise: the sentiment layer swallows
+        retry exhaustion and returns an API-error HOLD sentinel for every symbol.
+        That must trip _sentiment_failed exactly like the exception path."""
+        import data.sentiment as sentiment_mod
+
+        def _all_sentinels(stocks_data, action="buy", regime=None):
+            # Real producer's sentinel, not a hand-rolled copy.
+            return {item["symbol"]: sentiment_mod._api_error_sentinel() for item in stocks_data}
+        monkeypatch.setattr(
+            sentiment_mod, "get_batch_sentiment_recommendations", _all_sentinels
+        )
+
+        broker = _broker(cash=1000.0, stock_prices={"AAA": 50.0, "BBB": 50.0})
+        pm = self._pm_sentiment(broker)
+
+        # Simulate the buggy/aggressive sweep that would dump ALL remaining cash
+        # into ETFs. The fix must skip the sweep entirely when sentiment failed,
+        # so this stub is never acted upon.
+        monkeypatch.setattr(pm, "_compute_etf_sweep_amount", lambda remaining, _idx: remaining)
+
+        pm.rebalance(_df(["AAA", "BBB"]), regime="bullish")
+
+        assert pm._sentiment_failed is True
+        assert broker.get_cash() > RISK_LIMITS["min_order_amount"], (
+            "active-sleeve cash must be held as cash when sentiment returns "
+            "all API-error sentinels, not swept into ETFs"
+        )

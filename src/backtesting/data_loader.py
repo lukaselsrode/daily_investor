@@ -44,12 +44,17 @@ def _yf_ticker(sym: str) -> str:
 
 
 def _extract_closes(raw: pd.DataFrame, all_tickers: list[str]) -> pd.DataFrame:
-    """Extract Close prices from a yfinance download result (handles MultiIndex)."""
+    """Extract Close prices from a yfinance download result (handles MultiIndex).
+
+    Forward-fill only — backfilling would fabricate pre-IPO prices (look-ahead).
+    Leading NaNs are handled downstream: the simulator gates buys on finite prices
+    and ETFs are required to have a valid day-0 print (see load_and_precompute).
+    """
     if isinstance(raw.columns, pd.MultiIndex):
         closes = raw["Close"] if "Close" in raw.columns.get_level_values(0) else raw["close"]
     else:
         closes = raw[["Close"]].rename(columns={"Close": all_tickers[0]})
-    return closes.ffill().bfill()
+    return closes.ffill()
 
 
 def select_backtest_universe(
@@ -221,14 +226,19 @@ def load_and_precompute(
     benchmark_tickers = [benchmark_symbol] if benchmark_symbol not in set(symbols + etf_list) else []
 
     _sf_dollar_vol = None  # survivorship-free causal dollar-volume (symbol-keyed DataFrame)
+    _sf_tradeable = None   # survivorship-free per-day tradeability (symbol-keyed DataFrame)
     if survivorship_free:
         # Survivorship-free path: split-adjusted prices from the FMP cache for the current
         # universe PLUS the liquid delisted names (prices to delisting). Replaces the yfinance
         # download; downstream array machinery is unchanged. See backtesting/survivorship.py.
         from .survivorship import assemble
-        closes, agg_df, _sf_dollar_vol = assemble(agg_df, symbols, etf_list, benchmark_symbol, n_days)
+        closes, agg_df, _sf_dollar_vol, _sf_tradeable = assemble(
+            agg_df, symbols, etf_list, benchmark_symbol, n_days
+        )
         symbols = agg_df["symbol"].tolist()
-        lookahead_bias = "SURVIVORSHIP_FREE"
+        # Keep the fundamentals caveat: prices are survivorship-free, but fundamentals remain
+        # the static current snapshot (the original look-ahead annotation must not be erased).
+        lookahead_bias = f"SURVIVORSHIP_FREE ({lookahead_bias}: static current-snapshot fundamentals)"
         # The FMP cache spans ~2021-2026; if the caller asked for more days than exist, cap to what
         # we have (with a warning) instead of hard-failing the downstream `len(closes) < n_days` check.
         if len(closes) < n_days:
@@ -330,6 +340,14 @@ def load_and_precompute(
     if _sf_dollar_vol is not None:
         dollar_volume_daily = (
             _sf_dollar_vol.reindex(index=closes.index, columns=stock_cols).values.astype(np.float64)
+        )
+    # Per-day tradeability aligned to the final stock order (survivorship-free path only):
+    # True through each symbol's last NATIVE print — blocks buys past the delist date.
+    tradeable_mask_daily = None
+    if _sf_tradeable is not None:
+        tradeable_mask_daily = (
+            _sf_tradeable.reindex(index=closes.index, columns=stock_cols)
+            .fillna(False).values.astype(bool)
         )
     etf_prices_arr  = (
         closes[etf_cols].values.astype(np.float64)
@@ -513,7 +531,7 @@ def load_and_precompute(
         f"Precomputed: {n_stocks} stocks, {len(etf_cols)} ETFs, {n_days} trading days "
         f"(lookahead bias: {lookahead_bias}). Ready."
     )
-    return PrecomputedData(
+    precomp = PrecomputedData(
         symbols=stock_cols,
         prices=stock_prices,
         pe_comp=pe_comp,
@@ -554,4 +572,11 @@ def load_and_precompute(
         dollar_volume_daily=dollar_volume_daily,
         excluded_mask=excluded_mask_arr,
         vix_prices=vix_prices,
+        tradeable_mask_daily=tradeable_mask_daily,
     )
+    # Attach point-in-time regime labels computed on the FULL load, where the 200-day MA
+    # context exists. Windows sliced at offset k >= 200 then carry correct labels instead
+    # of resetting to the day<200 "bullish" fallback at their day 0 (regime_scope warns
+    # once about the genuinely history-less first 200 days of the full load).
+    from .regime_scope import regime_labels
+    return precomp._replace(regime_labels_daily=regime_labels(precomp))

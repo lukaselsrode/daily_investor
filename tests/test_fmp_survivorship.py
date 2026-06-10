@@ -76,10 +76,13 @@ def test_survivorship_assemble_survivor_path():
     from backtesting.survivorship import assemble, dead_universe
     agg = pd.DataFrame({"symbol": ["AAPL"], "volume": [1e7], "quality_score": [0.0],
                         "pe_comp": [0.0], "pb_comp": [0.0], "income_score": [0.0], "value_metric": [0.0]})
-    closes, ext_agg, dv = assemble(agg, ["AAPL"], ["SPY"], "SPY", 250, add_dead=False)
+    closes, ext_agg, dv, tradeable = assemble(agg, ["AAPL"], ["SPY"], "SPY", 250, add_dead=False)
     assert "AAPL" in closes.columns and "SPY" in closes.columns
     assert len(closes) == 250
     assert dv.shape[0] == 250
+    # Survivors print through the window end → tradeable everywhere they have prices.
+    assert tradeable.shape == closes.shape
+    assert bool(tradeable["AAPL"].iloc[-1])
     # the dead-name roster exists and is non-trivial (the survivorship hole to splice in)
     assert len(dead_universe()) > 100
 

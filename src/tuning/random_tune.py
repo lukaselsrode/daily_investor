@@ -27,6 +27,7 @@ import pandas as pd
 
 from backtesting.random_walk import RandomWindowSummary, random_window_backtest
 from backtesting.types import PrecomputedData
+from tuning.constants import _CONFIG_PATH_TO_PARAM_IDX as _C2I
 from tuning.robust_scan import RobustScanResult
 
 logger = logging.getLogger(__name__)
@@ -35,33 +36,13 @@ logger = logging.getLogger(__name__)
 _WEIGHT_SLICE = slice(0, 4)  # [value, quality, income, momentum]
 _WEIGHT_NAMES = ["value", "quality", "income", "momentum"]
 
-# Inverted config-path → param-name display labels (used for YAML export)
-_IDX_TO_CONFIG_PATH: dict[int, str] = {
-    0:  "score_weights.value",
-    1:  "score_weights.quality",
-    2:  "score_weights.income",
-    3:  "score_weights.momentum",
-    4:  "index_pct",
-    5:  "metric_threshold",
-    6:  "sell_rules.take_profit_pct",
-    7:  "sell_rules.sell_weak_value_below",
-    8:  "sell_rules.trailing_stop_pct",
-    9:  "scoring.factors.value.pe_weight",
-    10: "scoring.momentum_inputs.weights.rs_3m",
-    11: "scoring.momentum_inputs.weights.rs_6m",
-    12: "scoring.momentum_inputs.weights.risk_adj_3m",
-    13: "scoring.momentum_inputs.weights.trend_structure",
-    14: "scoring.momentum_inputs.weights.return_1m",
-    15: "scoring.momentum_inputs.weights.return_5d",
-}
-# Append archetype lifecycle slots 15-38 — derived from the same layout as constants.py
-try:
-    from tuning.constants import _CONFIG_PATH_TO_PARAM_IDX as _C2I
-    for _path, _idx in _C2I.items():
-        if _path.startswith("archetype_management.") and _idx not in _IDX_TO_CONFIG_PATH:
-            _IDX_TO_CONFIG_PATH[_idx] = _path
-except Exception:
-    pass
+# Param slot → nested config path (used for YAML export). Derived from the canonical
+# slot↔path mapping in constants.py so EVERY slot — base 0-15, archetype lifecycle,
+# candidate filters, sizing, regime/scoring blends, exit floors, opportunity-cost,
+# rebalance/cooldowns — emits its real nested YAML path. The old hand-written 0-15
+# table made best_weights_yaml() emit invalid top-level keys (e.g. `cs_top_percentile:`)
+# for extended slots.
+_IDX_TO_CONFIG_PATH: dict[int, str] = {_idx: _path for _path, _idx in _C2I.items()}
 
 _SCORE_WEIGHT_IDXS: frozenset[int] = frozenset({0, 1, 2, 3})
 
@@ -403,7 +384,12 @@ def run_random_weight_tune(
             params_i[aidx] = float(active_vals[j])
 
         try:
-            result = _evaluate(params_i, seed + idx + 1)
+            # One SHARED seed for every candidate (and the baseline below): in the
+            # legacy no-run_matrix path the seed picks the random windows, so all
+            # configs must be scored on IDENTICAL windows for the ranking to reflect
+            # parameters rather than per-candidate window luck (which is of the same
+            # order as the effect being measured).
+            result = _evaluate(params_i, seed)
             if result[0] is None:
                 continue
             summary, rank_score, scan = result
@@ -427,11 +413,12 @@ def run_random_weight_tune(
     if not candidates:
         warnings.append("All parameter samples failed. Check data and window_days.")
 
-    # Evaluate current config as baseline
+    # Evaluate current config as baseline — on the SAME windows as the candidates
+    # (shared seed), so best-vs-current deltas are paired, not window-luck.
     current_summary: RandomWindowSummary | None = None
     current_scan: RobustScanResult | None = None
     try:
-        result = _evaluate(base_params.copy(), seed + n_samples + 99)
+        result = _evaluate(base_params.copy(), seed)
         if result[0] is not None:
             current_summary, _, current_scan = result
     except Exception as exc:

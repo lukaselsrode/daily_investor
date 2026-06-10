@@ -44,16 +44,43 @@ def normalize_regime_scope(regime_scope: str | None) -> str:
     return _ALIASES[raw]
 
 
+# Warn only once per process about the day<200 bullish fallback in fresh label computation.
+_warned_warmup_bullish = False
+
+
 def regime_labels(precomp: PrecomputedData) -> np.ndarray:
-    """Return the simulator's point-in-time regime label for every day."""
+    """Return the simulator's point-in-time regime label for every day.
+
+    Compute these on the FULL load (where 200-day MA context exists) and attach them
+    via ``regime_labels_daily`` BEFORE slicing windows — a window sliced at offset k
+    then carries correct labels instead of resetting the 200DMA warm-up at its day 0.
+    Days < 200 of the full load have no 200DMA history and keep the bullish fallback
+    (warned once).
+    """
     stored = getattr(precomp, "regime_labels_daily", None)
     if stored is not None:
         return np.asarray(stored, dtype=object)
-    return np.array([_detect_regime(precomp, d) for d in range(precomp.prices.shape[0])], dtype=object)
+    n_days = int(precomp.prices.shape[0])
+    global _warned_warmup_bullish
+    if n_days > 0 and not _warned_warmup_bullish:
+        logger.warning(
+            "Regime labels: the first %d days lack 200DMA history and default to 'bullish'. "
+            "Compute labels on the full load before slicing windows to avoid this in sub-windows.",
+            min(200, n_days),
+        )
+        _warned_warmup_bullish = True
+    return np.array([_detect_regime(precomp, d) for d in range(n_days)], dtype=object)
 
 
 def slice_precomp(precomp: PrecomputedData, s: slice) -> PrecomputedData:
-    """Slice all time-indexed arrays in PrecomputedData, preserving static fields."""
+    """Slice ALL time-indexed (per-day) arrays in PrecomputedData, preserving static fields.
+
+    This is the ONE canonical window slicer — run_backtest_report, the compare_* helpers
+    and random_walk all delegate here. Every (n_days, …) field must be sliced together:
+    omitting any per-day array (vix_prices, spy_prices, dollar_volume_daily, …) leaves it
+    in FULL-load coordinates while the window is day-relative, silently corrupting regime
+    detection, residual momentum and dollar-volume sizing for any window at offset > 0.
+    """
     def _opt(arr: np.ndarray | None) -> np.ndarray | None:
         return arr[s] if arr is not None else None
 
@@ -73,9 +100,11 @@ def slice_precomp(precomp: PrecomputedData, s: slice) -> PrecomputedData:
         vol_3m_daily=_opt(precomp.vol_3m_daily),
         above_50dma_daily=_opt(precomp.above_50dma_daily),
         above_200dma_daily=_opt(precomp.above_200dma_daily),
+        spy_prices=_opt(precomp.spy_prices),
         dollar_volume_daily=_opt(precomp.dollar_volume_daily),
         regime_labels_daily=_opt(precomp.regime_labels_daily),
         vix_prices=_opt(precomp.vix_prices),
+        tradeable_mask_daily=_opt(precomp.tradeable_mask_daily),
     )
 
 
