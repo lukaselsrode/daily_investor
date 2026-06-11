@@ -17,6 +17,14 @@ index_pct: 0.8465
 # from short-term benchmark conditions while a rolling window keeps the monthly
 # total near target. Contribution sizing ONLY — never sells or alters holdings.
 # enabled:false preserves the flat weekly_investment behavior exactly.
+#
+# DECISION 2026-06-10: REJECTED — keep disabled. Fixed-budget version
+# underperforms flat DCA (bull-tape cash drag); dip-only acceleration beats
+# flat $400/wk but the benefit is explained almost entirely by higher total
+# contributions — equal-capital flat DCA captures the same with less
+# complexity (see scripts/contribution_timing_compare.py, reports/
+# contribution_*_compare.json). RE-TEST only when a real bear-market window
+# enters the survivorship-free dataset (--mode dip_only, A' control).
 contribution_timing:
   enabled: false
   benchmark_symbol: SPY
