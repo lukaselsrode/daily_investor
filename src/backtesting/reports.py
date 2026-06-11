@@ -38,15 +38,15 @@ def print_backtest_report(report: BacktestReport) -> None:
             f"    Avg factors:   quality={pool.avg_quality:.2f}  momentum={pool.avg_momentum:.2f}  "
             f"income={pool.avg_income:.2f}  value={pool.avg_value:.2f}"
         )
-        v3_extra = getattr(pool, "n_peer_relative_rank_excluded", 0) or 0
+        peer_rank_excluded = getattr(pool, "n_peer_relative_rank_excluded", 0) or 0
         if (
             pool.n_floor_excluded
             or pool.n_quality_gate_excluded
             or pool.n_momentum_gate_excluded
             or pool.n_income_trap_excluded
-            or v3_extra
+            or peer_rank_excluded
         ):
-            extra = f"  peer_rank={v3_extra}" if v3_extra else ""
+            extra = f"  peer_rank={peer_rank_excluded}" if peer_rank_excluded else ""
             print(
                 f"    Gates excluded: floor={pool.n_floor_excluded}  "
                 f"quality={pool.n_quality_gate_excluded}  "

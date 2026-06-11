@@ -413,6 +413,120 @@ def assemble_candidate_pool(
     return pool
 
 
+def _select_tournament_winner(rows: list[dict]) -> tuple[dict, bool]:
+    """Pick the tournament winner: Pareto-non-dominated gate-passers ranked by
+    selection score. With no passer, keep the best-scoring row (legacy-midpoint
+    fallback) for DIAGNOSTICS only — nothing is written when gates failed.
+    Prints the table + selection. Returns (selected_row, any_passed)."""
+    passers = [r for r in rows if r["gates_passed"] and r["metrics"] is not None]
+    if passers:
+        non_dominated = _pareto_non_dominated(passers)
+        pool = [r for r in passers if r["candidate_id"] in non_dominated] or passers
+        selected = max(pool, key=lambda r: r["score"])
+        note = "highest validation robust score among candidates passing gates."
+    else:
+        diagnostic = max(rows, key=lambda r: r["score"])
+        selected = next(r for r in rows if r["candidate_id"] == "avg_50_50")
+        if np.isfinite(diagnostic["score"]):
+            selected = diagnostic
+        note = "none passed gates — best-scoring candidate kept for diagnostics only."
+    _print_tournament_table(rows, selected["candidate_id"] if passers else None)
+    print(f"\nSelected candidate: {selected['candidate_id'] if passers else 'none (gates failed)'}")
+    print(f"Reason: {note}")
+    return selected, bool(passers)
+
+
+def _post_selection_gates(
+    selected: dict,
+    selected_params: np.ndarray,
+    incumbent_params: np.ndarray,
+    backtest_cfg: dict,
+    mode: str | None,
+    scope: str,
+) -> tuple[bool, list[str]]:
+    """The gate chain AFTER tournament selection: the candidate's own split-gate
+    outcome, then the paired random-window gate, then multi-horizon confirmation.
+    Later tiers run only while everything earlier passed — failed candidates
+    never consume the expensive gates."""
+    validation_passed, reasons = selected["gates_passed"], list(selected["reasons"])
+
+    if validation_passed:
+        gw_cfg = backtest_cfg.get("random_window_gate", {}) or {}
+        if gw_cfg.get("enabled", True):
+            print(
+                f"\nRandom-window gate: {gw_cfg.get('n_windows', 12)}x"
+                f"{gw_cfg.get('window_days', 120)}d paired windows over "
+                f"{gw_cfg.get('history_days', 730)}d history …"
+            )
+            rw_passed, rw_reasons, rw_stats = paired_random_window_gate(
+                selected_params, incumbent_params, backtest_cfg, mode=mode, scope=scope,
+            )
+            if rw_stats and not rw_stats.get("skipped"):
+                print(
+                    f"  paired win rate {rw_stats['win_rate']:.0%} "
+                    f"({rw_stats['wins']}/{rw_stats['n_paired']})  |  median excess "
+                    f"tuned {rw_stats['tuned_median_excess']:+.2%} vs incumbent "
+                    f"{rw_stats['incumbent_median_excess']:+.2%}  |  robust score "
+                    f"tuned {rw_stats['tuned_robust_score']:.4f} vs incumbent "
+                    f"{rw_stats['incumbent_robust_score']:.4f}"
+                )
+            validation_passed = rw_passed
+            reasons.extend(rw_reasons)
+
+    if validation_passed:
+        mh_cfg = backtest_cfg.get("multi_horizon_confirm", {}) or {}
+        if mh_cfg.get("enabled", True):
+            print(
+                f"\nMulti-horizon confirm: selected vs incumbent over "
+                f"{mh_cfg.get('windows', [90, 180, 365, 730])} trailing days …"
+            )
+            mh_passed, mh_reasons, mh_rows = multi_horizon_confirm(
+                selected_params, incumbent_params, backtest_cfg, mode=mode, scope=scope,
+            )
+            _print_multi_horizon_table(mh_rows)
+            validation_passed = mh_passed
+            reasons.extend(mh_reasons)
+
+    return validation_passed, reasons
+
+
+def _source_random_candidates(
+    tune_precomp,
+    incumbent_params: np.ndarray,
+    random_topk: int,
+    backtest_cfg: dict,
+    scope: str,
+    preset: str | None,
+    train_days: int,
+) -> dict[str, np.ndarray]:
+    """Top-K vectors from the robust-score random search (shared-window ranking
+    vs the incumbent baseline) for the tournament. Empty dict when disabled or
+    when the search fails — candidate sourcing must never sink the tune."""
+    out: dict[str, np.ndarray] = {}
+    if random_topk <= 0:
+        return out
+    try:
+        from .random_tune import run_random_weight_tune
+        print(f"\nRobust random search for tournament candidates (top-{random_topk}) …")
+        rs = run_random_weight_tune(
+            tune_precomp,
+            base_params=incumbent_params.copy(),
+            n_samples=max(24, random_topk * 8),
+            n_windows=10,
+            window_days=min(120, max(30, train_days - 1)),
+            seed=7,
+            slippage_bps=backtest_cfg["slippage_bps"],
+            rebalance_frequency_days=backtest_cfg["rebalance_frequency_days"],
+            scope=scope,
+            preset=preset,
+        )
+        for rank, cand in enumerate(rs.candidates[:random_topk], 1):
+            out[f"random_top{rank}"] = cand.full_params
+    except Exception as exc:
+        print(f"  robust random search unavailable ({exc}) — continuing without")
+    return out
+
+
 def _load_lead_vectors(paths: list[str]) -> dict[str, np.ndarray]:
     """Load saved .npy lead vectors (e.g. prior research candidates); unreadable
     files are skipped with a warning, never fatal."""
@@ -727,27 +841,9 @@ def run_auto_tune(
     # incumbent blends — plus optional robust-search top-K, saved lead vectors,
     # and manually supplied vectors — are each evaluated on the same split,
     # gated individually, Pareto-filtered, and ranked by the selection score.
-    random_topk_vectors: dict[str, np.ndarray] = {}
-    if random_topk > 0:
-        try:
-            from .random_tune import run_random_weight_tune
-            print(f"\nRobust random search for tournament candidates (top-{random_topk}) …")
-            _rs = run_random_weight_tune(
-                tune_precomp,
-                base_params=incumbent_params.copy(),
-                n_samples=max(24, random_topk * 8),
-                n_windows=10,
-                window_days=min(120, max(30, train_days - 1)),
-                seed=7,
-                slippage_bps=bp["slippage_bps"],
-                rebalance_frequency_days=bp["rebalance_frequency_days"],
-                scope=scope,
-                preset=preset,
-            )
-            for _rank, _cand in enumerate(_rs.candidates[:random_topk], 1):
-                random_topk_vectors[f"random_top{_rank}"] = _cand.full_params
-        except Exception as exc:
-            print(f"  robust random search unavailable ({exc}) — continuing without")
+    random_topk_vectors = _source_random_candidates(
+        tune_precomp, incumbent_params, random_topk, bp, scope, preset, train_days,
+    )
     lead_vectors = _load_lead_vectors(lead_vector_paths or [])
     candidate_pool = assemble_candidate_pool(
         sharpe_params, calmar_params, incumbent_params,
@@ -758,25 +854,7 @@ def run_auto_tune(
     rows = run_candidate_tournament(
         precomp, candidate_pool, train_sl, val_slice, scope, bp, incumbent_report,
     )
-    passers = [r for r in rows if r["gates_passed"] and r["metrics"] is not None]
-    if passers:
-        non_dominated = _pareto_non_dominated(passers)
-        pool = [r for r in passers if r["candidate_id"] in non_dominated] or passers
-        selected = max(pool, key=lambda r: r["score"])
-        selection_note = "highest validation robust score among candidates passing gates."
-    else:
-        # No passer: keep the legacy midpoint as the returned vector for caller
-        # compatibility (nothing is written — gates failed). Prefer the best-
-        # scoring row's diagnostics when metrics exist.
-        diagnostic = max(rows, key=lambda r: r["score"])
-        selected = next(r for r in rows if r["candidate_id"] == "avg_50_50")
-        if np.isfinite(diagnostic["score"]):
-            selected = diagnostic
-        selection_note = "none passed gates — best-scoring candidate kept for diagnostics only."
-    selected_id = selected["candidate_id"] if passers else None
-    _print_tournament_table(rows, selected_id)
-    print(f"\nSelected candidate: {selected['candidate_id'] if passers else 'none (gates failed)'}")
-    print(f"Reason: {selection_note}")
+    selected, _ = _select_tournament_winner(rows)
 
     selected_params = selected["params"]
     train_report = selected["report"]
@@ -788,59 +866,20 @@ def run_auto_tune(
         rebalance_frequency_days=bp["rebalance_frequency_days"],
     )
 
-    if use_val and train_report.validation_result is not None and incumbent_report.validation_result is not None:
-        _t, _i = train_report, incumbent_report
-        _t_exc = _t.validation_result.total_return - _t.validation_benchmark_return
-        _i_exc = _i.validation_result.total_return - _i.validation_benchmark_return
+    _sel_vr = train_report.validation_result
+    _inc_vr = incumbent_report.validation_result
+    if use_val and _sel_vr is not None and _inc_vr is not None:
+        _t_exc = _sel_vr.total_return - train_report.validation_benchmark_return
+        _i_exc = _inc_vr.total_return - incumbent_report.validation_benchmark_return
         print(
             f"\nValidation window (excess vs SPY):  selected {_t_exc:+.2%}  vs  incumbent {_i_exc:+.2%}"
-            f"   |  turnover: selected {_t.validation_result.turnover_estimate:.2f}"
-            f" vs incumbent {_i.validation_result.turnover_estimate:.2f}"
+            f"   |  turnover: selected {_sel_vr.turnover_estimate:.2f}"
+            f" vs incumbent {_inc_vr.turnover_estimate:.2f}"
         )
 
-    validation_passed, reasons = selected["gates_passed"], list(selected["reasons"])
-
-    # Reproducibility gate: paired random windows on longer, mostly-unseen
-    # history — run ONLY on the selected candidate (never on failed ones).
-    if validation_passed:
-        gw_cfg = bp.get("random_window_gate", {}) or {}
-        if gw_cfg.get("enabled", True):
-            print(
-                f"\nRandom-window gate: {gw_cfg.get('n_windows', 12)}x"
-                f"{gw_cfg.get('window_days', 120)}d paired windows over "
-                f"{gw_cfg.get('history_days', 730)}d history …"
-            )
-            rw_passed, rw_reasons, rw_stats = paired_random_window_gate(
-                selected_params, incumbent_params, bp, mode=mode, scope=scope,
-            )
-            if rw_stats and not rw_stats.get("skipped"):
-                print(
-                    f"  paired win rate {rw_stats['win_rate']:.0%} "
-                    f"({rw_stats['wins']}/{rw_stats['n_paired']})  |  median excess "
-                    f"tuned {rw_stats['tuned_median_excess']:+.2%} vs incumbent "
-                    f"{rw_stats['incumbent_median_excess']:+.2%}  |  robust score "
-                    f"tuned {rw_stats['tuned_robust_score']:.4f} vs incumbent "
-                    f"{rw_stats['incumbent_robust_score']:.4f}"
-                )
-            validation_passed = rw_passed
-            reasons.extend(rw_reasons)
-
-    # Final tier: multi-horizon confirmation — selected vs incumbent across
-    # trailing windows (90/180/365/730d by default). Runs ONLY when every
-    # earlier gate passed; a failure here blocks the write like any other gate.
-    if validation_passed:
-        mh_cfg = bp.get("multi_horizon_confirm", {}) or {}
-        if mh_cfg.get("enabled", True):
-            print(
-                f"\nMulti-horizon confirm: selected vs incumbent over "
-                f"{mh_cfg.get('windows', [90, 180, 365, 730])} trailing days …"
-            )
-            mh_passed, mh_reasons, mh_rows = multi_horizon_confirm(
-                selected_params, incumbent_params, bp, mode=mode, scope=scope,
-            )
-            _print_multi_horizon_table(mh_rows)
-            validation_passed = mh_passed
-            reasons.extend(mh_reasons)
+    validation_passed, reasons = _post_selection_gates(
+        selected, selected_params, incumbent_params, bp, mode, scope,
+    )
 
     if reasons:
         print("\n⚠  Validation gates FAILED:")
@@ -860,76 +899,37 @@ def run_auto_tune(
         try:
             tr = train_report.train_result
             vr = train_report.validation_result
+
+            def _llm_entry(cid: str, params, train_metrics) -> dict:
+                """One review-payload row — shared shape for every candidate."""
+                return {
+                    "candidate_id": cid,
+                    "alpha_params": dict(zip(PARAM_NAMES, params.tolist())),
+                    "train_return": train_metrics.total_return,
+                    "train_sharpe": train_metrics.sharpe,
+                    "train_calmar": train_metrics.calmar,
+                    "train_max_drawdown": train_metrics.max_drawdown,
+                    "train_trades": train_metrics.trades_made,
+                    "train_avg_positions": train_metrics.average_positions,
+                    "train_max_positions": train_metrics.max_positions,
+                    "train_avg_cash_pct": train_metrics.average_cash_pct,
+                    "train_turnover": train_metrics.turnover_estimate,
+                    "train_friction_cost": train_metrics.friction_cost,
+                    "val_return": vr.total_return if vr else None,
+                    "val_sharpe": vr.sharpe if vr else None,
+                    "val_max_drawdown": vr.max_drawdown if vr else None,
+                    "bench_return": train_report.benchmark_return,
+                    "bench_sharpe": train_report.benchmark_sharpe,
+                    "bench_max_drawdown": train_report.benchmark_max_drawdown,
+                    "excess_return": train_report.excess_return,
+                    "lookahead_bias_level": precomp.lookahead_bias_level,
+                    "notes": train_report.notes,
+                }
+
             candidates = [
-                {
-                    "candidate_id": "sharpe_opt",
-                    "alpha_params": dict(zip(PARAM_NAMES, sharpe_params.tolist())),
-                    "train_return": sharpe_result.total_return,
-                    "train_sharpe": sharpe_result.sharpe,
-                    "train_calmar": sharpe_result.calmar,
-                    "train_max_drawdown": sharpe_result.max_drawdown,
-                    "train_trades": sharpe_result.trades_made,
-                    "train_avg_positions": sharpe_result.average_positions,
-                    "train_max_positions": sharpe_result.max_positions,
-                    "train_avg_cash_pct": sharpe_result.average_cash_pct,
-                    "train_turnover": sharpe_result.turnover_estimate,
-                    "train_friction_cost": sharpe_result.friction_cost,
-                    "val_return": vr.total_return if vr else None,
-                    "val_sharpe": vr.sharpe if vr else None,
-                    "val_max_drawdown": vr.max_drawdown if vr else None,
-                    "bench_return": train_report.benchmark_return,
-                    "bench_sharpe": train_report.benchmark_sharpe,
-                    "bench_max_drawdown": train_report.benchmark_max_drawdown,
-                    "excess_return": train_report.excess_return,
-                    "lookahead_bias_level": precomp.lookahead_bias_level,
-                    "notes": train_report.notes,
-                },
-                {
-                    "candidate_id": "calmar_opt",
-                    "alpha_params": dict(zip(PARAM_NAMES, calmar_params.tolist())),
-                    "train_return": calmar_result.total_return,
-                    "train_sharpe": calmar_result.sharpe,
-                    "train_calmar": calmar_result.calmar,
-                    "train_max_drawdown": calmar_result.max_drawdown,
-                    "train_trades": calmar_result.trades_made,
-                    "train_avg_positions": calmar_result.average_positions,
-                    "train_max_positions": calmar_result.max_positions,
-                    "train_avg_cash_pct": calmar_result.average_cash_pct,
-                    "train_turnover": calmar_result.turnover_estimate,
-                    "train_friction_cost": calmar_result.friction_cost,
-                    "val_return": vr.total_return if vr else None,
-                    "val_sharpe": vr.sharpe if vr else None,
-                    "val_max_drawdown": vr.max_drawdown if vr else None,
-                    "bench_return": train_report.benchmark_return,
-                    "bench_sharpe": train_report.benchmark_sharpe,
-                    "bench_max_drawdown": train_report.benchmark_max_drawdown,
-                    "excess_return": train_report.excess_return,
-                    "lookahead_bias_level": precomp.lookahead_bias_level,
-                    "notes": train_report.notes,
-                },
-                {
-                    "candidate_id": f"selected:{selected['candidate_id']}",
-                    "alpha_params": dict(zip(PARAM_NAMES, selected_params.tolist())),
-                    "train_return": tr.total_return,
-                    "train_sharpe": tr.sharpe,
-                    "train_calmar": tr.calmar,
-                    "train_max_drawdown": tr.max_drawdown,
-                    "train_trades": tr.trades_made,
-                    "train_avg_positions": tr.average_positions,
-                    "train_max_positions": tr.max_positions,
-                    "train_avg_cash_pct": tr.average_cash_pct,
-                    "train_turnover": tr.turnover_estimate,
-                    "train_friction_cost": tr.friction_cost,
-                    "val_return": vr.total_return if vr else None,
-                    "val_sharpe": vr.sharpe if vr else None,
-                    "val_max_drawdown": vr.max_drawdown if vr else None,
-                    "bench_return": train_report.benchmark_return,
-                    "bench_sharpe": train_report.benchmark_sharpe,
-                    "bench_max_drawdown": train_report.benchmark_max_drawdown,
-                    "excess_return": train_report.excess_return,
-                    "lookahead_bias_level": precomp.lookahead_bias_level,
-                    "notes": train_report.notes,
-                },
+                _llm_entry("sharpe_opt", sharpe_params, sharpe_result),
+                _llm_entry("calmar_opt", calmar_params, calmar_result),
+                _llm_entry(f"selected:{selected['candidate_id']}", selected_params, tr),
             ]
             payload = build_llm_review_payload(
                 candidates,

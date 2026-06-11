@@ -172,6 +172,64 @@ def contribution_multiplier(
     return float(np.clip(raw, lo, hi))
 
 
+def _apply_budget_and_bounds(
+    raw: float,
+    base: float,
+    cfg: dict,
+    state: ContributionState,
+    reasons: list[str],
+) -> float:
+    """Clamp a raw weekly amount through the budget mechanics, appending reason
+    codes and updating ``state.carry_forward`` in place: weekly min/max bounds →
+    carry/borrow rules for above-base spending → rolling window cap →
+    carry-forward bookkeeping. Returns the final adjusted amount."""
+    target  = float(cfg.get("target_monthly_contribution", 1600.0))
+    wk_min  = float(cfg.get("min_weekly_contribution", 100.0))
+    wk_max  = float(cfg.get("max_weekly_contribution", 800.0))
+    preserve = bool(cfg.get("preserve_monthly_budget", True))
+    accelerate = bool(cfg.get("allow_budget_acceleration", False))
+    tol     = float(cfg.get("monthly_budget_tolerance_pct", 0.15))
+    carry_ok = bool(cfg.get("carry_forward_unused_budget", True))
+    borrow_ok = bool(cfg.get("borrow_from_future_weeks", True))
+
+    # Weekly hard bounds.
+    adjusted = raw
+    if adjusted > wk_max:
+        adjusted = wk_max
+        reasons.append("max_weekly_cap")
+    if adjusted < wk_min:
+        adjusted = wk_min
+        reasons.append("min_weekly_floor")
+
+    # Above-base spending draws on banked carry-forward first; without
+    # borrow_from_future_weeks it may not exceed base + banked carry.
+    if adjusted > base:
+        available_carry = state.carry_forward if carry_ok else 0.0
+        if not borrow_ok and adjusted > base + available_carry:
+            adjusted = base + available_carry
+            reasons.append("borrow_disabled_cap")
+        if available_carry > 0:
+            reasons.append("carry_forward_used")
+
+    # Rolling budget cap across the window (this week counts toward it).
+    if preserve and not accelerate:
+        budget_cap = target * (1.0 + tol) + (state.carry_forward if carry_ok else 0.0)
+        headroom = budget_cap - state.window_sum()
+        if adjusted > headroom:
+            adjusted = max(0.0, headroom)
+            reasons.append("monthly_budget_cap")
+
+    adjusted = float(round(adjusted, 2))
+
+    # Carry-forward bookkeeping (banked under-spend, consumed by over-spend).
+    if carry_ok:
+        if adjusted < base:
+            state.carry_forward = min(state.carry_forward + (base - adjusted), target)
+        elif adjusted > base:
+            state.carry_forward = max(0.0, state.carry_forward - (adjusted - base))
+    return adjusted
+
+
 def decide_contribution(
     bench_history: np.ndarray,
     cfg: dict,
@@ -187,16 +245,9 @@ def decide_contribution(
     caller can run it week after week. ``bench_history`` must contain only
     closes available BEFORE the contribution is deployed.
     """
-    base    = float(cfg.get("base_weekly_contribution", 400.0))
-    target  = float(cfg.get("target_monthly_contribution", 1600.0))
-    window  = int(cfg.get("budget_window_weeks", 4))
-    wk_min  = float(cfg.get("min_weekly_contribution", 100.0))
-    wk_max  = float(cfg.get("max_weekly_contribution", 800.0))
-    preserve = bool(cfg.get("preserve_monthly_budget", True))
-    accelerate = bool(cfg.get("allow_budget_acceleration", False))
-    tol     = float(cfg.get("monthly_budget_tolerance_pct", 0.15))
-    carry_ok = bool(cfg.get("carry_forward_unused_budget", True))
-    borrow_ok = bool(cfg.get("borrow_from_future_weeks", True))
+    base   = float(cfg.get("base_weekly_contribution", 400.0))
+    target = float(cfg.get("target_monthly_contribution", 1600.0))
+    window = int(cfg.get("budget_window_weeks", 4))
 
     dip, comps, reasons = compute_dip_score(bench_history, cfg.get("dip_signal", {}) or {})
 
@@ -219,44 +270,7 @@ def decide_contribution(
         mult = float(rc.get("defensive_max_multiplier", 1.25))
         reasons.append("defensive_regime_cap")
 
-    raw = base * mult
-
-    # Weekly hard bounds.
-    adjusted = raw
-    if adjusted > wk_max:
-        adjusted = wk_max
-        reasons.append("max_weekly_cap")
-    if adjusted < wk_min:
-        adjusted = wk_min
-        reasons.append("min_weekly_floor")
-
-    # Above-base spending draws on banked carry-forward first; without
-    # borrow_from_future_weeks it may not exceed base + banked carry.
-    if adjusted > base:
-        available_carry = state.carry_forward if carry_ok else 0.0
-        if not borrow_ok and adjusted > base + available_carry:
-            adjusted = base + available_carry
-            reasons.append("borrow_disabled_cap")
-        if available_carry > 0:
-            reasons.append("carry_forward_used")
-
-    # Rolling budget cap across the window (this week counts toward it).
-    window_sum_before = state.window_sum()
-    if preserve and not accelerate:
-        budget_cap = target * (1.0 + tol) + (state.carry_forward if carry_ok else 0.0)
-        headroom = budget_cap - window_sum_before
-        if adjusted > headroom:
-            adjusted = max(0.0, headroom)
-            reasons.append("monthly_budget_cap")
-
-    adjusted = float(round(adjusted, 2))
-
-    # Carry-forward bookkeeping (banked under-spend, consumed by over-spend).
-    if carry_ok:
-        if adjusted < base:
-            state.carry_forward = min(state.carry_forward + (base - adjusted), target)
-        elif adjusted > base:
-            state.carry_forward = max(0.0, state.carry_forward - (adjusted - base))
+    adjusted = _apply_budget_and_bounds(base * mult, base, cfg, state, reasons)
 
     state.window_amounts.append(adjusted)
     while len(state.window_amounts) > window:

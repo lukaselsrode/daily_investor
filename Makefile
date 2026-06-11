@@ -101,11 +101,11 @@ tune:                        ## Single-objective tune, no write  (TUNE_DAYS=N  O
 	$(DI) tune $(TUNE_DAYS) --objective $(OBJ) $(if $(MODE),--mode $(MODE),)
 
 .PHONY: auto-tune
-auto-tune:                   ## Dual-objective tune, walk-forward validation, no write  (AUTO_DAYS=N)
+auto-tune:                   ## Dual-objective tune + candidate tournament + gate tiers, no write  (AUTO_DAYS=N)
 	$(DI) auto-tune $(AUTO_DAYS) $(if $(MODE),--mode $(MODE),)
 
 .PHONY: auto-tune-apply
-auto-tune-apply:             ## auto-tune + write config.yaml if validation gates pass
+auto-tune-apply:             ## auto-tune + write config.yaml if ALL gates pass (split, incumbent, random-window, multi-horizon)
 	$(DI) auto-tune $(AUTO_DAYS) $(if $(MODE),--mode $(MODE),) --apply
 
 .PHONY: auto-tune-llm

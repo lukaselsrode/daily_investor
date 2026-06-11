@@ -217,7 +217,7 @@ daily-investor COMMAND [OPTIONS]
 | `run` | Live trading run (sell + buy cycle) |
 | `backtest DAYS` | Run backtest simulation |
 | `tune DAYS` | Single-objective parameter tune — prints diff, no write |
-| `auto-tune [DAYS]` | Dual-objective tune with walk-forward validation (default: 90d) |
+| `auto-tune [DAYS]` | Dual-objective tune + multi-source candidate tournament (`--random-topk N`, `--leads a.npy`) gated by split, incumbent-relative, random-window, and multi-horizon tiers (default: 90d) |
 | `auto-tune-all` | Staged coordinate-ascent over interaction clusters + full windowed validation (`--profile`, `--clusters`) — research only |
 | `interaction-screen` | Screen which param clusters synergize/clash when co-tuned (`--profile quick\|standard\|deep`) — research only |
 | `list-presets` | Print available tuning presets and exit (presets compose with `+`) |
