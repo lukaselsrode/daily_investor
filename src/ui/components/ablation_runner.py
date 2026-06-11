@@ -48,7 +48,9 @@ def _load_cfg(filename: str) -> dict | None:
 
 
 def _params_from_cfg(cfg: dict) -> np.ndarray:
-    """Build the 15-element params vector from a config dict. Mirrors tuner._current_params()."""
+    """Build the 15-element CORE params vector from a config dict for ablation
+    comparison — deliberately NOT the full 80-slot tuner vector (_current_params),
+    only the base score/exit/momentum slots ablations sweep."""
     sw   = cfg.get("score_weights", {})
     mv2w = cfg.get("scoring", {}).get("momentum_inputs", {}).get("weights", {})
     sr   = cfg.get("sell_rules", {})

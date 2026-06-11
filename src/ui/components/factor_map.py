@@ -88,10 +88,12 @@ def _classify(df: pd.DataFrame, metric_threshold: float) -> pd.DataFrame:
     that clears the quality + momentum floors and is not on the contrarian watchlist
     (CANDIDATE_SELECTION_PARAMS — the same gate select_candidates() uses).
 
-    NB: value_metric is peer-relative, normalized to roughly [-1, 1]; the old code
-    compared it to `metric_threshold` (~1.15, a backtest-scale composite cutoff), which
-    is unreachable on this scale and produced ZERO candidates — an empty centroid and
-    no candidate features. `metric_threshold` is retained only as a display caption.
+    NB: value_metric is peer-relative, normalized to roughly [-1, 1].
+    `metric_threshold` (1.15) is the EXIT-ladder anchor and unreachable as an
+    entry bar on this scale (the old code gated on it and produced ZERO
+    candidates); the LIVE entry gate is candidate_selection.entry_threshold_override
+    (0.75) with the percentile/floor gates below — the same gate select_candidates()
+    and the live buy ladder use.
     """
     df = df.copy()
     owned_mask = df["owned"].astype(bool) if "owned" in df.columns else pd.Series(False, index=df.index)

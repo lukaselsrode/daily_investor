@@ -95,6 +95,7 @@ def _params_from_cfg(cfg: dict) -> np.ndarray:
         float(mv2w.get("risk_adj_3m",       0.20)),
         float(mv2w.get("trend_structure",   0.15)),
         float(mv2w.get("return_1m",         0.10)),
+        float(mv2w.get("return_5d",         0.05)),
     ])
 
 
@@ -217,18 +218,19 @@ def _param_editor(cfg: dict, key_prefix: str = "cv") -> dict:
 
     with st.expander("🚀 Momentum v2 Sub-Weights"):
         mv2 = out.setdefault("scoring", {}).setdefault("momentum_inputs", {}).setdefault("weights", {})
-        c1, c2, c3, c4, c5 = st.columns(5)
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
         mv2["rs_3m"]           = c1.slider("RS 3m",       0.0, 1.0, float(mv2.get("rs_3m",           0.25)), 0.01, key=f"{key_prefix}_m_rs3m")
         mv2["rs_6m"]           = c2.slider("RS 6m",       0.0, 1.0, float(mv2.get("rs_6m",           0.25)), 0.01, key=f"{key_prefix}_m_rs6m")
         mv2["risk_adj_3m"]     = c3.slider("Risk-adj 3m", 0.0, 1.0, float(mv2.get("risk_adj_3m",     0.20)), 0.01, key=f"{key_prefix}_m_ra3m")
         mv2["trend_structure"] = c4.slider("Trend",       0.0, 1.0, float(mv2.get("trend_structure", 0.15)), 0.01, key=f"{key_prefix}_m_trend")
         mv2["return_1m"]       = c5.slider("Return 1m",   0.0, 1.0, float(mv2.get("return_1m",       0.10)), 0.01, key=f"{key_prefix}_m_r1m")
+        mv2["return_5d"]       = c6.slider("Return 5d",   0.0, 0.30, float(mv2.get("return_5d",      0.05)), 0.01, key=f"{key_prefix}_m_r5d")
         st.caption("Sub-weights are normalized internally before use.")
 
     with st.expander("🏦 Allocation"):
         c1, c2 = st.columns(2)
         out["index_pct"]        = c1.slider("index_pct",        0.40, 1.00, float(out.get("index_pct",        0.85)), 0.01, key=f"{key_prefix}_idx")
-        out["metric_threshold"] = c2.slider("metric_threshold", 0.20, 0.95, float(out.get("metric_threshold", 0.75)), 0.01, key=f"{key_prefix}_mt")
+        out["metric_threshold"] = c2.slider("metric_threshold (exit anchor)", 0.30, 1.50, float(out.get("metric_threshold", 1.15)), 0.01, key=f"{key_prefix}_mt")
 
     with st.expander("🎯 Candidate Selection"):
         cs = out.setdefault("candidate_selection", {})
@@ -245,6 +247,8 @@ def _param_editor(cfg: dict, key_prefix: str = "cv") -> dict:
         cs["min_quality_score"]                = c2.slider("Min quality",     0.0, 0.6,  float(cs.get("min_quality_score",                0.30)), 0.01, key=f"{key_prefix}_cs_mq")
         cs["min_momentum_score"]               = c3.slider("Min momentum",   -0.5, 0.5,  float(cs.get("min_momentum_score",               -0.10)), 0.01, key=f"{key_prefix}_cs_mm")
         c1, c2, c3 = st.columns(3)
+        cs["entry_threshold_override"]         = c1.slider("Entry gate (live)", 0.20, 1.00, float(cs.get("entry_threshold_override") or 0.75), 0.01, key=f"{key_prefix}_cs_eto")
+        c1, c2, c3 = st.columns(3)
         cs["min_conditional_momentum_score"]   = c1.slider("Min cond mom",   -0.5, 0.5,  float(cs.get("min_conditional_momentum_score",   0.00)), 0.01, key=f"{key_prefix}_cs_cm")
         cs["use_absolute_score_floor"]         = c2.checkbox("Use absolute floor",          bool(cs.get("use_absolute_score_floor",         True)),  key=f"{key_prefix}_cs_uaf")
         cs["allow_income_defensive_exception"] = c3.checkbox("Allow income def. exception", bool(cs.get("allow_income_defensive_exception", False)), key=f"{key_prefix}_cs_aide")
@@ -253,9 +257,9 @@ def _param_editor(cfg: dict, key_prefix: str = "cv") -> dict:
         sr = out.setdefault("sell_rules", {})
         c1, c2, c3, c4 = st.columns(4)
         sr["take_profit_pct"]       = c1.slider("Take profit",    0.10, 2.00,  float(sr.get("take_profit_pct",        0.60)), 0.01, key=f"{key_prefix}_sr_tp")
-        sr["trailing_stop_pct"]     = c2.slider("Trailing stop", -0.30, -0.02, float(sr.get("trailing_stop_pct",      -0.08)), 0.01, key=f"{key_prefix}_sr_ts")
+        sr["trailing_stop_pct"]     = c2.slider("Trailing stop", -0.45, -0.02, float(sr.get("trailing_stop_pct",      -0.39)), 0.01, key=f"{key_prefix}_sr_ts")
         sr["stop_loss_pct"]         = c3.slider("Stop loss",     -0.50, -0.05, float(sr.get("stop_loss_pct",          -0.20)), 0.01, key=f"{key_prefix}_sr_sl")
-        sr["sell_weak_value_below"] = c4.slider("Sell weak value", 0.0, 0.70,  float(sr.get("sell_weak_value_below",  0.45)), 0.01, key=f"{key_prefix}_sr_sw")
+        sr["sell_weak_value_below"] = c4.slider("Sell weak value", -0.45, 0.90, float(sr.get("sell_weak_value_below", -0.18)), 0.01, key=f"{key_prefix}_sr_sw")
         c1, c2 = st.columns(2)
         sr["min_days_held_before_value_exit"]    = int(c1.number_input("Min days before value exit",    0, 90, int(sr.get("min_days_held_before_value_exit",    21)), 1, key=f"{key_prefix}_sr_mdv"))
         sr["minimum_days_before_take_profit"]    = int(c2.number_input("Min days before take-profit",   0, 90, int(sr.get("minimum_days_before_take_profit",    0)),  1, key=f"{key_prefix}_sr_mdtp"))
@@ -272,7 +276,7 @@ def _param_editor(cfg: dict, key_prefix: str = "cv") -> dict:
         ex["harvest_profit_threshold"]   = c1.slider("Harvest threshold",  0.05, 0.50, float(ex.get("harvest_profit_threshold",  0.15)), 0.01, key=f"{key_prefix}_ex_hpt")
         ex["harvest_fraction"]           = c2.slider("Harvest fraction",   0.10, 0.70, float(ex.get("harvest_fraction",          0.40)), 0.01, key=f"{key_prefix}_ex_hf")
         ex["review_score_below"]         = c3.slider("Review floor",       0.10, 0.70, float(ex.get("review_score_below",        0.45)), 0.01, key=f"{key_prefix}_ex_rsb")
-        ex["hard_exit_score_below"]      = c4.slider("Hard exit floor",    0.05, 0.40, float(ex.get("hard_exit_score_below",     0.20)), 0.01, key=f"{key_prefix}_ex_hesb")
+        ex["hard_exit_score_below"]      = c4.slider("Hard exit floor",   -0.60, 0.40, float(ex.get("hard_exit_score_below",    -0.35)), 0.01, key=f"{key_prefix}_ex_hesb")
         ex["positive_pnl_exit_downgrade"] = st.checkbox(
             "Positive PNL suppresses downgrade exits",
             bool(ex.get("positive_pnl_exit_downgrade", True)),

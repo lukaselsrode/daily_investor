@@ -87,7 +87,7 @@ def _allocation(cfg: dict) -> dict:
     return {
         "index_pct":      float(cfg.get("index_pct", 0.85)),
         "min_index_pct":  float(risk.get("min_index_pct", 0.60)),
-        "min_candidate_allocation_pct": float(risk.get("min_candidate_allocation_pct", 0.10)),
+        "min_candidate_allocation_pct": float(risk.get("min_candidate_allocation_pct", 0.25)),
         "max_order_pct_of_cash": float(risk.get("max_order_pct_of_cash", 0.50)),
         "max_buys_per_rebalance": int(risk.get("max_buys_per_rebalance", 4)),
     }
@@ -97,6 +97,8 @@ def _candidate_selection(cfg: dict) -> dict:
     cs = cfg.get("candidate_selection", {})
     return {
         "mode":                           cs.get("mode", "percentile"),
+        # Live entry gate (decoupled from metric_threshold, the exit anchor).
+        "entry_threshold_override":       float(cs.get("entry_threshold_override") or 0.0),
         "top_percentile":                 float(cs.get("top_percentile", 0.15)),
         "max_candidates":                 int(cs.get("max_candidates", 25)),
         "use_absolute_score_floor":       bool(cs.get("use_absolute_score_floor", True)),

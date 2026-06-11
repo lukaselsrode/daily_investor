@@ -483,8 +483,8 @@ def render() -> None:
 
     _trim_on   = bool(exit_d.get("trim_enabled", True))
     _trim_thr  = float(exit_d.get("trim_profit_threshold", 0.20))
-    _harv_thr  = float(exit_d.get("harvest_profit_threshold", 0.30))
-    _full_tp   = float(sell.get("take_profit_pct", 0.81))
+    _harv_thr  = float(exit_d.get("harvest_profit_threshold", 0.50))
+    _full_tp   = float(sell.get("take_profit_pct", 1.50))
 
     rows = [
         {

@@ -33,8 +33,8 @@ def _normalized_weights(raw: dict[str, float]) -> dict[str, float]:
 
 
 def _params_from_weights(weights: dict[str, float]) -> np.ndarray:
-    # Full 60-slot vector (extended slots at config seeds) so previews run in the
-    # SAME regime as the tuner (archetype/regime overrides applied), not the 16-slot
+    # Full-length param vector (extended slots at config seeds) so previews run in
+    # the SAME regime as the tuner (archetype/regime overrides applied), not the 16-slot
     # path which silently skips them.
     from tuning.constants import _current_params
     params = _current_params()
@@ -449,7 +449,7 @@ def _run_full_history_weight_search(
     )
     from tuning.random_tune import _weight_bounds_from_config, sample_weight_simplex
 
-    base        = _current_params()   # full 60-slot vector — supports any active slot index
+    base        = _current_params()   # full-length vector — supports any active slot index
     active_idxs = _get_active_indices(scope=scope, preset=preset)
     eff_bounds  = _effective_bounds(scope=scope, preset=preset)
 
@@ -1189,7 +1189,7 @@ def _render_scipy_mode(scope: str = "overall_strategy", preset: str | None = Non
 
         from tuning.constants import _current_params
         params = sp["params"]
-        cur = _current_params()   # 60-slot current config — matches optimized vector length
+        cur = _current_params()   # full-length current config — matches optimized vector length
         active_set = set(sp.get("active_params", []))
 
         # --- Summary metrics ---
@@ -1313,7 +1313,7 @@ def _render_scipy_mode(scope: str = "overall_strategy", preset: str | None = Non
 
         # --- Weight change charts ---
         from tuning.constants import _current_params
-        cur = _current_params()   # 60-slot current config — matches optimized vector length
+        cur = _current_params()   # full-length current config — matches optimized vector length
         active_set = set(result.active_params)
         candidates = [
             ("Sharpe-opt", result.sharpe_params, "#4c8ef5"),
