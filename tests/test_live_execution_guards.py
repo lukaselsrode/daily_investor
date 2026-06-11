@@ -154,3 +154,30 @@ class TestSellCooldown:
         pm = _pm()
         monkeypatch.setattr(pm, "_SELL_HISTORY_CSV", str(tmp_path / "nope.csv"))
         assert pm._load_sell_history() == {}
+
+
+class TestWeakStreakPersistence:
+
+    def test_empty_store_writes_parseable_header_only_csv(self, tmp_path, monkeypatch):
+        """Regression: save_weak_streak({}) wrote a single newline (column-less
+        DataFrame), which pandas refuses to parse (EmptyDataError) and which
+        crashed the UI Data Explorer's Research section."""
+        import pandas as pd
+
+        import portfolio.thesis_confirm_tracker as tct
+
+        path = tmp_path / "weak_streak.csv"
+        monkeypatch.setattr(tct, "_WEAK_STREAK_CSV", str(path))
+
+        tct.save_weak_streak({})
+        df = pd.read_csv(path)  # must NOT raise EmptyDataError
+        assert list(df.columns) == ["symbol", "weak_streak"]
+        assert tct.load_weak_streak() == {}
+
+    def test_round_trip_with_entries(self, tmp_path, monkeypatch):
+        import portfolio.thesis_confirm_tracker as tct
+
+        path = tmp_path / "weak_streak.csv"
+        monkeypatch.setattr(tct, "_WEAK_STREAK_CSV", str(path))
+        tct.save_weak_streak({"ABC": 2, "XYZ": 0})   # zero-streaks dropped
+        assert tct.load_weak_streak() == {"ABC": 2}

@@ -41,10 +41,15 @@ def load_weak_streak() -> dict[str, int]:
 
 
 def save_weak_streak(store: dict[str, int]) -> None:
-    """Persist {symbol: consecutive_weak_evals} to weak_streak.csv (best-effort)."""
+    """Persist {symbol: consecutive_weak_evals} to weak_streak.csv (best-effort).
+
+    Columns are explicit so an EMPTY store writes a header-only CSV — a
+    column-less DataFrame writes a single newline, which pandas then refuses
+    to parse (EmptyDataError) and which crashed the UI Data Explorer."""
     try:
         pd.DataFrame(
-            [{"symbol": s, "weak_streak": int(n)} for s, n in store.items() if n]
+            [{"symbol": s, "weak_streak": int(n)} for s, n in store.items() if n],
+            columns=["symbol", "weak_streak"],
         ).to_csv(_WEAK_STREAK_CSV, index=False)
     except Exception:
         pass

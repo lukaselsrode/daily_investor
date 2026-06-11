@@ -28,7 +28,13 @@ _SCORE_COLS = ["value_metric", "value_score", "quality_score", "income_score", "
 
 @st.cache_data(ttl=120)
 def _read_csv(path: str) -> pd.DataFrame:
-    return pd.read_csv(path)
+    """Read a CSV defensively: empty/header-less/corrupt files (e.g. a tracker
+    writing a bare newline) return an empty frame instead of crashing the whole
+    Research section with EmptyDataError/ParserError."""
+    try:
+        return pd.read_csv(path)
+    except (pd.errors.EmptyDataError, pd.errors.ParserError, UnicodeDecodeError):
+        return pd.DataFrame()
 
 
 def render() -> None:
@@ -49,6 +55,12 @@ def render() -> None:
             st.cache_data.clear()
 
     df = _read_csv(str(csv_files[chosen_name]))
+    if df.empty and len(df.columns) == 0:
+        st.warning(
+            f"`{chosen_name}` is empty or not a parseable CSV — nothing to explore. "
+            "Pick another dataset."
+        )
+        return
     num_cols = df.select_dtypes("number").columns.tolist()
 
     st.caption(f"{len(df)} rows × {len(df.columns)} columns | NaN cells: {df.isna().sum().sum()}")
