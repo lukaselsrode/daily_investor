@@ -318,4 +318,8 @@ def _log_candidate_inner(
         final_allocation        = _sf(final_allocation),
         regime                  = regime,
         reliability_score       = _r("reliability_score"),
+        # Decision-time price — without it the outcome backfill can never
+        # compute forward returns for candidates (the "was skipping right?"
+        # half of the ledger was structurally empty).
+        price                   = _r("current_price"),
     )

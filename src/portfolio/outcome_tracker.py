@@ -369,8 +369,13 @@ def record_decision_candidate(
     final_allocation: float | None      = None,
     regime: str | None          = None,
     reliability_score: float | None = None,
+    price: float | None = None,
 ) -> None:
-    """Append one candidate-evaluation record to decision_outcomes.parquet."""
+    """Append one candidate-evaluation record to decision_outcomes.parquet.
+
+    `price` (the candidate's price at decision time) is REQUIRED for outcome
+    backfill: fill_future_returns computes forward returns from row["price"],
+    so candidates logged without it can never answer "was skipping right?"."""
     now = datetime.datetime.now(datetime.timezone.utc)
     ts  = timestamp or now.isoformat()
     date_str = now.strftime("%Y-%m-%d")
@@ -385,6 +390,7 @@ def record_decision_candidate(
         "raw_signal":     decision_state,
         "final_action":   decision_state,
         "executed_bool":  selected_bool,
+        "price":          price,
         "current_value_metric": current_value_metric,
         "value_score":    value_score,
         "quality_score":  quality_score,

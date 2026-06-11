@@ -181,3 +181,34 @@ class TestWeakStreakPersistence:
         monkeypatch.setattr(tct, "_WEAK_STREAK_CSV", str(path))
         tct.save_weak_streak({"ABC": 2, "XYZ": 0})   # zero-streaks dropped
         assert tct.load_weak_streak() == {"ABC": 2}
+
+
+class TestCandidateOutcomePrice:
+
+    def test_candidate_rows_record_decision_price(self, tmp_path):
+        """Regression: candidate ledger rows had no price, so fill_future_returns
+        could never compute forward returns for them — the 'was skipping this
+        candidate right?' half of the ledger was structurally empty (0% coverage
+        vs 90% for holdings)."""
+        import pandas as pd
+
+        import portfolio.outcome_tracker as ot
+        from portfolio.decision_logger import log_candidate_decision
+
+        row = pd.Series({
+            "symbol": "ZZZQP", "value_metric": 0.8, "current_price": 123.45,
+            "value_score": 0.5, "quality_score": 0.5, "momentum_score": 0.1,
+            "income_score": 0.0, "reliability_score": 0.9,
+        })
+        log_candidate_decision(
+            symbol="ZZZQP", row=row, decision_state="SKIP",
+            selected_bool=False, skipped_bool=True, skip_reason="sentiment_gate",
+            sentiment_result_dict={"action": "HOLD", "confidence": 60.0},
+            risk_check_passed=True, risk_check_fail_reason="",
+            proposed_allocation=100.0, final_allocation=0.0,
+            regime="neutral", candidate_rank=1, agg_df=None,
+        )
+        out = ot.load_outcomes()
+        cand = out[out["record_type"] == "candidate"]
+        assert len(cand) == 1
+        assert float(cand.iloc[0]["price"]) == 123.45
