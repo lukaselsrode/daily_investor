@@ -27,6 +27,41 @@ from .constants import (
 )
 
 
+def de_turnover_penalty(turnover: float, incumbent_turnover: float | None, bp: dict) -> float:
+    """
+    Incumbent-relative churn penalty for the DE objective.
+
+    The validation gates reject any candidate whose turnover exceeds
+    max_turnover_multiple x incumbent — but the optimizer used to spend most of
+    its evaluations in exactly that region (the first tournament run produced
+    5.5x-churn optima across the board). This penalty makes those regions
+    unattractive DURING the search instead of after it:
+
+      multiple <= soft limit            → 0 (low-turnover improvements unaffected)
+      soft < multiple <= hard           → linear ramp 0 → weight
+      multiple > hard                   → weight x (1 + overshoot)  (steep)
+
+    Returns 0 when disabled, when incumbent-relative mode is off, or when the
+    incumbent turnover is unavailable (the legacy trade-count penalty still
+    applies in the objective either way).
+    """
+    if not bp.get("de_turnover_penalty_enabled", True):
+        return 0.0
+    if not bp.get("de_turnover_penalty_vs_incumbent", True):
+        return 0.0
+    if incumbent_turnover is None or incumbent_turnover <= 0:
+        return 0.0
+    soft = float(bp.get("de_turnover_soft_limit_multiple", 1.5))
+    hard = float(bp.get("de_turnover_hard_limit_multiple", 2.5))
+    weight = float(bp.get("de_turnover_penalty_weight", 1.0))
+    multiple = float(turnover) / float(incumbent_turnover)
+    if multiple <= soft:
+        return 0.0
+    if multiple <= hard:
+        return weight * (multiple - soft) / max(hard - soft, 1e-9)
+    return weight * (1.0 + (multiple - hard))
+
+
 def make_objective(
     precomp: PrecomputedData,
     objective: Literal["sharpe", "calmar", "info_ratio"] = "sharpe",
@@ -36,6 +71,7 @@ def make_objective(
     weekly_contribution: float = 0.0,
     rebalance_frequency_days: int = 5,
     scope: BacktestScope = "overall_strategy",
+    incumbent_turnover: float | None = None,
 ) -> Callable[[np.ndarray], float]:
     """Return the function scipy minimizes (−metric + diversification penalty)."""
     call_count = [0]
@@ -88,6 +124,12 @@ def make_objective(
         tp_weight = bp.get("turnover_penalty_weight", 1.0) if bp.get("turnover_penalty_enabled", True) else 0.0
         turnover_penalty = max(0.0, result.trades_made - tp_threshold) / max(tp_threshold, 1) * tp_weight
 
+        # Incumbent-relative churn penalty — steer DE away from regions the
+        # turnover gate will reject anyway (see de_turnover_penalty).
+        churn_penalty = de_turnover_penalty(
+            float(result.turnover_estimate), incumbent_turnover, bp,
+        )
+
         diversity_penalty = max(0.0, 5.0 - result.average_positions) * 0.4
 
         if call_count[0] % 50 == 0:
@@ -95,9 +137,9 @@ def make_objective(
             print(
                 f"  [{call_count[0]} evals] {_display}={score:.3f} "
                 f"ret={result.total_return:.1%} trades={result.trades_made} "
-                f"avg_pos={result.average_positions:.1f}"
+                f"avg_pos={result.average_positions:.1f} turn={result.turnover_estimate:.2f}"
             )
-        return -score + penalty + turnover_penalty + diversity_penalty
+        return -score + penalty + turnover_penalty + churn_penalty + diversity_penalty
 
     return _obj
 
@@ -119,6 +161,29 @@ def _run_single(
     eff_bounds = _effective_bounds(scope, preset=preset)
     active_bounds = [eff_bounds[i] for i in active]
 
+    # Incumbent turnover anchor for the incumbent-relative churn penalty —
+    # computed ONCE per optimization (one extra sim), not per evaluation.
+    incumbent_turnover: float | None = None
+    if bp.get("de_turnover_penalty_enabled", True) and bp.get("de_turnover_penalty_vs_incumbent", True):
+        try:
+            _inc_res = run_simulation(
+                precomp, frozen_vals, starting_capital,
+                slippage_bps=bp["slippage_bps"],
+                commission_per_trade=bp["commission_per_trade"],
+                weekly_contribution=bp["weekly_contribution"],
+                rebalance_frequency_days=bp["rebalance_frequency_days"],
+                scope=scope,
+            )
+            incumbent_turnover = float(_inc_res.turnover_estimate) or None
+            if incumbent_turnover:
+                print(
+                    f"  churn penalty anchor: incumbent turnover {incumbent_turnover:.2f} "
+                    f"(soft {bp.get('de_turnover_soft_limit_multiple', 1.5)}x, "
+                    f"hard {bp.get('de_turnover_hard_limit_multiple', 2.5)}x)"
+                )
+        except Exception as _exc:
+            print(f"  churn penalty anchor unavailable ({_exc}) — incumbent-relative penalty off")
+
     obj_fn_full = make_objective(
         precomp, objective, starting_capital,
         slippage_bps=bp["slippage_bps"],
@@ -126,6 +191,7 @@ def _run_single(
         weekly_contribution=bp["weekly_contribution"],
         rebalance_frequency_days=bp["rebalance_frequency_days"],
         scope=scope,
+        incumbent_turnover=incumbent_turnover,
     )
 
     def _obj(reduced: np.ndarray) -> float:

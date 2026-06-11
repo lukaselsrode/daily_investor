@@ -113,7 +113,10 @@ def main(argv: list[str] | None = None) -> None:
         scope = _flag_value(rest, "--scope") or "overall_strategy"
         preset = _flag_value(rest, "--preset")
         regime_scope = _flag_value(rest, "--regime-scope") or "all"
-        cmd_auto_tune(n_days=n_days, mode=mode, apply=apply, force_apply=force_apply, llm_review=llm_review, scope=scope, preset=preset, regime_scope=regime_scope)
+        random_topk = int(_flag_value(rest, "--random-topk") or 0)
+        _leads_raw = _flag_value(rest, "--leads")
+        lead_vector_paths = [p for p in (_leads_raw or "").split(",") if p] or None
+        cmd_auto_tune(n_days=n_days, mode=mode, apply=apply, force_apply=force_apply, llm_review=llm_review, scope=scope, preset=preset, regime_scope=regime_scope, random_topk=random_topk, lead_vector_paths=lead_vector_paths)
 
     elif cmd == "stability-scan":
         mode = _flag_value(rest, "--mode")
@@ -306,6 +309,9 @@ OPTIONS (tune / auto-tune)
   --regime-scope SCOPE     all (default), bullish, neutral, or defensive (bearish accepted as an alias for defensive)
   --preset NAME[+NAME...]  Restrict tunable params to a preset; compose several with '+'
                            to co-tune their union (e.g. active_exits+active_exit_floors)
+  --random-topk N          auto-tune only: add the top-N robust-random-search candidates
+                           to the selection tournament (default 0 = off)
+  --leads a.npy,b.npy      auto-tune only: add saved lead param vectors to the tournament
 
 OPTIONS (auto-tune-all / interaction-screen)
   --profile P              quick | standard | deep  (default: standard)

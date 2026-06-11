@@ -201,6 +201,126 @@ def paired_random_window_gate(
     return len(reasons) == 0, reasons, stats
 
 
+def multi_horizon_confirm(
+    selected_params: np.ndarray,
+    incumbent_params: np.ndarray,
+    backtest_cfg: dict,
+    mode: str | None = None,
+    scope: str = "overall_strategy",
+) -> tuple[bool, list[str], list[dict]]:
+    """
+    Final confirmation tier — runs ONLY after the split, incumbent-relative,
+    and random-window gates have all passed. The selected candidate and the
+    incumbent are simulated on trailing windows (default 90/180/365/730d, same
+    mode/scope as the tune) and compared on excess-vs-SPY, max drawdown, and
+    turnover. Automates the manual "confirm with independent backtests before
+    trusting a tune" step.
+
+    Rules (config: backtest.multi_horizon_confirm):
+      • short windows (<=120d): excess may regress at most short_regress_tolerance
+      • mid windows (<=400d):   improve-or-preserve (mid_regress_tolerance slack)
+      • long windows:           no catastrophic regime failure — excess regression
+        beyond long_catastrophe_excess OR drawdown deeper by more than
+        long_catastrophe_drawdown fails
+      • every window: turnover within max_turnover_multiple of the incumbent
+
+    Returns (passed, reasons, rows). Disabled or no usable windows → passes
+    (the prior gates remain in force).
+    """
+    cfg = backtest_cfg.get("multi_horizon_confirm", {}) or {}
+    if not cfg.get("enabled", True):
+        return True, [], []
+
+    from backtesting.regime_scope import slice_precomp
+
+    windows = sorted(int(w) for w in cfg.get("windows", [90, 180, 365, 730]))
+    short_tol = float(cfg.get("short_regress_tolerance", 0.02))
+    mid_tol = float(cfg.get("mid_regress_tolerance", 0.005))
+    long_excess = float(cfg.get("long_catastrophe_excess", 0.10))
+    long_dd = float(cfg.get("long_catastrophe_drawdown", 0.05))
+    turn_mult = float(backtest_cfg.get("max_turnover_multiple", 2.0))
+
+    try:
+        full = load_and_precompute(max(windows), mode=mode)
+    except Exception as exc:
+        return False, [f"multi-horizon confirm: could not load history ({exc})"], []
+    n_full = full.prices.shape[0]
+
+    def _sim(pc, params):
+        return run_simulation(
+            pc, params, backtest_cfg.get("starting_capital", 10_000.0),
+            slippage_bps=backtest_cfg.get("slippage_bps", 10.0),
+            commission_per_trade=backtest_cfg.get("commission_per_trade", 0.0),
+            weekly_contribution=backtest_cfg.get("weekly_contribution", 0.0),
+            rebalance_frequency_days=backtest_cfg.get("rebalance_frequency_days", 5),
+            scope=scope,
+        )
+
+    rows: list[dict] = []
+    reasons: list[str] = []
+    for w in windows:
+        if w > n_full:
+            continue
+        pc = full if w == n_full else slice_precomp(full, slice(n_full - w, n_full))
+        sel = _sim(pc, selected_params)
+        inc = _sim(pc, incumbent_params)
+        sel_exc = sel.total_return - sel.benchmark_twr
+        inc_exc = inc.total_return - inc.benchmark_twr
+        delta = sel_exc - inc_exc
+        row = {
+            "window": w,
+            "incumbent_excess": inc_exc, "selected_excess": sel_exc, "delta": delta,
+            "incumbent_max_drawdown": inc.max_drawdown, "selected_max_drawdown": sel.max_drawdown,
+            "incumbent_turnover": inc.turnover_estimate, "selected_turnover": sel.turnover_estimate,
+        }
+        rows.append(row)
+
+        tier = "short" if w <= 120 else ("mid" if w <= 400 else "long")
+        if tier == "short" and delta < -short_tol:
+            reasons.append(
+                f"{w}d: selected excess {sel_exc:+.2%} regresses incumbent {inc_exc:+.2%} "
+                f"by more than {short_tol:.1%}"
+            )
+        elif tier == "mid" and delta < -mid_tol:
+            reasons.append(
+                f"{w}d: selected excess {sel_exc:+.2%} fails improve-or-preserve vs "
+                f"incumbent {inc_exc:+.2%} (tolerance {mid_tol:.1%})"
+            )
+        elif tier == "long":
+            if delta < -long_excess:
+                reasons.append(
+                    f"{w}d: catastrophic excess regression {delta:+.2%} (limit -{long_excess:.0%})"
+                )
+            if sel.max_drawdown < inc.max_drawdown - long_dd:
+                reasons.append(
+                    f"{w}d: drawdown {sel.max_drawdown:.1%} deeper than incumbent "
+                    f"{inc.max_drawdown:.1%} by more than {long_dd:.0%}"
+                )
+        inc_turn = max(float(inc.turnover_estimate), 1e-9)
+        if float(sel.turnover_estimate) > inc_turn * turn_mult:
+            reasons.append(
+                f"{w}d: turnover {sel.turnover_estimate:.2f} > {turn_mult:.1f}x "
+                f"incumbent's {inc.turnover_estimate:.2f}"
+            )
+    return len(reasons) == 0, reasons, rows
+
+
+def _print_multi_horizon_table(rows: list[dict]) -> None:
+    if not rows:
+        return
+    print(
+        f"\n{'window':>7} {'inc_exc':>9} {'sel_exc':>9} {'delta':>8} "
+        f"{'inc_DD':>8} {'sel_DD':>8} {'turn_Δ':>8}"
+    )
+    for r in rows:
+        print(
+            f"{r['window']:>6}d {r['incumbent_excess']:>+9.2%} {r['selected_excess']:>+9.2%} "
+            f"{r['delta']:>+8.2%} {r['incumbent_max_drawdown']:>8.1%} "
+            f"{r['selected_max_drawdown']:>8.1%} "
+            f"{r['selected_turnover'] - r['incumbent_turnover']:>+8.2f}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Candidate tournament — the selection layer between DE optimization and the
 # gates. The arithmetic midpoint of the Sharpe- and Calmar-optimal vectors is
@@ -228,6 +348,84 @@ def build_tournament_candidates(
         "incumbent_blend_50": 0.50 * incumbent_params + 0.50 * avg,
         "incumbent_blend_75": 0.25 * incumbent_params + 0.75 * avg,
     }
+
+
+def _coerce_vector(vec: np.ndarray, reference: np.ndarray, label: str) -> np.ndarray | None:
+    """Fit an externally-supplied vector to the current param layout: shorter
+    vectors (saved before newer slot families were appended) are padded with
+    the reference (incumbent) tail; longer ones are rejected — a longer vector
+    means it was saved under an UNKNOWN future layout and slot meanings can't
+    be trusted."""
+    vec = np.asarray(vec, dtype=float).ravel()
+    if len(vec) == len(reference):
+        return vec.copy()
+    if len(vec) < len(reference):
+        out = reference.copy()
+        out[: len(vec)] = vec
+        logger.info(
+            "Candidate %s padded from %d to %d slots with incumbent values",
+            label, len(vec), len(reference),
+        )
+        return out
+    logger.warning(
+        "Candidate %s has %d slots but the current layout has %d — skipped",
+        label, len(vec), len(reference),
+    )
+    return None
+
+
+def assemble_candidate_pool(
+    sharpe_params: np.ndarray,
+    calmar_params: np.ndarray,
+    incumbent_params: np.ndarray,
+    random_topk_vectors: dict[str, np.ndarray] | None = None,
+    lead_vectors: dict[str, np.ndarray] | None = None,
+    manual_vectors: dict[str, np.ndarray] | None = None,
+) -> dict[str, dict]:
+    """
+    Full tournament pool: candidate_id → {"params", "source"}.
+
+    Sources: the DE optima + blends ("de"/"blend"/"incumbent_blend"), top-K
+    vectors from the robust-score random search ("random_search"), saved lead
+    vectors from prior research ("lead"), and manually supplied vectors
+    ("manual"). All enter the SAME evaluation, gates, and selection.
+    """
+    pool: dict[str, dict] = {}
+    base_source = {
+        "sharpe_opt": "de", "calmar_opt": "de",
+        "avg_50_50": "blend", "avg_25_75": "blend", "avg_75_25": "blend",
+        "incumbent_blend_25": "incumbent_blend",
+        "incumbent_blend_50": "incumbent_blend",
+        "incumbent_blend_75": "incumbent_blend",
+    }
+    for cid, vec in build_tournament_candidates(sharpe_params, calmar_params, incumbent_params).items():
+        pool[cid] = {"params": vec, "source": base_source[cid]}
+    for group, source in ((random_topk_vectors, "random_search"),
+                          (lead_vectors, "lead"),
+                          (manual_vectors, "manual")):
+        for cid, vec in (group or {}).items():
+            fitted = _coerce_vector(vec, incumbent_params, cid)
+            if fitted is None:
+                continue
+            if cid in pool:
+                cid = f"{source}:{cid}"
+            pool[cid] = {"params": fitted, "source": source}
+    return pool
+
+
+def _load_lead_vectors(paths: list[str]) -> dict[str, np.ndarray]:
+    """Load saved .npy lead vectors (e.g. prior research candidates); unreadable
+    files are skipped with a warning, never fatal."""
+    import os
+
+    out: dict[str, np.ndarray] = {}
+    for p in paths or []:
+        try:
+            name = f"lead:{os.path.splitext(os.path.basename(p))[0]}"
+            out[name] = np.load(p)
+        except Exception as exc:
+            logger.warning("Could not load lead vector %s: %s", p, exc)
+    return out
 
 
 # Isolated so the selection trade-offs can be adjusted without touching the
@@ -309,24 +507,26 @@ def _pareto_non_dominated(rows: list[dict]) -> set[str]:
 
 def run_candidate_tournament(
     precomp,
-    candidate_vectors: dict[str, np.ndarray],
+    candidate_pool: dict[str, dict],
     train_sl,
     val_slice,
     scope: str,
     backtest_cfg: dict,
     incumbent_report: BacktestReport,
 ) -> list[dict]:
-    """Evaluate every candidate on the same split and gate each with
-    validate_tuned_params (absolute + incumbent-relative + turnover). Returns
-    rows of {candidate_id, params, report, metrics, gates_passed, reasons,
-    score}; score is -inf when the candidate has no validation metrics."""
+    """Evaluate every candidate (id → {params, source}) on the same split and
+    gate each with validate_tuned_params (absolute + incumbent-relative +
+    turnover). Returns rows of {candidate_id, source, params, report, metrics,
+    gates_passed, reasons, score}; score is -inf without validation metrics."""
     rows: list[dict] = []
-    for cid, params in candidate_vectors.items():
+    for cid, entry in candidate_pool.items():
+        params = entry["params"]
         report = run_backtest_report(precomp, params, train_sl, val_slice, scope=scope)
         passed, reasons = validate_tuned_params(report, backtest_cfg, incumbent_report)
         metrics = _candidate_metrics(report, incumbent_report)
         rows.append({
             "candidate_id": cid,
+            "source": entry.get("source", "de"),
             "params": params,
             "report": report,
             "metrics": metrics,
@@ -339,18 +539,19 @@ def run_candidate_tournament(
 
 def _print_tournament_table(rows: list[dict], selected_id: str | None) -> None:
     print(
-        f"\n{'candidate_id':<20} {'val_exc':>8} {'vs_inc':>8} {'sharpe':>7} "
+        f"\n{'candidate_id':<22} {'source':<15} {'val_exc':>8} {'vs_inc':>8} {'sharpe':>7} "
         f"{'calmar':>7} {'maxDD':>7} {'turn':>6} {'gates':>6} {'score':>8}"
     )
     for r in rows:
         m = r.get("metrics")
+        src = r.get("source", "")
         mark = " ◀ selected" if r["candidate_id"] == selected_id else ""
         if m is None:
-            print(f"{r['candidate_id']:<20} {'—':>8} {'—':>8} {'—':>7} {'—':>7} "
+            print(f"{r['candidate_id']:<22} {src:<15} {'—':>8} {'—':>8} {'—':>7} {'—':>7} "
                   f"{'—':>7} {'—':>6} {'FAIL':>6} {'—':>8}{mark}")
             continue
         print(
-            f"{r['candidate_id']:<20} {m['val_excess']:>+8.2%} {m['val_excess_vs_incumbent']:>+8.2%} "
+            f"{r['candidate_id']:<22} {src:<15} {m['val_excess']:>+8.2%} {m['val_excess_vs_incumbent']:>+8.2%} "
             f"{m['val_sharpe']:>7.2f} {m['val_calmar']:>7.2f} {m['val_max_drawdown']:>7.1%} "
             f"{m['val_turnover']:>6.2f} {'PASS' if r['gates_passed'] else 'FAIL':>6} "
             f"{r['score']:>+8.4f}{mark}"
@@ -429,6 +630,9 @@ def run_auto_tune(
     scope: str = "overall_strategy",
     preset: str | None = None,
     regime_scope: str = "all",
+    random_topk: int = 0,
+    lead_vector_paths: list[str] | None = None,
+    extra_candidates: dict[str, np.ndarray] | None = None,
 ) -> tuple:
     """
     Run Sharpe + Calmar optimizations, then a candidate TOURNAMENT (the optima,
@@ -518,13 +722,41 @@ def run_auto_tune(
     incumbent_params = _current_params()
     incumbent_report = run_backtest_report(precomp, incumbent_params, train_sl, val_slice, scope=scope)
 
-    # ── Candidate tournament ──────────────────────────────────────────────────
-    # Replaces the blind (sharpe + calmar) / 2 midpoint: the optima, three
-    # blends, and three incumbent blends are each evaluated on the same split,
+    # ── Candidate tournament (multi-source) ───────────────────────────────────
+    # Replaces the blind (sharpe + calmar) / 2 midpoint: the DE optima, blends,
+    # incumbent blends — plus optional robust-search top-K, saved lead vectors,
+    # and manually supplied vectors — are each evaluated on the same split,
     # gated individually, Pareto-filtered, and ranked by the selection score.
-    candidate_vectors = build_tournament_candidates(sharpe_params, calmar_params, incumbent_params)
+    random_topk_vectors: dict[str, np.ndarray] = {}
+    if random_topk > 0:
+        try:
+            from .random_tune import run_random_weight_tune
+            print(f"\nRobust random search for tournament candidates (top-{random_topk}) …")
+            _rs = run_random_weight_tune(
+                tune_precomp,
+                base_params=incumbent_params.copy(),
+                n_samples=max(24, random_topk * 8),
+                n_windows=10,
+                window_days=min(120, max(30, train_days - 1)),
+                seed=7,
+                slippage_bps=bp["slippage_bps"],
+                rebalance_frequency_days=bp["rebalance_frequency_days"],
+                scope=scope,
+                preset=preset,
+            )
+            for _rank, _cand in enumerate(_rs.candidates[:random_topk], 1):
+                random_topk_vectors[f"random_top{_rank}"] = _cand.full_params
+        except Exception as exc:
+            print(f"  robust random search unavailable ({exc}) — continuing without")
+    lead_vectors = _load_lead_vectors(lead_vector_paths or [])
+    candidate_pool = assemble_candidate_pool(
+        sharpe_params, calmar_params, incumbent_params,
+        random_topk_vectors=random_topk_vectors,
+        lead_vectors=lead_vectors,
+        manual_vectors=extra_candidates,
+    )
     rows = run_candidate_tournament(
-        precomp, candidate_vectors, train_sl, val_slice, scope, bp, incumbent_report,
+        precomp, candidate_pool, train_sl, val_slice, scope, bp, incumbent_report,
     )
     passers = [r for r in rows if r["gates_passed"] and r["metrics"] is not None]
     if passers:
@@ -592,6 +824,23 @@ def run_auto_tune(
                 )
             validation_passed = rw_passed
             reasons.extend(rw_reasons)
+
+    # Final tier: multi-horizon confirmation — selected vs incumbent across
+    # trailing windows (90/180/365/730d by default). Runs ONLY when every
+    # earlier gate passed; a failure here blocks the write like any other gate.
+    if validation_passed:
+        mh_cfg = bp.get("multi_horizon_confirm", {}) or {}
+        if mh_cfg.get("enabled", True):
+            print(
+                f"\nMulti-horizon confirm: selected vs incumbent over "
+                f"{mh_cfg.get('windows', [90, 180, 365, 730])} trailing days …"
+            )
+            mh_passed, mh_reasons, mh_rows = multi_horizon_confirm(
+                selected_params, incumbent_params, bp, mode=mode, scope=scope,
+            )
+            _print_multi_horizon_table(mh_rows)
+            validation_passed = mh_passed
+            reasons.extend(mh_reasons)
 
     if reasons:
         print("\n⚠  Validation gates FAILED:")
@@ -805,6 +1054,9 @@ class ParameterTuner:
         scope: str = "overall_strategy",
         preset: str | None = None,
         regime_scope: str = "all",
+        random_topk: int = 0,
+        lead_vector_paths: list[str] | None = None,
+        extra_candidates: dict | None = None,
     ) -> AutoTuneResult:
         # Clear any stale stash so we only consume the outcome of THIS call
         # (run_auto_tune may be replaced in tests; it resets the stash itself
@@ -821,6 +1073,9 @@ class ParameterTuner:
             scope=scope,
             preset=preset,
             regime_scope=regime_scope,
+            random_topk=random_topk,
+            lead_vector_paths=lead_vector_paths,
+            extra_candidates=extra_candidates,
         )
         avg_params, sharpe_result, calmar_result, avg_result, sharpe_params, calmar_params = raw
 

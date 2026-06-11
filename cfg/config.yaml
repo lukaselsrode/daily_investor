@@ -492,6 +492,28 @@ backtest:
   turnover_penalty_enabled: true
   turnover_penalty_trade_count: 60
   turnover_penalty_weight: 0.15
+  # 2026-06 DE churn calibration: the trade-count penalty above is too weak to
+  # stop the optimizer proposing 5.5x-incumbent turnover (every such candidate
+  # is then rejected by the max_turnover_multiple gate — wasted evaluations).
+  # Incumbent-relative ramp: free below soft x incumbent, linear to `weight` at
+  # hard x, steep beyond. Anchor = one incumbent sim per optimization run.
+  de_turnover_penalty_enabled: true
+  de_turnover_penalty_vs_incumbent: true
+  de_turnover_soft_limit_multiple: 1.5
+  de_turnover_hard_limit_multiple: 2.5
+  de_turnover_penalty_weight: 1.0
+  # Final multi-horizon confirmation (runs ONLY after the split + incumbent +
+  # random-window gates all pass): selected vs incumbent across trailing
+  # windows. 90d must not materially regress; 180/365d must improve-or-preserve;
+  # 730d must not reveal a catastrophic regime failure; turnover stays within
+  # max_turnover_multiple on every window. Fail -> config NOT written.
+  multi_horizon_confirm:
+    enabled: true
+    windows: [90, 180, 365, 730]
+    short_regress_tolerance: 0.02
+    mid_regress_tolerance: 0.005
+    long_catastrophe_excess: 0.10
+    long_catastrophe_drawdown: 0.05
   llm_review_enabled: false
   llm_review_top_n: 5
   llm_review_apply: false

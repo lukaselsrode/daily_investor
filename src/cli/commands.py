@@ -202,13 +202,17 @@ def cmd_auto_tune(
     scope: str = "overall_strategy",
     preset: str | None = None,
     regime_scope: str = "all",
+    random_topk: int = 0,
+    lead_vector_paths: list[str] | None = None,
 ) -> None:
-    """Dual-objective auto-tune with walk-forward validation.
+    """Dual-objective auto-tune with candidate tournament + validation gates.
 
     --scope active_sleeve_compounding  freezes index_pct and ETF routing params,
     optimizes only stock-picking parameters, ranks by active sleeve metrics.
     --preset <name>  Restrict tunable parameters to a named preset.
                      Use --list-presets to see available presets.
+    --random-topk N  Add the top-N robust-random-search candidates to the tournament.
+    --leads a.npy,b.npy  Add saved lead param vectors to the tournament.
     """
     from tuning.tuner import ParameterTuner
     tuner = ParameterTuner()
@@ -221,17 +225,19 @@ def cmd_auto_tune(
         scope=scope,
         preset=preset,
         regime_scope=regime_scope,
+        random_topk=random_topk,
+        lead_vector_paths=lead_vector_paths,
     )
     _t._diff_table(
         result.avg_params,
-        label=f"mean of Sharpe + Calmar over {n_days}d",
+        label=f"tournament-selected over {n_days}d",
         sharpe_ref=result.sharpe_result,
         calmar_ref=result.calmar_result,
         sharpe_params=result.sharpe_params,
         calmar_params=result.calmar_params,
     )
     print(
-        f"\nAveraged result:  ret={result.avg_result.total_return:+.1%}  "
+        f"\nSelected result:  ret={result.avg_result.total_return:+.1%}  "
         f"sharpe={result.avg_result.sharpe:+.3f}  "
         f"calmar={result.avg_result.calmar:+.3f}  "
         f"trades={result.avg_result.trades_made}"

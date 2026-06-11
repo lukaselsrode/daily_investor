@@ -214,6 +214,7 @@ class TestCmdAutoTune:
         mock_at.assert_called_once_with(
             n_days=90, apply=False, force_apply=False, mode=None, llm_review=False,
             scope="overall_strategy", preset=None, regime_scope="all",
+            random_topk=0, lead_vector_paths=None,
         )
 
     def test_passes_scope_active_sleeve(self):
@@ -223,6 +224,7 @@ class TestCmdAutoTune:
         mock_at.assert_called_once_with(
             n_days=90, apply=False, force_apply=False, mode=None, llm_review=False,
             scope="active_sleeve_compounding", preset=None, regime_scope="all",
+            random_topk=0, lead_vector_paths=None,
         )
 
     def test_passes_preset(self):
@@ -232,6 +234,7 @@ class TestCmdAutoTune:
         mock_at.assert_called_once_with(
             n_days=90, apply=False, force_apply=False, mode=None, llm_review=False,
             scope="overall_strategy", preset="active_core_weights", regime_scope="all",
+            random_topk=0, lead_vector_paths=None,
         )
 
     def test_default_preset_is_none(self):
@@ -375,6 +378,7 @@ class TestCliDispatch:
         mock_cmd.assert_called_once_with(
             n_days=90, mode=None, apply=False, force_apply=False, llm_review=False,
             scope="overall_strategy", preset=None, regime_scope="all",
+            random_topk=0, lead_vector_paths=None,
         )
 
     def test_dispatch_auto_tune_with_apply(self):
@@ -383,6 +387,7 @@ class TestCliDispatch:
         mock_cmd.assert_called_once_with(
             n_days=120, mode=None, apply=True, force_apply=False, llm_review=False,
             scope="overall_strategy", preset=None, regime_scope="all",
+            random_topk=0, lead_vector_paths=None,
         )
 
     def test_dispatch_auto_tune_with_scope(self):
@@ -391,6 +396,7 @@ class TestCliDispatch:
         mock_cmd.assert_called_once_with(
             n_days=90, mode=None, apply=False, force_apply=False, llm_review=False,
             scope="active_sleeve_compounding", preset=None, regime_scope="all",
+            random_topk=0, lead_vector_paths=None,
         )
 
     def test_dispatch_auto_tune_with_preset(self):
@@ -399,6 +405,7 @@ class TestCliDispatch:
         mock_cmd.assert_called_once_with(
             n_days=90, mode=None, apply=False, force_apply=False, llm_review=False,
             scope="overall_strategy", preset="active_core_weights", regime_scope="all",
+            random_topk=0, lead_vector_paths=None,
         )
 
     def test_dispatch_auto_tune_scope_and_preset_together(self):
@@ -409,6 +416,7 @@ class TestCliDispatch:
         mock_cmd.assert_called_once_with(
             n_days=90, mode=None, apply=False, force_apply=False, llm_review=False,
             scope="active_sleeve_compounding", preset="active_core_weights", regime_scope="all",
+            random_topk=0, lead_vector_paths=None,
         )
 
     def test_dispatch_auto_tune_omitted_preset_is_none(self):

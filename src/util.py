@@ -473,6 +473,18 @@ BACKTEST_PARAMS: dict = {
     "turnover_penalty_enabled":     bool(_bt.get("turnover_penalty_enabled",    True)),
     "turnover_penalty_trade_count": int(_bt.get("turnover_penalty_trade_count", 80)),
     "turnover_penalty_weight":      float(_bt.get("turnover_penalty_weight",    1.0)),
+    # Incumbent-relative churn penalty inside the DE objective — steers the
+    # optimizer away from turnover regions the validation gate rejects anyway
+    # (see tuning/objective.de_turnover_penalty).
+    "de_turnover_penalty_enabled":      bool(_bt.get("de_turnover_penalty_enabled",      True)),
+    "de_turnover_penalty_vs_incumbent": bool(_bt.get("de_turnover_penalty_vs_incumbent", True)),
+    "de_turnover_soft_limit_multiple":  float(_bt.get("de_turnover_soft_limit_multiple", 1.5)),
+    "de_turnover_hard_limit_multiple":  float(_bt.get("de_turnover_hard_limit_multiple", 2.5)),
+    "de_turnover_penalty_weight":       float(_bt.get("de_turnover_penalty_weight",      1.0)),
+    # Final multi-horizon confirmation gate (tuner.multi_horizon_confirm): the
+    # selected tournament candidate is compared against the incumbent across
+    # trailing windows AFTER the split + random-window gates pass.
+    "multi_horizon_confirm":            dict(_bt.get("multi_horizon_confirm",            {}) or {}),
 }
 
 # ---------------------------------------------------------------------------
