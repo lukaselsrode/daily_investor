@@ -116,15 +116,30 @@ def cfg(base_config) -> ConfigManager:
 
 
 @pytest.fixture(autouse=True)
-def isolate_outcome_ledgers(tmp_path, monkeypatch):
-    """Redirect the decision-outcome ledgers to a per-test temp dir.
+def isolate_data_writers(tmp_path, monkeypatch):
+    """Redirect EVERY production data/ writer to a per-test temp dir.
 
-    Regression guard (2026-06-11): tests exercising buy_cycle wrote candidate
-    rows for fake tickers (ZZZQA/ZZZQB) into the REAL data/outcome_journal.csv;
-    the live run's outcome backfill then tried to price them via yfinance every
-    run. No test may ever touch the production ledgers.
+    Regression guards (2026-06-11): tests exercising buy_cycle wrote fake
+    tickers into the REAL outcome_journal.csv (priced via yfinance every live
+    run), and every suite run dropped synthetic PaperBroker holdings_*.csv
+    files into data/ — the Portfolio Intelligence UI reads the NEWEST holdings
+    file and showed an $846 fixture portfolio. No test may ever write into
+    the production data directory.
     """
+    import data.cache as dc
+    import portfolio.manager as pmgr
     import portfolio.outcome_tracker as ot
+    import portfolio.position_journal as pj
+    import portfolio.thesis_confirm_tracker as tct
 
+    # The canonical CSV cache (holdings, agg_data, news, …).
+    monkeypatch.setattr(dc, "DATA_DIRECTORY", str(tmp_path))
+    # Manager trade-history ledgers (class attributes bound at import).
+    monkeypatch.setattr(pmgr.PortfolioManager, "_BUY_HISTORY_CSV", str(tmp_path / "buy_history.csv"))
+    monkeypatch.setattr(pmgr.PortfolioManager, "_SELL_HISTORY_CSV", str(tmp_path / "sell_history.csv"))
+    # Decision-outcome ledgers.
     monkeypatch.setattr(ot, "_journal_path", lambda: tmp_path / "outcome_journal.csv")
     monkeypatch.setattr(ot, "_outcomes_path", lambda: tmp_path / "decision_outcomes.parquet")
+    # Position-event journal + thesis weak-streak store.
+    monkeypatch.setattr(pj, "_journal_path", lambda: tmp_path / "position_journal.csv")
+    monkeypatch.setattr(tct, "_WEAK_STREAK_CSV", str(tmp_path / "weak_streak.csv"))
