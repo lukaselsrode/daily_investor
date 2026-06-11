@@ -88,18 +88,67 @@ def save_holdings_csv(holdings: dict) -> None:
         logger.warning(f"Could not save holdings CSV: {e}")
 
 
-def add_funds_to_account() -> None:
+def add_funds_to_account(target_amount: float | None = None) -> None:
+    """Deposit up to the weekly target. `target_amount` overrides WEEKLY_INVESTMENT
+    when the contribution-timing overlay recommends a different amount this week —
+    the existing confirmation prompt is unchanged (no new automatic money movement)."""
+    target = WEEKLY_INVESTMENT if target_amount is None else float(target_amount)
     available = _broker.get_cash()
-    if available >= WEEKLY_INVESTMENT:
-        logger.info(f"Sufficient cash (${available:,.2f} ≥ ${WEEKLY_INVESTMENT:,.2f}) — no deposit needed")
+    if available >= target:
+        logger.info(f"Sufficient cash (${available:,.2f} ≥ ${target:,.2f}) — no deposit needed")
         return
-    needed = WEEKLY_INVESTMENT - available
+    needed = target - available
     resp = input(
-        f"Cash ${available:,.2f} < target ${WEEKLY_INVESTMENT:,.2f}. Deposit ${needed:,.2f}? [y/n] "
+        f"Cash ${available:,.2f} < target ${target:,.2f}. Deposit ${needed:,.2f}? [y/n] "
     ).strip().lower()
     if resp not in ("y", "yes"):
         return
     _broker.add_funds(needed)
+
+
+_CONTRIBUTION_LOG_CSV = os.path.join(DATA_DIRECTORY, "contribution_timing_log.csv")
+
+
+def _contribution_timing_recommendation() -> float | None:
+    """Compute, display, and persist this week's contribution recommendation.
+    Returns the adjusted weekly amount, or None when the overlay is disabled or
+    the signal could not be computed (caller falls back to WEEKLY_INVESTMENT)."""
+    from util import CONTRIBUTION_TIMING_PARAMS as _ct
+    if not _ct.get("enabled", False):
+        return None
+    try:
+        import yfinance as yf
+
+        from portfolio.contribution_timing import (
+            decide_contribution,
+            format_live_panel,
+            load_live_state,
+            record_live_decision,
+        )
+        hist = yf.download(
+            _ct.get("benchmark_symbol", "SPY"), period="400d",
+            auto_adjust=True, progress=False,
+        )
+        closes = hist["Close"]
+        if hasattr(closes, "squeeze"):
+            closes = closes.squeeze()
+        closes = closes.dropna().to_numpy(dtype=float)
+        if len(closes) == 0:
+            logger.warning("Contribution timing: no benchmark history — using base amount")
+            return None
+        try:
+            from strategy.regimes.detector import get_current_regime
+            regime = get_current_regime()
+        except Exception:
+            regime = None
+        state = load_live_state(_CONTRIBUTION_LOG_CSV, _ct)
+        decision = decide_contribution(closes, _ct, state, regime=regime)
+        logger.info("\n%s", format_live_panel(decision, _ct))
+        record_live_decision(_CONTRIBUTION_LOG_CSV, decision)
+        return decision.adjusted_amount
+    except Exception as exc:
+        logger.warning("Contribution timing recommendation failed (using base amount): %s", exc)
+        return None
 
 
 def _fetch_and_save_dividends() -> None:
@@ -192,10 +241,14 @@ def run_daily_strat() -> None:
         return
 
     try:
+        # Contribution-timing overlay: weekly recommendation panel (and the
+        # deposit target when a deposit is part of this run). None → flat base.
+        recommended_contribution = _contribution_timing_recommendation()
+
         skip_data = "--skip-data" in sys.argv
         if not skip_data:
             update_industry_valuations(verbose=True)
-            add_funds_to_account()
+            add_funds_to_account(target_amount=recommended_contribution)
             _fetch_and_save_dividends()
             refresh = AUTO_APPROVE or confirm("Generate fresh data? (takes several minutes)")
         else:

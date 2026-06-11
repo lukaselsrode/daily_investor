@@ -106,6 +106,15 @@ def _perturbed_full_vector(tc):
         "backtest.rebalance_frequency_days":    7.0,
         "backtest.cooldown_days_after_sell":    4.0,
         "backtest.cooldown_days_after_stopout": 10.0,
+        # contribution-timing slots 72-79 (last group)
+        "contribution_timing.multiplier.dip_sensitivity":      1.50,
+        "contribution_timing.multiplier.neutral_dip_score":    0.40,
+        "contribution_timing.multiplier.min_multiplier":       0.60,
+        "contribution_timing.multiplier.max_multiplier":       2.50,
+        "contribution_timing.dip_signal.weights.return_1w":    0.30,
+        "contribution_timing.dip_signal.weights.return_1m":    0.30,
+        "contribution_timing.dip_signal.weights.drawdown_20d": 0.25,
+        "contribution_timing.dip_signal.weights.drawdown_60d": 0.10,
     }
     for path, val in explicit.items():
         target[by_path[path]] = val

@@ -106,6 +106,29 @@ def print_backtest_report(report: BacktestReport) -> None:
                 f"neutral={rd['neutral']} ({rd['neutral']/total_rd:.0%})  "
                 f"defensive={rd['defensive']} ({rd['defensive']/total_rd:.0%})"
             )
+    _ct = getattr(r.train_result, "contribution_timing", None)
+    if _ct:
+        print("\n  CONTRIBUTION TIMING")
+        print(
+            f"    Contributed: ${_ct['total_contributed']:,.0f} over {_ct['weeks']} weeks"
+            f"  (avg ${_ct['avg_weekly']:,.0f}, min ${_ct['min_weekly']:,.0f},"
+            f" max ${_ct['max_weekly']:,.0f})"
+        )
+        print(
+            f"    Weeks above base: {_ct['pct_weeks_above_base']:.0%}"
+            f"   below base: {_ct['pct_weeks_below_base']:.0%}"
+            f"   avg dip score: {_ct['avg_dip_score']:.2f}"
+            f"   carry-forward end: ${_ct['final_carry_forward']:,.0f}"
+        )
+        _rows = _ct.get("schedule", [])[-8:]
+        if _rows:
+            print("    last weeks:  day | dip  | mult  | contrib | reasons")
+            for _row in _rows:
+                _dip = f"{_row['dip_score']:.2f}" if _row["dip_score"] == _row["dip_score"] else " n/a"
+                print(
+                    f"      {_row['day']:>10} | {_dip} | {_row['multiplier']:.2f}x |"
+                    f" ${_row['contribution']:>6,.0f} | {','.join(_row['reason_codes'][:3])}"
+                )
     if r.notes:
         print("\n  NOTES")
         for n in r.notes:

@@ -183,15 +183,19 @@ class TestParamVector:
         # + 1 regime-tilt (46) + 1 mean-reversion blend (47) + 1 low-vol quality blend (48)
         # + 1 residual-momentum blend (49) + 4 DAE exit-floor slots (50-53)
         # + 3 opportunity-cost slots (54-56) + 3 rebalance/cooldown slots (57-59)
-        # + 12 appended archetype-boolean slots (60-71, last group: 6 archetypes × 2 flags).
+        # + 12 archetype-boolean slots (60-71, 6 archetypes × 2 flags)
+        # + 8 contribution-timing slots (72-79, last group).
         from tuning.constants import (
             _ARCH_BOOL_FIELDS,
             _ARCH_BOOL_SLOT_OFFSET,
             _ARCH_KEYS,
+            _CT_FIELDS,
+            _CT_SLOT_OFFSET,
             BOUNDS,
             PARAM_NAMES,
         )
-        expected = _ARCH_BOOL_SLOT_OFFSET + len(_ARCH_KEYS) * len(_ARCH_BOOL_FIELDS)
+        assert _CT_SLOT_OFFSET == _ARCH_BOOL_SLOT_OFFSET + len(_ARCH_KEYS) * len(_ARCH_BOOL_FIELDS)
+        expected = _CT_SLOT_OFFSET + len(_CT_FIELDS)
         assert len(PARAM_NAMES) == expected
         assert len(BOUNDS) == expected
 

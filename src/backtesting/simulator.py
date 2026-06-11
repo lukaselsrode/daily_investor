@@ -15,6 +15,7 @@ from util import (
     ARCHETYPE_PARAMS,
     BACKTEST_PARAMS,
     CANDIDATE_SELECTION_PARAMS,
+    CONTRIBUTION_TIMING_PARAMS,
     EXIT_DECISION_PARAMS,
     HARVEST_PARAMS,
     INDEX_PCT,
@@ -771,10 +772,18 @@ def select_candidates(
 # Benchmark TWR
 # ---------------------------------------------------------------------------
 
+def _contrib_at(weekly_contribution: float | np.ndarray, d: int) -> float:
+    """Contribution amount on day d — scalar legacy schedule or per-day array
+    (contribution-timing overlay). Arrays carry the amount at index d directly."""
+    if isinstance(weekly_contribution, np.ndarray):
+        return float(weekly_contribution[d]) if d < len(weekly_contribution) else 0.0
+    return float(weekly_contribution)
+
+
 def _bench_twr(
     bench_prices: np.ndarray,
     starting_capital: float,
-    weekly_contribution: float,
+    weekly_contribution: float | np.ndarray,
     rebalance_freq: int,
 ) -> float:
     """Contribution-adjusted TWR for a buy-and-hold benchmark receiving the same cash schedule."""
@@ -789,7 +798,7 @@ def _bench_twr(
             shares = cash / p
             cash   = 0.0
         elif d > 0 and d % rebalance_freq == 0 and p > 0:
-            contrib      = weekly_contribution
+            contrib      = _contrib_at(weekly_contribution, d)
             prev_shares  = shares          # capture pre-contribution shares for TWR
             shares      += contrib / p
             cash         = 0.0
@@ -808,7 +817,7 @@ def _bench_twr(
 def _bench_daily_equity(
     bench_prices: np.ndarray,
     starting_capital: float,
-    weekly_contribution: float,
+    weekly_contribution: float | np.ndarray,
     rebalance_freq: int,
 ) -> np.ndarray:
     """Daily benchmark portfolio values matching the same contribution schedule as the strategy."""
@@ -823,7 +832,7 @@ def _bench_daily_equity(
         if d == 0:
             shares = starting_capital / p
         elif d % rebalance_freq == 0:
-            shares += weekly_contribution / p
+            shares += _contrib_at(weekly_contribution, d) / p
         vals[d] = shares * p
     return vals
 
@@ -831,7 +840,7 @@ def _bench_daily_equity(
 def _bench_daily_ca_equity(
     bench_prices: np.ndarray,
     starting_capital: float,
-    weekly_contribution: float,
+    weekly_contribution: float | np.ndarray,
     rebalance_freq: int,
 ) -> np.ndarray:
     """Contribution-adjusted daily benchmark series (same TWR basis as _bench_twr)."""
@@ -846,7 +855,7 @@ def _bench_daily_ca_equity(
             shares = cash / p
             cash   = 0.0
         elif d > 0 and d % rebalance_freq == 0 and p > 0:
-            contrib     = weekly_contribution
+            contrib     = _contrib_at(weekly_contribution, d)
             prev_shares = shares
             shares     += contrib / p
             cash        = 0.0
@@ -1036,6 +1045,7 @@ def run_simulation(
     # When the tuner appends exit-floor slots (active_exit_floors preset), let the
     # optimizer move the floors; otherwise they stay at the config values above.
     from tuning.constants import (
+        contribution_timing_cfg_from_params,
         exit_floors_cfg_from_params,
         opportunity_cost_cfg_from_params,
         rebalance_cfg_from_params,
@@ -1048,6 +1058,43 @@ def run_simulation(
     if "rebalance_frequency_days" in _rebal_override:
         rebalance_frequency_days = int(_rebal_override["rebalance_frequency_days"])
     _dae_floors.update(exit_floors_cfg_from_params(params))
+
+    # ── Contribution-timing overlay (buy-the-dip weekly contribution sizing) ──
+    # The whole schedule depends only on benchmark prices + config, so it is
+    # precomputed for every day here (after the rebalance-cadence override, which
+    # gates contribution days). Disabled → flat `weekly_contribution` on every
+    # contribution day, byte-identical to the pre-overlay simulator. The SAME
+    # varied schedule feeds the benchmark comparators below, so excess-vs-SPY
+    # stays apples-to-apples. Strictly config-gated: tuned slots refine the
+    # overlay but never enable it.
+    from portfolio.contribution_timing import (
+        build_contribution_schedule,
+        summarize_decisions,
+    )
+    _ct_cfg = None
+    if CONTRIBUTION_TIMING_PARAMS.get("enabled", False):
+        import copy as _ct_copy
+        _ct_cfg = _ct_copy.deepcopy(CONTRIBUTION_TIMING_PARAMS)
+        _ct_over = contribution_timing_cfg_from_params(params)
+        if _ct_over:
+            _ct_cfg["multiplier"].update(_ct_over.get("multiplier", {}))
+            _ct_cfg["dip_signal"]["weights"].update(_ct_over.get("weights", {}))
+    _ct_regimes = None
+    if _ct_cfg is not None:
+        _ct_regimes = precomp.regime_labels_daily
+        if _ct_regimes is None:
+            # Point-in-time labels via the canonical helper (same path the
+            # random-window harness uses) so the defensive multiplier cap is
+            # live in sims, not just in the live path.
+            try:
+                from backtesting.regime_scope import regime_labels as _ct_rl
+                _ct_regimes = _ct_rl(precomp)
+            except Exception:
+                _ct_regimes = None
+    _contrib_amounts, _ct_decisions = build_contribution_schedule(
+        precomp.benchmark_prices, n_days, rebalance_frequency_days,
+        weekly_contribution, _ct_cfg, regime_labels=_ct_regimes,
+    )
 
     # ── Opportunity-cost ("max hold without progress") exit ───────────────────
     # Culls positions that make NO progress for _oc_stall_max_days, to recycle
@@ -1984,9 +2031,9 @@ def run_simulation(
                 _ro_active = False
 
         is_contrib_day       = d > 0 and d % rebalance_frequency_days == 0
-        contrib_today        = weekly_contribution if is_contrib_day else 0.0
+        contrib_today        = float(_contrib_amounts[d]) if is_contrib_day else 0.0
         active_contrib_today = (
-            weekly_contribution * (1.0 - index_pct)
+            contrib_today * (1.0 - index_pct)
             if (is_contrib_day and _ca_active_daily is not None)
             else 0.0
         )
@@ -2012,11 +2059,11 @@ def run_simulation(
             current_scores = score_stocks_at_day(precomp, params, d)
             current_mom    = _momentum_score_at_day(precomp, params, d)
             candidate_mask, _ = select_candidates(d, current_scores, precomp, params, _cs_params)
-            cash              += weekly_contribution
-            total_contributions += weekly_contribution
+            cash              += contrib_today
+            total_contributions += contrib_today
 
             if index_pct > 0 and n_etfs > 0:
-                etf_contrib = weekly_contribution * index_pct
+                etf_contrib = contrib_today * index_pct
                 p_etf       = precomp.etf_prices[d]
                 valid_etfs  = np.isfinite(p_etf) & (p_etf > 0)
                 n_valid_e   = int(valid_etfs.sum())
@@ -2158,17 +2205,20 @@ def run_simulation(
     bench_equity   = np.array([])
     bench_ca_equity = np.array([])
     if np.isfinite(precomp.benchmark_prices).all() and precomp.benchmark_prices[0] > 0:
+        # The benchmark receives the SAME schedule the strategy did (varied when
+        # the contribution-timing overlay is on), so excess comparisons isolate
+        # stock selection rather than contribution timing.
         bench_twr_val = _bench_twr(
             precomp.benchmark_prices, starting_capital,
-            weekly_contribution, rebalance_frequency_days,
+            _contrib_amounts, rebalance_frequency_days,
         )
         bench_equity = _bench_daily_equity(
             precomp.benchmark_prices, starting_capital,
-            weekly_contribution, rebalance_frequency_days,
+            _contrib_amounts, rebalance_frequency_days,
         )
         bench_ca_equity = _bench_daily_ca_equity(
             precomp.benchmark_prices, starting_capital,
-            weekly_contribution, rebalance_frequency_days,
+            _contrib_amounts, rebalance_frequency_days,
         )
 
     # ── Per-archetype rollups ───────────────────────────────────────────
@@ -2337,6 +2387,23 @@ def run_simulation(
             "max_overlay_value": float(_ro_max_value),
         } if _ro_enabled else None),
         benchmark_twr=bench_twr_val,
+        contribution_timing=(
+            {
+                **summarize_decisions(_ct_decisions, float(_ct_cfg["base_weekly_contribution"])),
+                "schedule": [
+                    {
+                        "day": dec.day,
+                        "dip_score": dec.dip_score,
+                        "multiplier": dec.multiplier,
+                        "contribution": dec.adjusted_amount,
+                        "carry_forward": dec.carry_forward,
+                        "reason_codes": dec.reason_codes,
+                    }
+                    for dec in _ct_decisions
+                ],
+            }
+            if _ct_cfg is not None and _ct_decisions else None
+        ),
         pool_diagnostics=_init_diag,
         trade_log=trade_log,
         equity_curve=daily_values.copy(),

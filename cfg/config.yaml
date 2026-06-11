@@ -13,6 +13,49 @@ metric_threshold: 1.15
 selloff_threshold: 30
 weekly_investment: 400
 index_pct: 0.8465
+# Buy-the-dip contribution-sizing overlay (2026-06). Sizes each week's NEW cash
+# from short-term benchmark conditions while a rolling window keeps the monthly
+# total near target. Contribution sizing ONLY — never sells or alters holdings.
+# enabled:false preserves the flat weekly_investment behavior exactly.
+contribution_timing:
+  enabled: false
+  benchmark_symbol: SPY
+  base_weekly_contribution: 400
+  target_monthly_contribution: 1600
+  budget_window_weeks: 4
+  min_weekly_contribution: 100
+  max_weekly_contribution: 800
+  preserve_monthly_budget: true
+  allow_budget_acceleration: false
+  monthly_budget_tolerance_pct: 0.15
+  carry_forward_unused_budget: true
+  borrow_from_future_weeks: true
+  dip_signal:
+    lookback_1w_days: 5
+    lookback_1m_days: 21
+    high_lookback_short: 20
+    high_lookback_medium: 60
+    ma_short: 50
+    ma_long: 200
+    # Weights are renormalized over the computable components at decision time
+    # (and after tuning), so they always effectively sum to 1.0.
+    weights:
+      return_1w: 0.25
+      return_1m: 0.25
+      drawdown_20d: 0.20
+      drawdown_60d: 0.15
+      ma50_gap: 0.10
+      ma200_gap: 0.05
+  multiplier:
+    neutral_dip_score: 0.35
+    dip_sensitivity: 1.25
+    min_multiplier: 0.50
+    max_multiplier: 2.00
+    smoothing_alpha: 0.50
+  regime_controls:
+    cap_multiplier_in_defensive: true
+    defensive_max_multiplier: 1.25
+    allow_full_dip_buying_in_bull: true
 rebalance:
   mode: contribution_driven
   drift_tolerance_pct: 0.03

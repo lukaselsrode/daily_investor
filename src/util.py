@@ -366,6 +366,61 @@ HARVEST_PARAMS: dict = {
 }
 
 # ---------------------------------------------------------------------------
+# Contribution-timing overlay (buy-the-dip weekly contribution sizing)
+# ---------------------------------------------------------------------------
+# Deep-merged with defaults so a partial config block can't produce KeyErrors.
+# enabled:false (the default) preserves flat weekly contributions exactly —
+# see portfolio/contribution_timing.py.
+
+_ct = _app.get("contribution_timing", {}) or {}
+_ct_dip = _ct.get("dip_signal", {}) or {}
+_ct_w   = _ct_dip.get("weights", {}) or {}
+_ct_m   = _ct.get("multiplier", {}) or {}
+_ct_rc  = _ct.get("regime_controls", {}) or {}
+CONTRIBUTION_TIMING_PARAMS: dict = {
+    "enabled":                      bool(_ct.get("enabled",                      False)),
+    "benchmark_symbol":             str(_ct.get("benchmark_symbol",              "SPY")),
+    "base_weekly_contribution":     float(_ct.get("base_weekly_contribution",    400.0)),
+    "target_monthly_contribution":  float(_ct.get("target_monthly_contribution", 1600.0)),
+    "budget_window_weeks":          int(_ct.get("budget_window_weeks",           4)),
+    "min_weekly_contribution":      float(_ct.get("min_weekly_contribution",     100.0)),
+    "max_weekly_contribution":      float(_ct.get("max_weekly_contribution",     800.0)),
+    "preserve_monthly_budget":      bool(_ct.get("preserve_monthly_budget",      True)),
+    "allow_budget_acceleration":    bool(_ct.get("allow_budget_acceleration",    False)),
+    "monthly_budget_tolerance_pct": float(_ct.get("monthly_budget_tolerance_pct", 0.15)),
+    "carry_forward_unused_budget":  bool(_ct.get("carry_forward_unused_budget",  True)),
+    "borrow_from_future_weeks":     bool(_ct.get("borrow_from_future_weeks",     True)),
+    "dip_signal": {
+        "lookback_1w_days":     int(_ct_dip.get("lookback_1w_days",     5)),
+        "lookback_1m_days":     int(_ct_dip.get("lookback_1m_days",     21)),
+        "high_lookback_short":  int(_ct_dip.get("high_lookback_short",  20)),
+        "high_lookback_medium": int(_ct_dip.get("high_lookback_medium", 60)),
+        "ma_short":             int(_ct_dip.get("ma_short",             50)),
+        "ma_long":              int(_ct_dip.get("ma_long",              200)),
+        "weights": {
+            "return_1w":    float(_ct_w.get("return_1w",    0.25)),
+            "return_1m":    float(_ct_w.get("return_1m",    0.25)),
+            "drawdown_20d": float(_ct_w.get("drawdown_20d", 0.20)),
+            "drawdown_60d": float(_ct_w.get("drawdown_60d", 0.15)),
+            "ma50_gap":     float(_ct_w.get("ma50_gap",     0.10)),
+            "ma200_gap":    float(_ct_w.get("ma200_gap",    0.05)),
+        },
+    },
+    "multiplier": {
+        "neutral_dip_score": float(_ct_m.get("neutral_dip_score", 0.35)),
+        "dip_sensitivity":   float(_ct_m.get("dip_sensitivity",   1.25)),
+        "min_multiplier":    float(_ct_m.get("min_multiplier",    0.50)),
+        "max_multiplier":    float(_ct_m.get("max_multiplier",    2.00)),
+        "smoothing_alpha":   float(_ct_m.get("smoothing_alpha",   0.50)),
+    },
+    "regime_controls": {
+        "cap_multiplier_in_defensive":   bool(_ct_rc.get("cap_multiplier_in_defensive",   True)),
+        "defensive_max_multiplier":      float(_ct_rc.get("defensive_max_multiplier",     1.25)),
+        "allow_full_dip_buying_in_bull": bool(_ct_rc.get("allow_full_dip_buying_in_bull", True)),
+    },
+}
+
+# ---------------------------------------------------------------------------
 # Backtest parameters
 # ---------------------------------------------------------------------------
 

@@ -73,12 +73,10 @@ def test_position_sizing_cfg_from_params():
 
 def test_current_params_extended_length():
     cp = constants._current_params()
-    # Full vector ends with the appended archetype-boolean group (60-71, last group:
-    # 6 archetypes × 2 flags), so the length matches that group's end.
-    assert len(cp) == (
-        constants._ARCH_BOOL_SLOT_OFFSET
-        + len(constants._ARCH_KEYS) * len(constants._ARCH_BOOL_FIELDS)
-    )
+    # Full vector ends with the appended contribution-timing group, so the
+    # length matches that group's end (and the PARAM_NAMES registry).
+    assert len(cp) == constants._CT_SLOT_OFFSET + len(constants._CT_FIELDS)
+    assert len(cp) == len(constants.PARAM_NAMES)
     # exit-floor slots seed from config (EXIT_DECISION_PARAMS) and sit within bounds
     for off in range(len(constants._EXIT_FLOOR_FIELDS)):
         idx = constants._EXIT_FLOOR_SLOT_OFFSET + off

@@ -184,6 +184,25 @@ _PRESETS: dict[str, dict] = {
         ],
         "phase2": False,
     },
+    "contribution_timing": {
+        "description": "Buy-the-dip contribution overlay: multiplier mapping "
+                       "(dip_sensitivity, neutral_dip_score, min/max_multiplier) + the four "
+                       "heaviest dip-signal weights (return_1w/1m, drawdown_20d/60d; "
+                       "renormalized to sum 1.0 at decision time). Requires "
+                       "contribution_timing.enabled: true in config for the slots to matter; "
+                       "regime_controls stay config-only so the defensive cap is never tuned away.",
+        "unfreeze": [
+            "contribution_timing.multiplier.dip_sensitivity",
+            "contribution_timing.multiplier.neutral_dip_score",
+            "contribution_timing.multiplier.min_multiplier",
+            "contribution_timing.multiplier.max_multiplier",
+            "contribution_timing.dip_signal.weights.return_1w",
+            "contribution_timing.dip_signal.weights.return_1m",
+            "contribution_timing.dip_signal.weights.drawdown_20d",
+            "contribution_timing.dip_signal.weights.drawdown_60d",
+        ],
+        "phase2": False,
+    },
 
     # ── Regime (scoring-only) ─────────────────────────────────────────────────
     "active_regime_tilt": {

@@ -17,6 +17,7 @@ from util import (
     ARCHETYPE_PARAMS,
     BACKTEST_PARAMS,
     CANDIDATE_SELECTION_PARAMS,
+    CONTRIBUTION_TIMING_PARAMS,
     EXIT_DECISION_PARAMS,
     INDEX_PCT,
     METRIC_THRESHOLD,
@@ -396,6 +397,64 @@ for _ai, _alabel in enumerate(_ARCH_KEYS):
         )
 
 
+# ── Append contribution-timing overlay slots (END of vector) ───────────────
+# Buy-the-dip weekly contribution sizing (portfolio/contribution_timing.py).
+# Deliberately a TIGHT first surface: the multiplier mapping (4) plus the four
+# heaviest dip-signal weights (the ma50/ma200 gap weights stay config-only).
+# Weights are renormalized to sum 1.0 at decision time, so tuning them is safe.
+# Frozen by default; the `contribution_timing` preset unfreezes them. The slots
+# only matter when contribution_timing.enabled is true in config (set it for
+# the tuning run) — the simulator never force-enables the overlay.
+_CT_SLOT_OFFSET = len(PARAM_NAMES)
+_CT_FIELDS: tuple[tuple[str, str, tuple[float, float]], ...] = (
+    # (PARAM_NAMES entry, config path, bounds)
+    ("ct_dip_sensitivity",   "contribution_timing.multiplier.dip_sensitivity",     (0.0, 3.0)),
+    ("ct_neutral_dip_score", "contribution_timing.multiplier.neutral_dip_score",   (0.1, 0.7)),
+    ("ct_min_multiplier",    "contribution_timing.multiplier.min_multiplier",      (0.25, 1.0)),
+    ("ct_max_multiplier",    "contribution_timing.multiplier.max_multiplier",      (1.0, 3.0)),
+    ("ct_w_return_1w",       "contribution_timing.dip_signal.weights.return_1w",   (0.0, 1.0)),
+    ("ct_w_return_1m",       "contribution_timing.dip_signal.weights.return_1m",   (0.0, 1.0)),
+    ("ct_w_drawdown_20d",    "contribution_timing.dip_signal.weights.drawdown_20d", (0.0, 1.0)),
+    ("ct_w_drawdown_60d",    "contribution_timing.dip_signal.weights.drawdown_60d", (0.0, 1.0)),
+)
+for _i, (_name, _path, _bnd) in enumerate(_CT_FIELDS):
+    PARAM_NAMES.append(_name)
+    BOUNDS.append(_bnd)
+    _CONFIG_PATH_TO_PARAM_IDX[_path] = _CT_SLOT_OFFSET + _i
+
+
+def contribution_timing_cfg_from_params(params) -> dict:
+    """
+    Build a contribution-timing override dict from the appended slots in *params*:
+    {"multiplier": {field: value, ...}, "weights": {field: value, ...}}. Returns {}
+    when params lacks the slots (len <= offset), so plain backtests read config.
+    """
+    if params is None or len(params) <= _CT_SLOT_OFFSET:
+        return {}
+    out: dict = {"multiplier": {}, "weights": {}}
+    for _i, (_, _path, _) in enumerate(_CT_FIELDS):
+        _idx = _CT_SLOT_OFFSET + _i
+        if _idx >= len(params):
+            continue
+        _field = _path.split(".")[-1]
+        _group = "weights" if ".weights." in _path else "multiplier"
+        out[_group][_field] = float(params[_idx])
+    # Degenerate tuned mapping guard: min must stay below max.
+    _m = out["multiplier"]
+    if "min_multiplier" in _m and "max_multiplier" in _m and _m["min_multiplier"] > _m["max_multiplier"]:
+        _m["min_multiplier"], _m["max_multiplier"] = _m["max_multiplier"], _m["min_multiplier"]
+    return out
+
+
+def _contribution_timing_default_frozen_indices() -> set[int]:
+    """Contribution-timing slots default to frozen — unfrozen only via the contribution_timing preset."""
+    _paths = {p for _, p, _ in _CT_FIELDS}
+    return {
+        _idx for _path, _idx in _CONFIG_PATH_TO_PARAM_IDX.items()
+        if _path in _paths
+    }
+
+
 def position_sizing_cfg_from_params(params) -> dict:
     """
     Build a position-sizing override dict from the sizing slots in *params*.
@@ -524,6 +583,8 @@ def _get_active_indices(scope: str = "overall_strategy", preset: str | None = No
     frozen |= _opportunity_cost_default_frozen_indices()
     # Rebalance/cooldown slots are frozen-by-default; active_rebalance_cooldown unfreezes them.
     frozen |= _rebalance_default_frozen_indices()
+    # Contribution-timing slots are frozen-by-default; the contribution_timing preset unfreezes them.
+    frozen |= _contribution_timing_default_frozen_indices()
     if preset is not None:
         from .presets import apply_preset_to_frozen
         frozen = apply_preset_to_frozen(frozen, preset)
@@ -655,7 +716,17 @@ def _current_params() -> np.ndarray:
         entry = (ARCHETYPE_PARAMS or {}).get(_alabel, {}) or {}
         for _bfield, _ in _ARCH_BOOL_FIELDS:
             arch_bool_tail.append(1.0 if bool(entry.get(_bfield, False)) else 0.0)
+    # Contribution-timing slots — read from CONTRIBUTION_TIMING_PARAMS subtrees.
+    _ct_mult = (CONTRIBUTION_TIMING_PARAMS or {}).get("multiplier", {}) or {}
+    _ct_wts  = ((CONTRIBUTION_TIMING_PARAMS or {}).get("dip_signal", {}) or {}).get("weights", {}) or {}
+    ct_tail: list[float] = []
+    for _name, _path, _bnd in _CT_FIELDS:
+        _field = _path.split(".")[-1]
+        _default = (_ct_wts if ".weights." in _path else _ct_mult).get(_field)
+        if _default is None:
+            _default = (_bnd[0] + _bnd[1]) / 2.0
+        ct_tail.append(float(_default))
     return np.array(
         base + arch_tail + cs_tail + ps_tail + regime_tail
-        + ef_tail + oc_tail + rb_tail + arch_bool_tail
+        + ef_tail + oc_tail + rb_tail + arch_bool_tail + ct_tail
     )

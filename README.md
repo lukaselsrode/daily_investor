@@ -53,6 +53,7 @@ That's it. The dashboard opens at `http://localhost:8501`.
 - **Validation-Aware Auto-Tune** — `scipy.differential_evolution` across Sharpe and Calmar; parameters written only if held-out validation gates pass
 - **Optional LLM Tune Review** — Routes optimizer candidates through Claude for a second-opinion before applying
 - **Batch AI Sentiment** — Async concurrent Claude calls with exponential backoff
+- **Contribution-Timing Overlay** *(config-gated, ships disabled)* — Buy-the-dip weekly contribution sizing: a causal dip score (1w/1m returns, 20/60d drawdowns, 50/200DMA gaps) maps to a contribution multiplier under a rolling monthly budget with carry-forward; defensive-regime cap prevents knife-catching. `contribution_timing` tuning preset; compare via `python scripts/contribution_timing_compare.py` (flat vs default vs tuned across 90/180/365/730d + random windows, reporting MWR/ending value)
 - **Streamlit Dashboard** — Five-section interactive UI covering operations, portfolio, research, validation, and system config
 
 ---

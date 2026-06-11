@@ -108,6 +108,10 @@ class SimResult:
     #  "rotations": N, "switch_cost": $, "max_overlay_value": $}
     overlay_telemetry: dict | None = None
     benchmark_twr: float = 0.0     # contribution-adjusted benchmark TWR for comparison
+    # Contribution-timing overlay diagnostics (None when overlay disabled):
+    # summarize_decisions() stats + per-week "schedule" rows
+    # (day, dip_score, multiplier, contribution, carry_forward, reason_codes).
+    contribution_timing: dict | None = None
     pool_diagnostics: CandidatePoolDiagnostics | None = None  # day-0 candidate pool
     trade_log: list = field(default_factory=list)  # list[TradeRecord] for attribution
     # Daily equity curves for charting (empty when not requested)
