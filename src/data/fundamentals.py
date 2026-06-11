@@ -96,6 +96,21 @@ def _position_52w(
 # Enrichment helpers
 # ---------------------------------------------------------------------------
 
+def _normalize_volume(item: dict) -> None:
+    """Replace Robinhood's `volume` (TODAY'S cumulative volume — a fraction of
+    normal turnover on morning runs) with average daily volume in place.
+
+    Regression (2026-06-11): a 10:19 refresh stored partial-day volumes (HST
+    "288k" vs ~3M ADV) and the min_liquidity_volume gate rejected every BUY
+    candidate for the whole run. The liquidity gate means AVERAGE daily volume;
+    `average_volume` / `average_volume_2_weeks` are in the same payload."""
+    avg_vol = safe_float(item.get("average_volume"), 0) or safe_float(
+        item.get("average_volume_2_weeks"), 0
+    )
+    if avg_vol > 0:
+        item["volume"] = avg_vol
+
+
 def _enrich_with_quotes(symbols: list[str], fundamentals: dict[str, dict]) -> None:
     batch_size = 50
     enriched = 0
@@ -537,6 +552,7 @@ def get_fundamentals_df(
             if result and isinstance(result, list):
                 for item in result:
                     if item and isinstance(item, dict) and "symbol" in item:
+                        _normalize_volume(item)
                         fundamentals[item["symbol"]] = item
         except Exception as e:
             print(f"Batch {batch_num} failed: {str(e)[:60]}")

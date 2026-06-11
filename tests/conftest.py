@@ -113,3 +113,18 @@ def base_config() -> dict:
 @pytest.fixture
 def cfg(base_config) -> ConfigManager:
     return ConfigManager.from_dict(base_config)
+
+
+@pytest.fixture(autouse=True)
+def isolate_outcome_ledgers(tmp_path, monkeypatch):
+    """Redirect the decision-outcome ledgers to a per-test temp dir.
+
+    Regression guard (2026-06-11): tests exercising buy_cycle wrote candidate
+    rows for fake tickers (ZZZQA/ZZZQB) into the REAL data/outcome_journal.csv;
+    the live run's outcome backfill then tried to price them via yfinance every
+    run. No test may ever touch the production ledgers.
+    """
+    import portfolio.outcome_tracker as ot
+
+    monkeypatch.setattr(ot, "_journal_path", lambda: tmp_path / "outcome_journal.csv")
+    monkeypatch.setattr(ot, "_outcomes_path", lambda: tmp_path / "decision_outcomes.parquet")

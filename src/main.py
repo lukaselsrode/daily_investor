@@ -200,9 +200,12 @@ def _maybe_fill_outcomes() -> None:
             return
 
         fetch_syms = sorted(set(symbols) | {"SPY"})
+        # yfinance uses "-" for share classes where Robinhood uses "."
+        # (PBR.A -> PBR-A); fetch under the yf alias, key results back to ours.
+        yf_alias = {s: s.replace(".", "-") for s in fetch_syms}
         today  = datetime.date.today()
         start  = (today - datetime.timedelta(days=125)).isoformat()
-        hist   = yf.download(fetch_syms, start=start, auto_adjust=True, progress=False)
+        hist   = yf.download(sorted(set(yf_alias.values())), start=start, auto_adjust=True, progress=False)
         close  = hist["Close"] if "Close" in hist.columns else hist
 
         current_prices: dict[str, float] = {}
@@ -210,7 +213,8 @@ def _maybe_fill_outcomes() -> None:
         spy_current_price: float | None = None
 
         for sym in fetch_syms:
-            col = close[sym] if sym in close.columns else None
+            alias = yf_alias[sym]
+            col = close[alias] if alias in close.columns else None
             if col is not None and not col.dropna().empty:
                 current_prices[sym] = float(col.dropna().iloc[-1])
 
