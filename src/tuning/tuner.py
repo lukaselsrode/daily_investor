@@ -201,6 +201,162 @@ def paired_random_window_gate(
     return len(reasons) == 0, reasons, stats
 
 
+# ---------------------------------------------------------------------------
+# Candidate tournament — the selection layer between DE optimization and the
+# gates. The arithmetic midpoint of the Sharpe- and Calmar-optimal vectors is
+# not guaranteed to be a strategy either objective wants; instead, a small
+# family of candidates (the optima, three blends, and three incumbent blends)
+# is evaluated on the SAME train/validation split and the best gate-passing
+# candidate is selected. The gates remain the final authority.
+# ---------------------------------------------------------------------------
+
+def build_tournament_candidates(
+    sharpe_params: np.ndarray,
+    calmar_params: np.ndarray,
+    incumbent_params: np.ndarray,
+) -> dict[str, np.ndarray]:
+    """Ordered candidate_id → full param vector. Blends are convex combinations,
+    so candidates stay inside any region the inputs occupy."""
+    avg = 0.5 * sharpe_params + 0.5 * calmar_params
+    return {
+        "sharpe_opt":         sharpe_params.copy(),
+        "calmar_opt":         calmar_params.copy(),
+        "avg_50_50":          avg,
+        "avg_25_75":          0.25 * sharpe_params + 0.75 * calmar_params,
+        "avg_75_25":          0.75 * sharpe_params + 0.25 * calmar_params,
+        "incumbent_blend_25": 0.75 * incumbent_params + 0.25 * avg,
+        "incumbent_blend_50": 0.50 * incumbent_params + 0.50 * avg,
+        "incumbent_blend_75": 0.25 * incumbent_params + 0.75 * avg,
+    }
+
+
+# Isolated so the selection trade-offs can be adjusted without touching the
+# tournament mechanics. Excess terms dominate (project rule: judge on excess);
+# Calmar/Sharpe are tie-breakers; churn and incumbent-relative drawdown
+# deterioration are penalized.
+_SELECTION_W_CALMAR    = 0.25
+_SELECTION_W_SHARPE    = 0.10
+_SELECTION_W_TURNOVER  = 0.25
+_SELECTION_W_DRAWDOWN  = 0.50
+
+
+def candidate_selection_score(m: dict) -> float:
+    """Validation robust score for tournament ranking (higher is better)."""
+    return (
+        m["val_excess"]
+        + m["val_excess_vs_incumbent"]
+        + _SELECTION_W_CALMAR * m["val_calmar"]
+        + _SELECTION_W_SHARPE * m["val_sharpe"]
+        - _SELECTION_W_TURNOVER * max(0.0, m["turnover_multiple"] - 1.0)
+        - _SELECTION_W_DRAWDOWN * max(0.0, m["drawdown_worse_than_incumbent"])
+    )
+
+
+def _candidate_metrics(report: BacktestReport, incumbent_report: BacktestReport) -> dict | None:
+    """Validation metrics vs SPY and vs the incumbent. None when either report
+    lacks a validation window (the candidate then fails gates anyway)."""
+    vr = report.validation_result
+    ivr = incumbent_report.validation_result if incumbent_report is not None else None
+    if vr is None or ivr is None:
+        return None
+    val_excess = vr.total_return - report.validation_benchmark_return
+    inc_excess = ivr.total_return - incumbent_report.validation_benchmark_return
+    inc_turn = max(float(ivr.turnover_estimate), 1e-9)
+    return {
+        "val_excess":                   float(val_excess),
+        "val_excess_vs_incumbent":      float(val_excess - inc_excess),
+        "val_sharpe":                   float(vr.sharpe),
+        "val_calmar":                   float(vr.calmar),
+        "val_max_drawdown":             float(vr.max_drawdown),
+        "val_turnover":                 float(vr.turnover_estimate),
+        "turnover_multiple":            float(vr.turnover_estimate) / inc_turn,
+        # max_drawdown is negative; positive when the candidate draws down DEEPER.
+        "drawdown_worse_than_incumbent": max(0.0, float(ivr.max_drawdown) - float(vr.max_drawdown)),
+    }
+
+
+def _pareto_non_dominated(rows: list[dict]) -> set[str]:
+    """IDs of candidates not dominated on (excess↑, calmar↑, drawdown↑ [less
+    negative], turnover↓). Dominated = another candidate is >= on all four with
+    at least one strict improvement."""
+    def dominates(a: dict, b: dict) -> bool:
+        ge = (
+            a["val_excess"] >= b["val_excess"]
+            and a["val_calmar"] >= b["val_calmar"]
+            and a["val_max_drawdown"] >= b["val_max_drawdown"]
+            and a["val_turnover"] <= b["val_turnover"]
+        )
+        strict = (
+            a["val_excess"] > b["val_excess"]
+            or a["val_calmar"] > b["val_calmar"]
+            or a["val_max_drawdown"] > b["val_max_drawdown"]
+            or a["val_turnover"] < b["val_turnover"]
+        )
+        return ge and strict
+
+    out: set[str] = set()
+    for r in rows:
+        if r.get("metrics") is None:
+            continue
+        if not any(
+            other is not r and other.get("metrics") is not None
+            and dominates(other["metrics"], r["metrics"])
+            for other in rows
+        ):
+            out.add(r["candidate_id"])
+    return out
+
+
+def run_candidate_tournament(
+    precomp,
+    candidate_vectors: dict[str, np.ndarray],
+    train_sl,
+    val_slice,
+    scope: str,
+    backtest_cfg: dict,
+    incumbent_report: BacktestReport,
+) -> list[dict]:
+    """Evaluate every candidate on the same split and gate each with
+    validate_tuned_params (absolute + incumbent-relative + turnover). Returns
+    rows of {candidate_id, params, report, metrics, gates_passed, reasons,
+    score}; score is -inf when the candidate has no validation metrics."""
+    rows: list[dict] = []
+    for cid, params in candidate_vectors.items():
+        report = run_backtest_report(precomp, params, train_sl, val_slice, scope=scope)
+        passed, reasons = validate_tuned_params(report, backtest_cfg, incumbent_report)
+        metrics = _candidate_metrics(report, incumbent_report)
+        rows.append({
+            "candidate_id": cid,
+            "params": params,
+            "report": report,
+            "metrics": metrics,
+            "gates_passed": passed,
+            "reasons": reasons,
+            "score": candidate_selection_score(metrics) if metrics is not None else float("-inf"),
+        })
+    return rows
+
+
+def _print_tournament_table(rows: list[dict], selected_id: str | None) -> None:
+    print(
+        f"\n{'candidate_id':<20} {'val_exc':>8} {'vs_inc':>8} {'sharpe':>7} "
+        f"{'calmar':>7} {'maxDD':>7} {'turn':>6} {'gates':>6} {'score':>8}"
+    )
+    for r in rows:
+        m = r.get("metrics")
+        mark = " ◀ selected" if r["candidate_id"] == selected_id else ""
+        if m is None:
+            print(f"{r['candidate_id']:<20} {'—':>8} {'—':>8} {'—':>7} {'—':>7} "
+                  f"{'—':>7} {'—':>6} {'FAIL':>6} {'—':>8}{mark}")
+            continue
+        print(
+            f"{r['candidate_id']:<20} {m['val_excess']:>+8.2%} {m['val_excess_vs_incumbent']:>+8.2%} "
+            f"{m['val_sharpe']:>7.2f} {m['val_calmar']:>7.2f} {m['val_max_drawdown']:>7.1%} "
+            f"{m['val_turnover']:>6.2f} {'PASS' if r['gates_passed'] else 'FAIL':>6} "
+            f"{r['score']:>+8.4f}{mark}"
+        )
+
+
 def should_apply_tuned_config(
     apply_flag: bool,
     validation_passed: bool,
@@ -275,11 +431,16 @@ def run_auto_tune(
     regime_scope: str = "all",
 ) -> tuple:
     """
-    Run Sharpe + Calmar optimizations, average the results.
-    Validates on held-out window; writes config.yaml only when gates pass
-    and apply=True or auto_apply_if_valid=True.
+    Run Sharpe + Calmar optimizations, then a candidate TOURNAMENT (the optima,
+    sharpe/calmar blends, and incumbent blends — see build_tournament_candidates)
+    evaluated on the held-out split; the best gate-passing, Pareto-non-dominated
+    candidate is selected. Writes config.yaml only when the selected candidate
+    passes every gate (split + incumbent-relative + random-window) and
+    apply=True or auto_apply_if_valid=True.
 
-    Returns (avg_params, sharpe_result, calmar_result, avg_result, sharpe_params, calmar_params).
+    Returns (selected_params, sharpe_result, calmar_result, selected_result,
+    sharpe_params, calmar_params) — the first/fourth slots held the blind
+    average before the tournament existed; callers' tuple shape is unchanged.
     """
     global _LAST_GATE_OUTCOME
     _LAST_GATE_OUTCOME = None
@@ -347,40 +508,68 @@ def run_auto_tune(
     print(f"\n[2/2] Optimizing for Calmar (scope={scope}{_preset_label}) …\n")
     calmar_params, calmar_result = _run_single(tune_precomp, "calmar", starting_capital, maxiter, popsize, scope=scope, preset=preset)
 
-    avg_params = (sharpe_params + calmar_params) / 2.0
-    avg_result = run_simulation(
-        tune_precomp, avg_params, starting_capital,
+    val_slice = val_sl if use_val else None
+
+    # Incumbent = the config we're currently running, on the SAME split/scope.
+    # Needed FIRST: it seeds the incumbent-blend candidates and anchors the
+    # relative gates. Gate at the SAME scope the parameters were optimized at:
+    # an active-sleeve preset tune gated at "overall_strategy" is ~77% benchmark
+    # (index_pct frozen), so the gates would pass/fail on index noise.
+    incumbent_params = _current_params()
+    incumbent_report = run_backtest_report(precomp, incumbent_params, train_sl, val_slice, scope=scope)
+
+    # ── Candidate tournament ──────────────────────────────────────────────────
+    # Replaces the blind (sharpe + calmar) / 2 midpoint: the optima, three
+    # blends, and three incumbent blends are each evaluated on the same split,
+    # gated individually, Pareto-filtered, and ranked by the selection score.
+    candidate_vectors = build_tournament_candidates(sharpe_params, calmar_params, incumbent_params)
+    rows = run_candidate_tournament(
+        precomp, candidate_vectors, train_sl, val_slice, scope, bp, incumbent_report,
+    )
+    passers = [r for r in rows if r["gates_passed"] and r["metrics"] is not None]
+    if passers:
+        non_dominated = _pareto_non_dominated(passers)
+        pool = [r for r in passers if r["candidate_id"] in non_dominated] or passers
+        selected = max(pool, key=lambda r: r["score"])
+        selection_note = "highest validation robust score among candidates passing gates."
+    else:
+        # No passer: keep the legacy midpoint as the returned vector for caller
+        # compatibility (nothing is written — gates failed). Prefer the best-
+        # scoring row's diagnostics when metrics exist.
+        diagnostic = max(rows, key=lambda r: r["score"])
+        selected = next(r for r in rows if r["candidate_id"] == "avg_50_50")
+        if np.isfinite(diagnostic["score"]):
+            selected = diagnostic
+        selection_note = "none passed gates — best-scoring candidate kept for diagnostics only."
+    selected_id = selected["candidate_id"] if passers else None
+    _print_tournament_table(rows, selected_id)
+    print(f"\nSelected candidate: {selected['candidate_id'] if passers else 'none (gates failed)'}")
+    print(f"Reason: {selection_note}")
+
+    selected_params = selected["params"]
+    train_report = selected["report"]
+    selected_result = run_simulation(
+        tune_precomp, selected_params, starting_capital,
         slippage_bps=bp["slippage_bps"],
         commission_per_trade=bp["commission_per_trade"],
         weekly_contribution=bp["weekly_contribution"],
         rebalance_frequency_days=bp["rebalance_frequency_days"],
     )
 
-    val_slice = val_sl if use_val else None
-    # Gate at the SAME scope the parameters were optimized at: an active-sleeve
-    # preset tune gated at "overall_strategy" is ~77% benchmark (index_pct frozen),
-    # so the tuned sleeve's effect is diluted ~4x and the gates pass/fail on index noise.
-    train_report = run_backtest_report(precomp, avg_params, train_sl, val_slice, scope=scope)
-
-    # Incumbent = the config we're currently running, on the SAME split/scope.
-    # The tuned candidate must beat it out-of-sample, not merely clear absolute floors.
-    incumbent_params = _current_params()
-    incumbent_report = run_backtest_report(precomp, incumbent_params, train_sl, val_slice, scope=scope)
-
     if use_val and train_report.validation_result is not None and incumbent_report.validation_result is not None:
         _t, _i = train_report, incumbent_report
         _t_exc = _t.validation_result.total_return - _t.validation_benchmark_return
         _i_exc = _i.validation_result.total_return - _i.validation_benchmark_return
         print(
-            f"\nValidation window (excess vs SPY):  tuned {_t_exc:+.2%}  vs  incumbent {_i_exc:+.2%}"
-            f"   |  turnover: tuned {_t.validation_result.turnover_estimate:.2f}"
+            f"\nValidation window (excess vs SPY):  selected {_t_exc:+.2%}  vs  incumbent {_i_exc:+.2%}"
+            f"   |  turnover: selected {_t.validation_result.turnover_estimate:.2f}"
             f" vs incumbent {_i.validation_result.turnover_estimate:.2f}"
         )
 
-    validation_passed, reasons = validate_tuned_params(train_report, bp, incumbent_report)
+    validation_passed, reasons = selected["gates_passed"], list(selected["reasons"])
 
-    # Reproducibility gate: paired random windows on longer, mostly-unseen history.
-    # Only worth the extra load when the split gates passed.
+    # Reproducibility gate: paired random windows on longer, mostly-unseen
+    # history — run ONLY on the selected candidate (never on failed ones).
     if validation_passed:
         gw_cfg = bp.get("random_window_gate", {}) or {}
         if gw_cfg.get("enabled", True):
@@ -390,7 +579,7 @@ def run_auto_tune(
                 f"{gw_cfg.get('history_days', 730)}d history …"
             )
             rw_passed, rw_reasons, rw_stats = paired_random_window_gate(
-                avg_params, incumbent_params, bp, mode=mode, scope=scope,
+                selected_params, incumbent_params, bp, mode=mode, scope=scope,
             )
             if rw_stats and not rw_stats.get("skipped"):
                 print(
@@ -415,7 +604,7 @@ def run_auto_tune(
 
     use_llm = llm_review or bp.get("llm_review_enabled", False)
     llm_apply = bp.get("llm_review_apply", False)
-    final_params = avg_params
+    final_params = selected_params
 
     if use_llm:
         print(f"\n[LLM review] Sending candidates to {bp.get('llm_review_model', 'claude-sonnet-4-6')} …")
@@ -470,8 +659,8 @@ def run_auto_tune(
                     "notes": train_report.notes,
                 },
                 {
-                    "candidate_id": "avg",
-                    "alpha_params": dict(zip(PARAM_NAMES, avg_params.tolist())),
+                    "candidate_id": f"selected:{selected['candidate_id']}",
+                    "alpha_params": dict(zip(PARAM_NAMES, selected_params.tolist())),
                     "train_return": tr.total_return,
                     "train_sharpe": tr.sharpe,
                     "train_calmar": tr.calmar,
@@ -533,7 +722,9 @@ def run_auto_tune(
     else:
         print("Config NOT written (--apply requires validation to pass; use --force-apply to override).")
 
-    return avg_params, sharpe_result, calmar_result, avg_result, sharpe_params, calmar_params
+    # Tuple shape preserved for callers: slots [0]/[3] carried the blind average
+    # before the tournament; they now carry the SELECTED candidate.
+    return selected_params, sharpe_result, calmar_result, selected_result, sharpe_params, calmar_params
 
 
 # ---------------------------------------------------------------------------
