@@ -664,11 +664,6 @@ def _render_component_report(diags: dict) -> None:
 _MIN_EMBED_ROWS = 5
 
 
-def _col_or_v3(df: pd.DataFrame, base: str) -> str:
-    """Prefer the scoring_v3 column (``<base>_v3``) when present, else the v2 name."""
-    return f"{base}_v3" if f"{base}_v3" in df.columns else base
-
-
 # Stable archetype colours (mirrors ui/components/archetype_diagnostics.py).
 _ARCHETYPE_COLORS = {
     "quality_compounder":   "#4c8ef5",
@@ -839,13 +834,15 @@ def _render_3d_map(df: pd.DataFrame, metric_threshold: float, config: dict | Non
                 "Scope", SCOPE_OPTIONS, index=0, key="fm3d_scope",
             )
         with c3:
-            # Color options: only columns actually present (v3 preferred over v2).
+            # Color options: only columns actually present. (Legacy *_v3 column
+            # fallbacks removed — all on-disk snapshots are converged to peer-1
+            # canonical names via `snapshots rescore`.)
             color_candidates = [
                 "_role", "cluster", "archetype", "sector", "industry",
                 "strategy_bucket",
-                _col_or_v3(df, "value_score"), _col_or_v3(df, "quality_score"),
-                _col_or_v3(df, "momentum_score"), _col_or_v3(df, "income_score"),
-                _col_or_v3(df, "value_metric"), "final_score",
+                "value_score", "quality_score",
+                "momentum_score", "income_score",
+                "value_metric", "final_score",
             ]
             seen: set[str] = set()
             color_opts = ["(auto)"]

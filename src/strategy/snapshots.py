@@ -524,7 +524,10 @@ def rescore_snapshots(
         report.rows_missing_sector += int(df["sector"].isna().sum())
         report.rows_missing_industry += int(df["industry"].isna().sum())
 
-        before_metric = pd.to_numeric(df.get("value_metric", 0.0), errors="coerce").fillna(0.0)
+        # df.get(col, scalar) returns the bare scalar when the column is absent —
+        # .fillna would crash; default to a zero Series instead.
+        _vm_before = df["value_metric"] if "value_metric" in df.columns else pd.Series(0.0, index=df.index)
+        before_metric = pd.to_numeric(_vm_before, errors="coerce").fillna(0.0)
         before_means.append(float(before_metric.mean()))
 
         try:
@@ -536,7 +539,8 @@ def rescore_snapshots(
             report.errors.append(f"{snap_path.name}: rescore failed — {exc}")
             continue
 
-        after_metric = pd.to_numeric(df.get("value_metric", 0.0), errors="coerce").fillna(0.0)
+        _vm_after = df["value_metric"] if "value_metric" in df.columns else pd.Series(0.0, index=df.index)
+        after_metric = pd.to_numeric(_vm_after, errors="coerce").fillna(0.0)
         after_means.append(float(after_metric.mean()))
         report.nan_value_metric_rows += int(after_metric.isna().sum())
         report.rows_rescored += len(df)

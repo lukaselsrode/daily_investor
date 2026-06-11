@@ -543,8 +543,8 @@ def score_stocks_at_day(precomp: PrecomputedData, params: np.ndarray, day: int) 
     """
     Score stocks using day-specific rolling momentum features.
 
-    Routes to v2 continuous scoring when multi-factor arrays are populated,
-    otherwise falls back to v1 bucket scoring for backward compatibility.
+    Routes to continuous multifactor scoring when the multi-factor arrays are
+    populated, otherwise falls back to bin-based warm-up scoring.
     """
     raw_sw = params[:4]
     sw = _regime_tilted_weights(raw_sw, params, precomp, day)
