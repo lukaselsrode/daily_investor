@@ -243,6 +243,28 @@ class TestScheduleAndSim:
             params = set(inspect.signature(fn).parameters)
             assert not params & {"holdings", "broker", "portfolio", "positions", "shares"}
 
+    def test_dip_only_acceleration_never_below_base(self):
+        """The dip-only shape (min_multiplier=1.0 + budget acceleration): always
+        contribute base, add up to +50% on dips, NEVER reduce below baseline —
+        across flat, rally, and selloff tapes."""
+        cfg = _cfg(
+            allow_budget_acceleration=True,
+            max_weekly_contribution=600.0,
+        )
+        cfg["multiplier"].update(
+            {"min_multiplier": 1.0, "max_multiplier": 1.5, "dip_sensitivity": 1.0}
+        )
+        for tape in (_flat(400), _rally(400, gain=0.25, days=60), _selloff(400, drop=0.25, days=60)):
+            amounts, decisions = build_contribution_schedule(tape, 400, 5, 400.0, cfg)
+            contrib = amounts[amounts > 0]
+            assert contrib.min() >= 400.0 - 1e-9          # never below baseline
+            assert contrib.max() <= 600.0 + 1e-9          # extra capped at +$200
+        # Selloff tape must actually trigger extra deployment.
+        sell_amounts, _ = build_contribution_schedule(
+            _selloff(400, drop=0.25, days=60), 400, 5, 400.0, cfg,
+        )
+        assert sell_amounts.max() > 400.0
+
     def test_simulator_receives_adjusted_schedule(self, monkeypatch):
         from backtesting.simulator import get_default_params, run_simulation
         sys.path.insert(0, os.path.dirname(__file__))
