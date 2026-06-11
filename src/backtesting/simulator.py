@@ -48,6 +48,9 @@ logger = logging.getLogger(__name__)
 _TAKE_PROFIT_FLOOR_MULTIPLIER = float(SELL_RULES.get("take_profit_value_floor_multiplier", 1.2))
 # Read stop-loss from config so live and backtest always stay in sync
 _STOP_LOSS_PCT = float(SELL_RULES.get("stop_loss_pct", -0.20))
+# Defensive-regime stop tightening (regime.defensive.stop_loss_tighten) — raises
+# the stop floor on defensive days, mirroring the live SellDecisionEngine.
+_STOP_TIGHTEN = float((REGIME_PARAMS.get("defensive", {}) or {}).get("stop_loss_tighten", 0.0))
 # Archetype `allow_deeper_drawdown`: widen the catastrophic hard stop for flagged
 # archetypes so high-conviction names get room to breathe before a failure exit.
 _DEEPER_DD_FACTOR = float(SELL_RULES.get("allow_deeper_drawdown_factor", 1.5))
@@ -1723,6 +1726,10 @@ def run_simulation(
             _eff_stoploss = np.where(_arch_deepdd_arr, _STOP_LOSS_PCT * _DEEPER_DD_FACTOR, _STOP_LOSS_PCT)
         else:
             _eff_stoploss = _STOP_LOSS_PCT
+        # Defensive-regime stop tightening — same knob the live SellDecisionEngine
+        # applies (regime.defensive.stop_loss_tighten), e.g. -0.30 → -0.25.
+        if _STOP_TIGHTEN > 0 and _detect_regime(precomp, d) == "defensive":
+            _eff_stoploss = _eff_stoploss + _STOP_TIGHTEN
         stop_loss_mask = held & (pct_from_avg  <= _eff_stoploss)
         trail_mask     = held & (pct_from_peak <= _eff_stop)        & (days_held >= _eff_minhold)
         tp_mask        = held & (pct_from_avg  >= _eff_tp)          & take_profit_ok & (days_held >= _MIN_DAYS_BEFORE_TAKE_PROFIT)

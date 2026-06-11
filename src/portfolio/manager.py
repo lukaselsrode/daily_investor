@@ -532,6 +532,12 @@ class PortfolioManager:
         """
         sold: list[str] = []
         trimmed: list[str] = []
+        # Resolved once per cycle: defensive regime tightens the stop-loss floor
+        # inside SellDecisionEngine.evaluate (regime.defensive.stop_loss_tighten).
+        try:
+            _sell_regime = get_current_regime()
+        except Exception:
+            _sell_regime = None
 
         try:
             holdings = self._broker.get_holdings()
@@ -669,6 +675,7 @@ class PortfolioManager:
                 archetype_policy=_arch_policy,
                 stall_days=_stall_days,
                 weak_streak=_weak_prev.get(symbol, 0),
+                regime=_sell_regime,
             )
 
             # Carry forward the thesis-weak streak; symbols not in a weak streak (sold,

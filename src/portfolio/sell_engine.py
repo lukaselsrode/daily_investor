@@ -29,6 +29,7 @@ from util import (
     CONVICTION_HOLDS,
     EXIT_DECISION_PARAMS,
     METRIC_THRESHOLD,
+    REGIME_PARAMS,
     SELL_RULES,
     safe_float,
 )
@@ -60,6 +61,7 @@ class SellDecisionEngine:
         archetype_policy: ArchetypePolicy | None = None,
         stall_days: int | None = None,
         weak_streak: int = 0,
+        regime: str | None = None,
     ) -> SellDecision:
         # Derive percent_change — Robinhood returns it as a percentage string e.g. "-15.3"
         percent_change: float | None = None
@@ -102,6 +104,15 @@ class SellDecisionEngine:
         sell_yt     = SELL_RULES["sell_yield_trap"]
         sell_lq     = SELL_RULES["sell_low_quality_below"]
         min_days    = SELL_RULES["min_days_held_before_value_exit"]
+
+        # Defensive-regime stop tightening (regime.defensive.stop_loss_tighten):
+        # raise the stop floor by the configured amount in a defensive tape
+        # (e.g. -0.30 → -0.25), cutting losers faster when the regime says
+        # de-risk. This knob existed in config/UI but was never consumed.
+        if regime == "defensive":
+            _tighten = float(REGIME_PARAMS.get("defensive", {}).get("stop_loss_tighten", 0.0))
+            if _tighten > 0:
+                stop_loss = stop_loss + _tighten
 
         # Archetype-aware overrides (position management only — hard sells are unchanged)
         _arch_enabled = ARCHETYPE_PARAMS.get("enabled", False)
@@ -378,6 +389,7 @@ def evaluate_sell_candidate(
     archetype_policy: ArchetypePolicy | None = None,
     stall_days: int | None = None,
     weak_streak: int = 0,
+    regime: str | None = None,
 ) -> dict:
     """
     Module-level wrapper around SellDecisionEngine.evaluate() that returns a
@@ -386,6 +398,7 @@ def evaluate_sell_candidate(
     """
     d = _engine.evaluate(
         symbol, holding, metrics_row, peak_price, archetype_policy, stall_days, weak_streak,
+        regime=regime,
     )
     return {
         "should_sell":    d.should_sell,
