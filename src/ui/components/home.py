@@ -84,7 +84,13 @@ def render() -> None:
     st.subheader("Active strategy config")
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        st.metric("metric_threshold", cfg.get("metric_threshold", "—"))
+        # metric_threshold anchors the EXIT ladder; the live ENTRY gate is the
+        # decoupled candidate_selection.entry_threshold_override (2026-06).
+        _entry_gate = (cfg.get("candidate_selection", {}) or {}).get(
+            "entry_threshold_override"
+        ) or cfg.get("metric_threshold", "—")
+        st.metric("entry gate (live)", _entry_gate)
+        st.metric("metric_threshold (exit anchor)", cfg.get("metric_threshold", "—"))
         st.metric("index_pct", cfg.get("index_pct", "—"))
     with c2:
         sw = cfg.get("score_weights", {})
@@ -107,8 +113,13 @@ def render() -> None:
     if df is None:
         st.info("No agg_data found. Run `daily-investor run` or `daily-investor run --skip-data` first.")
     else:
-        thresh = cfg.get("metric_threshold", 0.0)
-        buy_candidates = df[df["value_metric"] >= thresh] if "value_metric" in df.columns else df.head(0)
+        # Use the LIVE entry gate (entry_threshold_override), not the exit
+        # anchor — metric_threshold (1.15) is unreachable under peer-percentile
+        # scoring, so gating on it showed "Buy candidates: 0" every day.
+        thresh = (cfg.get("candidate_selection", {}) or {}).get(
+            "entry_threshold_override"
+        ) or cfg.get("metric_threshold", 0.0)
+        buy_candidates = df[df["value_metric"] >= float(thresh)] if "value_metric" in df.columns else df.head(0)
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Universe size", len(df))
         c2.metric("Buy candidates", len(buy_candidates))

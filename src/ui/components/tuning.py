@@ -156,7 +156,7 @@ def render() -> None:
             st.metric("Return", f"{result.calmar_result.total_return:+.1%}")
             st.metric("Calmar", f"{result.calmar_result.calmar:+.3f}")
         with c3:
-            st.markdown("**Averaged result**")
+            st.markdown("**Tournament-selected result**")
             st.metric("Return", f"{result.avg_result.total_return:+.1%}")
             st.metric("Sharpe", f"{result.avg_result.sharpe:+.3f}")
             st.metric("Calmar", f"{result.avg_result.calmar:+.3f}")

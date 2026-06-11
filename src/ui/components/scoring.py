@@ -41,7 +41,11 @@ def render() -> None:
         return
 
     cfg = load_config_raw()
-    thresh = cfg.get("metric_threshold", 0.0)
+    # Live entry gate (decoupled from metric_threshold, which anchors exits).
+    thresh = (cfg.get("candidate_selection", {}) or {}).get(
+        "entry_threshold_override"
+    ) or cfg.get("metric_threshold", 0.0)
+    thresh = float(thresh)
 
     # Cross-reference holdings CSV to tag owned symbols
     holdings_df = load_latest_csv("holdings")
@@ -51,7 +55,7 @@ def render() -> None:
     if "symbol" in df.columns:
         df["owned"] = df["symbol"].isin(owned_symbols)
 
-    st.caption(f"Source: agg_data {data_date('agg_data')} | {len(df)} symbols | composite score threshold = {thresh} | owned: {len(owned_symbols)}")
+    st.caption(f"Source: agg_data {data_date('agg_data')} | {len(df)} symbols | live entry gate = {thresh} | owned: {len(owned_symbols)}")
 
     # ---- Filters ----------------------------------------------------------
     with st.expander("Filters", expanded=True):

@@ -1308,7 +1308,7 @@ def _render_scipy_mode(scope: str = "overall_strategy", preset: str | None = Non
             _multi_equity_chart([
                 ("Sharpe-opt", shr, "#4c8ef5"),
                 ("Calmar-opt", cal, "#f5a04c"),
-                ("Averaged",   avg, "#5dbb6b"),
+                ("Selected",   avg, "#5dbb6b"),
             ])
 
         # --- Weight change charts ---
@@ -1318,7 +1318,7 @@ def _render_scipy_mode(scope: str = "overall_strategy", preset: str | None = Non
         candidates = [
             ("Sharpe-opt", result.sharpe_params, "#4c8ef5"),
             ("Calmar-opt", result.calmar_params, "#f5a04c"),
-            ("Averaged",   result.avg_params,    "#5dbb6b"),
+            ("Selected",   result.avg_params,    "#5dbb6b"),
         ]
 
         st.subheader("Score Weight Changes")
@@ -1332,8 +1332,8 @@ def _render_scipy_mode(scope: str = "overall_strategy", preset: str | None = Non
         import pandas as pd
         df = _build_param_df(cur, [(lbl, arr) for lbl, arr, _ in candidates], active_set)
         disp = df.copy()
-        num_cols = ["Current", "Sharpe-opt", "Calmar-opt", "Averaged"]
-        delta_cols = ["Δ Sharpe-opt", "Δ Calmar-opt", "Δ Averaged"]
+        num_cols = ["Current", "Sharpe-opt", "Calmar-opt", "Selected"]
+        delta_cols = ["Δ Sharpe-opt", "Δ Calmar-opt", "Δ Selected"]
         for col in num_cols:
             if col in disp.columns:
                 disp[col] = df[col].map("{:.4f}".format)
