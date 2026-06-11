@@ -1051,6 +1051,23 @@ class PortfolioManager:
                 if df_eligible.empty:
                     logger.warning("No candidates remain after active-sleeve fund filter")
                     return [], df["symbol"].tolist(), []
+        # Liquidity pre-filter: the min_liquidity_volume gate is deterministic, so
+        # apply it BEFORE candidates consume sentiment-batch slots (RiskManager.can_buy
+        # still re-checks per-order as defense-in-depth). Previously illiquid names
+        # earned BUY verdicts from Claude and were then skipped every time.
+        if "volume" in df_eligible.columns:
+            _min_vol = RISK_LIMITS["min_liquidity_volume"]
+            _vols = pd.to_numeric(df_eligible["volume"], errors="coerce").fillna(0.0)
+            _illiquid = df_eligible.loc[_vols < _min_vol, "symbol"].tolist()
+            if _illiquid:
+                df_eligible = df_eligible[_vols >= _min_vol].copy()
+                logger.info(
+                    "Liquidity pre-filter: excluded %d symbols below %s ADV (e.g. %s)",
+                    len(_illiquid), f"{_min_vol:,.0f}", _illiquid[:8],
+                )
+                if df_eligible.empty:
+                    logger.warning("No candidates remain after liquidity pre-filter")
+                    return [], df["symbol"].tolist(), []
         if "strategy_bucket" in df_eligible.columns and CONTRARIAN_PENALTY_PARAMS["enabled"]:
             contrarian_mask = df_eligible["strategy_bucket"] == "contrarian_watchlist"
             contrarian_syms = df_eligible.loc[contrarian_mask, "symbol"].tolist()

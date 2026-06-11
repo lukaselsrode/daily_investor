@@ -131,3 +131,37 @@ class TestSentimentRunCache:
         if not is_api_error_sentinel(sentinel):
             pm._sentiment_run_cache[("buy", "AAA")] = sentinel
         assert ("buy", "AAA") not in pm._sentiment_run_cache
+
+
+class TestLiquidityPrefilter:
+
+    def test_illiquid_candidates_never_reach_sentiment(self, monkeypatch):
+        """Deterministic volume gate runs BEFORE the Claude batch — illiquid
+        names must not consume sentiment slots (2026-06-11: BLX/SUBCY earned
+        BUY verdicts then were skipped on volume every iteration)."""
+        import pandas as pd
+
+        from util import RISK_LIMITS
+
+        pm = _pm(cash=10_000.0)
+        queried: list[list[str]] = []
+
+        def fake_batch(stocks_data, action="buy", regime=None):
+            queried.append([s["symbol"] for s in stocks_data])
+            return {s["symbol"]: {"action": "HOLD", "sentiment": "neutral",
+                                  "confidence": 50.0, "reasoning": "x"}
+                    for s in stocks_data}
+
+        import data.sentiment as ds
+        monkeypatch.setattr(ds, "get_batch_sentiment_recommendations", fake_batch)
+
+        min_vol = RISK_LIMITS["min_liquidity_volume"]
+        df = pd.DataFrame({
+            "symbol":       ["ZZZQL", "ZZZQH"],
+            "value_metric": [0.9, 0.85],
+            "volume":       [min_vol / 10.0, min_vol * 10.0],  # illiquid vs liquid
+        })
+        pm.buy_cycle(df, is_first_iteration=True, regime="neutral", effective_index_pct=0.77)
+        seen = set().union(*queried) if queried else set()
+        assert "ZZZQL" not in seen   # illiquid name never queried
+        assert "ZZZQH" in seen       # liquid name still flows through
