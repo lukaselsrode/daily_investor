@@ -488,6 +488,15 @@ backtest:
   starting_capital: 5000.0
   weekly_contribution: 400.0
   rebalance_frequency_days: 5
+  # Exit-evaluation cadence in the simulator. Live execution sells ONLY on the
+  # weekly Wednesday run — a mid-week stop breach waits — so the legacy daily
+  # exit checks (1) were optimistic about crash protection. 5 mirrors live.
+  # 2026-06-12 A/B (applied config, all windows + stress episodes): bias was
+  # negligible for the LOW-CHURN safe config (excess within ±0.34pp, drawdown
+  # ~0.0pp incl. GFC/COVID) -> flipped to live-faithful. NOTE: a greedy
+  # momentum sleeve with tighter effective stops is where daily exits WOULD
+  # flatter results — keep 5 for all sleeve/dual-config validation.
+  exit_check_frequency_days: 5
   deploy_initial_cash: true
   reinvest_sell_proceeds: true
   train_pct: 0.7

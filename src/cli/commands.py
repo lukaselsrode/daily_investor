@@ -79,6 +79,11 @@ def cmd_fetch_data() -> None:
             if holdings:
                 save_holdings_csv(holdings)
                 logger.info("Holdings saved: %d positions", len(holdings))
+                # Daily watchtower: execution is weekly (Wednesday), so breaches,
+                # near-stops, profit levels, and regime transitions are surfaced
+                # HERE — the human is the intra-week circuit breaker.
+                from reporting.position_watch import run_position_watch
+                run_position_watch(holdings)
             else:
                 logger.warning("0 holdings returned — snapshot NOT overwritten")
         except Exception as exc:

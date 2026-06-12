@@ -446,6 +446,10 @@ BACKTEST_PARAMS: dict = {
     "apply_discretionary_exclusions": bool(_bt.get("apply_discretionary_exclusions", True)),
     "weekly_contribution":          float(_bt.get("weekly_contribution",        400.0)),
     "rebalance_frequency_days":     int(_bt.get("rebalance_frequency_days",     5)),
+    # Exit-evaluation cadence (1 = legacy daily exits, optimistic; 5 = live
+    # weekly-Wednesday fidelity). Consumed by run_simulation when its
+    # exit_check_frequency_days param is None.
+    "exit_check_frequency_days":    int(_bt.get("exit_check_frequency_days",    1)),
     "deploy_initial_cash":          bool(_bt.get("deploy_initial_cash",         True)),
     "reinvest_sell_proceeds":       bool(_bt.get("reinvest_sell_proceeds",      True)),
     "use_out_of_sample_validation": bool(_bt.get("use_out_of_sample_validation",True)),

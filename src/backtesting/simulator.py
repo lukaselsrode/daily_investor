@@ -996,6 +996,7 @@ def run_simulation(
     commission_per_trade: float = 0.0,
     weekly_contribution: float = 0.0,
     rebalance_frequency_days: int = 5,
+    exit_check_frequency_days: int | None = None,
     cs_params: dict | None = None,
     archetype_aware: bool = False,
     cluster_tracking: bool = False,
@@ -1060,6 +1061,12 @@ def run_simulation(
     _rebal_override = rebalance_cfg_from_params(params)
     if "rebalance_frequency_days" in _rebal_override:
         rebalance_frequency_days = int(_rebal_override["rebalance_frequency_days"])
+    # Exit-evaluation cadence. Live execution sells ONLY on the weekly run — a
+    # mid-week stop breach waits for Wednesday — so daily exit checks (the
+    # legacy behavior, =1) are optimistic about crash protection. 5 mirrors the
+    # live cadence. None -> config backtest.exit_check_frequency_days.
+    if exit_check_frequency_days is None:
+        exit_check_frequency_days = int(BACKTEST_PARAMS.get("exit_check_frequency_days", 1))
     _dae_floors.update(exit_floors_cfg_from_params(params))
 
     # ── Contribution-timing overlay (buy-the-dip weekly contribution sizing) ──
@@ -1695,6 +1702,17 @@ def run_simulation(
         days_held      = np.where(stock_day_bought >= 0, d - stock_day_bought, 0)
         take_profit_ok = current_scores < metric_threshold * _TAKE_PROFIT_FLOOR_MULTIPLIER
 
+        # Exits fire only on exit-check days (live sells happen on the weekly
+        # run; a mid-week breach waits). The final day always evaluates so the
+        # terminal mark is never an artificial hold. Observational state (peaks,
+        # stall clocks, streaks) still updates daily above/below.
+        _exits_today = (
+            exit_check_frequency_days <= 1
+            or d % exit_check_frequency_days == 0
+            or d == n_days - 1
+        )
+        _exit_held = held & _exits_today
+
         _eff_tp      = _arch_take_profit_arr   if _arch_take_profit_arr   is not None else take_profit_pct
         _eff_stop    = _arch_trailing_stop_arr if _arch_trailing_stop_arr is not None else trailing_stop
         _eff_harvest = _arch_harvest_arr       if _arch_harvest_arr       is not None else _HARVEST_PROFIT_THRESHOLD
@@ -1711,7 +1729,7 @@ def run_simulation(
             stock_last_progress_day = np.where(progress_mask, d, stock_last_progress_day)
             stall_days = np.where(stock_last_progress_day >= 0, d - stock_last_progress_day, 0)
             oc_mask = (
-                held
+                _exit_held
                 & ~progress_mask
                 & (stall_days >= _oc_stall_max_days)
                 & (days_held >= _eff_minhold)
@@ -1730,9 +1748,9 @@ def run_simulation(
         # applies (regime.defensive.stop_loss_tighten), e.g. -0.30 → -0.25.
         if _STOP_TIGHTEN > 0 and _detect_regime(precomp, d) == "defensive":
             _eff_stoploss = _eff_stoploss + _STOP_TIGHTEN
-        stop_loss_mask = held & (pct_from_avg  <= _eff_stoploss)
-        trail_mask     = held & (pct_from_peak <= _eff_stop)        & (days_held >= _eff_minhold)
-        tp_mask        = held & (pct_from_avg  >= _eff_tp)          & take_profit_ok & (days_held >= _MIN_DAYS_BEFORE_TAKE_PROFIT)
+        stop_loss_mask = _exit_held & (pct_from_avg  <= _eff_stoploss)
+        trail_mask     = _exit_held & (pct_from_peak <= _eff_stop)        & (days_held >= _eff_minhold)
+        tp_mask        = _exit_held & (pct_from_avg  >= _eff_tp)          & take_profit_ok & (days_held >= _MIN_DAYS_BEFORE_TAKE_PROFIT)
         # Score-below-threshold soft-exit candidates. The live SellDecisionEngine
         # raises a soft EXIT here; the DecisionAdjustmentEngine then runs its full
         # tree (confirmed-breakdown / harvest / trim / review / watch / exit) before
@@ -1740,7 +1758,7 @@ def run_simulation(
         # (hard_exit_score_below, positive_momentum/strong_quality/thesis_intact
         # review floors) are load-bearing — a weak score alone never forces an exit.
         _weak_cand = (
-            held
+            _exit_held
             & (current_scores < sell_weak_below)
             & (days_held >= _MIN_DAYS_HELD_BEFORE_VALUE_EXIT)
         )
@@ -1862,7 +1880,7 @@ def run_simulation(
         # Sells harvest_fraction (default 40%) of the position and routes
         # proceeds to ETFs, matching the live HarvestManager behaviour.
         harvest_mask = (
-            held
+            _exit_held
             & ~sell_mask
             & (pct_from_avg >= _eff_harvest)
             & (days_held >= _eff_minhold)
@@ -1923,7 +1941,7 @@ def run_simulation(
         # ── Trim exits (partial position reduction) ──────────────────────────
         if _trim_enabled:
             trim_mask = (
-                held
+                _exit_held
                 & ~sell_mask
                 & ~harvest_mask
                 & (pct_from_avg >= _trim_min_gain)
