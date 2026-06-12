@@ -9,10 +9,17 @@ dividend_threshold: 0.03
 # validation identical); 1.15 kept as the validated value. NOTE: a backtest that
 # first blamed 0.75 for a -10% validation swing was contaminated by a stripped
 # agg_data snapshot (see data/market.py persist-on-refresh-only fix), not by this.
-metric_threshold: 1.15
+# 2026-06-11: 1.15 -> 0.8947 — bear-validated tournament candidate applied after
+# passing the full symmetric gate chain + stress gauntlet (exit anchor now:
+# trim ~0.76, TP floor ~1.07). Live entry still decoupled via
+# candidate_selection.entry_threshold_override.
+metric_threshold: 0.8947
 selloff_threshold: 30
 weekly_investment: 400
-index_pct: 0.8465
+# 2026-06-11: 0.8465 -> 0.9486 (same gate-passed candidate) — the bear-aware
+# optimum holds a larger SPY core; the active sleeve shrinks to ~5% in the base
+# regime. Regime overrides elsewhere are untouched.
+index_pct: 0.9486
 # Buy-the-dip contribution-sizing overlay (2026-06). Sizes each week's NEW cash
 # from short-term benchmark conditions while a rolling window keeps the monthly
 # total near target. Contribution sizing ONLY — never sells or alters holdings.
@@ -92,11 +99,15 @@ etfs:
 # junk that breadth adds). CAVEAT: quality_scores are a static current snapshot, so the quality
 # benefit is partly look-ahead-inflated (quality persists ~0.7 yr/yr, so partial not total);
 # +0.321 is an optimistic ceiling. PROVISIONAL pending point-in-time quality + survivorship-free data.
+# 2026-06-11: rebalanced to the income/trend-led bear-validated candidate
+# (value/quality/income/momentum 0.064/0.323/0.051/0.562 -> below). Selected by
+# the 1250d tournament (train includes the 2022 bear), passed rw gate, symmetric
+# multi-horizon confirm, and the stress gauntlet (GFC'08..2022) vs the incumbent.
 score_weights:
-  value: 0.064
-  quality: 0.323
-  income: 0.051
-  momentum: 0.562
+  value: 0.1354
+  quality: 0.1263
+  income: 0.5747
+  momentum: 0.1636
 valuation_guardrails:
   max_pe_component: 5.0
   max_pb_component: 5.45
@@ -153,12 +164,15 @@ sell_rules:
   # drawdown even improves (-25.6%->-24.9%) — wider stop reduces false exits
   # on names that would have recovered and compounded.
   stop_loss_pct: -0.3
-  trailing_stop_pct: -0.39
+  # 2026-06-11: -0.39 -> -0.4405 (bear-validated candidate; rode winners looser).
+  trailing_stop_pct: -0.4405
   # take_profit_pct raised to 1.50 (2026-05): with harvest now at +50%,
   # full-exit threshold raised to +150% to avoid collision and let true
   # compounders run well past harvest. Section 2 sweep showed +150% ≡ +300%
   # ≡ OFF (Sharpe 1.24, holdout +1.1%) — all equivalent once harvest fires first.
-  take_profit_pct: 1.5
+  # 2026-06-11: 1.50 -> 0.8042 (bear-validated candidate). Still above the +50%
+  # harvest, so harvest keeps firing first; full exit now at +80%.
+  take_profit_pct: 0.8042
   take_profit_value_floor_multiplier: 1.2
   # 2026-06: 0.37 -> -0.18 (regime-robust exit-ladder DE tune). Was dumping merely-okay names
   # (score 0..0.37) on weakness; now only sells the genuinely-bad (< -0.18), holding the rest.
@@ -166,7 +180,9 @@ sell_rules:
   # look-ahead / survivorship dependency — confirms the 'stop selling winners' finding. stop_loss
   # still cuts price-crashers; this only relaxes the SCORE-based exit. Other ladder knobs
   # (take_profit/trailing/stop_loss) optimized to ~unchanged (noise) and left as-is.
-  sell_weak_value_below: -0.18
+  # 2026-06-11: -0.18 -> -0.0852 (bear-validated candidate; slightly stricter
+  # weak-score exit than -0.18, still far looser than the old +0.37).
+  sell_weak_value_below: -0.0852
   minimum_days_before_take_profit: 10
   sell_yield_trap: true
   sell_low_quality_below: -0.25
@@ -340,7 +356,7 @@ scoring:
     value:
       enabled: true
       peer_relative: true
-      pe_weight: 0.7
+      pe_weight: 0.8757  # 2026-06-11: 0.70 -> 0.8757 (bear-validated candidate)
       pb_weight: 0.3
       distress:
         pe_threshold: 5.0
@@ -370,12 +386,16 @@ scoring:
     # numbers are inflated (they reward high-flyers that survived) while the bear regime —
     # where blowups actually happen — is the more honest test. Longer-horizon momentum avoids
     # the recent-rocket cohort the data hides. PROVISIONAL until survivorship-free data exists.
+    # 2026-06-11: shifted from rs_6m-led to TREND-STRUCTURE-led (bear-validated
+    # candidate: rs_3m/rs_6m/risk_adj/trend/r1m 0.20/0.55/0.22/0.01/0.0 -> below).
+    # Same survivorship-aware spirit — trend confirmation over raw relative
+    # strength; return_5d untouched (moved <1% in the tune).
     weights:
-      rs_3m: 0.20
-      rs_6m: 0.55
-      risk_adj_3m: 0.22
-      trend_structure: 0.01
-      return_1m: 0.0
+      rs_3m: 0.0488
+      rs_6m: 0.3096
+      risk_adj_3m: 0.1697
+      trend_structure: 0.4128
+      return_1m: 0.0072
       return_5d: 0.02
     penalties:
       falling_knife_3m_threshold: -0.15

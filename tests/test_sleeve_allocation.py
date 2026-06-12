@@ -360,7 +360,12 @@ class TestSentimentFailureHoldsCash:
             raise RuntimeError("Claude API down")
         monkeypatch.setattr(sentiment_mod, "get_batch_sentiment_recommendations", _boom)
 
-        broker = _broker(cash=1000.0, stock_prices={"AAA": 50.0, "BBB": 50.0})
+        # Cash sized from LIVE config so the active sleeve always clears the
+        # buy-phase allocation pre-check (which skips sentiment entirely when
+        # the best allocation is below min_order) — a fixed $1,000 silently
+        # stopped exercising sentiment when index_pct was re-tuned upward.
+        cash = 20.0 * RISK_LIMITS["min_order_amount"] / max(1.0 - INDEX_PCT, 0.02)
+        broker = _broker(cash=cash, stock_prices={"AAA": 50.0, "BBB": 50.0})
         pm = self._pm_sentiment(broker)
 
         # Simulate the buggy/aggressive sweep that would dump ALL remaining cash
@@ -391,7 +396,12 @@ class TestSentimentFailureHoldsCash:
             sentiment_mod, "get_batch_sentiment_recommendations", _all_sentinels
         )
 
-        broker = _broker(cash=1000.0, stock_prices={"AAA": 50.0, "BBB": 50.0})
+        # Cash sized from LIVE config so the active sleeve always clears the
+        # buy-phase allocation pre-check (which skips sentiment entirely when
+        # the best allocation is below min_order) — a fixed $1,000 silently
+        # stopped exercising sentiment when index_pct was re-tuned upward.
+        cash = 20.0 * RISK_LIMITS["min_order_amount"] / max(1.0 - INDEX_PCT, 0.02)
+        broker = _broker(cash=cash, stock_prices={"AAA": 50.0, "BBB": 50.0})
         pm = self._pm_sentiment(broker)
 
         # Simulate the buggy/aggressive sweep that would dump ALL remaining cash

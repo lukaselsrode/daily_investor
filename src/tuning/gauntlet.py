@@ -127,10 +127,13 @@ def stress_gauntlet(
             rows.append(row)
             continue
 
+        # Listed = finite price at episode start; the tradeable mask alone is
+        # True from axis start (it only encodes the post-delist tail), so it
+        # must be ANDed with price availability or pre-listing names count.
+        listed = np.isfinite(np.asarray(precomp.prices[i0], dtype=float))
         if precomp.tradeable_mask_daily is not None:
-            n_avail = int(np.asarray(precomp.tradeable_mask_daily[i0]).sum())
-        else:
-            n_avail = int(np.isfinite(np.asarray(precomp.prices[i0], dtype=float)).sum())
+            listed &= np.asarray(precomp.tradeable_mask_daily[i0], dtype=bool)
+        n_avail = int(listed.sum())
         row["n_symbols"] = n_avail
         row["n_dead"] = _dead_names_in_window(start, end)
         if n_avail < min_symbols:
