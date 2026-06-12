@@ -105,6 +105,7 @@ def slice_precomp(precomp: PrecomputedData, s: slice) -> PrecomputedData:
         regime_labels_daily=_opt(precomp.regime_labels_daily),
         vix_prices=_opt(precomp.vix_prices),
         tradeable_mask_daily=_opt(precomp.tradeable_mask_daily),
+        dates=tuple(precomp.dates[s]) if precomp.dates is not None else None,
     )
 
 

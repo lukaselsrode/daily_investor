@@ -76,6 +76,10 @@ class PrecomputedData(NamedTuple):
     # delist date so held positions can mark, but they must never be BOUGHT there. None →
     # all finite-priced symbols are tradeable (default yfinance path).
     tradeable_mask_daily: np.ndarray | None = None
+    # (n_days,) ISO date strings aligned to rows — the benchmark trading calendar.
+    # Enables date-anchored slicing (stress-gauntlet episodes). None only in
+    # synthetic test fixtures that construct PrecomputedData directly.
+    dates: tuple[str, ...] | None = None
 
 
 @dataclass

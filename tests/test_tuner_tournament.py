@@ -155,6 +155,11 @@ def _wire_auto_tune(monkeypatch, metrics_for_params, sharpe_vec, calmar_vec):
         captured["mh_params"] = np.asarray(params).copy()
         return True, [], []
     monkeypatch.setattr(tt, "multi_horizon_confirm", fake_mh)
+
+    def fake_sg(params, incumbent, bp, **kw):
+        captured["sg_params"] = np.asarray(params).copy()
+        return True, [], []
+    monkeypatch.setattr(tt, "stress_gauntlet", fake_sg)
     monkeypatch.setattr(tt, "apply_config_params", lambda p: captured["applied"].append(np.asarray(p).copy()))
 
     fake_precomp = MagicMock()
@@ -533,15 +538,27 @@ class TestMultiHorizonConfirm:
         assert passed, reasons
         assert [r["window"] for r in rows] == [90, 180, 365, 730]
 
-    def test_short_window_material_regression_blocks(self, monkeypatch):
+    def test_regression_beyond_catastrophe_tolerance_blocks(self, monkeypatch):
         from util import BACKTEST_PARAMS as bp
-        tol = float(bp["multi_horizon_confirm"].get("short_regress_tolerance", 0.02))
+        tol = float(bp["multi_horizon_confirm"].get("regress_tolerance", 0.04))
         sims = self._uniform(0.05, 0.05)
         sims[(90, "sel")] = self._mh_sim(0.05 - tol - 0.01)  # just past tolerance
         tt, sel = self._wire_mh(monkeypatch, sims)
         passed, reasons, _ = tt.multi_horizon_confirm(sel, np.full(4, 2.0), bp)
         assert not passed
         assert any("90d" in r for r in reasons)
+
+    def test_single_window_noise_regression_passes(self, monkeypatch):
+        """The regime-sample rule: a sub-tolerance regression on ONE window (the
+        old 180d recency-veto scenario) must NOT block a candidate that wins
+        everywhere else — no single window gets a fine-grained veto."""
+        from util import BACKTEST_PARAMS as bp
+        tol = float(bp["multi_horizon_confirm"].get("regress_tolerance", 0.04))
+        sims = self._uniform(0.08, 0.05)                       # wins 90/365/730
+        sims[(180, "sel")] = self._mh_sim(0.05 - tol + 0.01)   # inside tolerance
+        tt, sel = self._wire_mh(monkeypatch, sims)
+        passed, reasons, _ = tt.multi_horizon_confirm(sel, np.full(4, 2.0), bp)
+        assert passed, reasons
 
     def test_long_window_catastrophe_blocks(self, monkeypatch):
         from util import BACKTEST_PARAMS as bp

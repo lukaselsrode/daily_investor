@@ -24,6 +24,7 @@ from .constants import (
     _effective_bounds,
     _get_active_indices,
 )
+from .gauntlet import print_gauntlet_table, stress_gauntlet
 from .objective import _run_single
 from .reports import (
     apply_config_params,
@@ -216,12 +217,16 @@ def multi_horizon_confirm(
     turnover. Automates the manual "confirm with independent backtests before
     trusting a tune" step.
 
-    Rules (config: backtest.multi_horizon_confirm):
-      • short windows (<=120d): excess may regress at most short_regress_tolerance
-      • mid windows (<=400d):   improve-or-preserve (mid_regress_tolerance slack)
-      • long windows:           no catastrophic regime failure — excess regression
+    Rules (config: backtest.multi_horizon_confirm). Windows are REGIME SAMPLES,
+    treated symmetrically — no single window gets a fine-grained veto (the old
+    0.5% improve-or-preserve rule on 180d was ~0.1 sigma of tracking error, a
+    coin-flip that structurally entrenched whatever regime the incumbent was
+    last tuned in):
+      • sub-400d windows: excess may regress at most regress_tolerance
+        (catastrophe-scale, ~0.7 sigma at 180d)
+      • long windows (>400d): no catastrophic regime failure — excess regression
         beyond long_catastrophe_excess OR drawdown deeper by more than
-        long_catastrophe_drawdown fails
+        long_catastrophe_drawdown fails (~ the same z-score via sqrt-t scaling)
       • every window: turnover within max_turnover_multiple of the incumbent
 
     Returns (passed, reasons, rows). Disabled or no usable windows → passes
@@ -234,8 +239,7 @@ def multi_horizon_confirm(
     from backtesting.regime_scope import slice_precomp
 
     windows = sorted(int(w) for w in cfg.get("windows", [90, 180, 365, 730]))
-    short_tol = float(cfg.get("short_regress_tolerance", 0.02))
-    mid_tol = float(cfg.get("mid_regress_tolerance", 0.005))
+    regress_tol = float(cfg.get("regress_tolerance", 0.04))
     long_excess = float(cfg.get("long_catastrophe_excess", 0.10))
     long_dd = float(cfg.get("long_catastrophe_drawdown", 0.05))
     turn_mult = float(backtest_cfg.get("max_turnover_multiple", 2.0))
@@ -275,18 +279,13 @@ def multi_horizon_confirm(
         }
         rows.append(row)
 
-        tier = "short" if w <= 120 else ("mid" if w <= 400 else "long")
-        if tier == "short" and delta < -short_tol:
-            reasons.append(
-                f"{w}d: selected excess {sel_exc:+.2%} regresses incumbent {inc_exc:+.2%} "
-                f"by more than {short_tol:.1%}"
-            )
-        elif tier == "mid" and delta < -mid_tol:
-            reasons.append(
-                f"{w}d: selected excess {sel_exc:+.2%} fails improve-or-preserve vs "
-                f"incumbent {inc_exc:+.2%} (tolerance {mid_tol:.1%})"
-            )
-        elif tier == "long":
+        if w <= 400:
+            if delta < -regress_tol:
+                reasons.append(
+                    f"{w}d: selected excess {sel_exc:+.2%} regresses incumbent {inc_exc:+.2%} "
+                    f"beyond catastrophe tolerance {regress_tol:.1%}"
+                )
+        else:
             if delta < -long_excess:
                 reasons.append(
                     f"{w}d: catastrophic excess regression {delta:+.2%} (limit -{long_excess:.0%})"
@@ -486,6 +485,20 @@ def _post_selection_gates(
             _print_multi_horizon_table(mh_rows)
             validation_passed = mh_passed
             reasons.extend(mh_reasons)
+
+    if validation_passed:
+        sg_cfg = backtest_cfg.get("stress_gauntlet", {}) or {}
+        if sg_cfg.get("enabled", False):
+            print(
+                "\nStress gauntlet: selected vs incumbent through named "
+                "bear/stress episodes (falsification, not win-requirements) …"
+            )
+            sg_passed, sg_reasons, sg_rows = stress_gauntlet(
+                selected_params, incumbent_params, backtest_cfg, mode=mode, scope=scope,
+            )
+            print_gauntlet_table(sg_rows)
+            validation_passed = sg_passed
+            reasons.extend(sg_reasons)
 
     return validation_passed, reasons
 

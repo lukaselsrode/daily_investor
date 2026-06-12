@@ -485,6 +485,10 @@ BACKTEST_PARAMS: dict = {
     # selected tournament candidate is compared against the incumbent across
     # trailing windows AFTER the split + random-window gates pass.
     "multi_horizon_confirm":            dict(_bt.get("multi_horizon_confirm",            {}) or {}),
+    # Stress-episode falsification gate (tuning.gauntlet.stress_gauntlet): the
+    # selected candidate must SURVIVE named historical stress regimes relative
+    # to the incumbent (catastrophe floors), not win them. Runs LAST.
+    "stress_gauntlet":                  dict(_bt.get("stress_gauntlet",                  {}) or {}),
 }
 
 # ---------------------------------------------------------------------------

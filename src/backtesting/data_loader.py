@@ -573,6 +573,7 @@ def load_and_precompute(
         excluded_mask=excluded_mask_arr,
         vix_prices=vix_prices,
         tradeable_mask_daily=tradeable_mask_daily,
+        dates=tuple(str(pd.Timestamp(d).date()) for d in closes.index),
     )
     # Attach point-in-time regime labels computed on the FULL load, where the 200-day MA
     # context exists. Windows sliced at offset k >= 200 then carry correct labels instead

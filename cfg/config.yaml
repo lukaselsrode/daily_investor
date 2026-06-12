@@ -504,16 +504,46 @@ backtest:
   de_turnover_penalty_weight: 1.0
   # Final multi-horizon confirmation (runs ONLY after the split + incumbent +
   # random-window gates all pass): selected vs incumbent across trailing
-  # windows. 90d must not materially regress; 180/365d must improve-or-preserve;
-  # 730d must not reveal a catastrophic regime failure; turnover stays within
+  # windows. Windows are REGIME SAMPLES, treated symmetrically (2026-06-11
+  # decision): the old short/mid recency ladder (0.5% improve-or-preserve on
+  # 180d) was ~0.1 sigma of tracking error — a coin-flip — and structurally
+  # entrenched whatever regime the incumbent was last tuned in (it vetoed two
+  # consecutive candidates that won every other window, the rw gate, drawdown
+  # and churn). Sub-400d windows now share one catastrophe-scale tolerance
+  # (~0.7 sigma at 180d); 730d keeps the long catastrophe checks (0.10 is the
+  # same z-score at 730d via sqrt-t scaling). Turnover stays within
   # max_turnover_multiple on every window. Fail -> config NOT written.
   multi_horizon_confirm:
     enabled: true
     windows: [90, 180, 365, 730]
-    short_regress_tolerance: 0.02
-    mid_regress_tolerance: 0.005
+    regress_tolerance: 0.04
     long_catastrophe_excess: 0.10
     long_catastrophe_drawdown: 0.05
+  # Stress gauntlet (final gate after multi-horizon): falsification, not
+  # win-requirements. At our sample size (~5-20y) excess point estimates cannot
+  # rank strategies; what a small sample CAN do is refute fragility. The
+  # candidate must SURVIVE each named stress regime relative to the incumbent
+  # (catastrophe floors on excess/drawdown/turnover), not win it.
+  # SURVIVORSHIP CAVEAT: dead-name coverage starts 2021 (the current FMP plan
+  # serves only page 0 of /delisted-companies), so pre-2021 episodes run on a
+  # survivor-biased cross-section. Checks are incumbent-RELATIVE (both configs
+  # share the bias) and every report row carries its dead-name count. An FMP
+  # plan with full delisted pagination would unlock honest deep-history
+  # falsification — until then, treat pre-2021 episode results as relative
+  # evidence only.
+  stress_gauntlet:
+    enabled: true
+    history_days: 5000           # full cache reach (benchmark axis starts 2006-07)
+    catastrophe_excess: 0.10
+    catastrophe_drawdown: 0.05
+    min_symbols: 300             # episode coverage floor, else skipped (visibly)
+    episodes:
+      gfc_2008:       {start: "2007-10-01", end: "2009-06-30"}
+      euro_debt_2011: {start: "2011-05-01", end: "2011-12-31"}
+      china_2015:     {start: "2015-06-01", end: "2016-03-31"}
+      q4_2018:        {start: "2018-09-01", end: "2018-12-31"}
+      covid_2020:     {start: "2020-02-01", end: "2020-08-31"}
+      inflation_2022: {start: "2022-01-01", end: "2022-12-31"}
   llm_review_enabled: false
   llm_review_top_n: 5
   llm_review_apply: false
