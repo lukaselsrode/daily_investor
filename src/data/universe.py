@@ -207,42 +207,21 @@ def _symbols_from_sources(rb_sources: list) -> tuple[set[str], int]:
     return symbols, invalid
 
 
-def gen_symbols_list(
-    force_refresh: bool = False,
-    extra_symbols: set[str] | None = None,
-) -> list[str]:
-    if not force_refresh:
-        cached = read_data_as_pd("stock_tickers")
-        if cached is not None and not cached.empty and "symbol" in cached.columns:
-            # Defensive: keep only string symbols. A non-str (float NaN from a
-            # stray empty row or an over-eager NaN parser) makes sorted() raise
-            # "'<' not supported between instances of 'float' and 'str'".
-            base = {s for s in cached["symbol"].tolist() if isinstance(s, str) and s}
-            if extra_symbols:
-                added = [s for s in sorted(extra_symbols) if _is_valid_ticker(s) and s not in base]
-                if added:
-                    logger.info(
-                        "Supplementing cached universe with %d portfolio holdings: %s",
-                        len(added), added,
-                    )
-                base.update(s for s in extra_symbols if _is_valid_ticker(s))
-            return sorted(base)
+def _merge_extra_symbols(symbols: set[str], extra_symbols: set[str] | None, msg: str) -> None:
+    """Fold portfolio holdings into a universe set (valid tickers only),
+    logging any genuinely-new names with the caller's message template."""
+    if not extra_symbols:
+        return
+    added = [s for s in sorted(extra_symbols) if _is_valid_ticker(s) and s not in symbols]
+    if added:
+        logger.info(msg, len(added), added)
+    symbols.update(s for s in extra_symbols if _is_valid_ticker(s))
 
-    all_symbols: set[str] = set()
-    for url in _INDEX_URLS:
-        print(f"Scraping {url}")
-        all_symbols.update(_scrape_wikipedia_tickers(url))
 
-    instrument_symbols = _fetch_robinhood_instrument_symbols()
-    if instrument_symbols:
-        before = len(all_symbols)
-        all_symbols.update(instrument_symbols)
-        print(
-            "Robinhood instruments: "
-            f"{len(instrument_symbols)} active tradable stocks/ADRs "
-            f"({len(all_symbols) - before} new)"
-        )
-
+def _collect_robinhood_sources() -> list:
+    """Fetch the Robinhood discovery endpoints (movers/top-100) and market
+    tags. Each failure is reported and skipped — discovery sources are
+    additive, never load-bearing."""
     rb_sources: list = []
     for fn, args, label in [
         (rb.get_top_movers_sp500, ("down",), "top_movers_sp500(down)"),
@@ -264,17 +243,47 @@ def gen_symbols_list(
             rb_sources.append(_tag_result)
             print(f"  Tag '{tag}': {len(_tag_result)} stocks")
         time.sleep(1.0)
+    return rb_sources
 
-    syms, invalid = _symbols_from_sources(rb_sources)
-    all_symbols.update(syms)
 
-    if extra_symbols:
-        added = [s for s in sorted(extra_symbols) if _is_valid_ticker(s) and s not in all_symbols]
-        if added:
-            logger.info(
-                "Adding %d portfolio holdings to refreshed universe: %s", len(added), added,
+def gen_symbols_list(
+    force_refresh: bool = False,
+    extra_symbols: set[str] | None = None,
+) -> list[str]:
+    if not force_refresh:
+        cached = read_data_as_pd("stock_tickers")
+        if cached is not None and not cached.empty and "symbol" in cached.columns:
+            # Defensive: keep only string symbols. A non-str (float NaN from a
+            # stray empty row or an over-eager NaN parser) makes sorted() raise
+            # "'<' not supported between instances of 'float' and 'str'".
+            base = {s for s in cached["symbol"].tolist() if isinstance(s, str) and s}
+            _merge_extra_symbols(
+                base, extra_symbols,
+                "Supplementing cached universe with %d portfolio holdings: %s",
             )
-        all_symbols.update(s for s in extra_symbols if _is_valid_ticker(s))
+            return sorted(base)
+
+    all_symbols: set[str] = set()
+    for url in _INDEX_URLS:
+        print(f"Scraping {url}")
+        all_symbols.update(_scrape_wikipedia_tickers(url))
+
+    instrument_symbols = _fetch_robinhood_instrument_symbols()
+    if instrument_symbols:
+        before = len(all_symbols)
+        all_symbols.update(instrument_symbols)
+        print(
+            "Robinhood instruments: "
+            f"{len(instrument_symbols)} active tradable stocks/ADRs "
+            f"({len(all_symbols) - before} new)"
+        )
+
+    syms, invalid = _symbols_from_sources(_collect_robinhood_sources())
+    all_symbols.update(syms)
+    _merge_extra_symbols(
+        all_symbols, extra_symbols,
+        "Adding %d portfolio holdings to refreshed universe: %s",
+    )
 
     print(f"Universe: {len(all_symbols)} valid tickers ({invalid} invalid skipped)")
     store_data_as_csv("stock_tickers", ["symbol"], [[s] for s in sorted(all_symbols)])

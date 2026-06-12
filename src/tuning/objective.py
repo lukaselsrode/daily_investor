@@ -62,6 +62,25 @@ def de_turnover_penalty(turnover: float, incumbent_turnover: float | None, bp: d
     return weight * (1.0 + (multiple - hard))
 
 
+def gate_simulation(
+    precomp: PrecomputedData,
+    params: np.ndarray,
+    backtest_cfg: dict,
+    scope: BacktestScope = "overall_strategy",
+) -> SimResult:
+    """One simulation under the live backtest cost/contribution config — the
+    shared evaluator for the post-selection gates (multi-horizon confirm and
+    stress gauntlet), so their cost assumptions can never drift apart."""
+    return run_simulation(
+        precomp, params, backtest_cfg.get("starting_capital", 10_000.0),
+        slippage_bps=backtest_cfg.get("slippage_bps", 10.0),
+        commission_per_trade=backtest_cfg.get("commission_per_trade", 0.0),
+        weekly_contribution=backtest_cfg.get("weekly_contribution", 0.0),
+        rebalance_frequency_days=backtest_cfg.get("rebalance_frequency_days", 5),
+        scope=scope,
+    )
+
+
 def make_objective(
     precomp: PrecomputedData,
     objective: Literal["sharpe", "calmar", "info_ratio"] = "sharpe",

@@ -26,7 +26,7 @@ import numpy as np
 import pandas as pd
 
 from backtesting.random_walk import RandomWindowSummary, random_window_backtest
-from backtesting.types import PrecomputedData
+from backtesting.types import BacktestScope, PrecomputedData
 from tuning.constants import _CONFIG_PATH_TO_PARAM_IDX as _C2I
 from tuning.robust_scan import RobustScanResult
 
@@ -276,7 +276,7 @@ def run_random_weight_tune(
     rebalance_frequency_days: int = 5,
     respect_config_bounds: bool = True,
     progress_callback: Callable[[int, int], None] | None = None,
-    scope: str = "overall_strategy",
+    scope: BacktestScope = "overall_strategy",
     preset: str | None = None,
     run_matrix: list[dict] | None = None,
     regime_scope: str = "all",

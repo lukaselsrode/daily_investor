@@ -63,7 +63,7 @@ def _wire(monkeypatch, sel_sim, inc_sim):
 
     monkeypatch.setattr(rs, "slice_precomp",
                         lambda pc, sl: SimpleNamespace(prices=pc.prices[sl]))
-    monkeypatch.setattr(g, "run_simulation",
+    monkeypatch.setattr(g, "gate_simulation",
                         lambda pc, params, *a, **k: sel_sim if np.allclose(params, SEL) else inc_sim)
     monkeypatch.setattr(g, "_dead_names_in_window", lambda s, e: 7)
     return g

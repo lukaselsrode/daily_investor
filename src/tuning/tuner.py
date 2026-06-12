@@ -15,7 +15,7 @@ import numpy as np
 
 from backtesting.data_loader import load_and_precompute
 from backtesting.simulator import run_backtest_report, run_simulation
-from backtesting.types import BacktestReport, SimResult
+from backtesting.types import BacktestReport, BacktestScope, SimResult
 from util import BACKTEST_PARAMS
 
 from .constants import (
@@ -25,7 +25,7 @@ from .constants import (
     _get_active_indices,
 )
 from .gauntlet import print_gauntlet_table, stress_gauntlet
-from .objective import _run_single
+from .objective import _run_single, gate_simulation
 from .reports import (
     apply_config_params,
     build_llm_review_payload,
@@ -116,7 +116,7 @@ def paired_random_window_gate(
     incumbent_params: np.ndarray,
     backtest_cfg: dict,
     mode: str | None = None,
-    scope: str = "overall_strategy",
+    scope: BacktestScope = "overall_strategy",
     precomp=None,
 ) -> tuple[bool, list[str], dict]:
     """
@@ -207,7 +207,7 @@ def multi_horizon_confirm(
     incumbent_params: np.ndarray,
     backtest_cfg: dict,
     mode: str | None = None,
-    scope: str = "overall_strategy",
+    scope: BacktestScope = "overall_strategy",
 ) -> tuple[bool, list[str], list[dict]]:
     """
     Final confirmation tier — runs ONLY after the split, incumbent-relative,
@@ -250,24 +250,14 @@ def multi_horizon_confirm(
         return False, [f"multi-horizon confirm: could not load history ({exc})"], []
     n_full = full.prices.shape[0]
 
-    def _sim(pc, params):
-        return run_simulation(
-            pc, params, backtest_cfg.get("starting_capital", 10_000.0),
-            slippage_bps=backtest_cfg.get("slippage_bps", 10.0),
-            commission_per_trade=backtest_cfg.get("commission_per_trade", 0.0),
-            weekly_contribution=backtest_cfg.get("weekly_contribution", 0.0),
-            rebalance_frequency_days=backtest_cfg.get("rebalance_frequency_days", 5),
-            scope=scope,
-        )
-
     rows: list[dict] = []
     reasons: list[str] = []
     for w in windows:
         if w > n_full:
             continue
         pc = full if w == n_full else slice_precomp(full, slice(n_full - w, n_full))
-        sel = _sim(pc, selected_params)
-        inc = _sim(pc, incumbent_params)
+        sel = gate_simulation(pc, selected_params, backtest_cfg, scope)
+        inc = gate_simulation(pc, incumbent_params, backtest_cfg, scope)
         sel_exc = sel.total_return - sel.benchmark_twr
         inc_exc = inc.total_return - inc.benchmark_twr
         delta = sel_exc - inc_exc
@@ -441,7 +431,7 @@ def _post_selection_gates(
     incumbent_params: np.ndarray,
     backtest_cfg: dict,
     mode: str | None,
-    scope: str,
+    scope: BacktestScope,
 ) -> tuple[bool, list[str]]:
     """The gate chain AFTER tournament selection: the candidate's own split-gate
     outcome, then the paired random-window gate, then multi-horizon confirmation.
@@ -508,7 +498,7 @@ def _source_random_candidates(
     incumbent_params: np.ndarray,
     random_topk: int,
     backtest_cfg: dict,
-    scope: str,
+    scope: BacktestScope,
     preset: str | None,
     train_days: int,
 ) -> dict[str, np.ndarray]:
@@ -652,7 +642,7 @@ def run_candidate_tournament(
     candidate_pool: dict[str, dict],
     train_sl,
     val_slice,
-    scope: str,
+    scope: BacktestScope,
     backtest_cfg: dict,
     incumbent_report: BacktestReport,
 ) -> list[dict]:
@@ -722,7 +712,7 @@ def run_tuner(
     maxiter: int = 25,
     popsize: int = 8,
     mode: str | None = None,
-    scope: str = "overall_strategy",
+    scope: BacktestScope = "overall_strategy",
     preset: str | None = None,
     regime_scope: str = "all",
 ) -> tuple[np.ndarray, SimResult]:
@@ -760,6 +750,92 @@ def run_tuner(
 # Dual-objective auto-tune
 # ---------------------------------------------------------------------------
 
+def _llm_review_step(
+    bp: dict,
+    selected: dict,
+    selected_params: np.ndarray,
+    sharpe_params: np.ndarray,
+    sharpe_result: SimResult,
+    calmar_params: np.ndarray,
+    calmar_result: SimResult,
+    train_report: BacktestReport,
+    precomp,
+) -> None:
+    """Optional advisory LLM review of the tournament outcome (extracted from
+    run_auto_tune). Prints the recommendation; with llm_review_apply set it may
+    merge proposed adjustments into config.yaml. Never raises — the tune's own
+    gate verdict must not depend on a remote model being reachable."""
+    llm_apply = bp.get("llm_review_apply", False)
+    print(f"\n[LLM review] Sending candidates to {bp.get('llm_review_model', 'claude-sonnet-4-6')} …")
+    try:
+        tr = train_report.train_result
+        vr = train_report.validation_result
+
+        def _llm_entry(cid: str, params, train_metrics) -> dict:
+            """One review-payload row — shared shape for every candidate."""
+            return {
+                "candidate_id": cid,
+                "alpha_params": dict(zip(PARAM_NAMES, params.tolist())),
+                "train_return": train_metrics.total_return,
+                "train_sharpe": train_metrics.sharpe,
+                "train_calmar": train_metrics.calmar,
+                "train_max_drawdown": train_metrics.max_drawdown,
+                "train_trades": train_metrics.trades_made,
+                "train_avg_positions": train_metrics.average_positions,
+                "train_max_positions": train_metrics.max_positions,
+                "train_avg_cash_pct": train_metrics.average_cash_pct,
+                "train_turnover": train_metrics.turnover_estimate,
+                "train_friction_cost": train_metrics.friction_cost,
+                "val_return": vr.total_return if vr else None,
+                "val_sharpe": vr.sharpe if vr else None,
+                "val_max_drawdown": vr.max_drawdown if vr else None,
+                "bench_return": train_report.benchmark_return,
+                "bench_sharpe": train_report.benchmark_sharpe,
+                "bench_max_drawdown": train_report.benchmark_max_drawdown,
+                "excess_return": train_report.excess_return,
+                "lookahead_bias_level": precomp.lookahead_bias_level,
+                "notes": train_report.notes,
+            }
+
+        candidates = [
+            _llm_entry("sharpe_opt", sharpe_params, sharpe_result),
+            _llm_entry("calmar_opt", calmar_params, calmar_result),
+            _llm_entry(f"selected:{selected['candidate_id']}", selected_params, tr),
+        ]
+        payload = build_llm_review_payload(
+            candidates,
+            mode=precomp.mode,
+            universe_selection=precomp.universe_selection,
+            benchmark_symbol=precomp.benchmark_symbol,
+            validation_cfg=bp,
+        )
+        response = request_llm_tune_review(payload)
+        valid, errors = validate_llm_review_response(response, candidates)
+        if not valid:
+            print(f"[LLM review] Response invalid — ignoring: {errors}")
+        else:
+            print(
+                f"[LLM review] Recommended: {response['recommended_candidate_id']}  "
+                f"confidence={response.get('confidence', '?'):.0%}\n"
+                f"  Rationale: {response.get('rationale', '')}\n"
+            )
+            if response.get("risk_warnings"):
+                for w in response["risk_warnings"]:
+                    print(f"  ⚠ {w}")
+            if llm_apply and response.get("apply_candidate_as_is") and response.get("proposed_adjustments"):
+                import yaml as _yaml
+
+                from util import CONFIG_FILE
+                with open(CONFIG_FILE) as f:
+                    cfg = _yaml.safe_load(f)
+                merged = merge_llm_recommendation_with_config(cfg, response)
+                with open(CONFIG_FILE, "w") as f:
+                    _yaml.dump(merged, f, default_flow_style=False, sort_keys=False)
+                print("[LLM review] Adjustments applied to config.yaml")
+    except Exception as e:
+        print(f"[LLM review] Failed ({e}) — continuing without LLM input")
+
+
 def run_auto_tune(
     n_days: int = 90,
     starting_capital: float = 10_000.0,
@@ -769,7 +845,7 @@ def run_auto_tune(
     apply: bool = False,
     force_apply: bool = False,
     llm_review: bool = False,
-    scope: str = "overall_strategy",
+    scope: BacktestScope = "overall_strategy",
     preset: str | None = None,
     regime_scope: str = "all",
     random_topk: int = 0,
@@ -920,78 +996,13 @@ def run_auto_tune(
     _LAST_GATE_OUTCOME = (validation_passed, list(reasons))
 
     use_llm = llm_review or bp.get("llm_review_enabled", False)
-    llm_apply = bp.get("llm_review_apply", False)
     final_params = selected_params
 
     if use_llm:
-        print(f"\n[LLM review] Sending candidates to {bp.get('llm_review_model', 'claude-sonnet-4-6')} …")
-        try:
-            tr = train_report.train_result
-            vr = train_report.validation_result
-
-            def _llm_entry(cid: str, params, train_metrics) -> dict:
-                """One review-payload row — shared shape for every candidate."""
-                return {
-                    "candidate_id": cid,
-                    "alpha_params": dict(zip(PARAM_NAMES, params.tolist())),
-                    "train_return": train_metrics.total_return,
-                    "train_sharpe": train_metrics.sharpe,
-                    "train_calmar": train_metrics.calmar,
-                    "train_max_drawdown": train_metrics.max_drawdown,
-                    "train_trades": train_metrics.trades_made,
-                    "train_avg_positions": train_metrics.average_positions,
-                    "train_max_positions": train_metrics.max_positions,
-                    "train_avg_cash_pct": train_metrics.average_cash_pct,
-                    "train_turnover": train_metrics.turnover_estimate,
-                    "train_friction_cost": train_metrics.friction_cost,
-                    "val_return": vr.total_return if vr else None,
-                    "val_sharpe": vr.sharpe if vr else None,
-                    "val_max_drawdown": vr.max_drawdown if vr else None,
-                    "bench_return": train_report.benchmark_return,
-                    "bench_sharpe": train_report.benchmark_sharpe,
-                    "bench_max_drawdown": train_report.benchmark_max_drawdown,
-                    "excess_return": train_report.excess_return,
-                    "lookahead_bias_level": precomp.lookahead_bias_level,
-                    "notes": train_report.notes,
-                }
-
-            candidates = [
-                _llm_entry("sharpe_opt", sharpe_params, sharpe_result),
-                _llm_entry("calmar_opt", calmar_params, calmar_result),
-                _llm_entry(f"selected:{selected['candidate_id']}", selected_params, tr),
-            ]
-            payload = build_llm_review_payload(
-                candidates,
-                mode=precomp.mode,
-                universe_selection=precomp.universe_selection,
-                benchmark_symbol=precomp.benchmark_symbol,
-                validation_cfg=bp,
-            )
-            response = request_llm_tune_review(payload)
-            valid, errors = validate_llm_review_response(response, candidates)
-            if not valid:
-                print(f"[LLM review] Response invalid — ignoring: {errors}")
-            else:
-                print(
-                    f"[LLM review] Recommended: {response['recommended_candidate_id']}  "
-                    f"confidence={response.get('confidence', '?'):.0%}\n"
-                    f"  Rationale: {response.get('rationale', '')}\n"
-                )
-                if response.get("risk_warnings"):
-                    for w in response["risk_warnings"]:
-                        print(f"  ⚠ {w}")
-                if llm_apply and response.get("apply_candidate_as_is") and response.get("proposed_adjustments"):
-                    import yaml as _yaml
-
-                    from util import CONFIG_FILE
-                    with open(CONFIG_FILE) as f:
-                        cfg = _yaml.safe_load(f)
-                    merged = merge_llm_recommendation_with_config(cfg, response)
-                    with open(CONFIG_FILE, "w") as f:
-                        _yaml.dump(merged, f, default_flow_style=False, sort_keys=False)
-                    print("[LLM review] Adjustments applied to config.yaml")
-        except Exception as e:
-            print(f"[LLM review] Failed ({e}) — continuing without LLM input")
+        _llm_review_step(
+            bp, selected, selected_params, sharpe_params, sharpe_result,
+            calmar_params, calmar_result, train_report, precomp,
+        )
 
     if should_apply_tuned_config(apply, validation_passed, bp, force_apply=force_apply):
         apply_config_params(final_params)
@@ -1024,7 +1035,7 @@ class ParameterTuner:
         return list(PARAM_NAMES)
 
     @staticmethod
-    def _active_param_names(scope: str = "overall_strategy", preset: str | None = None) -> list[str]:
+    def _active_param_names(scope: BacktestScope = "overall_strategy", preset: str | None = None) -> list[str]:
         """Names of the slots actually tunable for the given scope/preset."""
         active_idx = set(_get_active_indices(scope, preset=preset))
         return [PARAM_NAMES[i] for i in sorted(active_idx)]
@@ -1051,7 +1062,7 @@ class ParameterTuner:
         objective: str = "sharpe",
         starting_capital: float = 10_000.0,
         mode: str | None = None,
-        scope: str = "overall_strategy",
+        scope: BacktestScope = "overall_strategy",
         preset: str | None = None,
         regime_scope: str = "all",
     ) -> TuneResult:
@@ -1080,7 +1091,7 @@ class ParameterTuner:
         mode: str | None = None,
         llm_review: bool = False,
         starting_capital: float = 10_000.0,
-        scope: str = "overall_strategy",
+        scope: BacktestScope = "overall_strategy",
         preset: str | None = None,
         regime_scope: str = "all",
         random_topk: int = 0,

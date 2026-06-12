@@ -17,6 +17,8 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from backtesting.types import BacktestScope
+
 logger = logging.getLogger(__name__)
 
 
@@ -33,7 +35,7 @@ class RobustScanResult:
     """Aggregated result across all (horizon, seed) cells."""
     run_matrix: list[dict]
     cells: list[ScanCell]
-    scope: str
+    scope: BacktestScope
 
     # Flattened aggregates across every window in every cell
     overall_robust_score: float = 0.0
@@ -113,15 +115,15 @@ class RobustScanResult:
         for h in horizons:
             h_cells = [c for c in self.cells if c.horizon_days == h]
             attr = "median_active_excess_return" if use_active else "median_excess_return"
-            vals = [getattr(c.summary, attr, None) for c in h_cells]
-            vals = [v for v in vals if v is not None]
+            raw = [getattr(c.summary, attr, None) for c in h_cells]
+            vals = [float(v) for v in raw if v is not None]
             if vals and float(np.median(vals)) > 0:
                 n_positive += 1
         return 1.0 - (n_positive / len(horizons))
 
     def all_window_results(self):
         """Flat list of WindowResult across all cells (for fan chart aggregation)."""
-        out = []
+        out: list = []
         for cell in self.cells:
             out.extend(getattr(cell.summary, "window_results", []))
         return out
@@ -142,7 +144,7 @@ def run_robust_scan(
     precomp,
     params,
     run_matrix: list[dict],
-    scope: str = "overall_strategy",
+    scope: BacktestScope = "overall_strategy",
     regime_scope: str = "all",
     progress_callback: Callable | None = None,
 ) -> RobustScanResult:
@@ -194,7 +196,7 @@ def run_robust_scan(
     return _aggregate(run_matrix, cells, scope)
 
 
-def _aggregate(run_matrix: list[dict], cells: list[ScanCell], scope: str) -> RobustScanResult:
+def _aggregate(run_matrix: list[dict], cells: list[ScanCell], scope: BacktestScope) -> RobustScanResult:
     """Build the aggregated RobustScanResult from completed cells."""
     if not cells:
         return RobustScanResult(run_matrix=run_matrix, cells=cells, scope=scope)

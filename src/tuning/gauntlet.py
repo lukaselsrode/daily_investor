@@ -23,7 +23,9 @@ import logging
 import numpy as np
 
 from backtesting.data_loader import load_and_precompute
-from backtesting.simulator import run_simulation
+from backtesting.types import BacktestScope
+
+from .objective import gate_simulation
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +63,7 @@ def stress_gauntlet(
     incumbent_params: np.ndarray,
     backtest_cfg: dict,
     mode: str | None = None,
-    scope: str = "overall_strategy",
+    scope: BacktestScope = "overall_strategy",
     precomp=None,
 ) -> tuple[bool, list[str], list[dict]]:
     """Run selected vs incumbent through each configured stress episode.
@@ -100,16 +102,6 @@ def stress_gauntlet(
 
     dates = np.asarray(precomp.dates, dtype=str)
 
-    def _sim(pc, params):
-        return run_simulation(
-            pc, params, backtest_cfg.get("starting_capital", 10_000.0),
-            slippage_bps=backtest_cfg.get("slippage_bps", 10.0),
-            commission_per_trade=backtest_cfg.get("commission_per_trade", 0.0),
-            weekly_contribution=backtest_cfg.get("weekly_contribution", 0.0),
-            rebalance_frequency_days=backtest_cfg.get("rebalance_frequency_days", 5),
-            scope=scope,
-        )
-
     rows: list[dict] = []
     reasons: list[str] = []
     for name, ep in episodes.items():
@@ -142,8 +134,8 @@ def stress_gauntlet(
             continue
 
         pc = slice_precomp(precomp, slice(i0, i1))
-        sel = _sim(pc, selected_params)
-        inc = _sim(pc, incumbent_params)
+        sel = gate_simulation(pc, selected_params, backtest_cfg, scope)
+        inc = gate_simulation(pc, incumbent_params, backtest_cfg, scope)
         sel_exc = sel.total_return - sel.benchmark_twr
         inc_exc = inc.total_return - inc.benchmark_twr
         delta = sel_exc - inc_exc

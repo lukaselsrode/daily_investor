@@ -50,7 +50,7 @@ That's it. The dashboard opens at `http://localhost:8501`.
 - **Exposure Analytics** — Factor tilts (z-score vs universe), sector weights, HHI concentration, rolling exposure drift
 - **Disciplined Sell Engine** — Hard sells (stop-loss, yield trap, quality floor) execute immediately; soft sells (take-profit, weak value) require Claude confirmation
 - **Anti-Lookahead Backtest** — All rolling features computed causally; contribution-adjusted TWR (chain-link) for portfolio and benchmark
-- **Validation-Aware Auto-Tune** — `scipy.differential_evolution` across Sharpe and Calmar feeds a multi-source candidate tournament (optima, blends, incumbent blends, `--random-topk` robust-search candidates, `--leads` saved vectors); the winner must pass held-out split gates, incumbent-relative excess/turnover gates, a paired random-window gate, and a final 90/180/365/730d multi-horizon confirmation before config.yaml is written. A churn penalty inside the DE objective steers the search away from turnover regions the gates reject
+- **Validation-Aware Auto-Tune** — `scipy.differential_evolution` across Sharpe and Calmar feeds a multi-source candidate tournament (optima, blends, incumbent blends, `--random-topk` robust-search candidates, `--leads` saved vectors); the winner must pass held-out split gates, incumbent-relative excess/turnover gates, a paired random-window gate, a regime-symmetric 90/180/365/730d multi-horizon confirmation (catastrophe-scale tolerances — no single window holds a fine-grained veto), and a stress gauntlet through named historical bear/stress episodes (GFC '08 → 2022) before config.yaml is written. The tournament winner is also saved to `data/leads_selected_<days>d.npy` so a gate-blocked near-miss is re-testable via `--leads`. A churn penalty inside the DE objective steers the search away from turnover regions the gates reject
 - **Optional LLM Tune Review** — Routes optimizer candidates through Claude for a second-opinion before applying
 - **Batch AI Sentiment** — Async concurrent Claude calls with exponential backoff
 - **Contribution-Timing Overlay** *(config-gated, ships disabled)* — Buy-the-dip weekly contribution sizing: a causal dip score (1w/1m returns, 20/60d drawdowns, 50/200DMA gaps) maps to a contribution multiplier under a rolling monthly budget with carry-forward; defensive-regime cap prevents knife-catching. `contribution_timing` tuning preset; compare via `python scripts/contribution_timing_compare.py` (flat vs default vs tuned across 90/180/365/730d + random windows, reporting MWR/ending value)
@@ -217,7 +217,7 @@ daily-investor COMMAND [OPTIONS]
 | `run` | Live trading run (sell + buy cycle) |
 | `backtest DAYS` | Run backtest simulation |
 | `tune DAYS` | Single-objective parameter tune — prints diff, no write |
-| `auto-tune [DAYS]` | Dual-objective tune + multi-source candidate tournament (`--random-topk N`, `--leads a.npy`) gated by split, incumbent-relative, random-window, and multi-horizon tiers (default: 90d) |
+| `auto-tune [DAYS]` | Dual-objective tune + multi-source candidate tournament (`--random-topk N`, `--leads a.npy`) gated by split, incumbent-relative, random-window, multi-horizon, and stress-gauntlet tiers (default: 90d) |
 | `auto-tune-all` | Staged coordinate-ascent over interaction clusters + full windowed validation (`--profile`, `--clusters`) — research only |
 | `interaction-screen` | Screen which param clusters synergize/clash when co-tuned (`--profile quick\|standard\|deep`) — research only |
 | `list-presets` | Print available tuning presets and exit (presets compose with `+`) |
@@ -570,13 +570,15 @@ Safety parameters (hard stop-loss, position caps, order caps) are never touched 
 
 ### Validation Gates (auto-tune)
 
-Before writing any changes to `config.yaml`:
+Before writing any changes to `config.yaml`, the selected tournament candidate must clear every tier in order:
 
-| Gate | Config key | Default |
-|------|-----------|---------|
-| Excess return vs benchmark | `min_validation_excess_return` | 0.0% |
-| Max drawdown | `max_validation_drawdown` | −20% |
-| Sharpe ratio | `min_validation_sharpe` | 0.25 |
+| Tier | Gate | Config keys (defaults) |
+|------|------|------------------------|
+| 1. Absolute floors | excess vs benchmark / max drawdown / Sharpe on the held-out split | `min_validation_excess_return` (0.0%), `max_validation_drawdown` (−20%), `min_validation_sharpe` (0.25) |
+| 2. Incumbent-relative | must beat the current config's validation excess; turnover capped | `min_excess_vs_incumbent` (0.0), `max_turnover_multiple` (2.0) |
+| 3. Random-window | paired win rate + median excess + robust score vs incumbent on shared random sub-windows | `random_window_gate.*` (12×120d over 730d, `min_win_rate` 0.5) |
+| 4. Multi-horizon confirm | regime-symmetric trailing windows; catastrophe-scale tolerances only — no single window holds a fine-grained veto | `multi_horizon_confirm.*` (`regress_tolerance` 0.04 sub-400d; `long_catastrophe_excess` 0.10 / `long_catastrophe_drawdown` 0.05) |
+| 5. Stress gauntlet | must SURVIVE named historical stress regimes vs the incumbent (falsification, not win-requirements); skipped episodes are reported, never silent | `stress_gauntlet.*` (episodes GFC '08, 2011, 2015, Q4 '18, COVID '20, 2022; pre-2021 episodes are survivor-biased — dead-name coverage starts 2021) |
 
 ---
 

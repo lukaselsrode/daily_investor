@@ -515,6 +515,7 @@ class TestMultiHorizonConfirm:
             which = "sel" if np.allclose(params, sel_vec) else "inc"
             return sims_by_window[(w, which)]
         monkeypatch.setattr(tt, "run_simulation", fake_sim)
+        monkeypatch.setattr(tt, "gate_simulation", fake_sim)
         return tt, sel_vec
 
     @staticmethod

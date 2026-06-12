@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from backtesting.random_walk import _slice_precomp as _slice_window_precomp
+from backtesting.types import BacktestScope
 
 # Fixed leverage order: scoring/momentum first (change which stocks rank high), then
 # the quality tilt, the buy gate, the exit ladder, and finally breadth/turnover.
@@ -94,7 +95,7 @@ def run_staged_tune(
     precomp,
     clusters,
     run_matrix: list[dict],
-    scope: str = "active_sleeve_compounding",
+    scope: BacktestScope = "active_sleeve_compounding",
     maxiter: int = 8,
     popsize: int = 6,
     min_improve: float = 0.0,
@@ -186,7 +187,7 @@ def validate_full_windowed(
     precomp,
     params: np.ndarray,
     run_matrix: list[dict],
-    scope: str = "active_sleeve_compounding",
+    scope: BacktestScope = "active_sleeve_compounding",
     regime_scope: str = "all",
     holdout_start_frac: float = 0.70,
 ) -> dict:
