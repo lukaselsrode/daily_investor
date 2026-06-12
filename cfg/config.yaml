@@ -357,7 +357,9 @@ scoring:
       enabled: true
       peer_relative: true
       pe_weight: 0.8757  # 2026-06-11: 0.70 -> 0.8757 (bear-validated candidate)
-      pb_weight: 0.3
+      # 2026-06-12: 0.30 -> 0.1243 — canonical complement of pe_weight (pe+pb=1),
+      # as the overnight re-tune's auto-apply writes it.
+      pb_weight: 0.1243
       distress:
         pe_threshold: 5.0
         pe_penalty: 0.3
@@ -389,14 +391,16 @@ scoring:
     # 2026-06-11: shifted from rs_6m-led to TREND-STRUCTURE-led (bear-validated
     # candidate: rs_3m/rs_6m/risk_adj/trend/r1m 0.20/0.55/0.22/0.01/0.0 -> below).
     # Same survivorship-aware spirit — trend confirmation over raw relative
-    # strength; return_5d untouched (moved <1% in the tune).
+    # strength. 2026-06-12: renormalized to sum 1.0 (canonical form written by
+    # the overnight re-tune's auto-apply; same direction — the engine
+    # renormalizes at decision time either way).
     weights:
-      rs_3m: 0.0488
-      rs_6m: 0.3096
-      risk_adj_3m: 0.1697
-      trend_structure: 0.4128
-      return_1m: 0.0072
-      return_5d: 0.02
+      rs_3m: 0.0504
+      rs_6m: 0.3198
+      risk_adj_3m: 0.1753
+      trend_structure: 0.4264
+      return_1m: 0.0074
+      return_5d: 0.0207
     penalties:
       falling_knife_3m_threshold: -0.15
       falling_knife_penalty: 0.25
