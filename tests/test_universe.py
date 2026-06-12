@@ -3,6 +3,7 @@ from __future__ import annotations
 from data.universe import (
     _fetch_robinhood_instrument_symbols,
     _is_robinhood_active_stock,
+    _symbols_from_sources,
 )
 
 
@@ -44,6 +45,21 @@ def test_robinhood_active_stock_filter_excludes_funds_and_inactive_rows() -> Non
     assert not _is_robinhood_active_stock({**base, "tradeable": False})
     assert not _is_robinhood_active_stock({**base, "rhs_tradability": "untradable"})
     assert not _is_robinhood_active_stock({**base, "symbol": "TOO-LONG"})
+
+
+def test_symbols_from_sources_survives_none_items() -> None:
+    """robin_stocks returns [None] for retired market tags (e.g.
+    'upcoming-earnings') — a non-dict item must count as invalid, not raise
+    AttributeError and kill the whole universe refresh."""
+    sources = [
+        [{"symbol": "AAPL"}, None, {"symbol": "msft"}],  # lowercase → invalid
+        None,                                            # whole source missing
+        [None],                                          # the retired-tag shape
+        [{"no_symbol_key": 1}, {"symbol": "TSLA"}],
+    ]
+    symbols, invalid = _symbols_from_sources(sources)
+    assert symbols == {"AAPL", "TSLA"}
+    assert invalid == 4
 
 
 def test_fetch_robinhood_instrument_symbols_paginates_and_filters(monkeypatch) -> None:

@@ -46,23 +46,43 @@ def cmd_fetch_data() -> None:
         save_holdings_csv,
     )
 
-    login()
+    try:
+        login()
+        authed = True
+    except Exception as exc:
+        # Unauthenticated mode still refreshes valuations/universe/fundamentals;
+        # account-bound steps are SKIPPED so a dead session can't overwrite good
+        # snapshots (a failed login once saved a 0-position holdings CSV).
+        authed = False
+        logger.warning(
+            "Robinhood login failed (%s) — running UNAUTHENTICATED: "
+            "dividends and holdings steps will be skipped.", exc,
+        )
     logger.info("=== Fetch-Data run (no trades) ===")
 
     logger.info("Step 1/5: industry valuations")
     update_industry_valuations(verbose=True)
 
     logger.info("Step 2/5: dividends")
-    _fetch_and_save_dividends()
+    if authed:
+        _fetch_and_save_dividends()
+    else:
+        logger.warning("Skipped (not logged in)")
 
     logger.info("Step 3/5: holdings")
-    try:
-        holdings = _broker.get_holdings()
-        _broker.enrich_holdings_created_at(holdings)
-        save_holdings_csv(holdings)
-        logger.info("Holdings saved: %d positions", len(holdings))
-    except Exception as exc:
-        logger.warning("Holdings fetch failed (continuing): %s", exc)
+    if not authed:
+        logger.warning("Skipped (not logged in) — existing holdings snapshot preserved")
+    else:
+        try:
+            holdings = _broker.get_holdings()
+            _broker.enrich_holdings_created_at(holdings)
+            if holdings:
+                save_holdings_csv(holdings)
+                logger.info("Holdings saved: %d positions", len(holdings))
+            else:
+                logger.warning("0 holdings returned — snapshot NOT overwritten")
+        except Exception as exc:
+            logger.warning("Holdings fetch failed (continuing): %s", exc)
 
     logger.info("Step 4/5: universe + fundamentals + news + scoring")
     df = generate_daily_undervalued_stocks(refresh=True)

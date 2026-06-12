@@ -36,7 +36,8 @@ _WIKI_HEADERS = {
 
 _ROBINHOOD_TAGS = [
     "100-most-popular",
-    "upcoming-earnings",
+    # "upcoming-earnings" removed 2026-06: Robinhood retired the tag (API now
+    # answers 'not a valid tag' and returns [None], not a list of stocks).
     "new-on-robinhood",
     "technology",
     "finance",
@@ -185,6 +186,27 @@ def _fetch_robinhood_instrument_symbols(
     return set()
 
 
+def _symbols_from_sources(rb_sources: list) -> tuple[set[str], int]:
+    """Collect valid tickers from Robinhood source lists.
+
+    robin_stocks returns [None] (not an error) for retired/invalid market tags,
+    so every item must be type-guarded — one bad tag must not crash the whole
+    universe refresh. Returns (symbols, invalid_count)."""
+    symbols: set[str] = set()
+    invalid = 0
+    for source in rb_sources:
+        for item in (source or []):
+            if not isinstance(item, dict):
+                invalid += 1
+                continue
+            sym = item.get("symbol", "")
+            if _is_valid_ticker(sym):
+                symbols.add(sym)
+            else:
+                invalid += 1
+    return symbols, invalid
+
+
 def gen_symbols_list(
     force_refresh: bool = False,
     extra_symbols: set[str] | None = None,
@@ -243,14 +265,8 @@ def gen_symbols_list(
             print(f"  Tag '{tag}': {len(_tag_result)} stocks")
         time.sleep(1.0)
 
-    invalid = 0
-    for source in rb_sources:
-        for item in (source or []):
-            sym = item.get("symbol", "")
-            if _is_valid_ticker(sym):
-                all_symbols.add(sym)
-            else:
-                invalid += 1
+    syms, invalid = _symbols_from_sources(rb_sources)
+    all_symbols.update(syms)
 
     if extra_symbols:
         added = [s for s in sorted(extra_symbols) if _is_valid_ticker(s) and s not in all_symbols]

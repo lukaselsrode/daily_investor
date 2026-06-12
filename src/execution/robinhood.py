@@ -79,15 +79,28 @@ class RobinhoodBroker(BrokerAdapter):
                         f"MFA generation failed: {e} — check RB_MFA_SECRET in .env (must be plain base32)"
                     )
 
+        # robin_stocks PRINTS "Login failed..." and returns normally when the
+        # device-approval challenge times out — success must be VERIFIED, not
+        # assumed, or every downstream call dies with "can only be called when
+        # logged in" while the log claims we authenticated.
+        def _verify(resp, context: str) -> None:
+            if not (isinstance(resp, dict) and resp.get("access_token")):
+                raise RuntimeError(
+                    f"Robinhood login did not produce an authenticated session "
+                    f"({context}: device-approval timeout or bad credentials/MFA)"
+                )
+
         try:
-            self._rb.login(username=username, password=password, mfa_code=mfa_code, store_session=True)
+            resp = self._rb.login(username=username, password=password, mfa_code=mfa_code, store_session=True)
+            _verify(resp, "automatic login")
             logger.info("Logged in to Robinhood")
         except Exception as e:
             if "mfa_required" in str(e).lower() and not mfa_code:
                 mfa_code = input("Enter MFA code: ").strip()
-                self._rb.login(
+                resp = self._rb.login(
                     username=username, password=password, mfa_code=mfa_code, store_session=True
                 )
+                _verify(resp, "manual MFA login")
                 logger.info("Logged in with manual MFA code")
             else:
                 raise
