@@ -542,6 +542,21 @@ def _load_lead_vectors(paths: list[str]) -> dict[str, np.ndarray]:
     return out
 
 
+def _save_selected_lead(selected_params: np.ndarray, n_days: int) -> None:
+    """Persist the tournament-selected vector so a gate-blocked near-miss can be
+    re-tested via --leads without repeating a multi-hour tune. Never fatal."""
+    try:
+        import os
+
+        import data.cache as _dcache  # call-time attr so test data-dir redirect applies
+
+        path = os.path.join(_dcache.DATA_DIRECTORY, f"leads_selected_{n_days}d.npy")
+        np.save(path, np.asarray(selected_params, dtype=float))
+        print(f"Selected vector saved: {path}  (re-test with --leads {path})")
+    except Exception as exc:
+        logger.warning("Could not save selected lead vector: %s", exc)
+
+
 # Isolated so the selection trade-offs can be adjusted without touching the
 # tournament mechanics. Excess terms dominate (project rule: judge on excess);
 # Calmar/Sharpe are tie-breakers; churn and incumbent-relative drawdown
@@ -857,6 +872,7 @@ def run_auto_tune(
     selected, _ = _select_tournament_winner(rows)
 
     selected_params = selected["params"]
+    _save_selected_lead(selected_params, n_days)
     train_report = selected["report"]
     selected_result = run_simulation(
         tune_precomp, selected_params, starting_capital,

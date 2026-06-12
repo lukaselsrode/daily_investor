@@ -219,6 +219,25 @@ class TestRunAutoTuneTournament:
         assert sharpe_p[0] == pytest.approx(self.SHARPE)
         assert calmar_p[0] == pytest.approx(self.CALMAR)
 
+    def test_selected_vector_persisted_as_lead(self, monkeypatch):
+        """The tournament winner is saved as a .npy lead — a gate-blocked
+        near-miss from a multi-hour tune must be recoverable via --leads."""
+        import os
+
+        import data.cache as dc
+
+        def metrics_for(params):
+            return _passing_sim(
+                total_return=0.40 if abs(float(params[0]) - self.CALMAR) < 1e-9 else 0.10
+            )
+
+        tt, _ = _wire_auto_tune(monkeypatch, metrics_for,
+                                self._vec(self.SHARPE), self._vec(self.CALMAR))
+        out = tt.run_auto_tune(n_days=90, apply=False)
+        lead = os.path.join(dc.DATA_DIRECTORY, "leads_selected_90d.npy")
+        assert os.path.exists(lead)
+        np.testing.assert_allclose(np.load(lead), out[0])
+
     def test_failed_candidates_not_selected(self, monkeypatch):
         """The best-scoring candidate fails the turnover gate — a passer with a
         lower score must be selected instead."""
