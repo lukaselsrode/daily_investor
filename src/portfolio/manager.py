@@ -313,6 +313,23 @@ class PortfolioManager:
         sector = str(row.iloc[0].get("sector") or "Unknown")
         sector_exposure[sector] = sector_exposure.get(sector, 0.0) + allocation
 
+    @staticmethod
+    def _candidate_sector(
+        symbol: str, row: pd.Series, agg_df: pd.DataFrame | None,
+    ) -> str:
+        """Resolve a candidate's sector the SAME way the running sector_exposure dict
+        is keyed (agg_df lookup, 'Unknown' fallback) so the buy-time sector cap reads
+        the same bucket the dict accumulates into. Prefers the candidate row when it
+        already carries a sector, else falls back to an agg_df lookup."""
+        _s = row.get("sector") if hasattr(row, "get") else None
+        if _s is not None and str(_s).strip():
+            return str(_s)
+        if agg_df is not None and not agg_df.empty and "symbol" in agg_df.columns:
+            _r = agg_df[agg_df["symbol"] == symbol]
+            if not _r.empty:
+                return str(_r.iloc[0].get("sector") or "Unknown")
+        return "Unknown"
+
     def _process_whole_share_queue(
         self,
         queue: list[tuple[str, float]],
@@ -1423,6 +1440,12 @@ class PortfolioManager:
         sector_exposure = (
             self._risk.get_sector_exposure(holdings, agg_df) if portfolio_value > 0 else {}
         )
+        # Active-sleeve target value. Concentration caps must bind the ACTIVE SLEEVE,
+        # not total PV: a 60%/40% cluster/sector cap measured against total PV is
+        # ~12×/8× too loose on a ~5%-of-PV sleeve and never binds (and is inert at
+        # cold start). Denominating against (1-index_pct)*PV makes them constrain the
+        # stock book itself. Mirrored in backtesting/simulator._do_buy.
+        active_sleeve_value = max((1.0 - effective_index_pct) * portfolio_value, 0.0)
 
         purchased: list[str] = []
         skipped: list[str] = []
@@ -1562,9 +1585,10 @@ class PortfolioManager:
                 )
                 _cluster_lookup = self._cluster_report.universe_cluster_lookup
                 _cluster_id_for_log = _cluster_lookup.get(symbol)
-                if _cluster_id_for_log is not None:
+                if _cluster_id_for_log is not None and active_sleeve_value > 0:
+                    # Weight is measured against the active-sleeve target, not total PV.
                     _cluster_cw = current_cluster_weight(
-                        holdings, _cluster_lookup, portfolio_value, _cluster_id_for_log,
+                        holdings, _cluster_lookup, active_sleeve_value, _cluster_id_for_log,
                     )
                     _cluster_limit = float(_CLP["max_cluster_weight"])
                     _cluster_decision, _new_alloc, _cluster_block_reason = cluster_buy_decision(
@@ -1572,16 +1596,16 @@ class PortfolioManager:
                         cluster_id=_cluster_id_for_log,
                         current_weight=_cluster_cw,
                         alloc=alloc,
-                        portfolio_value=portfolio_value,
+                        portfolio_value=active_sleeve_value,
                         cluster_limit=_cluster_limit,
                         enforcement_cfg=_CLP["enforcement"],
                         min_order_amount=RISK_LIMITS["min_order_amount"],
-                        is_underweight=active_is_underweight,
+                        # The underweight exemption is NOT applied to the per-cluster cap:
+                        # building the sleeve toward target is fine, but it must not be
+                        # built up concentrated in one cluster (the cold-start gap).
+                        is_underweight=False,
                     )
-                    _cluster_pw = (
-                        _cluster_cw + (_new_alloc / portfolio_value)
-                        if portfolio_value > 0 else 0.0
-                    )
+                    _cluster_pw = _cluster_cw + (_new_alloc / active_sleeve_value)
                     if _cluster_decision == "blocked":
                         logger.info(
                             "Skipping %s: %s", symbol, _cluster_block_reason,
@@ -1598,6 +1622,55 @@ class PortfolioManager:
                             symbol, alloc, _new_alloc,
                         )
                         alloc = _new_alloc
+
+            # ── GICS sector concentration cap (active-sleeve relative) ────────
+            # max_sector_weight (concentration_limits) was previously enforced only
+            # in warning logs. Enforce it here against the active-sleeve target so a
+            # single sector (shipping/banks/REITs) can't dominate the stock book.
+            # "Unknown"/blank sectors are skipped: the running sector_exposure dict
+            # buckets the ETF sleeve under "Unknown", so capping it is meaningless
+            # (the cluster cap + can_buy's max_sector_pct still apply to those names).
+            if (
+                _CLP["enabled"] and not _CLP["warn_only"]
+                and _CLP["apply_to"]["active_sleeve"]
+                and active_sleeve_value > 0 and alloc > 0
+            ):
+                _sec = self._candidate_sector(symbol, row, agg_df)
+                _max_sec_w = float(_CLP["max_sector_weight"])
+                if _sec and _sec != "Unknown" and _max_sec_w > 0:
+                    # Same cap math as the cluster cap — reuse the tested pure function
+                    # with the sector label as the "cluster" and the sector weight cap.
+                    from portfolio.exposure.cluster_enforcement import cluster_buy_decision
+                    _cur_sec_w = sector_exposure.get(_sec, 0.0) / active_sleeve_value
+                    _sec_decision, _sec_alloc, _sec_reason = cluster_buy_decision(
+                        symbol=symbol,
+                        cluster_id=_sec,
+                        current_weight=_cur_sec_w,
+                        alloc=alloc,
+                        portfolio_value=active_sleeve_value,
+                        cluster_limit=_max_sec_w,
+                        enforcement_cfg=_CLP["enforcement"],
+                        min_order_amount=RISK_LIMITS["min_order_amount"],
+                        is_underweight=False,
+                    )
+                    if _sec_decision == "blocked":
+                        logger.info(
+                            "Skipping %s: sector_cap %r would exceed %.0f%% of active "
+                            "sleeve (%s)", symbol, _sec, _max_sec_w * 100, _sec_reason,
+                        )
+                        self._log_candidate(
+                            symbol, row, "SKIP", False, f"sector_cap: {_sec}",
+                            _sent_result, True, "", alloc, 0.0, regime, _cand_rank, agg_df,
+                        )
+                        skipped.append(symbol)
+                        continue
+                    if _sec_decision == "downsized":
+                        logger.info(
+                            "%s: sector_cap %r downsized $%.2f → $%.2f "
+                            "(≤ %.0f%% of active sleeve)",
+                            symbol, _sec, alloc, _sec_alloc, _max_sec_w * 100,
+                        )
+                        alloc = _sec_alloc
 
             n_remaining = len(candidates) - (_cand_rank - 1)
             _buy_dec = self._risk.can_buy(

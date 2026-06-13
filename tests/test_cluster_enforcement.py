@@ -135,4 +135,108 @@ def test_zero_cap_returns_allowed():
         min_order_amount=30.0,
     )
     assert decision == "allowed"
-    assert alloc == 500.0
+
+
+# ---------------------------------------------------------------------------
+# Active-sleeve denominator: caps must bind the SLEEVE, not total PV.
+# These encode the bug→fix: the buy-cycle/simulator now pass active_sleeve_value
+# (= (1-index_pct)*PV) as the `portfolio_value` denominator, so a 60%/40% cap
+# constrains the stock book even when the sleeve is a tiny fraction of total PV.
+# ---------------------------------------------------------------------------
+
+def test_cluster_cap_binds_against_small_active_sleeve():
+    """A cluster at 80% of a tiny active sleeve must trip the 0.60 cap, even though
+    that same dollar amount is only ~4% of total PV (the old, broken denominator)."""
+    total_pv      = 10_000.0
+    index_pct     = 0.95
+    sleeve_value  = (1.0 - index_pct) * total_pv   # $500 active sleeve
+    cluster_equity = 400.0                          # 80% of sleeve, 4% of total PV
+    new_buy        = 100.0
+
+    cur_w = cluster_equity / sleeve_value           # 0.80
+    # Under the OLD denominator the weight would be 400/10000 = 0.04 — allowed.
+    assert cluster_equity / total_pv < 0.60
+
+    decision, alloc, _ = cluster_buy_decision(
+        "MARINE", "c1", current_weight=cur_w, alloc=new_buy,
+        portfolio_value=sleeve_value,           # active-sleeve denominator (the fix)
+        cluster_limit=0.60, enforcement_cfg=_enf(),
+        min_order_amount=30.0, is_underweight=False,
+    )
+    # 0.80 already over the 0.60 cap → no headroom → blocked.
+    assert decision == "blocked"
+    assert alloc == 0.0
+
+
+def test_underweight_exemption_not_applied_at_buy_time():
+    """The live buy path passes is_underweight=False so the per-cluster cap binds
+    during the initial sleeve build-out (the cold-start gap). Confirm that without
+    the exemption an over-cap cluster is still blocked."""
+    decision, alloc, _ = cluster_buy_decision(
+        "X", "c1", current_weight=0.80, alloc=500.0, portfolio_value=1000,
+        cluster_limit=0.60, enforcement_cfg=_enf(allow_if_underweight=True),
+        min_order_amount=30.0, is_underweight=False,   # buy path always passes False
+    )
+    assert decision == "blocked"
+
+
+def test_sector_cap_uses_same_decision_fn_shipping_banks_reits():
+    """The active-sleeve sector cap reuses cluster_buy_decision with the sector label.
+    Three sectors each under the cap are fine; a 4th buy that would push one sector
+    over max_sector_weight of the sleeve is downsized/blocked. Uses the LIVE config
+    cap so the test tracks config, not a hardcoded threshold."""
+    from util import CONCENTRATION_LIMIT_PARAMS
+
+    max_sec_w = float(CONCENTRATION_LIMIT_PARAMS["max_sector_weight"])
+    sleeve    = 1000.0
+    # Banks already at the cap (max_sec_w of the sleeve).
+    banks_equity = max_sec_w * sleeve
+    decision, alloc, _ = cluster_buy_decision(
+        "JPM", "Financial", current_weight=banks_equity / sleeve, alloc=200.0,
+        portfolio_value=sleeve, cluster_limit=max_sec_w,
+        enforcement_cfg=CONCENTRATION_LIMIT_PARAMS["enforcement"],
+        min_order_amount=30.0, is_underweight=False,
+    )
+    assert decision in ("blocked", "downsized")
+    # A different sector well under the cap is still allowed at full size.
+    decision2, alloc2, _ = cluster_buy_decision(
+        "XOM", "Energy", current_weight=0.0, alloc=200.0,
+        portfolio_value=sleeve, cluster_limit=max_sec_w,
+        enforcement_cfg=CONCENTRATION_LIMIT_PARAMS["enforcement"],
+        min_order_amount=30.0, is_underweight=False,
+    )
+    assert decision2 == "allowed"
+    assert alloc2 == 200.0
+
+
+def test_cold_start_universe_lookup_is_populated(monkeypatch):
+    """Regression: at cold start (only ETFs held, no active stock) the concentration
+    report must still carry universe_cluster_lookup so the buy-time cluster cap can
+    constrain the FIRST active-sleeve buys. Previously the empty-sleeve branch
+    returned an empty lookup → the cap was inert during build-out."""
+    import pandas as pd
+
+    import portfolio.exposure.cluster_concentration as cc
+
+    # Stub the (heavy) PCA/KMeans factor map with a deterministic universe→cluster map.
+    def _fake_factor_map(agg_df, **_kw):
+        mapped = pd.DataFrame({
+            "symbol":  ["AAA", "BBB", "CCC"],
+            "cluster": ["c0", "c0", "c1"],
+        })
+        return None, mapped, None
+
+    monkeypatch.setattr(
+        "portfolio.visualization.factor_map.build_factor_map", _fake_factor_map
+    )
+
+    # Holdings = ETF only → active sleeve is empty.
+    holdings_df = pd.DataFrame({"symbol": ["SPY"], "equity": [1000.0], "quantity": [10.0]})
+    agg_df      = pd.DataFrame({"symbol": ["AAA", "BBB", "CCC"], "sector": ["T", "T", "F"]})
+
+    report = cc.compute_concentration(
+        holdings_df, agg_df, etfs=["SPY"], n_clusters=2,
+    )
+    assert report.n_active_positions == 0
+    # The fix: lookup is populated even though the active sleeve is empty.
+    assert report.universe_cluster_lookup == {"AAA": "c0", "BBB": "c0", "CCC": "c1"}

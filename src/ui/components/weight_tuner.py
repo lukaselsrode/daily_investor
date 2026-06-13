@@ -1597,7 +1597,10 @@ def _render_advanced_tuning() -> None:
     _cache = st.session_state.get("_precomp_cache", {})
     if _cache:
         _keys = sorted(_cache.keys())
-        _desc = ", ".join(f"{d}d/{m or 'default'}" for d, m in _keys)
+        # Cache key is (n_days, mode, survivorship_free) — see backtest_service.load_precomp.
+        _desc = ", ".join(
+            f"{d}d/{m or 'default'}{'/surv-free' if sf else ''}" for d, m, sf in _keys
+        )
         _col1, _col2 = st.columns([4, 1])
         _col1.caption(f"💾 Full-universe data cached for: {_desc} — 2nd+ runs skip the download")
         if _col2.button("Clear data cache", key="wt_clear_cache"):

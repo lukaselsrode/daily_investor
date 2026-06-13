@@ -1471,6 +1471,9 @@ def run_simulation(
 
         portfolio_value = _current_portfolio_value(day)
         sector_exp      = _sector_exposures(day)
+        # Active-sleeve target value — concentration caps bind the active sleeve, not
+        # total PV. Mirrors portfolio/manager.buy_cycle (active_sleeve_value).
+        _active_sleeve_val = max((1.0 - index_pct) * portfolio_value, 0.0)
         spent           = 0.0
         commission_paid = 0.0
         buys_this_pass  = 0
@@ -1529,6 +1532,25 @@ def run_simulation(
             else:
                 sector = precomp.sector_labels[i] if i < len(precomp.sector_labels) else "Unknown"
 
+            # ── GICS sector concentration cap (active-sleeve relative) ────────
+            # Mirrors manager.buy_cycle: enforce max_sector_weight against the active
+            # sleeve so one sector can't dominate the stock book. Only when cluster
+            # enforcement is active (same config switch). "Unknown" sectors skipped.
+            if (
+                _cluster_cap_enabled
+                and _active_sleeve_val > 0
+                and sector and sector != "Unknown"
+            ):
+                _cur_sec_w = sector_exp.get(sector, 0.0) / _active_sleeve_val
+                if _cur_sec_w + (alloc / _active_sleeve_val) > _max_sector_w:
+                    _sec_fit = max(0.0, _max_sector_w * _active_sleeve_val - sector_exp.get(sector, 0.0))
+                    if _cluster_cap_downsize and _sec_fit >= min_order:
+                        alloc = _sec_fit
+                        cap_reductions += 1
+                    else:
+                        skipped_buys += 1
+                        continue
+
             # ── Cluster concentration enforcement (config-gated) ──────────────
             # When the user flips warn_only=false, the simulator's `_do_buy()` enforces
             # cluster caps the same way as live `buy_cycle()`. Defaults are a no-op.
@@ -1536,7 +1558,7 @@ def run_simulation(
             if (
                 _cluster_cap_enabled
                 and _cluster_labels_by_day is not None
-                and portfolio_value > 0
+                and _active_sleeve_val > 0
             ):
                 _rebal_idx = day // rebalance_frequency_days
                 if _rebal_idx < _cluster_labels_by_day.shape[0]:
@@ -1551,13 +1573,14 @@ def run_simulation(
                                 stock_last_price[_k] if np.isfinite(stock_last_price[_k]) else stock_avg_cost[_k]
                             )
                             _cur_cw += float(stock_shares[_k] * _p_k)
-                    _cur_cw = _cur_cw / portfolio_value
-                    _new_w = _cur_cw + (alloc / portfolio_value)
+                    # Active-sleeve denominator (not total PV) — see _active_sleeve_val.
+                    _cur_cw = _cur_cw / _active_sleeve_val
+                    _new_w = _cur_cw + (alloc / _active_sleeve_val)
                     if _new_w > _cluster_cap_limit:
                         _cluster_violations_count += 1
                         if _cluster_cap_downsize:
                             _headroom = max(0.0, _cluster_cap_limit - _cur_cw)
-                            _fit = _headroom * portfolio_value
+                            _fit = _headroom * _active_sleeve_val
                             if _fit >= min_order:
                                 alloc = _fit
                                 cap_reductions += 1

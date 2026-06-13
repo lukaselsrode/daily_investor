@@ -188,20 +188,14 @@ def _compute(
 
     active = h[~h["symbol"].isin(etfs) & (h["equity"] > 0)].copy()
 
-    if active.empty:
-        return ConcentrationReport(
-            timestamp=ts, total_active_equity=0.0, n_active_positions=0,
-            cluster_weights={}, sector_weights={}, cluster_symbols={},
-            sector_symbols={}, violations=[], method=method,
-            n_clusters=n_clusters, unmatched_symbols=[],
-        )
-
-    total_active_equity = float(active["equity"].sum())
-    _active_syms = set(active["symbol"].astype(str).tolist())
-
     # ── Step 2: run factor map on full universe to get cluster labels ─────────
+    # Built BEFORE the empty-sleeve check so the symbol→cluster lookup exists even
+    # at cold start (mostly cash + ETFs, no active stock yet). The buy-time cap in
+    # manager.buy_cycle needs this lookup to constrain the initial sleeve build-out;
+    # without it the cluster cap was inert until the first active position existed.
     from portfolio.visualization.factor_map import build_factor_map
 
+    cluster_lookup: dict[str, str] = {}
     _, df_mapped, _ = build_factor_map(
         agg_df,
         method=method,
@@ -209,12 +203,22 @@ def _compute(
         output_html=None,
         show=False,
     )
-
     # df_mapped has "cluster" column (string) for every symbol in the universe
-    cluster_lookup: dict[str, str] = {}
     if "cluster" in df_mapped.columns and "symbol" in df_mapped.columns:
         for _, row in df_mapped[["symbol", "cluster"]].iterrows():
             cluster_lookup[str(row["symbol"])] = str(row["cluster"])
+
+    if active.empty:
+        return ConcentrationReport(
+            timestamp=ts, total_active_equity=0.0, n_active_positions=0,
+            cluster_weights={}, sector_weights={}, cluster_symbols={},
+            sector_symbols={}, violations=[], method=method,
+            n_clusters=n_clusters, unmatched_symbols=[],
+            universe_cluster_lookup=dict(cluster_lookup),
+        )
+
+    total_active_equity = float(active["equity"].sum())
+    _active_syms = set(active["symbol"].astype(str).tolist())
 
     # Bring sector info into active holdings
     sector_lookup: dict[str, str] = {}
