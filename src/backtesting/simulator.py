@@ -16,6 +16,7 @@ from util import (
     BACKTEST_PARAMS,
     CANDIDATE_SELECTION_PARAMS,
     CONTRIBUTION_TIMING_PARAMS,
+    ETF_ALLOCATION_PARAMS,
     EXIT_DECISION_PARAMS,
     HARVEST_PARAMS,
     INDEX_PCT,
@@ -543,6 +544,24 @@ def _regime_tilted_weights(raw_sw: np.ndarray, params: np.ndarray,
     return tilted
 
 
+def _pit_or_static(precomp: PrecomputedData, day: int):
+    """Return (pe_comp, pb_comp, quality, income) factor arrays for `day`.
+
+    Uses the point-in-time DAILY panels when present (no static current-snapshot
+    look-ahead); otherwise the static 1D arrays — byte-identical to the pre-PIT path.
+    Consumed by BOTH composite scoring and the candidate gates so no look-ahead leaks
+    through the gate even when the composite is PIT.
+    """
+    if precomp.pe_comp_daily is not None:
+        return (
+            precomp.pe_comp_daily[day],
+            precomp.pb_comp_daily[day],
+            precomp.quality_scores_daily[day],
+            precomp.income_scores_daily[day],
+        )
+    return (precomp.pe_comp, precomp.pb_comp, precomp.quality_scores, precomp.income_scores)
+
+
 def score_stocks_at_day(precomp: PrecomputedData, params: np.ndarray, day: int) -> np.ndarray:
     """
     Score stocks using day-specific rolling momentum features.
@@ -553,7 +572,8 @@ def score_stocks_at_day(precomp: PrecomputedData, params: np.ndarray, day: int) 
     raw_sw = params[:4]
     sw = _regime_tilted_weights(raw_sw, params, precomp, day)
     value_pe_w  = params[9]
-    value_score = value_pe_w * precomp.pe_comp + (1.0 - value_pe_w) * precomp.pb_comp
+    _pe_c, _pb_c, _qual_c, _inc_c = _pit_or_static(precomp, day)
+    value_score = value_pe_w * _pe_c + (1.0 - value_pe_w) * _pb_c
 
     if precomp.ret_3m_daily is not None:
         momentum_score = _momentum_score_multifactor_vec(day, precomp, params[10:16])
@@ -577,7 +597,7 @@ def score_stocks_at_day(precomp: PrecomputedData, params: np.ndarray, day: int) 
             resid_mom = _residmom_score_at_day(precomp, day)
             momentum_score = (1.0 - rm_blend) * momentum_score + rm_blend * resid_mom
 
-    quality_component = precomp.quality_scores
+    quality_component = _qual_c
     # Low-vol quality blend (slot 48, frozen-by-default = 0.0). Blends a causal
     # cross-sectional low-volatility score into the quality factor: 0 = pure
     # configured quality, 1 = pure low-vol rank. Low-vol is a documented quality
@@ -591,7 +611,7 @@ def score_stocks_at_day(precomp: PrecomputedData, params: np.ndarray, day: int) 
     composite = (
         sw[0] * value_score
         + sw[1] * quality_component
-        + sw[2] * precomp.income_scores
+        + sw[2] * _inc_c
         + sw[3] * momentum_score
     )
 
@@ -673,6 +693,10 @@ def select_candidates(
         if len(params) > 45:
             cs_params["max_candidates"] = round(float(params[45]))
 
+    # PIT (or static) factor arrays for THIS day — the gate must use the same causal
+    # quality/income the composite used, else look-ahead leaks through the gate.
+    _pe_c, _pb_c, _qual_c, _inc_c = _pit_or_static(precomp, day)
+
     n            = len(composite_scores)
     mode         = cs_params["mode"]
     max_cands    = cs_params["max_candidates"]
@@ -699,14 +723,14 @@ def select_candidates(
         floor_excluded = int((score_mask & ~floor_gate).sum())
         score_mask  = score_mask & floor_gate
 
-    quality_gate = precomp.quality_scores >= min_qual
+    quality_gate = _qual_c >= min_qual
     qual_excluded = int((score_mask & ~quality_gate).sum())
 
     mom_scores  = _momentum_score_at_day(precomp, params, day)
     mom_gate    = mom_scores >= min_mom
     mom_excluded = int((score_mask & quality_gate & ~mom_gate).sum())
 
-    has_income    = precomp.income_scores > 0.0
+    has_income    = _inc_c > 0.0
     cond_mom_weak = mom_scores < min_cond_mom
     income_at_risk = has_income & cond_mom_weak & ~precomp.yield_trap_mask
     income_trap_gate = ~income_at_risk | (allow_def & is_defensive)
@@ -736,11 +760,11 @@ def select_candidates(
     n_sel    = len(selected)
 
     value_pe_w  = float(params[9])
-    value_scores_diag = value_pe_w * precomp.pe_comp + (1.0 - value_pe_w) * precomp.pb_comp
+    value_scores_diag = value_pe_w * _pe_c + (1.0 - value_pe_w) * _pb_c
 
-    avg_quality  = float(precomp.quality_scores[selected].mean()) if n_sel else 0.0
+    avg_quality  = float(_qual_c[selected].mean()) if n_sel else 0.0
     avg_momentum = float(mom_scores[selected].mean())              if n_sel else 0.0
-    avg_income   = float(precomp.income_scores[selected].mean())   if n_sel else 0.0
+    avg_income   = float(_inc_c[selected].mean())   if n_sel else 0.0
     avg_value    = float(value_scores_diag[selected].mean())       if n_sel else 0.0
 
     sector_counts: dict = {}
@@ -932,6 +956,17 @@ def _build_archetype_thresholds(
 
     yt_mask = precomp.yield_trap_mask if precomp.yield_trap_mask is not None else np.zeros(n, dtype=bool)
 
+    # Archetype classification feeds per-archetype caps / exits / min_score_to_buy — the
+    # TRADE path — so it must use the CAUSAL day-0 PIT quality/income when present, not the
+    # static current-snapshot (which would leak look-ahead through the archetype policy).
+    # Falls back to the static 1D arrays when PIT is off (byte-identical).
+    _q0 = (precomp.quality_scores_daily[0]
+           if getattr(precomp, "quality_scores_daily", None) is not None
+           else precomp.quality_scores)
+    _inc0 = (precomp.income_scores_daily[0]
+             if getattr(precomp, "income_scores_daily", None) is not None
+             else precomp.income_scores)
+
     # Augment signals: pass sector/industry/market_cap from precomp so the
     # backtest classifier sees ~6 signals instead of 4 (closes most of the
     # live/backtest label-disagreement gap).
@@ -951,9 +986,9 @@ def _build_archetype_thresholds(
                                              and np.isfinite(_mom_scores[i])) else 0.0
             # Use the full classifier to also capture confidence_bucket for attribution.
             _full = classify_archetype_full_from_scores(
-                quality_score  = float(precomp.quality_scores[i]),
+                quality_score  = float(_q0[i]),
                 momentum_score = _mom,
-                income_score   = float(precomp.income_scores[i]),
+                income_score   = float(_inc0[i]),
                 yield_trap     = bool(yt_mask[i]),
                 archetype_cfg  = arch_cfg,
                 sector         = _sec,
@@ -1002,6 +1037,7 @@ def run_simulation(
     cluster_tracking: bool = False,
     scope: str = "overall_strategy",
     accounting_trace: list | None = None,
+    etf_alloc_params: dict | None = None,
 ) -> SimResult:
     """
     Simulate the strategy over the precomputed price history.
@@ -1670,18 +1706,74 @@ def run_simulation(
         cash -= spent + commission_paid
         return spent
 
+    # ── ETF/core sleeve allocation weights (single source of truth) ───────────
+    # _etf_alloc_params defaults to config; the tuner passes a slot-derived override.
+    # enabled:false / equal_weight reproduce the historical equal-weight ETF behavior
+    # exactly (the weighted path collapses to 1/n_valid). Mirrors live buy_cycle.
+    from portfolio.etf_allocation import etf_target_weights as _etf_tw
+    from portfolio.etf_allocation import rebalance_plan as _etf_rebal_plan
+    if scope == "etf_allocation":
+        # ETF-allocation tuning: read the ETF bucket-weight slots from the param vector
+        # (tuning.constants owns the slot layout). Lets every existing gate run an ETF
+        # candidate just by passing its vector through — no gate plumbing changes.
+        from tuning.constants import etf_alloc_params_from_params as _etf_from_vec
+        _slot_p = _etf_from_vec(params)
+        _etf_alloc_p = _slot_p if _slot_p is not None else (
+            etf_alloc_params if etf_alloc_params is not None else ETF_ALLOCATION_PARAMS
+        )
+    else:
+        _etf_alloc_p = etf_alloc_params if etf_alloc_params is not None else ETF_ALLOCATION_PARAMS
+    _etf_syms      = list(getattr(precomp, "etf_symbols", []) or [])
+    _etf_alloc_on  = (
+        bool(_etf_alloc_p.get("enabled", False))
+        and _etf_alloc_p.get("mode") != "equal_weight"
+        and n_etfs > 0 and len(_etf_syms) == n_etfs
+    )
+    etf_turnover_notional = 0.0          # one-way $ traded in band-breach rebalances
+    _etf_inflow  = np.zeros(n_days)      # net $ added to ETF sleeve per day (for sleeve TWR)
+    _etf_daily   = np.zeros(n_days)      # ETF sleeve $ value per day
+    _etf_alloc_frac_sum = 0.0            # Σ etf_value/port_val (for avg allocation)
+    _etf_alloc_frac_cnt = 0
+
+    def _etf_weight_arr(day: int, valid_mask: np.ndarray) -> np.ndarray:
+        """Per-column ETF weights summing to 1 over price-valid ETFs. Equal weight
+        when allocation is off — byte-identical to the historical per_etf split."""
+        if not _etf_alloc_on:
+            w = valid_mask.astype(np.float64)
+            s = w.sum()
+            return w / s if s > 0 else w
+        regime     = _detect_regime(precomp, day)
+        valid_syms = [_etf_syms[j] for j in range(n_etfs) if valid_mask[j]]
+        wd  = _etf_tw(regime, valid_syms, params=_etf_alloc_p)
+        arr = np.array([wd.get(_etf_syms[j], 0.0) for j in range(n_etfs)], dtype=np.float64)
+        s = arr.sum()
+        if s > 0:
+            return arr / s
+        w = valid_mask.astype(np.float64)
+        return w / w.sum() if w.sum() > 0 else w
+
+    def _etf_buy_weighted(day: int, budget: float, prices_row: np.ndarray) -> float:
+        """Buy `budget` of ETFs split by target weights; returns dollars deployed.
+        ETFs whose slice is below min_order are skipped (matches the old all-or-nothing
+        skip when every equal slice was sub-min). Updates etf_shares; caller debits cash."""
+        if budget <= 0 or n_etfs == 0:
+            return 0.0
+        valid = np.isfinite(prices_row) & (prices_row > 0)
+        if not valid.any():
+            return 0.0
+        w = _etf_weight_arr(day, valid)
+        spent_ = 0.0
+        for j in np.where(valid)[0]:
+            amt = budget * w[j]
+            if amt >= min_order:
+                etf_shares[j] += amt / prices_row[j]
+                spent_ += amt
+        _etf_inflow[day] += spent_
+        return spent_
+
     # Day 0: ETF buy + initial stock deployment
     if n_etfs > 0 and index_pct > 0:
-        etf_budget = cash * index_pct
-        p0_etf     = precomp.etf_prices[0]
-        valid_etfs = np.isfinite(p0_etf) & (p0_etf > 0)
-        n_valid    = int(valid_etfs.sum())
-        if n_valid > 0:
-            per_etf = etf_budget / n_valid
-            if per_etf >= min_order:
-                for j in np.where(valid_etfs)[0]:
-                    etf_shares[j] = per_etf / p0_etf[j]
-                    cash -= per_etf
+        cash -= _etf_buy_weighted(0, cash * index_pct, precomp.etf_prices[0])
 
     _do_buy(0, cash)
 
@@ -1786,14 +1878,15 @@ def run_simulation(
             & (days_held >= _MIN_DAYS_HELD_BEFORE_VALUE_EXIT)
         )
         if _weak_cand.any():
+            _qual_d = _pit_or_static(precomp, d)[2]  # day-d quality (PIT or static)
             _rank01 = (_pct_rank_vec(current_scores) + 1.0) / 2.0
-            _tis    = _thesis_intact_vec(precomp.quality_scores, current_mom, pct_from_avg, _rank01)
+            _tis    = _thesis_intact_vec(_qual_d, current_mom, pct_from_avg, _rank01)
             weak_val_mask = _dae_soft_exit_full_exit(
                 _weak_cand,
                 snw=current_scores,
                 pnl=pct_from_avg,
                 mom=current_mom,
-                qual=precomp.quality_scores,
+                qual=_qual_d,
                 tis=_tis,
                 floors=_dae_floors,
             )
@@ -1951,15 +2044,7 @@ def run_simulation(
             # Route harvest proceeds to ETF sleeve (same as live HarvestManager)
             etf_portion = harv_notional * _harvest_to_etfs_pct
             if n_etfs > 0 and etf_portion > 0:
-                p_etf     = precomp.etf_prices[d]
-                valid_etfs = np.isfinite(p_etf) & (p_etf > 0)
-                n_valid_e  = int(valid_etfs.sum())
-                if n_valid_e > 0:
-                    per_etf = etf_portion / n_valid_e
-                    if per_etf >= min_order:
-                        for j in np.where(valid_etfs)[0]:
-                            etf_shares[j] += per_etf / p_etf[j]
-                            cash           -= per_etf
+                cash -= _etf_buy_weighted(d, etf_portion, precomp.etf_prices[d])
 
         # ── Trim exits (partial position reduction) ──────────────────────────
         if _trim_enabled:
@@ -2026,15 +2111,7 @@ def run_simulation(
                 # Route trim proceeds to ETF sleeve
                 etf_portion = trim_notional * _trim_to_etfs_pct
                 if n_etfs > 0 and etf_portion > 0:
-                    p_etf     = precomp.etf_prices[d]
-                    valid_etfs = np.isfinite(p_etf) & (p_etf > 0)
-                    n_valid_e  = int(valid_etfs.sum())
-                    if n_valid_e > 0:
-                        per_etf = etf_portion / n_valid_e
-                        if per_etf >= min_order:
-                            for j in np.where(valid_etfs)[0]:
-                                etf_shares[j] += per_etf / p_etf[j]
-                                cash           -= per_etf
+                    cash -= _etf_buy_weighted(d, etf_portion, precomp.etf_prices[d])
 
         # ── Regime de-risk overlay: rotate book <-> benchmark on regime edges ──
         # Frozen off unless regime.defensive.backtest_derisk_frac > 0. The overlay
@@ -2111,16 +2188,35 @@ def run_simulation(
             total_contributions += contrib_today
 
             if index_pct > 0 and n_etfs > 0:
-                etf_contrib = contrib_today * index_pct
-                p_etf       = precomp.etf_prices[d]
-                valid_etfs  = np.isfinite(p_etf) & (p_etf > 0)
-                n_valid_e   = int(valid_etfs.sum())
-                if n_valid_e > 0:
-                    per_etf_c = etf_contrib / n_valid_e
-                    if per_etf_c >= min_order:
-                        for j in np.where(valid_etfs)[0]:
-                            etf_shares[j] += per_etf_c / p_etf[j]
-                            cash           -= per_etf_c
+                p_etf = precomp.etf_prices[d]
+                cash -= _etf_buy_weighted(d, contrib_today * index_pct, p_etf)
+                # Band-breach rebalance toward target weights (turnover-bounded). No-op
+                # when allocation is off (the historical sleeve is buy-only). Cash-neutral
+                # within the sleeve: sells fund buys; tracked as one-way ETF turnover.
+                if _etf_alloc_on:
+                    valid_etfs = np.isfinite(p_etf) & (p_etf > 0)
+                    cur_dollars = {
+                        _etf_syms[j]: float(etf_shares[j] * p_etf[j])
+                        for j in np.where(valid_etfs)[0]
+                    }
+                    tgt = _etf_tw(_detect_regime(precomp, d),
+                                  [_etf_syms[j] for j in np.where(valid_etfs)[0]],
+                                  params=_etf_alloc_p)
+                    _cons = _etf_alloc_p["constraints"]
+                    deltas = _etf_rebal_plan(
+                        cur_dollars, tgt,
+                        float(_cons["rebalance_band"]),
+                        float(_cons["max_turnover_per_rebalance"]),
+                    )
+                    sym_to_col = {_etf_syms[j]: j for j in range(n_etfs)}
+                    # Sells (negative) first so they fund the buys (cash-neutral).
+                    for _sym, _d in sorted(deltas.items(), key=lambda kv: kv[1]):
+                        j = sym_to_col.get(_sym)
+                        if j is None or not (np.isfinite(p_etf[j]) and p_etf[j] > 0):
+                            continue
+                        etf_shares[j] += _d / p_etf[j]
+                        cash          -= _d
+                        etf_turnover_notional += abs(_d) * 0.5
 
             # ── BSC vol-scaling overlay: set target exposure, de-risk pro-rata,
             # cap the buy budget so the stock book holds w*(stock+cash) in stock
@@ -2186,6 +2282,10 @@ def run_simulation(
         stock_value = float(np.sum(stock_shares * _mark_prices(prices, valid_price)))
         port_val    = cash + stock_value + etf_value + _overlay_value
         daily_values[d] = port_val
+        _etf_daily[d] = etf_value
+        if port_val > 0:
+            _etf_alloc_frac_sum += etf_value / port_val
+            _etf_alloc_frac_cnt += 1
         if _active_daily is not None:
             # Overlay is part of the ACTIVE sleeve (de-risked active capital riding
             # the benchmark), so it stays in the active curve: only the index sleeve
@@ -2403,6 +2503,41 @@ def run_simulation(
         if bench_ca_equity is not None and len(bench_ca_equity) >= 3:
             _active_information_ratio = information_ratio(_ca_active_daily, bench_ca_equity)
 
+    # ── ETF/core sleeve diagnostics ───────────────────────────────────────────
+    # Contribution-adjusted ETF sleeve TWR (inflows are external to sleeve return),
+    # average ETF allocation fraction, one-way ETF turnover (Σ rebalance + drift notional
+    # / mean sleeve value), and final per-ETF weights for the current-vs-proposed diff.
+    _etf_sleeve_return: float | None = None
+    _etf_excess_return: float | None = None
+    _etf_turnover:      float | None = None
+    _etf_allocation_avg: float | None = None
+    _etf_final_weights: dict[str, float] | None = None
+    if n_etfs > 0 and _etf_daily.any():
+        _first = int(np.argmax(_etf_daily > 0))
+        if _etf_daily[_first] > 0:
+            _etf_ca = np.zeros(n_days)
+            _etf_ca[_first] = _etf_daily[_first]
+            for _i in range(_first + 1, n_days):
+                _prev = _etf_daily[_i - 1]
+                _fac  = (_etf_daily[_i] - _etf_inflow[_i]) / _prev if _prev > 1e-9 else 1.0
+                _etf_ca[_i] = _etf_ca[_i - 1] * _fac
+            _etf_sleeve_return = float(_etf_ca[-1] / _etf_ca[_first] - 1.0)
+            _etf_excess_return = _etf_sleeve_return - bench_twr_val
+        _mean_sleeve = float(_etf_daily[_etf_daily > 0].mean()) if (_etf_daily > 0).any() else 0.0
+        _etf_turnover = float(etf_turnover_notional / _mean_sleeve) if _mean_sleeve > 0 else 0.0
+        _etf_allocation_avg = (
+            _etf_alloc_frac_sum / _etf_alloc_frac_cnt if _etf_alloc_frac_cnt > 0 else 0.0
+        )
+        _last_p = precomp.etf_prices[-1]
+        _last_val = etf_shares * _last_p
+        _tot = float(np.nansum(np.where(np.isfinite(_last_val), _last_val, 0.0)))
+        if _tot > 0 and len(_etf_syms) == n_etfs:
+            _etf_final_weights = {
+                _etf_syms[j]: float(_last_val[j] / _tot)
+                for j in range(n_etfs)
+                if np.isfinite(_last_val[j]) and _last_val[j] > 0
+            }
+
     return SimResult(
         final_value=final_value,
         total_return=metrics["total_return"],
@@ -2491,6 +2626,11 @@ def run_simulation(
         active_max_drawdown=_active_max_drawdown,
         active_excess_return=_active_excess_return,
         active_information_ratio=_active_information_ratio,
+        etf_sleeve_return=_etf_sleeve_return,
+        etf_excess_return=_etf_excess_return,
+        etf_turnover=_etf_turnover,
+        etf_allocation_avg=_etf_allocation_avg,
+        etf_final_weights=_etf_final_weights,
     )
 
 

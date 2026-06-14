@@ -23,23 +23,30 @@ class HarvestManager:
     def __init__(self, config=None) -> None:
         self._cfg = config
 
-    def route_proceeds(self, amount: float, broker: BrokerAdapter) -> None:
+    def route_proceeds(
+        self, amount: float, broker: BrokerAdapter, regime: str = "bullish",
+    ) -> None:
         """Reinvest take-profit proceeds into harvest ETFs.
 
         Only `harvest_to_etfs_pct` of proceeds is deployed to ETFs; the remainder
         stays as cash available for the active sleeve (no extra ETF buy triggered).
+        The ETF split honors etf_allocation weights (over the harvest-ETF subset);
+        with allocation disabled this is the historical equal weight.
         """
+        from portfolio.etf_allocation import etf_target_weights, split_budget
+
         harvest_etfs = HARVEST_PARAMS["harvest_etfs"]
         if not harvest_etfs:
             return
         to_etfs_pct   = float(HARVEST_PARAMS.get("harvest_to_etfs_pct", 1.0))
         etf_amount    = amount * to_etfs_pct
         active_reserve = amount - etf_amount
-        per_etf = etf_amount / len(harvest_etfs)
         min_order = RISK_LIMITS["min_order_amount"]
-        if per_etf < min_order:
+        weights = etf_target_weights(regime, list(harvest_etfs))
+        alloc = {e: d for e, d in split_budget(weights, etf_amount).items() if d >= min_order}
+        if not alloc:
             logger.info(
-                f"Harvest per-ETF ${per_etf:.2f} < min_order ${min_order:.2f} "
+                f"Harvest ETF allocations below min_order ${min_order:.2f} "
                 f"— skipping harvest reinvestment"
             )
             return
@@ -48,9 +55,9 @@ class HarvestManager:
             f"({to_etfs_pct:.0%}) + active reserve ${active_reserve:.2f} "
             f"({1 - to_etfs_pct:.0%}) ==="
         )
-        for etf in harvest_etfs:
+        for etf, amt in alloc.items():
             try:
-                result = broker.buy_fractional(etf, per_etf)
+                result = broker.buy_fractional(etf, amt)
                 logger.info(f"Harvest → {etf}: {result.state if result.success else result.detail}")
             except Exception as e:
                 logger.error(f"Harvest reinvestment failed for {etf}: {e}")

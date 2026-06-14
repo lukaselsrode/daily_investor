@@ -18,6 +18,7 @@ from util import (
     BACKTEST_PARAMS,
     CANDIDATE_SELECTION_PARAMS,
     CONTRIBUTION_TIMING_PARAMS,
+    ETF_ALLOCATION_PARAMS,
     EXIT_DECISION_PARAMS,
     INDEX_PCT,
     METRIC_THRESHOLD,
@@ -455,6 +456,80 @@ def _contribution_timing_default_frozen_indices() -> set[int]:
     }
 
 
+# ── ETF/core sleeve allocation slots (regime × bucket weights) ─────────────────
+# Tunable ONLY under scope == "etf_allocation"; frozen-by-default otherwise so they
+# never perturb an active-stock tune. Layout: 1 enabled flag + (3 regimes × 7 buckets)
+# raw bucket weights, normalized within each regime at decision time. The simulator
+# reads these (via etf_alloc_params_from_params) when scope == "etf_allocation".
+# Defaults are a VALID core-heavy allocation (core 0.40, satellites 0.10 each) so a
+# seed perturbation starts inside the constraint set (min_core_market 0.40, caps).
+_ETF_REGIMES: tuple[str, ...] = ("bullish", "neutral", "defensive")
+_ETF_BUCKETS: tuple[str, ...] = (
+    "core_market", "growth", "semis", "dividend_defensive",
+    "international", "real_estate", "small_cap",
+)
+_ETF_BUCKET_DEFAULT: dict[str, float] = {
+    "core_market": 0.40, "growth": 0.10, "semis": 0.10, "dividend_defensive": 0.10,
+    "international": 0.10, "real_estate": 0.10, "small_cap": 0.10,
+}
+
+_ETF_ENABLED_SLOT = len(PARAM_NAMES)
+PARAM_NAMES.append("etf_alloc_enabled")
+BOUNDS.append((0.0, 1.0))
+_CONFIG_PATH_TO_PARAM_IDX["etf_allocation.enabled"] = _ETF_ENABLED_SLOT
+
+_ETF_WEIGHT_SLOT_OFFSET = len(PARAM_NAMES)
+for _r in _ETF_REGIMES:
+    for _b in _ETF_BUCKETS:
+        _CONFIG_PATH_TO_PARAM_IDX[f"etf_allocation.regime_weights.{_r}.{_b}"] = len(PARAM_NAMES)
+        PARAM_NAMES.append(f"etf_bw_{_r[:4]}_{_b}")
+        BOUNDS.append((0.0, 1.0))
+
+
+def etf_alloc_params_from_params(params) -> dict | None:
+    """Build an ETF_ALLOCATION_PARAMS-shaped override from the ETF slots in *params*.
+
+    Returns None when params lacks the ETF slots (plain/legacy vectors), so the
+    simulator reads config instead. enabled is taken from the flag slot (≥0.5);
+    mode is forced to regime_weights (the only slot-tunable mode in Milestone A).
+    Buckets / constraints / universe are inherited from live config.
+    """
+    if params is None or len(params) <= _ETF_ENABLED_SLOT:
+        return None
+    from util import ETF_ALLOCATION_PARAMS as _BASE
+    regime_weights: dict[str, dict[str, float]] = {r: {} for r in _ETF_REGIMES}
+    for _ri, _r in enumerate(_ETF_REGIMES):
+        for _bi, _b in enumerate(_ETF_BUCKETS):
+            _idx = _ETF_WEIGHT_SLOT_OFFSET + _ri * len(_ETF_BUCKETS) + _bi
+            if _idx < len(params):
+                regime_weights[_r][_b] = float(params[_idx])
+    return {
+        **_BASE,
+        "enabled": bool(float(params[_ETF_ENABLED_SLOT]) >= 0.5),
+        "mode": "regime_weights",
+        "regime_weights": regime_weights,
+    }
+
+
+def _etf_alloc_default_frozen_indices() -> set[int]:
+    """All ETF-allocation slots are frozen by default — unfrozen only via an ETF preset
+    AND only ever active under scope == 'etf_allocation'."""
+    out = {_ETF_ENABLED_SLOT}
+    out |= {
+        _idx for _path, _idx in _CONFIG_PATH_TO_PARAM_IDX.items()
+        if _path.startswith("etf_allocation.regime_weights.")
+    }
+    return out
+
+
+def _etf_weight_slot_indices() -> set[int]:
+    """The 21 regime×bucket weight slots (NOT the enabled flag)."""
+    return {
+        _idx for _path, _idx in _CONFIG_PATH_TO_PARAM_IDX.items()
+        if _path.startswith("etf_allocation.regime_weights.")
+    }
+
+
 def position_sizing_cfg_from_params(params) -> dict:
     """
     Build a position-sizing override dict from the sizing slots in *params*.
@@ -585,6 +660,8 @@ def _get_active_indices(scope: str = "overall_strategy", preset: str | None = No
     frozen |= _rebalance_default_frozen_indices()
     # Contribution-timing slots are frozen-by-default; the contribution_timing preset unfreezes them.
     frozen |= _contribution_timing_default_frozen_indices()
+    # ETF-allocation slots are frozen-by-default; an ETF preset unfreezes them.
+    frozen |= _etf_alloc_default_frozen_indices()
     if preset is not None:
         from .presets import apply_preset_to_frozen
         frozen = apply_preset_to_frozen(frozen, preset)
@@ -594,6 +671,12 @@ def _get_active_indices(scope: str = "overall_strategy", preset: str | None = No
             for p in ACTIVE_SLEEVE_FROZEN
             if p in _CONFIG_PATH_TO_PARAM_IDX
         }
+    if scope == "etf_allocation":
+        # Hard guarantee: under the ETF scope ONLY the 21 regime×bucket weight slots
+        # may be active. Freeze every other slot — provably leaving all active-stock
+        # parameters (and the enabled flag) untouched, regardless of preset.
+        _etf_weights = _etf_weight_slot_indices()
+        frozen |= (set(range(len(PARAM_NAMES))) - _etf_weights)
     return [i for i in range(len(PARAM_NAMES)) if i not in frozen]
 
 
@@ -726,7 +809,15 @@ def _current_params() -> np.ndarray:
         if _default is None:
             _default = (_bnd[0] + _bnd[1]) / 2.0
         ct_tail.append(float(_default))
+    # ETF-allocation slots — incumbent is the historical equal-weight behavior, so the
+    # enabled flag is 0.0 (the weight slots carry a VALID core-heavy default so that a
+    # candidate seeded from the incumbent and flipped to enabled=1 starts in-bounds).
+    etf_tail: list[float] = [float(ETF_ALLOCATION_PARAMS.get("enabled", False))]
+    for _r in _ETF_REGIMES:
+        _cfg_rw = (ETF_ALLOCATION_PARAMS.get("regime_weights", {}) or {}).get(_r, {}) or {}
+        for _b in _ETF_BUCKETS:
+            etf_tail.append(float(_cfg_rw.get(_b, _ETF_BUCKET_DEFAULT[_b])))
     return np.array(
         base + arch_tail + cs_tail + ps_tail + regime_tail
-        + ef_tail + oc_tail + rb_tail + arch_bool_tail + ct_tail
+        + ef_tail + oc_tail + rb_tail + arch_bool_tail + ct_tail + etf_tail
     )

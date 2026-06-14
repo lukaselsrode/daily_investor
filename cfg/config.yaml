@@ -319,6 +319,87 @@ etf_risk:
   ma_period: 200
   defensive_etf_pct: 0.85
   defensive_cash_pct: 0.1
+# ── ETF/core sleeve allocation ────────────────────────────────────────────────
+# Governs HOW the ETF/core sleeve is split across the ETF universe (the index_pct
+# split between ETF and active sleeves is unchanged and lives above). enabled:false
+# AND mode:equal_weight both reproduce the historical equal-weight behavior exactly.
+# Weights are parameterized by BUCKET (not free ETF-level) to resist overfit; within
+# a bucket, ETFs are equal-weighted. Tuned only through the gated `tune-etf-allocation`
+# flow — never hand-edit regime_weights without re-running the gauntlet.
+etf_allocation:
+  enabled: false
+  mode: equal_weight                 # equal_weight | static_weights | regime_weights
+  universe_mode: configured_only     # configured_only | approved_allowlist | curated_exploration
+  configured_universe:
+  - SPY
+  - VOO
+  - VTI
+  - QQQ
+  - SCHD
+  - SMH
+  - VXUS
+  - VNQ
+  - IWM
+  - DRAM
+  approved_allowlist: []
+  # Per-ETF static weights (mode:static_weights). null = excluded then renormalized;
+  # all-null falls back to equal_weight with a warning.
+  default_weights:
+    SPY: null
+    VOO: null
+    VTI: null
+    QQQ: null
+    SCHD: null
+    SMH: null
+    VXUS: null
+    VNQ: null
+    IWM: null
+    DRAM: null
+  # Per-regime BUCKET weights (mode:regime_weights). Empty = equal-weight fallback.
+  # Keys must be bucket names from `buckets` below; values are bucket weights that
+  # are normalized at decision time and expanded equal-weight to each bucket's ETFs.
+  regime_weights:
+    bullish: {}
+    neutral: {}
+    defensive: {}
+  constraints:
+    min_weight: 0.0
+    max_single_etf_weight: 0.60
+    min_core_market_weight: 0.40
+    max_growth_weight: 0.35
+    max_semis_weight: 0.25
+    max_thematic_combined: 0.25
+    max_real_estate_weight: 0.10
+    max_small_cap_weight: 0.15
+    max_international_weight: 0.20
+    max_bond_or_cashlike_weight: 0.60
+    max_gold_commodity_weight: 0.15
+    max_turnover_per_rebalance: 0.35
+    rebalance_band: 0.03
+  buckets:
+    core_market:
+    - SPY
+    - VOO
+    - VTI
+    growth:
+    - QQQ
+    semis:
+    - SMH
+    - DRAM
+    dividend_defensive:
+    - SCHD
+    international:
+    - VXUS
+    real_estate:
+    - VNQ
+    small_cap:
+    - IWM
+    cashlike_bonds: []
+    intermediate_bonds: []
+    long_bonds: []
+    defensive_equity: []
+    quality_value: []
+    gold_commodities: []
 scoring:
   enabled: true
   # ── Price-derived factor blend overlays (frozen-by-default = 0.0) ──────────
@@ -468,6 +549,13 @@ backtest:
   # but ~2021-2026-bounded view. Default false (opt-in): toggle here or via the UI checkbox. Falls
   # back to yfinance with a warning if the cache is absent. See backtesting/survivorship.py.
   survivorship_free: true
+  # Point-in-time fundamentals (2026-06): when true (default), survivorship-free backtests/tuning
+  # score value/quality/income from filings dated STRICTLY BEFORE each rebalance date — no static
+  # current-snapshot look-ahead (the dominant active-sleeve validation gap). Live/current-snapshot
+  # scoring is unchanged. If PIT is requested but the per-day arrays can't be built, the loader
+  # HARD-RAISES unless allow_static_fundamentals_fallback is true (kept false for honest modes).
+  point_in_time_fundamentals: true
+  allow_static_fundamentals_fallback: false
   # Apply the discretionary NEVER-BUY industry/sector exclusions (discretionary.excluded_*,
   # funds/trusts, and the "Miscellaneous" sector) to the backtest candidate universe, mirroring
   # the live gate in data/fundamentals.py. Default true = live/backtest parity. Set false for

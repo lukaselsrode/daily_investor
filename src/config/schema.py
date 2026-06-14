@@ -260,11 +260,49 @@ class EtfRiskConfig:
 
 
 @dataclass(frozen=True)
+class EtfAllocationConstraintsConfig:
+    min_weight: float = 0.0
+    max_single_etf_weight: float = 0.60
+    min_core_market_weight: float = 0.40
+    max_growth_weight: float = 0.35
+    max_semis_weight: float = 0.25
+    max_thematic_combined: float = 0.25
+    max_real_estate_weight: float = 0.10
+    max_small_cap_weight: float = 0.15
+    max_international_weight: float = 0.20
+    max_bond_or_cashlike_weight: float = 0.60
+    max_gold_commodity_weight: float = 0.15
+    max_turnover_per_rebalance: float = 0.35
+    rebalance_band: float = 0.03
+
+
+@dataclass(frozen=True)
+class EtfAllocationConfig:
+    """ETF/core sleeve allocation. enabled:false AND mode:equal_weight both reproduce
+    the historical equal-weight behavior exactly. Weights are bucket-parameterized
+    (equal-weight within a bucket) and tuned only via the gated tune-etf-allocation flow."""
+    enabled: bool = False
+    mode: str = "equal_weight"            # equal_weight | static_weights | regime_weights
+    universe_mode: str = "configured_only"  # configured_only | approved_allowlist | curated_exploration
+    configured_universe: tuple[str, ...] = field(default_factory=tuple)
+    approved_allowlist: tuple[str, ...] = field(default_factory=tuple)
+    default_weights: dict[str, float | None] = field(default_factory=dict)
+    regime_weights: dict[str, dict[str, float]] = field(default_factory=dict)
+    constraints: EtfAllocationConstraintsConfig = field(default_factory=EtfAllocationConstraintsConfig)
+    buckets: dict[str, tuple[str, ...]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class BacktestConfig:
     default_mode: str = "liquid_universe_full"
     universe_selection: str = "liquid_sample"
     max_symbols: int = 0   # 0 = full universe (breadth is the edge); >0 caps for smoke-tests only
     min_volume: float = 500_000
+    survivorship_free: bool = False
+    # Point-in-time fundamentals for survivorship-free backtests/tuning (no static-snapshot
+    # look-ahead). Live scoring unchanged. Hard-raises if PIT can't build unless fallback true.
+    point_in_time_fundamentals: bool = True
+    allow_static_fundamentals_fallback: bool = False
     random_seed: int = 42
     benchmark_symbol: str = "SPY"
     slippage_bps: float = 10.0

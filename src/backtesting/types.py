@@ -9,7 +9,7 @@ from typing import Literal, NamedTuple
 
 import numpy as np
 
-BacktestScope = Literal["overall_strategy", "active_sleeve_compounding"]
+BacktestScope = Literal["overall_strategy", "active_sleeve_compounding", "etf_allocation"]
 
 
 class PrecomputedData(NamedTuple):
@@ -80,6 +80,15 @@ class PrecomputedData(NamedTuple):
     # Enables date-anchored slicing (stress-gauntlet episodes). None only in
     # synthetic test fixtures that construct PrecomputedData directly.
     dates: tuple[str, ...] | None = None
+    # Point-in-time DAILY factor arrays (n_days, n_stocks). Populated by the survivorship-free
+    # loader when backtest.point_in_time_fundamentals is on — value PE/PB sub-scores, quality
+    # and income scored causally per rebalance date (no static current-snapshot look-ahead).
+    # None → the simulator falls back to the static 1D pe_comp/pb_comp/quality_scores/income_scores
+    # (byte-identical to the pre-PIT path).
+    pe_comp_daily: np.ndarray | None = None
+    pb_comp_daily: np.ndarray | None = None
+    quality_scores_daily: np.ndarray | None = None
+    income_scores_daily: np.ndarray | None = None
 
 
 @dataclass
@@ -161,6 +170,14 @@ class SimResult:
     active_max_drawdown: float | None = None
     active_excess_return: float | None = None
     active_information_ratio: float | None = None
+    # ETF/core sleeve diagnostics (None when no ETF sleeve). Contribution-adjusted
+    # ETF sleeve TWR, its excess vs SPY, one-way ETF turnover (fraction of sleeve),
+    # average ETF allocation fraction of the portfolio, and final per-ETF weights.
+    etf_sleeve_return: float | None = None
+    etf_excess_return: float | None = None
+    etf_turnover: float | None = None
+    etf_allocation_avg: float | None = None
+    etf_final_weights: dict[str, float] | None = None
 
 
 @dataclass

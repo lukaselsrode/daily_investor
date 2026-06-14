@@ -88,6 +88,26 @@ def main(argv: list[str] | None = None) -> None:
         archetype_compare = "--archetype-compare" in rest
         scope = _flag_value(rest, "--scope") or "overall_strategy"
         regime_scope = _flag_value(rest, "--regime-scope") or "all"
+        if "--compare-etf-allocation" in rest:
+            # ETF sleeve before/after: forced equal-weight vs the current config allocation.
+            from backtesting.data_loader import load_and_precompute
+            from backtesting.reports import format_etf_sleeve_diagnostics
+            from backtesting.simulator import run_backtest_report, split_price_window
+            from tuning.constants import _ETF_ENABLED_SLOT, _current_params
+            _pc = load_and_precompute(n_days, mode=mode)
+            _tr, _vl = split_price_window(_pc.prices.shape[0], 0.70)
+            _eq = _current_params().copy()
+            _eq[_ETF_ENABLED_SLOT] = 0.0
+            _cfg = _current_params().copy()  # reflects config etf_allocation.enabled
+            _r_eq = run_backtest_report(_pc, _eq, _tr, _vl, scope="etf_allocation")
+            _r_cfg = run_backtest_report(_pc, _cfg, _tr, _vl, scope="etf_allocation")
+            print(format_etf_sleeve_diagnostics(
+                _r_eq.validation_result or _r_eq.train_result, label="BEFORE: equal-weight"))
+            print(format_etf_sleeve_diagnostics(
+                _r_cfg.validation_result or _r_cfg.train_result,
+                label="AFTER: current config",
+                current_weights=(_r_eq.train_result.etf_final_weights or {})))
+            return
         cmd_backtest(n_days=n_days, mode=mode, compare=compare,
                      archetype_compare=archetype_compare, scope=scope,
                      regime_scope=regime_scope)
@@ -117,6 +137,36 @@ def main(argv: list[str] | None = None) -> None:
         _leads_raw = _flag_value(rest, "--leads")
         lead_vector_paths = [p for p in (_leads_raw or "").split(",") if p] or None
         cmd_auto_tune(n_days=n_days, mode=mode, apply=apply, force_apply=force_apply, llm_review=llm_review, scope=scope, preset=preset, regime_scope=regime_scope, random_topk=random_topk, lead_vector_paths=lead_vector_paths)
+
+    elif cmd == "tune-etf-allocation":
+        _nd = _flag_value(rest, "--days")
+        n_days = int(_nd) if _nd else 1250
+        universe = _flag_value(rest, "--universe") or "configured_only"
+        _mode = _flag_value(rest, "--mode") or "regime"
+        if universe == "curated_exploration":
+            print("curated_exploration is Milestone B — not yet available. "
+                  "Use --universe configured_only.")
+            return
+        preset = "etf_defensive_only" if _mode == "defensive" else "etf_allocation"
+        random_topk = int(_flag_value(rest, "--random-topk") or 10)
+        apply = "--apply" in rest
+        force_apply = "--force-apply" in rest
+        from tuning.etf_tune import run_etf_allocation_tune
+        run_etf_allocation_tune(n_days=n_days, preset=preset, random_topk=random_topk,
+                                apply=apply, force_apply=force_apply)
+
+    elif cmd == "report-etf-allocation":
+        _nd = _flag_value(rest, "--days")
+        n_days = int(_nd) if _nd else 1250
+        from backtesting.data_loader import load_and_precompute
+        from backtesting.reports import format_etf_sleeve_diagnostics
+        from backtesting.simulator import run_backtest_report, split_price_window
+        from tuning.constants import _current_params
+        _pc = load_and_precompute(n_days, mode=None)
+        _tr, _vl = split_price_window(_pc.prices.shape[0], 0.70)
+        _rep = run_backtest_report(_pc, _current_params(), _tr, _vl, scope="etf_allocation")
+        print(format_etf_sleeve_diagnostics(
+            _rep.validation_result or _rep.train_result, label=f"current config ({n_days}d)"))
 
     elif cmd == "stability-scan":
         mode = _flag_value(rest, "--mode")

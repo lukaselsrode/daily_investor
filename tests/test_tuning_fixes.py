@@ -147,7 +147,13 @@ def test_apply_config_params_round_trips_every_slot(tmp_path):
 
     cur, target = _perturbed_full_vector(tc)
     names = list(tc.PARAM_NAMES)
-    unperturbed = [names[i] for i in range(len(target)) if abs(target[i] - cur[i]) < 1e-9]
+    # ETF-allocation slots are written by apply_etf_allocation_params (NOT this generic
+    # active-stock writer), so exclude them from this round-trip — they have their own test.
+    _etf_idx = tc._etf_weight_slot_indices() | {tc._ETF_ENABLED_SLOT}
+    unperturbed = [
+        names[i] for i in range(len(target))
+        if i not in _etf_idx and abs(target[i] - cur[i]) < 1e-9
+    ]
     assert not unperturbed, (
         f"test setup must perturb every slot to detect drops; equal to current config: "
         f"{unperturbed} — adjust _perturbed_full_vector"
@@ -178,7 +184,7 @@ def test_apply_config_params_round_trips_every_slot(tmp_path):
     mismatches = {
         names[i]: {"written": float(target[i]), "reloaded": float(reloaded[i])}
         for i in range(len(target))
-        if abs(float(reloaded[i]) - float(target[i])) > 1e-6
+        if i not in _etf_idx and abs(float(reloaded[i]) - float(target[i])) > 1e-6
     }
     assert not mismatches, f"slots dropped or mangled by apply_config_params: {mismatches}"
 

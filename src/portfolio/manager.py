@@ -1016,17 +1016,17 @@ class PortfolioManager:
             )
             if etf_amount > 0 and \
                     (self._auto_approve or self._confirm(f"Buy ETFs (${etf_amount:,.2f})?")):
-                per_etf = etf_amount / max(len(ETFS), 1)
-                if per_etf < RISK_LIMITS["min_order_amount"]:
+                etf_alloc = self._etf_weighted_split(etf_amount, regime)
+                if not etf_alloc:
                     logger.info(
-                        f"Per-ETF amount ${per_etf:.2f} < min_order "
+                        f"ETF allocations all below min_order "
                         f"${RISK_LIMITS['min_order_amount']:.2f} — skipping ETF buys"
                     )
                 else:
-                    for etf in ETFS:
+                    for etf, amt in etf_alloc.items():
                         try:
-                            if self._auto_approve or self._confirm(f"Buy ${per_etf:,.2f} of {etf}?"):
-                                result = self._broker.buy_fractional(etf, per_etf)
+                            if self._auto_approve or self._confirm(f"Buy ${amt:,.2f} of {etf}?"):
+                                result = self._broker.buy_fractional(etf, amt)
                                 logger.info(f"ETF {etf}: {result.state}")
                         except Exception as e:
                             logger.error(f"ETF buy failed for {etf}: {e}")
@@ -1765,6 +1765,22 @@ class PortfolioManager:
     # Rebalance loop
     # ------------------------------------------------------------------
 
+    def _etf_weighted_split(
+        self, budget: float, regime: str, universe: list[str] | None = None,
+    ) -> dict[str, float]:
+        """Split a positive dollar `budget` across the ETF sleeve by target weights.
+
+        With etf_allocation disabled (or mode:equal_weight) this returns the historical
+        equal-weight split. ETFs whose dollar allocation falls below min_order are
+        dropped (mirrors the old all-or-nothing skip when every equal slice was sub-min).
+        """
+        from portfolio.etf_allocation import etf_target_weights, split_budget
+        universe = list(universe) if universe is not None else list(ETFS)
+        weights = etf_target_weights(regime, universe)
+        raw = split_budget(weights, budget)
+        min_order = RISK_LIMITS["min_order_amount"]
+        return {e: d for e, d in raw.items() if d >= min_order}
+
     def _compute_etf_sweep_amount(self, remaining_cash: float, effective_index_pct: float) -> float:
         """
         Compute how much of `remaining_cash` should be swept to ETFs.
@@ -1953,17 +1969,17 @@ class PortfolioManager:
                     f"(ETFs at or near target)"
                 )
             else:
-                per_etf = sweep_amount / len(ETFS)
+                etf_alloc = self._etf_weighted_split(sweep_amount, regime)
                 logger.info(
                     f"=== CASH SWEEP: ${sweep_amount:,.2f} → ETFs "
-                    f"(${per_etf:.2f} each, ${remaining - sweep_amount:.2f} retained) ==="
+                    f"({len(etf_alloc)} ETFs, ${remaining - sweep_amount:.2f} retained) ==="
                 )
                 _swept = 0.0
-                for etf in ETFS:
+                for etf, amt in etf_alloc.items():
                     try:
-                        result = self._broker.buy_fractional(etf, per_etf)
+                        result = self._broker.buy_fractional(etf, amt)
                         if result.success:
-                            _swept += per_etf
+                            _swept += amt
                             logger.info(f"Sweep {etf}: {result.state}")
                         else:
                             logger.warning(f"Sweep {etf}: order failed — {result.detail}")

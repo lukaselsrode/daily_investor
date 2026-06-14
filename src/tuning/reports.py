@@ -124,6 +124,8 @@ def apply_config_params(params: np.ndarray) -> None:
             continue  # base slots 0-15 handled above (normalization special cases)
         if _path.startswith("archetype_management."):
             continue
+        if _path.startswith("etf_allocation."):
+            continue  # ETF sleeve config is written ONLY by apply_etf_allocation_params
         _v = float(params[_idx])
         if _path in _INT_CONFIG_PATHS:
             _iv = max(0, round(_v))
@@ -158,6 +160,72 @@ def apply_config_params(params: np.ndarray) -> None:
         yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
 
     print(f"\nconfig.yaml updated: {CONFIG_FILE}")
+
+
+def apply_etf_allocation_params(params: np.ndarray, provenance: dict | None = None) -> None:
+    """Write ONLY the etf_allocation section from the tuned vector's ETF slots.
+
+    Surgical block replacement: the rest of config.yaml (including all comments and the
+    active-stock parameters) is left byte-for-byte untouched. Sets enabled:true,
+    mode:regime_weights, and the per-regime bucket weights from the slots; preserves
+    universe / constraints / buckets / default_weights. A provenance comment recording
+    the candidate id, gate results, and current-vs-proposed weights is prepended.
+    """
+    from .constants import etf_alloc_params_from_params
+
+    slot_p = etf_alloc_params_from_params(params)
+    if slot_p is None:
+        raise ValueError("vector lacks ETF slots — cannot write etf_allocation")
+
+    with open(CONFIG_FILE) as f:
+        full = yaml.safe_load(f)
+    base = dict(full.get("etf_allocation", {}) or {})
+
+    # Round + drop ~zero buckets for readability; only non-trivial weights are written.
+    regime_weights: dict[str, dict[str, float]] = {}
+    for _r, _bw in slot_p["regime_weights"].items():
+        regime_weights[_r] = {
+            _b: round(float(_w), 4) for _b, _w in _bw.items() if _w and _w > 1e-4
+        }
+    base["enabled"] = True
+    base["mode"] = "regime_weights"
+    base["regime_weights"] = regime_weights
+
+    # Serialize just the etf_allocation sub-tree and replace the existing block.
+    block_body = yaml.dump(
+        {"etf_allocation": base}, default_flow_style=False, sort_keys=False
+    )
+    prov_lines = ["# ── etf_allocation written by tune-etf-allocation ──"]
+    for k, v in (provenance or {}).items():
+        prov_lines.append(f"#   {k}: {v}")
+    new_block = "\n".join(prov_lines) + "\n" + block_body
+
+    with open(CONFIG_FILE) as f:
+        lines = f.readlines()
+    start = end = None
+    for i, ln in enumerate(lines):
+        if ln.startswith("etf_allocation:"):
+            start = i
+            # absorb an immediately-preceding comment header block
+            while start > 0 and lines[start - 1].lstrip().startswith("#"):
+                start -= 1
+            # find the next top-level key (column-0, non-comment, non-blank)
+            for j in range(i + 1, len(lines)):
+                s = lines[j]
+                if s.strip() and not s.startswith((" ", "\t", "#")):
+                    end = j
+                    break
+            if end is None:
+                end = len(lines)
+            break
+    if start is None:
+        # No existing block (shouldn't happen) — append at EOF.
+        lines.append("\n" + new_block)
+    else:
+        lines[start:end] = [new_block if new_block.endswith("\n") else new_block + "\n"]
+    with open(CONFIG_FILE, "w") as f:
+        f.writelines(lines)
+    print(f"\netf_allocation section updated: {CONFIG_FILE}")
 
 
 def _diff_table(

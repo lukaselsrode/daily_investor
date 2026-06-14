@@ -200,11 +200,15 @@ class AttributionReporter:
             return {}
         return {
             "etf": {
-                "return": getattr(sim, "etf_return", 0.0),
-                "avg_allocation": getattr(sim, "etf_allocation_avg", 0.0),
+                "return": getattr(sim, "etf_sleeve_return", None),
+                "excess_vs_spy": getattr(sim, "etf_excess_return", None),
+                "avg_allocation": getattr(sim, "etf_allocation_avg", None),
+                "turnover": getattr(sim, "etf_turnover", None),
+                "final_weights": getattr(sim, "etf_final_weights", None),
             },
             "stock": {
-                "return": getattr(sim, "stock_return", 0.0),
+                "return": getattr(sim, "active_total_return", None),
+                "excess_vs_spy": getattr(sim, "active_excess_return", None),
             },
         }
 

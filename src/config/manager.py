@@ -417,6 +417,11 @@ class ConfigManager:
             universe_selection=str(bt.get("universe_selection", "liquid_sample")),
             max_symbols=int(bt.get("max_symbols", 0)),   # 0 = full universe
             min_volume=float(bt.get("min_volume", 500_000)),
+            survivorship_free=bool(bt.get("survivorship_free", False)),
+            point_in_time_fundamentals=bool(bt.get("point_in_time_fundamentals", True)),
+            allow_static_fundamentals_fallback=bool(
+                bt.get("allow_static_fundamentals_fallback", False)
+            ),
             random_seed=int(bt.get("random_seed", 42)),
             benchmark_symbol=str(bt.get("benchmark_symbol", "SPY")),
             slippage_bps=float(bt.get("slippage_bps", 10.0)),

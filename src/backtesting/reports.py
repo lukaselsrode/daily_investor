@@ -136,6 +136,58 @@ def print_backtest_report(report: BacktestReport) -> None:
     print("=" * 64)
 
 
+def _fmt_pct(x, places: int = 2) -> str:
+    return "n/a" if x is None else f"{x:+.{places}%}"
+
+
+def format_etf_sleeve_diagnostics(sim, label: str = "", current_weights: dict | None = None) -> str:
+    """ETF SLEEVE DIAGNOSTICS block: sleeve/active/total return, ETF excess vs SPY,
+    avg ETF allocation, ETF turnover, and current-vs-proposed final-weight diff.
+    `sim` is a SimResult; current_weights is the incumbent's final weights for the diff."""
+    lines = [f"\n  ETF SLEEVE DIAGNOSTICS{(' — ' + label) if label else ''}"]
+    lines.append(f"    ETF sleeve return:     {_fmt_pct(getattr(sim, 'etf_sleeve_return', None))}")
+    lines.append(f"    Active sleeve return:  {_fmt_pct(getattr(sim, 'active_total_return', None))}")
+    lines.append(f"    Total return:          {_fmt_pct(getattr(sim, 'total_return', None))}")
+    lines.append(f"    ETF excess vs SPY:     {_fmt_pct(getattr(sim, 'etf_excess_return', None))}")
+    lines.append(f"    Active excess vs SPY:  {_fmt_pct(getattr(sim, 'active_excess_return', None))}")
+    _alloc = getattr(sim, "etf_allocation_avg", None)
+    lines.append(f"    Avg ETF allocation:    {('n/a' if _alloc is None else f'{_alloc:.1%}')}")
+    _to = getattr(sim, "etf_turnover", None)
+    lines.append(f"    ETF turnover (1-way):  {('n/a' if _to is None else f'{_to:.2f}x sleeve')}")
+    fw = getattr(sim, "etf_final_weights", None) or {}
+    if fw:
+        lines.append("    Final ETF weights (proposed vs current):")
+        for etf in sorted(fw, key=lambda k: -fw[k]):
+            cur = (current_weights or {}).get(etf)
+            cur_s = "—" if cur is None else f"{cur:.1%}"
+            lines.append(f"      {etf:<6} {fw[etf]:>6.1%}   (cur {cur_s})")
+    return "\n".join(lines)
+
+
+def format_etf_regime_table(rows: list[dict]) -> str:
+    """Regime allocation table. Each row: regime, weights(dict), etf_return, spy_return,
+    excess, max_dd, etf_turnover."""
+    out = [
+        "\n  ETF ALLOCATION BY REGIME",
+        f"    {'regime':<10} {'ETF return':>11} {'SPY':>9} {'excess':>9} {'maxDD':>8} {'turnover':>9}",
+        "    " + "-" * 60,
+    ]
+    for r in rows:
+        _to = r.get("etf_turnover")
+        _to_s = "n/a" if _to is None else f"{_to:.2f}x"
+        out.append(
+            f"    {r.get('regime',''):<10} {_fmt_pct(r.get('etf_return')):>11} "
+            f"{_fmt_pct(r.get('spy_return')):>9} {_fmt_pct(r.get('excess')):>9} "
+            f"{_fmt_pct(r.get('max_dd')):>8} {_to_s:>9}"
+        )
+        w = r.get("weights") or {}
+        if w:
+            out.append("      weights: " + ", ".join(
+                f"{k} {v:.0%}" for k, v in sorted(w.items(), key=lambda kv: -kv[1]) if v > 0.005
+            ))
+    return "\n".join(out)
+
+
 def print_comparison_report(comparison: dict) -> None:
     """Print a formatted A/B/C candidate-selection-mode comparison table."""
     bench  = comparison.get("_benchmark_return", 0.0)

@@ -409,6 +409,33 @@ _PRESETS: dict[str, dict] = {
         ],
         "phase2": False,
     },
+
+    # ── ETF/core sleeve allocation (scope == "etf_allocation" only) ────────────
+    # These unfreeze the regime×bucket ETF weight slots. They are inert under any
+    # active-stock scope (the slots are frozen-by-default AND the etf_allocation scope
+    # force-freezes every non-ETF slot). Bucket order: core_market, growth, semis,
+    # dividend_defensive, international, real_estate, small_cap.
+    "etf_allocation": {
+        "description": "Regime-aware ETF/core sleeve bucket weights — all 3 regimes "
+                       "(bullish/neutral/defensive) × 7 buckets. Surface B (regime).",
+        "unfreeze": [
+            f"etf_allocation.regime_weights.{_r}.{_b}"
+            for _r in ("bullish", "neutral", "defensive")
+            for _b in ("core_market", "growth", "semis", "dividend_defensive",
+                       "international", "real_estate", "small_cap")
+        ],
+        "phase2": False,
+    },
+    "etf_defensive_only": {
+        "description": "Tune ONLY the defensive-regime ETF bucket weights; bullish/neutral "
+                       "ETF allocation held at incumbent. Surface C.",
+        "unfreeze": [
+            f"etf_allocation.regime_weights.defensive.{_b}"
+            for _b in ("core_market", "growth", "semis", "dividend_defensive",
+                       "international", "real_estate", "small_cap")
+        ],
+        "phase2": False,
+    },
 }
 
 

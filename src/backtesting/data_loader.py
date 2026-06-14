@@ -34,6 +34,20 @@ _MOMENTUM_WARMUP = SCORING_PARAMS["momentum_warmup"]
 logger = logging.getLogger(__name__)
 
 
+def _pit_enabled_for(mode: str, survivorship_free: bool) -> bool:
+    """Whether to build point-in-time fundamental panels for this load.
+
+    PIT is on by default for the honest survivorship-free path, BUT never for
+    walk_forward_price_only_test — that mode deliberately zeroes fundamentals to stay
+    price-only / LOW look-ahead, and PIT must not reintroduce them.
+    """
+    return (
+        bool(BACKTEST_PARAMS.get("point_in_time_fundamentals", True))
+        and bool(survivorship_free)
+        and mode != "walk_forward_price_only_test"
+    )
+
+
 def _yf_ticker(sym: str) -> str:
     """
     Normalize a ticker symbol for yfinance.
@@ -580,4 +594,41 @@ def load_and_precompute(
     # of resetting to the day<200 "bullish" fallback at their day 0 (regime_scope warns
     # once about the genuinely history-less first 200 days of the full load).
     from .regime_scope import regime_labels
-    return precomp._replace(regime_labels_daily=regime_labels(precomp))
+    precomp = precomp._replace(regime_labels_daily=regime_labels(precomp))
+
+    # Point-in-time fundamentals: replace the static current-snapshot value/quality/income
+    # arrays with CAUSAL per-day panels (survivorship-free honest path only). Live/current-
+    # snapshot scoring is unchanged. Default on; hard-raise on failure unless the config
+    # explicitly allows the (look-ahead) static fallback.
+    if _pit_enabled_for(mode, survivorship_free):
+        from backtesting.pit_precompute import build_pit_factor_panels
+        try:
+            _panels = build_pit_factor_panels(
+                symbols=stock_cols,
+                dates=closes.index,
+                prices=stock_prices,
+                sectors=sector_labels,
+                industries=industry_labels,
+                position_52w_daily=pos_52w_daily,
+                volume=volume_arr,
+                rebalance_freq=int(BACKTEST_PARAMS.get("rebalance_frequency_days", 5)),
+                scoring_cfg=SCORING_PARAMS,
+            )
+            precomp = precomp._replace(
+                pe_comp_daily=_panels["pe_comp_daily"],
+                pb_comp_daily=_panels["pb_comp_daily"],
+                quality_scores_daily=_panels["quality_scores_daily"],
+                income_scores_daily=_panels["income_scores_daily"],
+            )
+            print("PIT fundamentals: per-day value/quality/income panels built (no static-snapshot look-ahead).")
+        except Exception as exc:
+            if not bool(BACKTEST_PARAMS.get("allow_static_fundamentals_fallback", False)):
+                raise RuntimeError(
+                    f"point_in_time_fundamentals is on but PIT panels could not be built: {exc}. "
+                    "Set backtest.allow_static_fundamentals_fallback: true to permit the "
+                    "(look-ahead) static path, or fix the statement cache."
+                ) from exc
+            logger.warning(
+                "PIT panels failed (%s) — falling back to STATIC fundamentals (look-ahead).", exc
+            )
+    return precomp

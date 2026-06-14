@@ -441,6 +441,13 @@ BACKTEST_PARAMS: dict = {
     # (data/fmp_cache_adj/), removing the ~35% survivorship inflation. Requires that cache to be
     # populated; load_and_precompute falls back to yfinance (with a warning) if it is missing.
     "survivorship_free":            bool(_bt.get("survivorship_free",           False)),
+    # Point-in-time fundamentals: when True (default), survivorship-free backtests/tuning score
+    # value/quality/income from data filed STRICTLY BEFORE each rebalance date (no static
+    # current-snapshot look-ahead). Live/current-snapshot scoring is unchanged. When PIT is
+    # requested but the per-day arrays cannot be built, the loader HARD-RAISES unless
+    # allow_static_fundamentals_fallback is True (kept False for honest backtest/tuning).
+    "point_in_time_fundamentals":   bool(_bt.get("point_in_time_fundamentals",   True)),
+    "allow_static_fundamentals_fallback": bool(_bt.get("allow_static_fundamentals_fallback", False)),
     # Apply the discretionary never-buy industry/sector exclusions to the backtest candidate
     # universe (live/backtest parity). False = full-universe research. See data_loader.
     "apply_discretionary_exclusions": bool(_bt.get("apply_discretionary_exclusions", True)),
@@ -582,6 +589,55 @@ CONCENTRATION_LIMIT_PARAMS: dict = {
         "downsize_to_fit":             bool(_cl_enf.get("downsize_to_fit",             True)),
         "min_remaining_alloc_multiple": float(_cl_enf.get("min_remaining_alloc_multiple", 1.0)),
     },
+}
+
+# ---------------------------------------------------------------------------
+# ETF/core sleeve allocation — config-driven, opt-in via `enabled`
+# enabled:false AND mode:equal_weight both reproduce the historical equal-weight
+# behavior exactly. Consumed by portfolio/etf_allocation.py (single source of truth).
+# ---------------------------------------------------------------------------
+
+_ea = _app.get("etf_allocation", {}) or {}
+_ea_constraints = _ea.get("constraints", {}) or {}
+_ea_buckets = _ea.get("buckets", {}) or {}
+_ea_regime = _ea.get("regime_weights", {}) or {}
+
+
+def _float_or_none(v):
+    """null → None; else float. Used for nullable per-ETF static weights."""
+    return None if v is None else float(v)
+
+
+ETF_ALLOCATION_PARAMS: dict = {
+    "enabled":       bool(_ea.get("enabled", False)),
+    "mode":          str(_ea.get("mode", "equal_weight")),
+    "universe_mode": str(_ea.get("universe_mode", "configured_only")),
+    "configured_universe": list(_ea.get("configured_universe", list(ETFS))),
+    "approved_allowlist":  list(_ea.get("approved_allowlist", [])),
+    "default_weights": {
+        str(k): _float_or_none(v) for k, v in (_ea.get("default_weights", {}) or {}).items()
+    },
+    "regime_weights": {
+        "bullish":   {str(k): float(v) for k, v in (_ea_regime.get("bullish", {})   or {}).items()},
+        "neutral":   {str(k): float(v) for k, v in (_ea_regime.get("neutral", {})   or {}).items()},
+        "defensive": {str(k): float(v) for k, v in (_ea_regime.get("defensive", {}) or {}).items()},
+    },
+    "constraints": {
+        "min_weight":                  float(_ea_constraints.get("min_weight", 0.0)),
+        "max_single_etf_weight":       float(_ea_constraints.get("max_single_etf_weight", 0.60)),
+        "min_core_market_weight":      float(_ea_constraints.get("min_core_market_weight", 0.40)),
+        "max_growth_weight":           float(_ea_constraints.get("max_growth_weight", 0.35)),
+        "max_semis_weight":            float(_ea_constraints.get("max_semis_weight", 0.25)),
+        "max_thematic_combined":       float(_ea_constraints.get("max_thematic_combined", 0.25)),
+        "max_real_estate_weight":      float(_ea_constraints.get("max_real_estate_weight", 0.10)),
+        "max_small_cap_weight":        float(_ea_constraints.get("max_small_cap_weight", 0.15)),
+        "max_international_weight":     float(_ea_constraints.get("max_international_weight", 0.20)),
+        "max_bond_or_cashlike_weight": float(_ea_constraints.get("max_bond_or_cashlike_weight", 0.60)),
+        "max_gold_commodity_weight":   float(_ea_constraints.get("max_gold_commodity_weight", 0.15)),
+        "max_turnover_per_rebalance":  float(_ea_constraints.get("max_turnover_per_rebalance", 0.35)),
+        "rebalance_band":              float(_ea_constraints.get("rebalance_band", 0.03)),
+    },
+    "buckets": {str(k): list(v or []) for k, v in _ea_buckets.items()},
 }
 
 # ---------------------------------------------------------------------------

@@ -211,14 +211,21 @@ class TestAttributionReporter:
 
     def test_sleeve_attribution_returns_dict(self):
         mock_report = MagicMock()
-        mock_report.train.etf_return = 0.05
-        mock_report.train.stock_return = 0.10
+        # Real SimResult sleeve-diagnostic field names (see backtesting/types.py).
+        mock_report.train.etf_sleeve_return = 0.05
+        mock_report.train.etf_excess_return = 0.01
         mock_report.train.etf_allocation_avg = 0.20
+        mock_report.train.etf_turnover = 0.3
+        mock_report.train.etf_final_weights = {"SPY": 0.6, "VTI": 0.4}
+        mock_report.train.active_total_return = 0.10
+        mock_report.train.active_excess_return = 0.02
         result = AttributionReporter().sleeve_attribution(mock_report)
         assert isinstance(result, dict)
         assert "etf" in result
         assert "stock" in result
         assert result["etf"]["return"] == pytest.approx(0.05)
+        assert result["etf"]["avg_allocation"] == pytest.approx(0.20)
+        assert result["stock"]["return"] == pytest.approx(0.10)
 
     def test_exit_type_breakdown_returns_dict(self):
         result = AttributionReporter().exit_type_breakdown(self._sell_trades())

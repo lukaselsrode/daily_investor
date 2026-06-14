@@ -73,10 +73,10 @@ def test_position_sizing_cfg_from_params():
 
 def test_current_params_extended_length():
     cp = constants._current_params()
-    # Full vector ends with the appended contribution-timing group, so the
-    # length matches that group's end (and the PARAM_NAMES registry).
-    assert len(cp) == constants._CT_SLOT_OFFSET + len(constants._CT_FIELDS)
+    # Full vector ends with the appended ETF-allocation group (1 enabled flag + the
+    # 21 regime×bucket weight slots), so its length matches the PARAM_NAMES registry.
     assert len(cp) == len(constants.PARAM_NAMES)
+    assert len(cp) == constants._ETF_WEIGHT_SLOT_OFFSET + len(constants._etf_weight_slot_indices())
     # exit-floor slots seed from config (EXIT_DECISION_PARAMS) and sit within bounds
     for off in range(len(constants._EXIT_FLOOR_FIELDS)):
         idx = constants._EXIT_FLOOR_SLOT_OFFSET + off
