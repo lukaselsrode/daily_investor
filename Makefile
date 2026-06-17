@@ -16,16 +16,20 @@ endif
 SRC := src
 
 # ── Dashboard ─────────────────────────────────────────────────────────────────
+##@ Dashboard
 
 .PHONY: ui
 ui:                          ## Launch the Streamlit dashboard
 	$(STREAMLIT) run $(SRC)/ui/streamlit_app.py
 
 # ── Data ──────────────────────────────────────────────────────────────────────
+##@ Data
+
+SKIP_NEWS ?=
 
 .PHONY: fetch-data
-fetch-data:                  ## Fetch all data: valuations, dividends, holdings, fundamentals, news, snapshot (no trades)
-	$(DI) fetch-data
+fetch-data:                  ## Fetch all market data + snapshot, no trades  (SKIP_NEWS=1 reuses cached news)
+	$(DI) fetch-data $(if $(SKIP_NEWS),--skip-fetch-news,)
 
 .PHONY: update-outcomes
 update-outcomes:             ## Backfill future return outcomes for past decisions (calibration only — never touches live scoring)
@@ -40,7 +44,7 @@ FMP_PAGES        ?= 50
 FMP_MIN_ADV      ?= 500000
 
 .PHONY: prepare-data
-prepare-data:                ## One-shot: fetch + deep-backfill ALL survivorship-free data (prices, delisted, dead-universe, statements, snapshots). Resumable.
+prepare-data:                ## One-shot fetch + deep-backfill of ALL survivorship-free data  (resumable)
 	-$(DI) fetch-data
 	$(DI) fmp backfill-delisted --max-pages $(FMP_PAGES)
 	$(DI) fmp backfill-prices --symbols $(FMP_SYMBOLS) --start $(FMP_START) --end $(FMP_END) $(if $(FMP_MAX),--max-symbols $(FMP_MAX),)
@@ -55,74 +59,55 @@ fmp-status:                  ## FMP cache coverage / key status  (granular backf
 	$(DI) fmp status
 
 # ── Live trading ──────────────────────────────────────────────────────────────
+##@ Live trading
+
+OP_MODE   ?= safe
+SKIP_DATA ?=
 
 .PHONY: run
-run:                         ## Live trading run  (safe mode — manual confirmation)
-	$(DI) run --op-mode safe
-
-.PHONY: run-auto
-run-auto:                    ## Live trading run  (automated mode — no prompts)
-	$(DI) run --op-mode automated
-
-.PHONY: run-skip
-run-skip:                    ## Live trading run, reuse existing CSV data  (faster)
-	$(DI) run --op-mode safe --skip-data
-
-.PHONY: run-dry
-run-dry:                     ## Dry-run: skip data + no sentiment  (scoring + logic preview only)
-	$(DI) run --op-mode no-sentiment --skip-data
+run:                         ## Live trading run (OP_MODE=safe|automated|no-sentiment  SKIP_DATA=1  SKIP_NEWS=1)
+	$(DI) run --op-mode $(OP_MODE) $(if $(SKIP_DATA),--skip-data,) $(if $(SKIP_NEWS),--skip-fetch-news,)
 
 # ── Backtesting ───────────────────────────────────────────────────────────────
+##@ Backtesting
+##: BT_MODE / MODE values: liquid_universe_full (default) · walk_forward_price_only_test · current_universe_stress_test
 
 DAYS    ?= 365
 BT_MODE ?= liquid_universe_full
+COMPARE ?=
 
 .PHONY: backtest
-backtest:                    ## Backtest  (DAYS=N  BT_MODE=...)
-	$(DI) backtest $(DAYS) --mode $(BT_MODE)
-
-.PHONY: backtest-wf
-backtest-wf:                 ## Walk-forward backtest  (low lookahead bias, DAYS=N)
-	$(DI) backtest $(DAYS) --mode walk_forward_price_only_test
-
-.PHONY: backtest-compare
-backtest-compare:            ## A/B/C candidate selection mode comparison  (DAYS=N  BT_MODE=...)
-	$(DI) backtest $(DAYS) --mode $(BT_MODE) --compare
+backtest:                    ## Backtest (DAYS=N  BT_MODE=...  COMPARE=1). Walk-forward: BT_MODE=walk_forward_price_only_test
+	$(DI) backtest $(DAYS) --mode $(BT_MODE) $(if $(COMPARE),--compare,)
 
 # ── Parameter tuning ──────────────────────────────────────────────────────────
+##@ Parameter tuning
+##: MODE = backtest universe mode (see Backtesting above; empty = engine default)
 
 OBJ       ?= sharpe
 TUNE_DAYS ?= 120
 AUTO_DAYS ?= 90
 MODE      ?=
+PRESET    ?=
+APPLY     ?=
+LLM       ?=
 
 .PHONY: tune
-tune:                        ## Single-objective tune, no write  (TUNE_DAYS=N  OBJ=sharpe|calmar)
+tune:                        ## Single-objective tune, no write  (TUNE_DAYS=N  OBJ=sharpe|calmar  MODE=<universe>)
 	$(DI) tune $(TUNE_DAYS) --objective $(OBJ) $(if $(MODE),--mode $(MODE),)
 
 .PHONY: auto-tune
-auto-tune:                   ## Dual-objective tune + candidate tournament + gate tiers, no write  (AUTO_DAYS=N)
-	$(DI) auto-tune $(AUTO_DAYS) $(if $(MODE),--mode $(MODE),)
-
-.PHONY: auto-tune-apply
-auto-tune-apply:             ## auto-tune + write config.yaml if ALL gates pass (split, incumbent, random-window, multi-horizon)
-	$(DI) auto-tune $(AUTO_DAYS) $(if $(MODE),--mode $(MODE),) --apply
-
-.PHONY: auto-tune-llm
-auto-tune-llm:               ## auto-tune + Claude second-opinion + apply
-	$(DI) auto-tune $(AUTO_DAYS) $(if $(MODE),--mode $(MODE),) --apply --llm-review
+auto-tune:                   ## Dual-objective tune + tournament + gate tiers (AUTO_DAYS=N  APPLY=1  LLM=1  PRESET=name  MODE=<universe>)
+	$(DI) auto-tune $(AUTO_DAYS) $(if $(MODE),--mode $(MODE),) \
+	  $(if $(PRESET),--scope active_sleeve_compounding --preset $(PRESET),) \
+	  $(if $(LLM),--apply --llm-review,$(if $(APPLY),--apply,))
 
 .PHONY: list-presets
-list-presets:                ## List tunable presets (use a name with auto-tune-preset PRESET=...)
+list-presets:                ## List tunable presets (use a name with auto-tune PRESET=...)
 	$(DI) list-presets
 
-PRESET ?= active_core_weights
-
-.PHONY: auto-tune-preset
-auto-tune-preset:            ## Active-sleeve auto-tune of ONE preset  (PRESET=name  AUTO_DAYS=N). Names: make list-presets
-	$(DI) auto-tune $(AUTO_DAYS) --scope active_sleeve_compounding --preset $(PRESET) $(if $(MODE),--mode $(MODE),)
-
 # ── Research / diagnostics ────────────────────────────────────────────────────
+##@ Research / diagnostics
 
 OUTPUT_DIR ?= reports
 REGIME ?= neutral
@@ -147,6 +132,12 @@ regime-sizing:               ## Random-window regime sizing/exposure grid (REGIM
 report:                      ## Quick 90-day backtest → print results + stability hint
 	$(DI) report --output-dir $(OUTPUT_DIR)
 
+OFFLINE ?=
+
+.PHONY: odte-report
+odte-report:                 ## 0DTE social watchlist — ANALYSIS/PAPER ONLY, places NO orders (OFFLINE=1 = --no-fetch: no network/options)
+	$(DI) odte-social-report $(if $(OFFLINE),--no-fetch,)
+
 .PHONY: regime
 regime:                      ## Print current market regime  (live SPY + VIX fetch)
 	$(PYTHON) -c "import sys; sys.path.insert(0, '$(SRC)'); from strategy.regimes import RegimeDetector; s = RegimeDetector().detect(); dma = f'{s.spy_vs_200dma_pct:+.2%}' if s.spy_vs_200dma_pct is not None else 'N/A'; print(f'Regime: {s.regime.upper()}  |  Confidence: {s.confidence:.0%}  |  VIX: {s.vix}  |  SPY vs 200DMA: {dma}'); print('Notes:', '  '.join(s.notes) if s.notes else 'none')"
@@ -164,6 +155,7 @@ ic:                          ## Print IC summary across default horizons  (needs
 	$(PYTHON) -c "import sys; sys.path.insert(0, '$(SRC)'); from strategy.research import FactorResearchEngine; engine = FactorResearchEngine(); ic = engine.compute_multi_horizon_ic(); summ = engine.compute_ic_summary(ic); print(summ.sort_values(['factor','horizon_days']).to_string(index=False) if not summ.empty else 'Not enough snapshots — need ≥ 2')"
 
 # ── Development ───────────────────────────────────────────────────────────────
+##@ Development
 
 .PHONY: install
 install:                     ## Install / reinstall package in editable mode
@@ -218,7 +210,11 @@ hygiene: lint arch-check             ## Blocking hygiene suite  (lint + architec
 
 .PHONY: help
 help:                        ## Show this help
-	@grep -E '^[a-zA-Z_-]+:.*?##' $(MAKEFILE_LIST) \
-	  | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
+	@awk 'BEGIN {FS = ":.*?## "} \
+		/^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5); next } \
+		/^##:/ { printf "    \033[2m%s\033[0m\n", substr($$0, 5); next } \
+		/^[a-zA-Z_-]+:.*?## / { printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2 } \
+		END { print "" }' $(MAKEFILE_LIST)
+	@printf "\nUsage: \033[36mmake <target> [VAR=val ...]\033[0m   e.g. make run OP_MODE=automated\n\n"
 
 .DEFAULT_GOAL := help

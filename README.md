@@ -284,6 +284,7 @@ these explicit `fmp backfill-*` commands spend FMP calls.
 ```bash
 # Data
 make fetch-data            # Fetch fresh fundamentals + news, save CSVs + snapshot (no trades)
+make fetch-data SKIP_NEWS=1 # Same, but reuse cached news (skip the slow news scrape)
 make update-outcomes       # Backfill future return labels for past decisions (calibration only)
 make fmp-status            # FMP cache/key/quota/coverage status
 make fmp-validate-cache    # Read-only FMP cache sanity check
@@ -293,23 +294,24 @@ make fmp-backfill-delisted
 make fmp-build-dead-universe
 
 # Live trading
-make run                   # Safe mode — manual confirmation at each step
-make run-auto              # Automated mode — no prompts
-make run-skip              # Safe mode, reuse cached CSVs (faster)
-make run-dry               # No sentiment, no trades — scoring + logic preview only
+make run                                    # Safe mode — manual confirmation at each step
+make run OP_MODE=automated                  # Automated mode — no prompts
+make run SKIP_DATA=1                        # Safe mode, reuse cached CSVs (faster)
+make run OP_MODE=no-sentiment SKIP_DATA=1   # No sentiment, no trades — scoring + logic preview only
+make run SKIP_NEWS=1                        # Refresh data but reuse cached news (skip slow news scrape)
 
 # Backtesting
 make backtest              # 365-day backtest (default mode)
 make backtest DAYS=180
-make backtest BT_MODE=walk_forward_price_only_test
-make backtest-wf           # Walk-forward mode (low lookahead)
-make backtest-compare      # A/B/C candidate selection mode comparison
+make backtest BT_MODE=walk_forward_price_only_test   # Walk-forward mode (low lookahead)
+make backtest COMPARE=1    # A/B/C candidate selection mode comparison
 
 # Parameter tuning
 make tune                  # Single-objective tune, no write  (TUNE_DAYS=120  OBJ=sharpe)
 make auto-tune             # Dual-objective tune, walk-forward validation, no write
-make auto-tune-apply       # auto-tune + write config.yaml if validation passes
-make auto-tune-llm         # auto-tune + Claude second-opinion + apply
+make auto-tune APPLY=1     # auto-tune + write config.yaml if validation passes
+make auto-tune LLM=1       # auto-tune + Claude second-opinion + apply
+make auto-tune PRESET=active_core_weights  # Tune a single active-sleeve preset (names: make list-presets)
 
 # Research & diagnostics
 make stability             # Parameter stability scan across multiple windows
@@ -709,7 +711,7 @@ make ui                    # Research → IC Analysis, Distribution Intelligence
 
 # Periodic maintenance
 make auto-tune             # review tuning diff
-make auto-tune-apply       # apply if satisfied
+make auto-tune APPLY=1     # apply if satisfied
 make stability             # check parameter sensitivity
 ```
 

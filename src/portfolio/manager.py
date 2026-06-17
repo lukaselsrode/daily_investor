@@ -64,6 +64,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Small-budget concentration (buy phase): when the sleeve budget can clear at
+# least one order but spreading it across every candidate drops all per-name
+# allocations below min_order, fund the top-ranked candidates at >= min_order
+# each, down the ranks as a LADDER, until the budget is exhausted — instead of
+# skipping the buy or spreading below min_order. The fallback bench scales with
+# how many such orders the budget supports (budget // min_order), with headroom
+# for sentiment rejections; this floor keeps a couple of backups even for a
+# single-order budget.
+_CONCENTRATE_MIN_BENCH = 3
+
 
 def _exclude_pooled_vehicles_from_active_candidates(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     """Remove pooled vehicles from active-sleeve candidate DataFrames.
@@ -1050,9 +1060,9 @@ class PortfolioManager:
             return [], [], []
 
         df["value_metric"] = pd.to_numeric(df["value_metric"], errors="coerce").fillna(0.0)
-        logger.info(f"value_metric dtype: {df['value_metric'].dtype}")
-        logger.info(f"value_metric max: {df['value_metric'].max()}")
-        logger.info(
+        logger.debug("value_metric dtype: %s", df["value_metric"].dtype)
+        logger.debug("value_metric max: %s", df["value_metric"].max())
+        logger.debug(
             "Top value_metric rows:\n%s",
             df[["symbol", "value_metric"]]
             .sort_values("value_metric", ascending=False)
@@ -1362,7 +1372,18 @@ class PortfolioManager:
         # min_order at this budget, no buy can execute — skip the entire sentiment
         # batch (a full Claude batch was previously spent on iterations that were
         # guaranteed to buy nothing, e.g. $162 budget x 12% floor = $19 allocs).
+        #
+        # Exception — small-budget concentration: when spreading the budget across
+        # all candidates drops every per-name allocation below min_order BUT the
+        # budget itself can clear at least one order, fund the top-ranked candidates
+        # at >= min_order each as a rank-ordered ladder (see _concentrate handling
+        # in the buy loop) instead of skipping. (Otherwise small weekly contributions
+        # never reach the active sleeve and it drifts below target.) The fallback
+        # bench scales with how many min_order buys the budget supports, plus
+        # headroom for sentiment rejections.
+        _concentrate = False
         if not candidates.empty:
+            _min_order = RISK_LIMITS["min_order_amount"]
             _tv_pre = float(candidates["value_metric"].sum())
             _floor_pre = stock_amount * RISK_LIMITS["min_candidate_allocation_pct"]
             _best_alloc = max(
@@ -1370,13 +1391,28 @@ class PortfolioManager:
                 for v in candidates["value_metric"]
             )
             _best_alloc = min(_best_alloc, stock_amount)
-            if _best_alloc < RISK_LIMITS["min_order_amount"]:
-                logger.info(
-                    f"Best possible allocation ${_best_alloc:.2f} < min order "
-                    f"${RISK_LIMITS['min_order_amount']:.2f} at budget ${stock_amount:.2f} "
-                    f"— skipping buy phase (and its sentiment batch)"
-                )
-                return [], candidates["symbol"].tolist(), []
+            if _best_alloc < _min_order:
+                if stock_amount >= _min_order:
+                    _concentrate = True
+                    # Ladder: how many min_order buys the budget supports, with ~2×
+                    # headroom for sentiment rejections (floored so a single-order
+                    # budget still keeps a couple of backups).
+                    _affordable = max(1, int(stock_amount // _min_order))
+                    _bench = min(len(candidates), max(_CONCENTRATE_MIN_BENCH, 2 * _affordable))
+                    candidates = candidates.head(_bench).copy()
+                    logger.info(
+                        f"Per-name allocation ${_best_alloc:.2f} < min order ${_min_order:.2f}, "
+                        f"but budget ${stock_amount:.2f} clears ~{_affordable} order(s) — "
+                        f"concentrating into a top-ranked ladder "
+                        f"(bench {_bench}: {candidates['symbol'].tolist()})."
+                    )
+                else:
+                    logger.info(
+                        f"Best possible allocation ${_best_alloc:.2f} < min order "
+                        f"${_min_order:.2f} at budget ${stock_amount:.2f} "
+                        f"— skipping buy phase (and its sentiment batch)"
+                    )
+                    return [], candidates["symbol"].tolist(), []
 
         sentiment_results: dict[str, dict] = {}
         if self._use_sentiment:
@@ -1515,6 +1551,16 @@ class PortfolioManager:
             alloc = (row["value_metric"] / total_value) * cash if total_value else 0
             min_alloc_floor = stock_amount * RISK_LIMITS["min_candidate_allocation_pct"]
             alloc = min(max(alloc, min_alloc_floor), cash)
+
+            # Small-budget concentration ladder: fund this (top-ranked, sentiment-
+            # approved) name at >= min_order rather than the below-min_order
+            # proportional share. As cash is consumed down the ranks, later names
+            # drop below min_order and the loop exits at the cash check above — so
+            # the budget concentrates into the top few names. Risk caps below still
+            # apply (and can push a name back under min_order → skipped, ladder
+            # continues to the next).
+            if _concentrate:
+                alloc = min(max(alloc, RISK_LIMITS["min_order_amount"]), cash)
 
             if (
                 row.get("strategy_bucket") == "contrarian_watchlist"

@@ -19,7 +19,7 @@ weekly_investment: 400
 # 2026-06-11: 0.8465 -> 0.9486 (same gate-passed candidate) — the bear-aware
 # optimum holds a larger SPY core; the active sleeve shrinks to ~5% in the base
 # regime. Regime overrides elsewhere are untouched.
-index_pct: 0.9486
+index_pct: 0.90
 # Buy-the-dip contribution-sizing overlay (2026-06). Sizes each week's NEW cash
 # from short-term benchmark conditions while a rolling window keeps the monthly
 # total near target. Contribution sizing ONLY — never sells or alters holdings.
@@ -77,6 +77,7 @@ rebalance:
   proportional_deficit_routing: true
 auto_approve: true
 use_sentiment_analysis: true
+sentiment_model: claude-opus-4-8
 confidence_threshold: 65
 sell_sentiment_override_confidence: 85
 max_iterations: 10
@@ -90,7 +91,6 @@ etfs:
 - VXUS
 - VNQ
 - IWM
-- DRAM
 # 2026-06: quality-momentum blend from regime-robust DE tune (maximize worst-of[bear,bull]
 # info ratio on the 1250d split). Lifted worst-regime IR +0.177 -> +0.321 (bear +0.18->+0.39,
 # bull held). MUST be paired with the wider breadth below (max_buys 8 / top_percentile 0.19 /
@@ -138,6 +138,13 @@ discretionary:
     - BABA                  # Qwen inflection + deep-value turnaround — a thesis the algo can't quantify
     - BABU                  # 2x-leveraged BABA — high-conviction expression of the same thesis
                             # (note: leveraged ETFs decay in choppy/sideways tapes — sized for conviction)
+  # Per-symbol sector reclassification. FMP's sector is sometimes wrong for the
+  # business (e.g. Alibaba tagged "Retail Trade" when it's cloud/AI-led). Applied
+  # right after fundamentals load, so the corrected sector flows EVERYWHERE: the
+  # PE/PB valuation benchmark it's scored against, concentration/cluster grouping,
+  # and the factor-map / exposure UI. Keep this list short and defensible.
+  sector_overrides:
+    BABA: Technology Services   # cloud + Qwen/AI platform, not a retailer
 risk:
   max_single_position_pct: 0.09
   max_sector_pct: 0.25
@@ -340,7 +347,6 @@ etf_allocation:
   - VXUS
   - VNQ
   - IWM
-  - DRAM
   approved_allowlist: []
   # Per-ETF static weights (mode:static_weights). null = excluded then renormalized;
   # all-null falls back to equal_weight with a warning.
@@ -354,7 +360,6 @@ etf_allocation:
     VXUS: null
     VNQ: null
     IWM: null
-    DRAM: null
   # Per-regime BUCKET weights (mode:regime_weights). Empty = equal-weight fallback.
   # Keys must be bucket names from `buckets` below; values are bucket weights that
   # are normalized at decision time and expanded equal-weight to each bucket's ETFs.
@@ -385,7 +390,6 @@ etf_allocation:
     - QQQ
     semis:
     - SMH
-    - DRAM
     dividend_defensive:
     - SCHD
     international:

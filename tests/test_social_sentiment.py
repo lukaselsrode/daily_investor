@@ -173,10 +173,10 @@ def test_build_report_shape_and_disclaimer(monkeypatch):
     assert rep["candidate"] is not None
     assert rep["candidate"]["ticker"] in ("GME", "SPY")
     assert rep["candidate"]["evidence"] and rep["candidate"]["evidence"][0]["url"].startswith("http")
-    assert any("0DTE" in r or "ZERO" in r for r in rep["risk_notes"])
+    assert any("lose" in r.lower() for r in rep["risk_notes"])
     # text rendering works and carries the paper-only banner
     txt = ss.format_report(rep)
-    assert "PAPER / ANALYSIS ONLY" in txt
+    assert "PAPER ONLY" in txt
 
 
 def _raw_reddit():
@@ -670,7 +670,7 @@ def test_report_sunday_keeps_friday_after_close_drops_before(monkeypatch):
     assert rep["candidate"]["ticker"] == "SPY"
     assert rep["freshness_window"]["mode"] == "market_window"
     assert rep["freshness_window"]["window_start_et"].startswith("2025-06-13T16:00")
-    assert "FRESHNESS" in ss.format_report(rep)
+    assert "HOW FRESH" in ss.format_report(rep)
 
 
 def test_report_monday_premarket_keeps_friday_after_close(monkeypatch):
@@ -802,7 +802,490 @@ def test_paper_options_attached_in_report(monkeypatch):
     po = rep["paper_options"]
     assert po["status"] == "ok" and po["option_type"] == "call" and po["contracts"]
     assert po["contracts"][0]["premium_cost_estimate"] <= 50
-    assert "PAPER 0DTE OPTIONS" in ss.format_report(rep)
+    assert "IF YOU PRACTICE ANYWAY" in ss.format_report(rep)
+
+
+def test_odte_cheapest_above_budget_when_none_fit(monkeypatch):
+    """No <= $50 call, but liquid calls at $60 and $90: return ONLY the cheapest ($60) above-budget
+    contract, flagged above_budget=True, with a status that explains it was just out of reach."""
+    import datetime as _dt
+    import sys
+
+    import pandas as pd
+
+    from data import odte_options as oo
+    today = _dt.date.today().isoformat()
+    calls = pd.DataFrame([
+        {"strike": 600, "bid": 0.55, "ask": 0.60, "lastPrice": 0.58, "volume": 1000, "openInterest": 5000},
+        {"strike": 595, "bid": 0.85, "ask": 0.90, "lastPrice": 0.88, "volume": 500, "openInterest": 300}])
+    monkeypatch.setitem(sys.modules, "yfinance", _fake_yf([today], calls, pd.DataFrame()))
+    res = oo.build_paper_options("SPY", "bullish", 50.0, today=today)
+    assert len(res["contracts"]) == 1
+    c = res["contracts"][0]
+    assert c["strike"] == 600 and c["above_budget"] is True
+    assert c["premium_cost_estimate"] == 60.0
+    assert "cheapest above-budget" in res["status"]
+
+
+def test_odte_budget_fit_excludes_above_budget(monkeypatch):
+    """If a <= $50 contract exists, above-budget candidates are NOT returned (and status is ok)."""
+    import datetime as _dt
+    import sys
+
+    import pandas as pd
+
+    from data import odte_options as oo
+    today = _dt.date.today().isoformat()
+    calls = pd.DataFrame([
+        {"strike": 500, "bid": 0.25, "ask": 0.30, "lastPrice": 0.28, "volume": 1000, "openInterest": 5000},
+        {"strike": 595, "bid": 0.85, "ask": 0.90, "lastPrice": 0.88, "volume": 500, "openInterest": 300}])
+    monkeypatch.setitem(sys.modules, "yfinance", _fake_yf([today], calls, pd.DataFrame()))
+    res = oo.build_paper_options("SPY", "bullish", 50.0, today=today)
+    assert res["status"] == "ok"
+    assert [c["strike"] for c in res["contracts"]] == [500]
+    assert all(c["above_budget"] is False for c in res["contracts"])
+
+
+def test_format_report_labels_above_budget(monkeypatch):
+    """End-to-end: an above-budget-only chain renders the contract row with an ABOVE BUDGET label
+    and a status that mentions the cheapest above-budget fallback."""
+    import datetime as _dt
+    import sys
+    import time as _t
+
+    import pandas as pd
+    today = _dt.date.today().isoformat()
+    calls = pd.DataFrame([
+        {"strike": 600, "bid": 0.55, "ask": 0.60, "lastPrice": 0.58, "volume": 1000, "openInterest": 5000}])
+    monkeypatch.setitem(sys.modules, "yfinance", _fake_yf([today], calls, pd.DataFrame()))
+    now = _t.time()
+    payload = {"data": {"children": [
+        {"data": {"title": "SPY calls bullish moon today", "selftext": "buy", "score": 100,
+                  "num_comments": 1, "permalink": "/r/wsb/x", "created_utc": now}}]}}
+    monkeypatch.setattr(ss.requests, "get", lambda *a, **k: _FakeResp(payload))
+    # Force a bullish price read so the verdict is CALL-leaning (practice examples are suppressed
+    # on OBSERVE); the above-budget call must then render with its label.
+    monkeypatch.setattr(ss, "_resolve_spy_trend", lambda allow_fetch: {
+        "ok": True, "last": 505.0, "prev_close": 500.0, "vwap": 503.0,
+        "pct_vs_prev_close": 0.01, "above_vwap": True})
+    rep = ss.build_odte_social_report(allow_fetch=True, params={
+        "sources": ["reddit"], "core_universe": ["SPY"], "min_mentions": 1,
+        "budget_dollars": 50, "include_paper_options": True})
+    po = rep["paper_options"]
+    assert po["contracts"] and po["contracts"][0]["above_budget"] is True
+    assert "cheapest above-budget" in po["status"]
+    assert rep["scorecard"]["verdict"] == "CALL-leaning"
+    txt = ss.format_report(rep)
+    assert "ABOVE BUDGET" in txt
+
+
+def test_practice_examples_suppressed_on_observe():
+    """On a DO NOTHING (OBSERVE) verdict, directional contract examples must be SUPPRESSED so they
+    never contradict the verdict — even when paper_options carries call contracts."""
+    rep = {
+        "budget_dollars": 50,
+        "freshness_window": {"window_start_et": "2026-06-17T09:30:00-04:00"},
+        "sources": {"reddit": {"subreddit": "wsb", "n_posts": 2, "n_fetched": 50,
+                               "n_stale_filtered": 40, "n_filtered": 0},
+                    "x": {"status": "disabled", "n_posts": 0, "n_stale_filtered": 0, "n_filtered": 0}},
+        "top_tickers": [{"ticker": "SPY", "mentions": 5}],
+        "spy_trend": {"ok": False, "status": "no intraday history"},
+        "social_intent": {"intent": "neutral", "bull": 0, "bear": 0, "n_docs": 2, "examples": []},
+        "scorecard": {"verdict": "OBSERVE", "confidence": "low",
+                      "reasons": ["SPY price/trend data unavailable or stale — observe only."]},
+        "paper_options": {"status": "ok", "option_type": "call", "contracts": [
+            {"option_type": "call", "strike": 505, "ask": 0.30, "premium_cost_estimate": 30,
+             "spread_pct": 0.05, "volume": 1000, "above_budget": False}]},
+        "risk_notes": ["practice money only."],
+    }
+    txt = ss.format_report(rep)
+    assert "No example shown — today's read is DO NOTHING" in txt
+    assert "A CALL at the $505" not in txt  # the directional example is suppressed
+
+
+def _spy_price(*, last, prev_close, open_, vwap, ok=True):
+    """Build a SPY price-trend dict in the shape build_scorecard consumes."""
+    return {"ok": ok, "status": "ok" if ok else "no intraday history",
+            "last": last, "prev_close": prev_close, "open": open_, "vwap": vwap,
+            "pct_vs_prev_close": (last / prev_close - 1.0) if prev_close else None,
+            "pct_vs_open": (last / open_ - 1.0) if open_ else None,
+            "above_vwap": (last > vwap) if vwap is not None else None}
+
+
+def test_scorecard_bullish_price_and_social_call_leaning():
+    """Bullish intraday SPY (up vs prior close, above VWAP) + bullish SPY social -> CALL-leaning."""
+    price = _spy_price(last=505.0, prev_close=500.0, open_=501.0, vwap=503.0)
+    po = {"contracts": [{"spread_pct": 0.05, "above_budget": False}]}
+    sc = ss.build_scorecard(price, po, "bullish")
+    assert sc["verdict"] == "CALL-leaning"
+    assert sc["confidence"] == "medium"
+    assert sc["price_direction"] == "bullish"
+
+
+def test_scorecard_bearish_price_and_social_put_leaning():
+    """Bearish intraday SPY (down vs prior close, below VWAP) + bearish SPY social -> PUT-leaning."""
+    price = _spy_price(last=495.0, prev_close=500.0, open_=499.0, vwap=497.0)
+    po = {"contracts": [{"spread_pct": 0.05, "above_budget": False}]}
+    sc = ss.build_scorecard(price, po, "bearish")
+    assert sc["verdict"] == "PUT-leaning"
+    assert sc["price_direction"] == "bearish"
+
+
+def test_scorecard_missing_price_observes():
+    """No usable price data -> OBSERVE even with strong bullish social (fail closed)."""
+    sc = ss.build_scorecard({"ok": False, "status": "no intraday history"}, {}, "bullish")
+    assert sc["verdict"] == "OBSERVE"
+    assert ss.build_scorecard(None, {}, "bullish")["verdict"] == "OBSERVE"
+
+
+def test_scorecard_social_only_never_directional():
+    """Price near VWAP / sub-threshold + bullish social must NOT yield CALL — social alone can't."""
+    price = _spy_price(last=500.2, prev_close=500.0, open_=500.1, vwap=500.15)  # +0.04%, tiny
+    sc = ss.build_scorecard(price, {}, "bullish")
+    assert sc["verdict"] == "OBSERVE"
+
+
+def test_scorecard_price_social_conflict_observes():
+    """Bullish price but bearish social -> conflict -> OBSERVE."""
+    price = _spy_price(last=505.0, prev_close=500.0, open_=501.0, vwap=503.0)
+    sc = ss.build_scorecard(price, {}, "bearish")
+    assert sc["verdict"] == "OBSERVE"
+
+
+def test_scorecard_no_social_confirmation_caps_confidence_low():
+    """Directional price with NO confirming SPY social (neutral/None) -> still CALL-leaning, but
+    only low confidence. (build_odte_social_report only ever feeds SPY intent here, so non-SPY
+    chatter can't confirm.)"""
+    price = _spy_price(last=505.0, prev_close=500.0, open_=501.0, vwap=503.0)
+    sc = ss.build_scorecard(price, {"contracts": []}, None)
+    assert sc["verdict"] == "CALL-leaning"
+    assert sc["confidence"] == "low"
+    assert sc["social_direction"] is None
+
+
+def test_format_report_includes_scorecard(monkeypatch):
+    """End-to-end: report leads with a plain-language 'WHAT TO DO NOW' action."""
+    import sys
+    import time as _t
+
+    import pandas as pd
+    monkeypatch.setitem(sys.modules, "yfinance", _fake_yf([], pd.DataFrame(), pd.DataFrame()))
+    now = _t.time()
+    payload = {"data": {"children": [
+        {"data": {"title": "SPY calls bullish moon today", "selftext": "buy", "score": 100,
+                  "num_comments": 1, "permalink": "/r/wsb/x", "created_utc": now}}]}}
+    monkeypatch.setattr(ss.requests, "get", lambda *a, **k: _FakeResp(payload))
+    rep = ss.build_odte_social_report(allow_fetch=True, params={
+        "sources": ["reddit"], "core_universe": ["SPY"], "min_mentions": 1,
+        "budget_dollars": 50, "include_paper_options": True})
+    assert "scorecard" in rep and rep["scorecard"]["verdict"] in ("CALL-leaning", "PUT-leaning", "OBSERVE")
+    txt = ss.format_report(rep)
+    assert "WHAT TO DO NOW" in txt
+
+
+def test_report_plain_language_no_jargon_in_primary(monkeypatch):
+    """Beginner UX: primary section answers what-to-do / why / do-nothing in plain words, with no
+    raw jargon and no raw floats. Uses --no-fetch so it fails closed to OBSERVE/DO NOTHING."""
+    rep = ss.build_odte_social_report(allow_fetch=False, params={
+        "sources": [], "core_universe": ["SPY"], "budget_dollars": 50})
+    txt = ss.format_report(rep)
+    head = txt.split("IF YOU PRACTICE ANYWAY")[0]  # the primary (above the practice block)
+    # Human labels present, near the top.
+    assert "WHAT TO DO NOW" in txt and txt.index("WHAT TO DO NOW") < 260
+    assert "DO NOTHING" in head
+    assert "Doing nothing is always fine" in head
+    assert "WHY (3 quick reasons)" in head
+    assert "WHAT WOULD CHANGE THIS" in head
+    # Plain 'Confidence:' label (not 'How strong is this hint'); 0DTE is never 'safe'.
+    assert "Confidence:" in head and "How strong is this hint" not in txt
+    assert "safe-enough" not in txt and "clear-enough" in head
+    # No raw jargon in the primary section ('confidence' is now an intended plain label).
+    for jargon in ("VWAP", "hype=", "spread", "liquidity", "momentum", "sentiment",
+                   "contextual", "sent=", "mom="):
+        assert jargon not in head, f"jargon {jargon!r} leaked into primary section"
+    # No raw floats with long decimal tails (e.g. 750.5200805664062).
+    import re as _re
+    assert not _re.search(r"\d+\.\d{5,}", txt), "raw long float leaked into report"
+
+
+def test_change_lines_state_aware_and_trade_text():
+    """'What would change this' must not ask for a cheap contract to appear when one exists; the
+    WHY trade line must not over-sell tradability; example cleaner drops junk/handle fragments."""
+    has = {"contracts": [{"above_budget": False, "premium_cost_estimate": 30}]}
+    none = {"contracts": []}
+    fit_lines = ss._kid_change_lines("OBSERVE", has, 50)
+    assert any("stay available" in line for line in fit_lines)
+    assert not any("show up" in line for line in fit_lines)
+    assert any("show up" in line for line in ss._kid_change_lines("OBSERVE", none, 50))
+    # WHY trade line: contracts existing does NOT imply a good setup.
+    assert "does NOT make the setup good" in ss._kid_trade_line(has, 50)
+    # Example cleaner: strip handle/junk + tiny fragments; keep clean directional snippets.
+    assert ss._clean_example("u spygod nota") is None      # no directional signal word
+    assert ss._clean_example("bull") is None                # single word
+    assert ss._clean_example("spy calls printing") == "spy calls printing"
+
+
+def test_report_examples_support_intent_no_contradiction():
+    """A negated phrase among bullish docs must NOT surface as a shown example (no 'not calls').
+    The rendered crowd line shows only intent-supporting spans."""
+    rep = {
+        "budget_dollars": 50,
+        "freshness_window": {"window_start_et": "2026-06-17T09:30:00-04:00"},
+        "sources": {"reddit": {"subreddit": "wsb", "n_posts": 3, "n_fetched": 50,
+                               "n_stale_filtered": 40, "n_filtered": 2},
+                    "x": {"status": "disabled", "n_posts": 0, "n_stale_filtered": 0, "n_filtered": 0}},
+        "top_tickers": [{"ticker": "SPY", "mentions": 11}],
+        "spy_trend": {"ok": True, "last": 505.0, "prev_close": 500.0, "vwap": 503.0,
+                      "pct_vs_prev_close": 0.01, "above_vwap": True},
+        "social_intent": ss.summarize_odte_intent("SPY", [
+            {"text": "SPY calls printing 🚀"}, {"text": "do not chase SPY puts"},
+            {"text": "buy the SPY dip"}]),
+        "scorecard": {"verdict": "CALL-leaning", "confidence": "medium",
+                      "reasons": ["SPY intraday +1.00% vs prior close and above VWAP."]},
+        "paper_options": {"status": "ok", "contracts": [
+            {"option_type": "call", "strike": 505, "ask": 0.30, "premium_cost_estimate": 30,
+             "spread_pct": 0.05, "volume": 1000, "above_budget": False}]},
+        "risk_notes": ["practice money only — you could lose it all."],
+    }
+    txt = ss.format_report(rep)
+    crowd = next(line for line in txt.splitlines() if "Crowd talk" in line)
+    # No negated span surfaces as a quoted example (e.g. "not puts"), and no debug marker.
+    assert '"not ' not in crowd and "(negated)" not in crowd and "not calls" not in txt
+    assert rep["social_intent"]["intent"] == "bullish"
+    assert "examples only, NOT instructions" in txt
+
+
+def test_classify_intent_contextual_phrases():
+    """Phrase/context: bullish directional phrases classify bullish, bearish ones bearish."""
+    assert ss.classify_odte_intent("SPY calls to the moon, buy the dip 🚀")["intent"] == "bullish"
+    assert ss.classify_odte_intent("SPY going to zero, grab puts")["intent"] == "bearish"
+
+
+def test_classify_intent_negation_not_bullish():
+    """Negation cancels: 'do not chase SPY calls' must NOT read bullish."""
+    r = ss.classify_odte_intent("do not chase SPY calls here")
+    assert r["intent"] != "bullish"
+    assert any("not" in e for e in r["examples"])
+
+
+def test_classify_intent_inverse_option_outcome():
+    """Inverse phrases: 'puts got smoked' is bullish for the underlying; 'calls got cooked' bearish;
+    'puts printing' is bearish (puts gaining => price down)."""
+    assert ss.classify_odte_intent("SPY puts got smoked today")["intent"] == "bullish"
+    assert ss.classify_odte_intent("SPY calls got cooked")["intent"] == "bearish"
+    assert ss.classify_odte_intent("SPY puts printing all day")["intent"] == "bearish"
+    assert ss.classify_odte_intent("SPY calls printing 🚀")["intent"] == "bullish"
+
+
+def test_classify_intent_question_and_risk_warning_neutral():
+    """Questions / risk-warnings without a strong margin resolve to neutral, not directional."""
+    assert ss.classify_odte_intent("is it too late to buy SPY calls?")["intent"] == "neutral"
+    assert ss.classify_odte_intent("SPY calls? thoughts? NFA")["intent"] == "neutral"
+
+
+def test_classify_intent_conflict_neutral():
+    """Balanced bullish + bearish cues conflict -> neutral."""
+    r = ss.classify_odte_intent("SPY calls or puts, bullish but also bearish")
+    assert r["intent"] == "neutral"
+
+
+def test_summarize_odte_intent_aggregates_examples():
+    """Aggregate over evidence: net-bullish docs -> bullish with transparent counts/examples."""
+    ev = [{"text": "SPY calls to the moon 🚀"}, {"text": "SPY puts got smoked"},
+          {"text": "QQQ puts printing"}]  # QQQ doc must not count toward SPY
+    s = ss.summarize_odte_intent("SPY", ev)
+    assert s["intent"] == "bullish" and s["n_docs"] == 2 and s["bull"] >= 2
+    assert s["examples"]
+
+
+def test_scorecard_uses_contextual_classifier_not_keyword(monkeypatch):
+    """End-to-end: the scorecard's social confirmation comes from the CONTEXTUAL classifier, not
+    raw keyword sentiment. 'SPY puts got smoked' reads keyword-bearish (candidate.direction) yet
+    contextual-bullish (inverse phrase), so a bullish price yields CALL-leaning."""
+    import time as _t
+    monkeypatch.setattr(ss, "_resolve_spy_trend", lambda allow_fetch: {
+        "ok": True, "last": 505.0, "prev_close": 500.0, "vwap": 503.0,
+        "pct_vs_prev_close": 0.01, "above_vwap": True})
+    payload = {"data": {"children": [
+        {"data": {"title": "SPY puts got smoked today", "selftext": "", "score": 50,
+                  "num_comments": 1, "permalink": "/r/wsb/x", "created_utc": _t.time()}}]}}
+    monkeypatch.setattr(ss.requests, "get", lambda *a, **k: _FakeResp(payload))
+    rep = ss.build_odte_social_report(allow_fetch=True, params={
+        "sources": ["reddit"], "core_universe": ["SPY"], "min_mentions": 1, "budget_dollars": 50})
+    assert rep["candidate"]["direction"] == "bearish"      # raw keyword view
+    assert rep["social_intent"]["intent"] == "bullish"     # contextual view
+    assert rep["scorecard"]["verdict"] == "CALL-leaning"   # verdict follows the contextual view
+
+
+def test_hardening_promo_alert_bot_is_spam():
+    """(1) Promo/alert-bot text is spam and never survives as ODTE evidence."""
+    t = "Bullish signal on $SPY — Conviction 3/5 Real-time options flow for members. Try free"
+    assert ss._is_spam(t) is True
+    kept = ss._quality_filter([{"text": t}], lambda c: c["text"],
+                              allowed={"SPY"}, require_options_context=True)
+    assert kept == []
+
+
+def test_hardening_phrasal_put_not_bearish():
+    """(2) Bare singular 'put' as an English verb ('put on someone') is NOT counted bearish."""
+    r = ss.classify_odte_intent("I would put on someone for $SPY $QQQ honestly", "SPY")
+    assert r["intent"] != "bearish"
+    assert r["bear"] == 0
+    # but a real option noun still counts (so we didn't over-suppress)
+    assert ss.classify_odte_intent("bought a $SPY put at the 500 strike", "SPY")["bear"] >= 1
+
+
+def test_hardening_lowercase_cashtags_normalized():
+    """(3) Lowercase cashtags '$spy $qqq' normalize to SPY/QQQ; plain lowercase words do not."""
+    c = ss.extract_ticker_mentions(["$spy and $qqq are ripping", "AAPL too"])
+    assert c["SPY"] == 1 and c["QQQ"] == 1 and c["AAPL"] == 1
+    assert "SPY" not in ss.extract_ticker_mentions(["i spy with my little eye"])
+    assert ss._tickers_in("$spy calls", allowed={"SPY"}) == ["SPY"]
+
+
+def test_hardening_flow_jargon_is_neutral():
+    """(4) Gamma/flow market-structure jargon is neutral context, not a directional vote."""
+    t = "dealers long gamma, call wall 510, put wall 500, GEX positive, max pain 505 on $SPY"
+    r = ss.classify_odte_intent(t, "SPY")
+    assert r["intent"] == "neutral"
+    assert "flow" in r["flags"]
+
+
+def test_hardening_short_cover_transition_is_bullish():
+    """(5) 'closed my short going back to $SPY calls' is a bullish transition, not a conflict."""
+    r = ss.classify_odte_intent("closed my short, going back to $SPY calls", "SPY")
+    assert r["intent"] == "bullish"
+
+
+def test_top_chatter_ranks_by_mentions_excludes_spy_and_spam():
+    """(8a) Top chatter ranks tickers by mentions from quality-gated evidence, excludes the SPY
+    backdrop, and never includes spam tickers."""
+    raw = [
+        {"text": "$NVDA 0dte calls ripping"}, {"text": "$NVDA puts 0dte strike 500"},
+        {"text": "$NVDA 0dte calls scalp"}, {"text": "$AMD 0dte calls"},
+        {"text": "$SPY 0dte calls today"},
+        {"text": "join my telegram VIP $TSLA 0dte calls free signal"},  # spam → dropped
+    ]
+    ev = ss._quality_filter(raw, lambda c: c["text"], allowed=None, require_options_context=True)
+    ranked = ss.rank_top_chatter(ev, exclude={"SPY"}, max_n=5, min_mentions=1)
+    tickers = [t for t, _ in ranked]
+    assert tickers[0] == "NVDA"          # most mentions first
+    assert "SPY" not in tickers          # backdrop excluded
+    assert "TSLA" not in tickers         # spam dropped before ranking
+    assert "AMD" in tickers
+
+
+def test_ticker_card_directional_with_chain_is_lean():
+    """(8b) Directional price + confirming social + a tradable same-day chain -> paper CALL-lean."""
+    price = _spy_price(last=505.0, prev_close=500.0, open_=501.0, vwap=503.0)
+    po = {"expiry": "2026-06-17", "contracts": [
+        {"option_type": "call", "strike": 505, "ask": 0.30, "premium_cost_estimate": 30,
+         "spread_pct": 0.05, "volume": 1000, "above_budget": False}]}
+    card = ss.build_ticker_card("NVDA", price, po, "bullish", mentions=7)
+    assert card["verdict"] == "CALL-leaning" and card["confidence"] == "medium"
+    assert card["contracts"] and card["contracts"][0]["option_type"] == "call"
+
+
+def test_ticker_card_social_only_observes():
+    """(8c) No usable price (social-only) -> OBSERVE, no contracts."""
+    card = ss.build_ticker_card("NVDA", {"ok": False, "status": "no data"},
+                                {"expiry": "2026-06-17", "contracts": []}, "bullish", mentions=9)
+    assert card["verdict"] == "OBSERVE" and card["contracts"] == []
+
+
+def test_ticker_card_no_chain_observes():
+    """(8d) No same-day options chain -> OBSERVE even with a directional price (can't 0DTE-trade)."""
+    price = _spy_price(last=505.0, prev_close=500.0, open_=501.0, vwap=503.0)
+    card = ss.build_ticker_card("NVDA", price, {"expiry": None, "contracts": []}, "bullish", 4)
+    assert card["verdict"] == "OBSERVE" and card["note"] == "no same-day options"
+    assert card["contracts"] == []
+
+
+def test_daily_thread_comments_fail_closed(monkeypatch):
+    """(8e) Daily-thread seam is official/fail-closed: --no-fetch -> skipped; thread found but no
+    comments and no OAuth creds -> 'auth needed'; no thread -> 'not found'. No cookies, ever."""
+    assert ss.fetch_daily_thread_comments([], {}, allow_fetch=False)[1].startswith("skipped")
+    monkeypatch.delenv("REDDIT_CLIENT_ID", raising=False)
+    monkeypatch.delenv("REDDIT_CLIENT_SECRET", raising=False)
+    monkeypatch.setattr(ss, "fetch_reddit_comments", lambda *a, **k: [])
+    monkeypatch.setattr(ss, "_fetch_reddit_search", lambda *a, **k: [])  # no network in unit test
+    posts = [{"id": "1u85wuy", "title": "Daily Discussion Thread for June 17, 2026"}]
+    cmts, status, tid = ss.fetch_daily_thread_comments(posts, {}, allow_fetch=True)
+    assert cmts == [] and "auth needed" in status and tid == "1u85wuy"
+    _, st2, _ = ss.fetch_daily_thread_comments([{"id": "x", "title": "random post"}], {}, allow_fetch=True)
+    assert "no daily discussion thread" in st2
+
+
+def test_daily_thread_discovered_by_search_when_not_in_listing(monkeypatch):
+    """The daily thread is reliably found BY DATE via official search even when it's not in the hot
+    listing (it's usually stickied). Discovery returns its id; the fetch then proceeds normally."""
+    monkeypatch.setattr(ss, "_fetch_reddit_search", lambda sub, q, af, limit=10: [
+        {"id": "1u85wuy", "title": "Daily Discussion Thread for June 17, 2026"}])
+    # Not in the (empty) hot listing → must come from search.
+    tid = ss._find_daily_thread_id([], {}, "wallstreetbets", allow_fetch=True)
+    assert tid == "1u85wuy"
+    # And without allow_fetch, search is NOT attempted (stays cheap/offline).
+    assert ss._find_daily_thread_id([], {}, "wallstreetbets", allow_fetch=False) == ""
+
+
+def test_report_includes_spy_backdrop_top_chatter_and_daily_status():
+    """(8f/8g) Report keeps SPY backdrop first, then a TOP CHATTER section, a daily-thread status
+    line, and an honest source caveat — and the chatter section stays jargon-free."""
+    rep = ss.build_odte_social_report(allow_fetch=False, params={
+        "sources": [], "core_universe": ["SPY"], "budget_dollars": 50})
+    assert isinstance(rep.get("top_chatter"), list)
+    assert "status" in rep.get("daily_thread", {})
+    assert rep.get("top_chatter_caveat")
+    txt = ss.format_report(rep)
+    assert txt.index("WHAT TO DO NOW") < txt.index("TOP CHATTER")   # SPY backdrop first
+    assert "daily thread" in txt.lower()
+    assert "limited by" in txt.lower()                              # honest source caveat
+    chatter = txt.split("TOP CHATTER")[1]
+    for jargon in ("VWAP", "spread", "liquidity", "hype=", "sentiment="):
+        assert jargon not in chatter
+
+
+def test_daily_thread_url_and_id_parsed():
+    """A configured daily_thread_url/id override resolves the thread id (no listing needed)."""
+    assert ss._parse_thread_id(
+        "https://www.reddit.com/r/wallstreetbets/comments/1u85wuy/daily_discussion/") == "1u85wuy"
+    assert ss._find_daily_thread_id([], {"daily_thread_url": "https://reddit.com/comments/abc123/x"}) == "abc123"
+    assert ss._find_daily_thread_id([], {"daily_thread_id": "zzz999"}) == "zzz999"
+
+
+def test_daily_thread_comments_folded_into_ev_pool_and_top_chatter(monkeypatch):
+    """Daily-thread comments are INGESTED: a thread found in the listing + bounded comments
+    mentioning $QQQ flow into the evidence pool, surface in TOP CHATTER, and report 'N included'."""
+    import time as _t
+    now = _t.time()
+    listing = {"data": {"children": [
+        {"data": {"id": "1u85wuy", "title": "Daily Discussion Thread for June 17, 2026",
+                  "selftext": "", "score": 10, "num_comments": 100,
+                  "permalink": "/r/wsb/dt", "created_utc": now}}]}}
+    monkeypatch.setattr(ss.requests, "get", lambda *a, **k: _FakeResp(listing))
+    monkeypatch.setattr(ss, "fetch_reddit_comments", lambda *a, **k: [
+        {"body": "$QQQ 0dte calls printing", "score": 5, "author": "u1"},
+        {"body": "grabbing $QQQ 0dte calls", "score": 3, "author": "u2"},
+        {"body": "$QQQ calls 0dte scalp", "score": 2, "author": "u3"}])
+    # Keep per-ticker price/options offline + deterministic (cards fail closed to OBSERVE).
+    monkeypatch.setattr(ss, "_resolve_intraday_trend", lambda tk, af: {"ok": False, "status": "no data"})
+    monkeypatch.setattr(ss, "_resolve_ticker_options", lambda *a, **k: {"contracts": [], "expiry": None})
+    rep = ss.build_odte_social_report(allow_fetch=True, params={
+        "sources": ["reddit"], "core_universe": ["SPY", "QQQ"], "min_mentions": 1,
+        "top_chatter_min_mentions": 2})
+    assert rep["daily_thread"]["n_comments"] == 3
+    assert "included" in rep["daily_thread"]["status"]
+    assert "QQQ" in [c["ticker"] for c in rep["top_chatter"]]   # comments fed top chatter
+    assert "3 included" in ss.format_report(rep)
+
+
+def test_no_cookie_secrets_used():
+    """Hard rule: the module never uses cookies or a cookie env secret (official OAuth only)."""
+    import inspect
+    src = inspect.getsource(ss)
+    assert "cookies=" not in src
+    assert "REDDIT_COOKIE" not in src
+    assert '"Cookie"' not in src and "'Cookie'" not in src
 
 
 def test_module_places_no_orders():

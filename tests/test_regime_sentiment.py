@@ -42,5 +42,6 @@ def test_model_resolution_env_overrides(monkeypatch):
 
     assert sentiment._resolve_model() == "claude-opus-4-8"
     monkeypatch.delenv("SENTIMENT_MODEL", raising=False)
-    # Without env or config, falls back to the built-in default.
-    assert sentiment._resolve_model().startswith("claude-")
+    # Without env or config, falls back to the built-in default — pinned to the
+    # current cutover target so a silent regression to a stale/retired id is caught.
+    assert sentiment._resolve_model() == "claude-opus-4-8"

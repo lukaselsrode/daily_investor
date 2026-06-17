@@ -10,7 +10,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import random
+import sys
 import time
 from datetime import datetime
 from typing import Any
@@ -20,7 +22,7 @@ import robin_stocks.robinhood as rb
 import yfinance as yf
 
 from core.utils import run_async
-from data.cache import read_data_as_pd, store_data_as_csv
+from data.cache import read_data_as_pd, read_recent_data_as_pd, store_data_as_csv
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +138,10 @@ def _fetch_news_with_retry(ticker: str, max_articles: int, max_retries: int = 3)
 
 MAX_NEWS_CONCURRENT = 3
 
+# Reuse an existing same-symbol news scrape if it is younger than this many hours,
+# rather than re-running the (slow) full fetch. Headlines move slowly intraday.
+NEWS_MAX_AGE_HOURS = 8.0
+
 
 async def _fetch_all_news_async(tickers: list[str], max_articles: int) -> dict[str, list]:
     semaphore = asyncio.Semaphore(MAX_NEWS_CONCURRENT)
@@ -191,9 +197,61 @@ def _enrich_news_with_social(news_df: pd.DataFrame) -> pd.DataFrame:
         return news_df
 
 
+def _is_valid_news_scrape(df: pd.DataFrame | None) -> bool:
+    """A reusable scrape has rows and at least one symbol with real articles.
+
+    Guards against reusing a botched same-day run that wrote an all-empty
+    ("[]") news frame (e.g. a fully rate-limited fetch)."""
+    if df is None or df.empty or "news" not in df.columns:
+        return False
+    return bool((df["news"].astype(str).str.len() > 2).any())
+
+
+def _skip_fetch_news() -> bool:
+    """True when the operator passed --skip-fetch-news.
+
+    Honored via either the env var set by the `daily-investor` CLI or a raw
+    sys.argv scan (mirrors how --skip-data is read by the legacy main.py entry),
+    so both invocation paths work."""
+    if os.environ.get("SKIP_FETCH_NEWS", "").strip() in ("1", "true", "True"):
+        return True
+    return "--skip-fetch-news" in sys.argv
+
+
 def get_news_df(tickers: list[str], force_refresh: bool) -> pd.DataFrame | None:
     if not force_refresh:
         return read_data_as_pd("news")
+
+    # --skip-fetch-news: reuse the most-recent cached scrape regardless of age and
+    # skip the fetch entirely, even on a fresh-data run. Falls through to a normal
+    # fetch only if no valid cached scrape exists (nothing to reuse).
+    if _skip_fetch_news():
+        cached = read_data_as_pd("news")
+        if _is_valid_news_scrape(cached):
+            print(
+                f"News: --skip-fetch-news → reusing latest cached scrape "
+                f"({len(cached)} symbols), skipping fetch."
+            )
+            logger.info("--skip-fetch-news: reusing latest cached news (%d symbols).", len(cached))
+            return cached
+        print("News: --skip-fetch-news set but no valid cached scrape found — fetching.")
+        logger.warning("--skip-fetch-news set but no valid cached news exists; fetching.")
+
+    # The full news scrape is by far the slowest stage (thousands of tickers, 3
+    # concurrent threads). News changes little intraday, so if a valid scrape
+    # exists within the freshness window, reuse it instead of refetching. Set
+    # NEWS_FORCE_REFETCH=1 to override (e.g. to pick up breaking headlines).
+    # 0DTE options sentiment is fetched separately and is NOT cached this way.
+    if os.environ.get("NEWS_FORCE_REFETCH", "").strip() not in ("1", "true", "True"):
+        cached = read_recent_data_as_pd("news", NEWS_MAX_AGE_HOURS)
+        if _is_valid_news_scrape(cached):
+            print(
+                f"News: reusing recent cached scrape ({len(cached)} symbols, "
+                f"<{NEWS_MAX_AGE_HOURS:g}h old) — skipping fetch. "
+                "Set NEWS_FORCE_REFETCH=1 to force."
+            )
+            logger.info("Reusing recent news scrape (%d symbols).", len(cached))
+            return cached
 
     rb_data = read_data_as_pd("robinhood_data")
     if rb_data is not None and not rb_data.empty and "volume" in rb_data.columns:

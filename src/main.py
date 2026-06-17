@@ -383,6 +383,9 @@ USAGE
 DATA OPTIONS
   --skip-data          Reuse existing agg_data.csv instead of fetching fresh fundamentals.
                        Useful for repeated tuning runs without re-downloading data.
+  --skip-fetch-news    Refresh all other data but reuse the latest cached news scrape
+                       (skips the slowest stage, any age). 0DTE options sentiment is
+                       unaffected. NEWS_FORCE_REFETCH=1 overrides the default 8h reuse.
 
 BACKTEST / TUNING OPTIONS
   --tune DAYS          Single-objective back-simulation over DAYS trading days.

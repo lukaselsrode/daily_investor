@@ -56,7 +56,7 @@ def _resolve_model() -> str:
             return str(_SM)
     except Exception:
         pass
-    return "claude-sonnet-4-20250514"
+    return "claude-opus-4-8"
 
 _CLAUDE_MODEL = _resolve_model()
 
@@ -123,7 +123,14 @@ def _make_langchain_model() -> ChatAnthropic | None:
     if not os.getenv("ANTHROPIC_API_KEY"):
         logger.warning("ANTHROPIC_API_KEY not set — sentiment analysis disabled")
         return None
-    return ChatAnthropic(model=_CLAUDE_MODEL, temperature=0.3)
+    # Opus 4.8: temperature is rejected (400); adaptive thinking aids the guard's
+    # judgment. max_tokens must be set explicitly (langchain default 1024 is too
+    # tight once thinking is on) — give the short answer headroom past thinking.
+    return ChatAnthropic(
+        model=_CLAUDE_MODEL,
+        max_tokens=4096,
+        thinking={"type": "adaptive"},
+    )
 
 
 def _make_async_client() -> anthropic.AsyncAnthropic | None:
@@ -382,11 +389,17 @@ async def _call_batch_async(
             try:
                 response = await _async_client.messages.create(
                     model=_CLAUDE_MODEL,
-                    max_tokens=2048,
+                    max_tokens=4096,
+                    thinking={"type": "adaptive"},
                     system=system_prompt,
                     messages=[{"role": "user", "content": user_prompt}],
                 )
-                return _parse_batch_response(response.content[0].text, batch)
+                # Adaptive thinking emits a thinking block first — scan for the
+                # text block rather than assuming content[0].
+                if response.stop_reason == "max_tokens":
+                    logger.warning("Batch sentiment hit max_tokens — answer may be truncated")
+                text = next((b.text for b in response.content if b.type == "text"), "")
+                return _parse_batch_response(text, batch)
 
             except anthropic.RateLimitError:
                 wait = (2 ** attempt) * (1 + random.random())
@@ -555,8 +568,11 @@ def analyze_sentiment(state: SentimentAnalysisState) -> dict:
 
     try:
         response = _lc_model.invoke([SystemMessage(content=system), HumanMessage(content=user)])
-        result = _parse_response(response.content)
-        result["analysis"] = response.content
+        # With adaptive thinking, .content is a list of blocks; .text concatenates
+        # only the text blocks (skips thinking) → keep _parse_response on a string.
+        text = response.text
+        result = _parse_response(text)
+        result["analysis"] = text
         if result["confidence"] < CONFIDENCE_THRESHOLD:
             return {
                 "sentiment_action": "HOLD",

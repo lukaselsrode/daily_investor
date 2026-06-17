@@ -76,6 +76,14 @@ EXCLUDED_STOCK_SECTORS: frozenset[str] = frozenset(
 )
 # Symbols the sell engine must never auto-exit (discretionary conviction).
 CONVICTION_HOLDS: frozenset[str] = frozenset({str(x).upper() for x in _disc.get("conviction_holds", [])})
+# Per-symbol sector reclassification (discretionary). {SYMBOL: corrected_sector}.
+# Applied right after fundamentals load so the corrected sector flows into scoring
+# (PE/PB benchmark), concentration grouping, and the UI. Keyed by upper-case symbol.
+SECTOR_OVERRIDES: dict[str, str] = {
+    str(k).upper(): str(v)
+    for k, v in (_disc.get("sector_overrides", {}) or {}).items()
+    if v
+}
 
 # ---------------------------------------------------------------------------
 # Score weights — weights must sum to 1.0; fall back to defaults otherwise

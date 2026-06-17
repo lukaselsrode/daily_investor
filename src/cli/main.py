@@ -39,6 +39,12 @@ def main(argv: list[str] | None = None) -> None:
     cmd = args[0]
     rest = args[1:]
 
+    # --skip-fetch-news: reuse the most-recent cached news scrape instead of the
+    # (slow) full news fetch, even on a fresh-data run. Surfaced as an env var so
+    # the data layer (data/news.py) honors it without coupling to sys.argv.
+    if "--skip-fetch-news" in rest:
+        os.environ["SKIP_FETCH_NEWS"] = "1"
+
     # --config <path>  — override which YAML the run reads.
     # Must be applied BEFORE importing cli.commands so core/paths.CONFIG_FILE
     # picks up the override at import time.
@@ -357,13 +363,20 @@ COMMANDS
                            --universe configured_only, --random-topk N, --apply)
   report-etf-allocation    Print ETF/core sleeve diagnostics for the current config (--days)
   odte-social-report       0DTE social-sentiment watchlist — ANALYSIS/PAPER ONLY, places NO orders.
-    (alias: options-social)  Reddit (JSON+Atom fallback) + X (official API only if X_BEARER_TOKEN);
+                           Reddit (JSON+Atom fallback) + X (official API only if X_BEARER_TOKEN);
                            DAY-OF posts only; attaches a PAPER same-day option idea (yfinance);
                            --no-fetch = offline (no network, no options lookup).
+  options-social           Alias for odte-social-report (identical behavior and options).
 
 OPTIONS (run)
   --skip-data              Reuse existing CSV data
   --op-mode safe|automated|no-sentiment
+
+OPTIONS (run / fetch-data)
+  --skip-fetch-news        Refresh all other data but reuse the latest cached news
+                           scrape (skips the slowest stage; any age). 0DTE options
+                           sentiment is unaffected. Env NEWS_FORCE_REFETCH=1 overrides
+                           the default 8h news-freshness reuse window.
 
 OPTIONS (tune / auto-tune)
   --apply                  Write config.yaml if validation passes
@@ -402,7 +415,10 @@ OPTIONS (tune only)
                              (averages sharpe+calmar) and ignores --objective.
 
 OPTIONS (all)
-  --mode MODE                Backtest universe selection mode
+  --mode MODE                Backtest universe selection mode. One of:
+                               liquid_universe_full          (default; full liquid universe)
+                               walk_forward_price_only_test  (low lookahead; price/momentum only)
+                               current_universe_stress_test  (high lookahead; current-score ranking)
   --output-dir PATH          Report output directory
 """)
 

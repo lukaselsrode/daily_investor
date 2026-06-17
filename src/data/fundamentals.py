@@ -559,6 +559,18 @@ def get_fundamentals_df(
 
     print(f"Fetched fundamentals for {len(fundamentals)} stocks")
 
+    # Discretionary per-symbol sector reclassification — applied BEFORE scoring so
+    # the corrected sector flows into the PE/PB valuation benchmark (_evaluate_stock),
+    # the scored sector column, and every downstream consumer (concentration, UI).
+    from util import SECTOR_OVERRIDES
+    for _sym, _data in fundamentals.items():
+        _new_sector = SECTOR_OVERRIDES.get(str(_sym).upper())
+        if _new_sector and _data.get("sector") != _new_sector:
+            logger.info(
+                "Sector override: %s '%s' → '%s'", _sym, _data.get("sector"), _new_sector
+            )
+            _data["sector"] = _new_sector
+
     _enrich_with_quotes(list(fundamentals.keys()), fundamentals)
     _enrich_with_momentum(list(fundamentals.keys()), fundamentals)
 

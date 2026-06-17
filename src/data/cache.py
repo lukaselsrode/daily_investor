@@ -88,3 +88,38 @@ def read_data_as_pd(dataset: str) -> pd.DataFrame | None:
     return pd.read_csv(path, keep_default_na=False, na_values=_NA_TOKENS)
 
 
+def read_recent_data_as_pd(dataset: str, max_age_hours: float) -> pd.DataFrame | None:
+    """Return the most-recent dataset CSV iff it is younger than ``max_age_hours``.
+
+    Filenames are produced by ``_dated_filename`` as ``{dataset}_{YYYY_MM_DD_HH_MM}.csv``;
+    the embedded timestamp is the scrape time, so age is measured from it (no reliance on
+    filesystem mtime). Used to skip slow refetches within a freshness window (e.g. news).
+    Returns None if no matching CSV exists or its timestamp can't be parsed.
+    """
+    try:
+        files = sorted(os.listdir(DATA_DIRECTORY))
+    except FileNotFoundError:
+        return None
+
+    suffix = ".csv"
+    prefix = f"{dataset}_"
+    matches = [f for f in files if f.startswith(prefix) and f.endswith(suffix)]
+    if not matches:
+        return None
+
+    newest = matches[-1]
+    stamp = newest[len(prefix):-len(suffix)]
+    try:
+        scraped_at = datetime.datetime.strptime(stamp, "%Y_%m_%d_%H_%M")
+    except ValueError:
+        return None
+
+    age_hours = (datetime.datetime.now() - scraped_at).total_seconds() / 3600.0
+    if age_hours > max_age_hours:
+        return None
+
+    path = os.path.join(DATA_DIRECTORY, newest)
+    logger.debug("Using recent cached %s (%.1fh old): %s", dataset, age_hours, newest)
+    return pd.read_csv(path, keep_default_na=False, na_values=_NA_TOKENS)
+
+
