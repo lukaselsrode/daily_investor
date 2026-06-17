@@ -1279,6 +1279,47 @@ def test_daily_thread_comments_folded_into_ev_pool_and_top_chatter(monkeypatch):
     assert "3 included" in ss.format_report(rep)
 
 
+def test_reddit_comments_uses_oauth_bearer_when_creds_present(monkeypatch):
+    """Verify the existing requests-OAuth path: with creds, comments are fetched from
+    oauth.reddit.com/comments/{id} with a bearer header (same app-only flow PRAW uses) — so PRAW
+    is unnecessary for this. No username/password; read-only application-only."""
+    captured = {}
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        captured["url"], captured["headers"] = url, headers or {}
+        return _FakeResp([{}, {"data": {"children": [
+            {"kind": "t1", "data": {"body": "SPY 0dte calls", "score": 3, "author": "u"}}]}}])
+
+    monkeypatch.setattr(ss, "_reddit_oauth_token", lambda: "TKN")
+    monkeypatch.setattr(ss.requests, "get", fake_get)
+    out = ss.fetch_reddit_comments("1u85wuy", limit=5, allow_fetch=True)
+    assert out and out[0]["body"].startswith("SPY")
+    assert captured["url"] == "https://oauth.reddit.com/comments/1u85wuy"
+    assert captured["headers"].get("Authorization") == "bearer TKN"
+
+
+def test_reddit_comments_public_json_without_creds(monkeypatch):
+    """Without creds, it falls back to public JSON (no bearer) — the path that 403s server-side,
+    which is exactly why REDDIT_CLIENT_ID/SECRET are needed for reliable daily-thread comments."""
+    captured = {}
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        captured["url"] = url
+        return _FakeResp([{}, {"data": {"children": []}}])
+
+    monkeypatch.setattr(ss, "_reddit_oauth_token", lambda: None)
+    monkeypatch.setattr(ss.requests, "get", fake_get)
+    ss.fetch_reddit_comments("xyz789", limit=3, allow_fetch=True)
+    assert captured["url"] == "https://www.reddit.com/comments/xyz789.json"
+
+
+def test_no_praw_dependency_added():
+    """Option A stays dependency-light: no PRAW import in the module (requests OAuth only)."""
+    import inspect
+    src = inspect.getsource(ss)
+    assert "import praw" not in src and "from praw" not in src
+
+
 def test_no_cookie_secrets_used():
     """Hard rule: the module never uses cookies or a cookie env secret (official OAuth only)."""
     import inspect

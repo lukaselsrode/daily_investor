@@ -559,17 +559,31 @@ def get_fundamentals_df(
 
     print(f"Fetched fundamentals for {len(fundamentals)} stocks")
 
-    # Discretionary per-symbol sector reclassification — applied BEFORE scoring so
-    # the corrected sector flows into the PE/PB valuation benchmark (_evaluate_stock),
-    # the scored sector column, and every downstream consumer (concentration, UI).
-    from util import SECTOR_OVERRIDES
+    # Discretionary per-symbol sector/industry reclassification — applied BEFORE
+    # scoring so corrections flow into the PE/PB valuation benchmark (_evaluate_stock),
+    # the scored sector/industry columns, and every downstream consumer (peer
+    # ranking, concentration, UI).
+    from util import CLASSIFICATION_OVERRIDES
     for _sym, _data in fundamentals.items():
-        _new_sector = SECTOR_OVERRIDES.get(str(_sym).upper())
-        if _new_sector and _data.get("sector") != _new_sector:
-            logger.info(
-                "Sector override: %s '%s' → '%s'", _sym, _data.get("sector"), _new_sector
-            )
-            _data["sector"] = _new_sector
+        _ov = CLASSIFICATION_OVERRIDES.get(str(_sym).upper())
+        if not _ov:
+            continue
+        for _field in ("sector", "industry"):
+            _new = _ov.get(_field)
+            if _new and _data.get(_field) != _new:
+                logger.info(
+                    "Classification override: %s %s '%s' → '%s'",
+                    _sym, _field, _data.get(_field), _new,
+                )
+                _data[_field] = _new
+
+    # FMP cross-validation (borderline-only second source) — applied BEFORE scoring,
+    # after manual overrides (which win). Config-gated; fail-closed.
+    try:
+        from data.classification_arbiter import cross_validate
+        cross_validate(fundamentals, allow_fetch=force_refresh)
+    except Exception as _xv_err:
+        logger.warning("Classification cross-validation skipped: %s", _xv_err)
 
     _enrich_with_quotes(list(fundamentals.keys()), fundamentals)
     _enrich_with_momentum(list(fundamentals.keys()), fundamentals)

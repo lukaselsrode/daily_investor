@@ -76,13 +76,25 @@ EXCLUDED_STOCK_SECTORS: frozenset[str] = frozenset(
 )
 # Symbols the sell engine must never auto-exit (discretionary conviction).
 CONVICTION_HOLDS: frozenset[str] = frozenset({str(x).upper() for x in _disc.get("conviction_holds", [])})
-# Per-symbol sector reclassification (discretionary). {SYMBOL: corrected_sector}.
-# Applied right after fundamentals load so the corrected sector flows into scoring
-# (PE/PB benchmark), concentration grouping, and the UI. Keyed by upper-case symbol.
-SECTOR_OVERRIDES: dict[str, str] = {
-    str(k).upper(): str(v)
-    for k, v in (_disc.get("sector_overrides", {}) or {}).items()
+# Per-symbol sector/industry reclassification (discretionary).
+# {SYMBOL: {"sector": ..., "industry": ...}} — either field optional. Applied right
+# after fundamentals load so corrections flow into scoring (PE/PB benchmark), peer
+# ranking, concentration grouping, and the UI. Keyed by upper-case symbol.
+CLASSIFICATION_OVERRIDES: dict[str, dict[str, str]] = {
+    str(k).upper(): {
+        _f: str(_v) for _f in ("sector", "industry")
+        if (_v := (v or {}).get(_f))
+    }
+    for k, v in (_disc.get("classification_overrides", {}) or {}).items()
     if v
+}
+# FMP cross-validation layer (borderline-only second source; see data/classification_arbiter.py).
+_xv = _disc.get("cross_validation", {}) or {}
+CROSS_VALIDATION_PARAMS: dict = {
+    "enabled":              bool(_xv.get("enabled", False)),
+    "swing_threshold":      float(_xv.get("swing_threshold", 0.20)),
+    "profile_fetch_per_run": int(_xv.get("profile_fetch_per_run", 200)),
+    "model":                str(_xv.get("model", "") or ""),
 }
 
 # ---------------------------------------------------------------------------

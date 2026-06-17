@@ -1516,6 +1516,21 @@ def run_simulation(
 
         candidate_indices = sorted(np.where(eligible)[0], key=lambda i: -eff_scores[i])
 
+        # Small-budget concentration — mirrors portfolio/manager.buy_cycle. When
+        # spreading the budget proportionally drops even the top candidate's slice
+        # below min_order BUT the budget can clear one order, fund the top-ranked
+        # candidates at >= min_order each, down the ranks as a ladder, instead of
+        # buying nothing. (No sentiment in backtests, so the live bench-trim is
+        # unnecessary here — only the allocation ladder is mirrored.)
+        _concentrate = False
+        if candidate_indices:
+            if _size_by_dv and _total_dv > 0:
+                _best_w = max(_dv[i] for i in candidate_indices) / _total_dv
+            else:
+                _best_w = max(eff_scores[i] for i in candidate_indices) / total_score
+            _best_alloc = min(_best_w * budget, cash * max_order_pct)
+            _concentrate = _best_alloc < min_order <= budget
+
         # Track archetype sleeve consumption within this rebalance pass so we cap
         # against running totals, not the stale day-start value.
         sleeve_consumed: dict[str, float] = {}
@@ -1535,6 +1550,16 @@ def run_simulation(
                 alloc = (_dv[i] / _total_dv) * budget
             else:
                 alloc = (eff_scores[i] / total_score) * budget
+
+            # Concentration ladder: floor this (top-ranked) name at min_order and
+            # cap at the budget still unspent this pass, so the budget funnels into
+            # the top few names. Once the unspent budget can't clear another order,
+            # stop. Downstream caps still apply (and can re-skip a name < min_order).
+            if _concentrate:
+                _remaining_budget = budget - spent
+                if _remaining_budget < min_order:
+                    break
+                alloc = min(max(alloc, min_order), _remaining_budget)
 
             max_by_cash = cash * max_order_pct
             if alloc > max_by_cash:

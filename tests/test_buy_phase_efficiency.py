@@ -40,17 +40,12 @@ def _df(symbols, scores=None):
 class TestAllocationPrecheck:
 
     def test_starved_budget_skips_sentiment_batch(self, monkeypatch):
-        """Budget so small no candidate can clear min_order → buy_cycle returns
-        without ever calling the sentiment layer."""
+        """Budget below min_order → NO order is possible at all, so buy_cycle returns
+        without ever calling the sentiment layer (token-saving guarantee)."""
         min_order = RISK_LIMITS["min_order_amount"]
-        alloc_pct = RISK_LIMITS["min_candidate_allocation_pct"]
-        # Pick a budget where even a 100%-share allocation is impossible:
-        # best_alloc <= budget, so budget < min_order guarantees starvation —
-        # but the interesting case is budget >= min_order with per-candidate
-        # shares below it. With N equal scores, best share = budget/N (or the
-        # floor): choose N and budget so max(budget/N, budget*alloc_pct) < min_order.
         n = 8
-        budget = min_order / max(1.0 / n, alloc_pct) * 0.9
+        # Truly starved: the whole stock budget can't clear a single min_order.
+        budget = min_order * 0.5
         pm = _pm(cash=budget)
 
         called = []
@@ -68,6 +63,33 @@ class TestAllocationPrecheck:
         assert purchased == [] and failed == []
         assert len(skipped) == n
         assert called == []  # sentiment never invoked
+
+    def test_small_budget_concentrates_instead_of_skipping(self, monkeypatch):
+        """Budget clears at least one order but per-candidate shares fall below
+        min_order → concentration ladder engages: the sentiment batch IS invoked
+        (on a trimmed top-ranked bench) so a concentrated buy can be placed,
+        rather than skipping the whole phase."""
+        min_order = RISK_LIMITS["min_order_amount"]
+        n = 8
+        # Spreading across 8 names → ~0.31*min_order each (< min_order), but the
+        # budget itself clears ~2 orders → concentration should trigger.
+        budget = min_order * 2.5
+        pm = _pm(cash=budget)
+
+        called = []
+        import data.sentiment as ds
+        monkeypatch.setattr(
+            ds, "get_batch_sentiment_recommendations",
+            lambda *a, **k: called.append(1) or {},  # all HOLD → still proves the path ran
+        )
+        purchased, skipped, failed = pm.buy_cycle(
+            _df([f"S{i}" for i in range(n)]),
+            is_first_iteration=False,
+            regime="neutral",
+            effective_index_pct=0.77,
+        )
+        assert called != []                 # concentration engaged → sentiment invoked
+        assert len(skipped) < n             # bench trimmed to the top-ranked ladder
 
     def test_viable_budget_proceeds_past_precheck(self, monkeypatch):
         """A budget where the top candidate clears min_order must NOT trigger the

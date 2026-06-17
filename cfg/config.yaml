@@ -138,13 +138,120 @@ discretionary:
     - BABA                  # Qwen inflection + deep-value turnaround — a thesis the algo can't quantify
     - BABU                  # 2x-leveraged BABA — high-conviction expression of the same thesis
                             # (note: leveraged ETFs decay in choppy/sideways tapes — sized for conviction)
-  # Per-symbol sector reclassification. FMP's sector is sometimes wrong for the
-  # business (e.g. Alibaba tagged "Retail Trade" when it's cloud/AI-led). Applied
-  # right after fundamentals load, so the corrected sector flows EVERYWHERE: the
-  # PE/PB valuation benchmark it's scored against, concentration/cluster grouping,
-  # and the factor-map / exposure UI. Keep this list short and defensible.
-  sector_overrides:
-    BABA: Technology Services   # cloud + Qwen/AI platform, not a retailer
+  # Per-symbol sector/industry reclassification. The source feed (Robinhood/TRBC)
+  # mislabels several platform businesses as retailers. Applied right after
+  # fundamentals load, so the correction flows EVERYWHERE: the PE/PB valuation
+  # benchmark the name is scored against, peer ranking, concentration/cluster
+  # grouping, and the factor-map / exposure UI. Targets must be REAL sectors/
+  # industries (else they re-default). Keep this list short and defensible.
+  classification_overrides:
+    BABA: {sector: Technology Services, industry: Internet Software/Services}   # cloud + Qwen/AI, not a retailer
+    AMZN: {sector: Technology Services, industry: Internet Software/Services}   # AWS drives profit
+    SE:   {sector: Technology Services, industry: Internet Software/Services}   # Shopee/Garena/SeaMoney platform
+    PDD:  {sector: Technology Services, industry: Internet Software/Services}   # social-commerce tech platform
+    JD:   {sector: Technology Services, industry: Internet Software/Services}   # logistics/supply-chain tech
+    MELI: {sector: Technology Services, industry: Internet Software/Services}   # commerce + fintech platform
+    AAPL: {sector: Electronic Technology, industry: Computer Processing Hardware}   # not telecom equipment
+    # --- frozen from FMP×Claude cross-validation (2026-06-17). Sector-only; promote/edit as needed.
+    ARRY: {sector: Energy}   # was 'Producer Manufacturing'
+    BKR: {sector: Energy}   # was 'Industrial Services'
+    BORR: {sector: Energy}   # was 'Industrial Services'
+    CGC: {sector: Health Technology}   # was 'Process Industries'
+    CIIT: {sector: Financial}   # was 'Transportation'
+    CLOV: {sector: Health Services}   # was 'Finance'
+    CMCSA: {sector: Communications}   # was 'Consumer Services'
+    CPRT: {sector: Industrials}   # was 'Retail Trade'
+    CRCL: {sector: Financial}   # was 'Technology Services'
+    CRVO: {sector: Health Technology}   # was 'Commercial Services'
+    CTM: {sector: Technology Services}   # was 'Process Industries'
+    DIS: {sector: Communications}   # was 'Consumer Services'
+    DOC: {sector: Real Estate}   # was 'Finance'
+    DSY: {sector: Consumer Non-Durables}   # was 'Miscellaneous'
+    EDBL: {sector: Consumer Non-Durables}   # was 'Process Industries'
+    ET: {sector: Energy}   # was 'Industrial Services'
+    FLD: {sector: Financial}   # was 'Technology Services'
+    FOXA: {sector: Communications}   # was 'Consumer Services'
+    FRMI: {sector: Utilities}   # was 'Finance'
+    GNS: {sector: Consumer Non-Durables}   # was 'Technology Services'
+    GPRO: {sector: Electronic Technology}   # was 'Consumer Durables'
+    HAL: {sector: Energy}   # was 'Industrial Services'
+    HST: {sector: Real Estate}   # was 'Finance'
+    IMCC: {sector: Health Technology}   # was 'Process Industries'
+    INVH: {sector: Real Estate}   # was 'Finance'
+    JZ: {sector: Consumer Non-Durables}   # was 'Commercial Services'
+    KIM: {sector: Real Estate}   # was 'Finance'
+    KMI: {sector: Energy}   # was 'Industrial Services'
+    MPT: {sector: Real Estate}   # was 'Finance'
+    NUAI: {sector: Energy}   # was 'Industrial Services'
+    NWL: {sector: Consumer Non-Durables}   # was 'Producer Manufacturing'
+    O: {sector: Real Estate}   # was 'Finance'
+    OPEN: {sector: Real Estate}   # was 'Finance'
+    PAA: {sector: Energy}   # was 'Industrial Services'
+    PK: {sector: Real Estate}   # was 'Finance'
+    PSKY: {sector: Communications}   # was 'Consumer Services'
+    PTEN: {sector: Energy}   # was 'Industrial Services'
+    PYPL: {sector: Financial}   # was 'Commercial Services'
+    QSI: {sector: Health Technology}   # was 'Technology Services'
+    RIG: {sector: Energy}   # was 'Industrial Services'
+    RR: {sector: Industrials}   # was 'Consumer Durables'
+    RUN: {sector: Energy}   # was 'Electronic Technology'
+    SBET: {sector: Financial}   # was 'Commercial Services'
+    SIRI: {sector: Communications}   # was 'Consumer Services'
+    SLB: {sector: Energy}   # was 'Industrial Services'
+    SPCX: {sector: Industrials}   # was 'Communications'
+    STI: {sector: Industrials}   # was 'Finance'
+    SVC: {sector: Real Estate}   # was 'Finance'
+    TEM: {sector: Health Technology}   # was 'Technology Services'
+    TWAV: {sector: Financial}   # was 'Electronic Technology'
+    VG: {sector: Energy}   # was 'Industrial Services'
+    VICI: {sector: Real Estate}   # was 'Finance'
+    WBD: {sector: Communications}   # was 'Consumer Services'
+    WMB: {sector: Energy}   # was 'Industrial Services'
+    # --- 2nd frozen batch from cross-val (2026-06-17); cross_validation disabled after this ---
+    AACG: {sector: Consumer Non-Durables}   # was 'Commercial Services'
+    AAT: {sector: Real Estate}   # was 'Finance'
+    ABLV: {sector: Communications}   # was 'Retail Trade'
+    ABR: {sector: Real Estate}   # was 'Finance'
+    ACA: {sector: Industrials}   # was 'Non-Energy Minerals'
+    ACB: {sector: Health Technology}   # was 'Process Industries'
+    ACDC: {sector: Energy}   # was 'Industrial Services'
+    ACON: {sector: Health Technology}   # was 'Technology Services'
+    ACU: {sector: Consumer Non-Durables}   # was 'Distribution Services'
+    ADAMM: {sector: Real Estate}   # was 'Finance'
+    ADAMN: {sector: Real Estate}   # was 'Finance'
+    ADC: {sector: Real Estate}   # was 'Finance'
+    ADNT: {sector: Retail Trade}   # was 'Producer Manufacturing'
+    AEBI: {sector: Industrials}   # was 'Consumer Durables'
+    AEI: {sector: Real Estate}   # was 'Finance'
+    AESI: {sector: Energy}   # was 'Industrial Services'
+    AFCG: {sector: Real Estate}   # was 'Finance'
+    AFIIQ: {sector: Industrials}   # was 'Non Energy Minerals'
+    AGNT: {sector: Real Estate}   # was 'Finance'
+    AGRO: {sector: Consumer Non-Durables}   # was 'Process Industries'
+    AGRZ: {sector: Basic Materials}   # was 'Industrial Services'
+    AHR: {sector: Real Estate}   # was 'Finance'
+    AIIR: {sector: Consumer Non-Durables}   # was 'Producer Manufacturing'
+    AIMD: {sector: Health Technology}   # was 'Electronic Technology'
+    AIOS: {sector: Financial}   # was 'Producer Manufacturing'
+    AIXC: {sector: Health Technology}   # was 'Technology Services'
+    AKAN: {sector: Health Technology}   # was 'Process Industries'
+    AKR: {sector: Real Estate}   # was 'Finance'
+    ALCO: {sector: Consumer Non-Durables}   # was 'Process Industries'
+    ALGGY: {sector: Industrials}   # was 'Finance'
+    ALLE: {sector: Industrials}   # was 'Consumer Durables'
+    ALPS: {sector: Health Technology}   # was 'Miscellaneous'
+    ALX: {sector: Real Estate}   # was 'Finance'
+    AM: {sector: Energy}   # was 'Industrial Services'
+  # FMP cross-validation: a borderline-only SECOND source. For names whose Robinhood
+  # sector disagrees with FMP AND the implied PE benchmark swings > threshold, Claude
+  # adjudicates which sector to score against. Verdicts are persisted
+  # (data/classification_adjudications.json) so each is decided once. Runs inline in
+  # fetch-data; manual classification_overrides above always win. enabled:false = kill-switch.
+  cross_validation:
+    enabled: false   # one-shot discovery tool; flip true for a run, review, re-freeze, flip back
+    swing_threshold: 0.20          # |PE(fmp) - PE(rh)| / PE(rh) must exceed this to flag
+    profile_fetch_per_run: 200     # cap new FMP profile fetches per run (backfills progressively)
+    model: ""                      # "" → reuse the sentiment model (app.sentiment_model)
 risk:
   max_single_position_pct: 0.09
   max_sector_pct: 0.25

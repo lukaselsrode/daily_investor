@@ -685,7 +685,17 @@ X_BEARER_TOKEN=your_x_api_bearer_token     # optional; enables X via the officia
 
 Reddit OAuth uses the **app-only `client_credentials`** grant (no user login) against
 `oauth.reddit.com` — it is ToS-clean and avoids the 403s/rate-limits anonymous server
-requests hit. No browser automation or HTML scraping is used anywhere.
+requests hit. No browser automation or HTML scraping is used anywhere. (This is the same
+read-only application-only OAuth that PRAW would use under the hood, done directly with
+`requests` — so **PRAW is not a dependency**.)
+
+**WSB daily-discussion-thread comments** (the real intraday chatter) need the same
+`REDDIT_CLIENT_ID`/`REDDIT_CLIENT_SECRET` — without them the public-JSON comments endpoint
+returns 403 and the report shows `daily thread comments: unavailable: auth needed` instead of a
+silently low count. Create a Reddit app at <https://www.reddit.com/prefs/apps> (type **script**
+or **web app**), copy its id/secret into `.env`. The daily thread is usually stickied and may be
+absent from the `hot` listing; in that case set an explicit override in `cfg/config.yaml` under
+`options_social`: `daily_thread_id: <base36 id>` or `daily_thread_url: <full /comments/ URL>`.
 
 ```bash
 daily-investor --help

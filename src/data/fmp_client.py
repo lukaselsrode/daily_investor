@@ -334,6 +334,51 @@ def statement(symbol: str, kind: str, period: str = "quarter", limit: int = 44,
     return pd.DataFrame(payload)
 
 
+_PROFILE_DIR = os.path.join(_CACHE_DIR, "profiles")
+
+
+def company_profile(symbol: str, allow_fetch: bool = False) -> dict | None:
+    """Cached FMP company profile (carries `sector`, `industry`, `companyName`, …).
+
+    Used as a SECOND classification source to cross-validate Robinhood's sector/industry.
+    Cached as JSON per symbol; 402/empty negative-cached so a bad symbol never re-spends a
+    call. Returns the profile dict or None when unavailable.
+    """
+    path = os.path.join(_PROFILE_DIR, f"{_safe(symbol)}.json")
+    if os.path.exists(path):
+        try:
+            with open(path) as fh:
+                return json.load(fh)
+        except (OSError, ValueError):
+            pass
+
+    mkey = f"profile:{symbol}"
+    meta = _read_meta(mkey)
+    if meta and meta.get("status") in ("premium", "empty", "error"):
+        return None
+    if not allow_fetch:
+        return None
+
+    url = f"{_BASE}/profile?symbol={symbol}&apikey={_api_key()}"
+    status, payload = _get(url)
+    if status == 402:
+        _write_meta(mkey, "premium", "402 paywalled on current plan")
+        return None
+    if status == 429 or status >= 500:
+        raise FMPNetworkError(f"{mkey}: transient HTTP {status}")
+    # /profile returns a single-element list; normalize to the dict.
+    record = payload[0] if isinstance(payload, list) and payload else None
+    if status != 200 or not isinstance(record, dict):
+        _write_meta(mkey, "empty", f"status={status}")
+        return None
+
+    os.makedirs(_PROFILE_DIR, exist_ok=True)
+    with open(path, "w") as fh:
+        json.dump(record, fh)
+    _write_meta(mkey, "ok", "company profile")
+    return record
+
+
 def delisted_companies(max_pages: int = 50, allow_fetch: bool = False) -> pd.DataFrame:
     """The delisted-company roster (symbol, exchange, ipoDate, delistedDate), cache-first.
 
