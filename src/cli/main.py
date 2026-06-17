@@ -168,6 +168,13 @@ def main(argv: list[str] | None = None) -> None:
         print(format_etf_sleeve_diagnostics(
             _rep.validation_result or _rep.train_result, label=f"current config ({n_days}d)"))
 
+    elif cmd in ("odte-social-report", "options-social"):
+        # 0DTE social-sentiment watchlist — ANALYSIS/PAPER ONLY, places no orders.
+        # --no-fetch runs offline (cache-only/empty) for a safe dry run.
+        from data.social_sentiment import build_odte_social_report, format_report
+        rep = build_odte_social_report(allow_fetch="--no-fetch" not in rest)
+        print(format_report(rep))
+
     elif cmd == "stability-scan":
         mode = _flag_value(rest, "--mode")
         out_dir = _flag_value(rest, "--output-dir")
@@ -346,6 +353,13 @@ COMMANDS
   fmp <SUB>                FMP cache operations (status, backfill, validate)
   config <SUB>             config maintenance (sub: migrate-scoring)
   snapshots <SUB>          snapshot maintenance (sub: rescore)
+  tune-etf-allocation      Gated ETF/core sleeve allocation tournament (--days, --mode regime|defensive,
+                           --universe configured_only, --random-topk N, --apply)
+  report-etf-allocation    Print ETF/core sleeve diagnostics for the current config (--days)
+  odte-social-report       0DTE social-sentiment watchlist — ANALYSIS/PAPER ONLY, places NO orders.
+    (alias: options-social)  Reddit (JSON+Atom fallback) + X (official API only if X_BEARER_TOKEN);
+                           DAY-OF posts only; attaches a PAPER same-day option idea (yfinance);
+                           --no-fetch = offline (no network, no options lookup).
 
 OPTIONS (run)
   --skip-data              Reuse existing CSV data

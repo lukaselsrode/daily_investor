@@ -228,6 +228,9 @@ daily-investor COMMAND [OPTIONS]
 | `fmp <SUB>` | FMP cache operations: `status`, `validate-cache`, `backfill-prices`, `backfill-statements`, `backfill-delisted`, `build-dead-universe` |
 | `config <SUB>` | Config maintenance — sub: `migrate-scoring` (rewrite legacy YAML to unified scoring) |
 | `snapshots <SUB>` | Snapshot maintenance — sub: `rescore` (re-score on-disk snapshots to current model) |
+| `tune-etf-allocation` | Gated ETF/core sleeve allocation tournament (`--days`, `--mode regime\|defensive`, `--universe configured_only`, `--random-topk N`, `--apply`) — writes only the `etf_allocation` config section if all gates pass |
+| `report-etf-allocation` | Print ETF/core sleeve diagnostics for the current config (`--days`) |
+| `odte-social-report` (alias `options-social`) | **ANALYSIS / PAPER ONLY — places NO orders.** 0DTE social-sentiment watchlist from Reddit (official OAuth when `REDDIT_CLIENT_ID`/`REDDIT_CLIENT_SECRET` set → public JSON → Atom-feed fallback; no scraping) + X official API (only if `X_BEARER_TOKEN` set; no scraping). Counts posts as fresh by **market session** (`freshness_mode: market_window`, America/New_York): weekend → since the last Friday 16:00 ET close; weekday pre-open → since the previous close; weekday at/after open → since today 09:30 ET (so weekend-accumulated sentiment is retained for Monday prep), floored by `max_lookback_hours` (default 96). Applies **transparent spam/quality filtering** (no ML): drops promo/scam (Telegram/VIP/100X/“free signals”/WhatsApp), off-topic crypto, class-action/legal blasts, shotgun-cashtag spam, and near-duplicates; ODTE evidence additionally requires an allowed ticker **plus** an options/day-trading context token (0DTE, call/put, strike, scalp, FOMC…) so generic SPY/QQQ chatter doesn’t inflate mention counts. News enrichment applies the same spam/dedupe pass but **not** the options-context requirement. Attaches a **paper-only same-day option idea** (yfinance; bullish→calls / bearish→puts; budget-capped, liquidity-sorted; fails closed when market closed / no chain / `--no-fetch`). The CLI runs **on demand regardless of config** (gated by neither `enabled` nor network). Separately, `fetch-data`/`force-refresh` **always** enriches the news-sentiment substrate with social items for the active-sleeve LLM — **fail-closed** and independent of `options_social.enabled`; opt out with `options_social.disable_social_news_enrichment: true`. Social items are merged as **ordinary news articles** (title, source/`api_source`, link, date, raw text, engagement counts) so the LLM judges news and social **uniformly** — no precomputed bullish/bearish/net social score is injected into the active-sleeve prompt (the report keeps its own transparent heuristics, separately). Optional bounded **comments enrichment** (`reddit_comments_enrich: true`, default off) folds top comments of the top posts into the post text (OAuth → public JSON; cached). |
 
 Research scripts:
 
@@ -614,6 +617,7 @@ Five top-level sections, each with tabs. Launch: `make ui`
 | 🔗 Correlations | Pairwise factor IC, VIF, OLS residualization, variance decomposition |
 | 🌡️ Regime | IC conditioned on market regime (bull/bear/high-vol/sideways) |
 | 🧬 Distribution | Bimodality test, tail analysis, local IC, GMM clusters, conditional alpha, threshold simulation |
+| 🔎 Single Stock | **Decision-support only — places NO orders.** Single-name deep dive (Universe tab): latest holdings exposure, cached factor scores, yfinance price/trend/fundamentals/news + options surface, Reddit/X social evidence (spam-filtered, with provenance), leveraged-ETF diagnostics (realized beta/correlation + cumulative vs daily-reset 2× with risk notes), and a hypothetical position-structure helper. Fails closed if yfinance/network is unavailable. |
 | 🧪 Experimental | Raw CSV/parquet explorer; prototype analyses |
 
 ### ✅ Validation
@@ -668,7 +672,18 @@ RB_ACCT=your_robinhood_email
 RB_CREDS=your_robinhood_password
 RB_MFA_SECRET=your_totp_secret         # optional: skips interactive MFA prompt
 ANTHROPIC_API_KEY=your_anthropic_key   # required for sentiment and LLM tune review
+
+# Optional — social-sentiment enrichment (Reddit/X). All optional; absence just
+# downgrades the Reddit fetch to public JSON, then the Atom/RSS feed.
+REDDIT_CLIENT_ID=your_reddit_app_id        # official Reddit app-only OAuth (preferred)
+REDDIT_CLIENT_SECRET=your_reddit_app_secret
+REDDIT_USER_AGENT=your-app/1.0 by u/you    # optional; Reddit asks for a descriptive UA
+X_BEARER_TOKEN=your_x_api_bearer_token     # optional; enables X via the official API only
 ```
+
+Reddit OAuth uses the **app-only `client_credentials`** grant (no user login) against
+`oauth.reddit.com` — it is ToS-clean and avoids the 403s/rate-limits anonymous server
+requests hit. No browser automation or HTML scraping is used anywhere.
 
 ```bash
 daily-investor --help

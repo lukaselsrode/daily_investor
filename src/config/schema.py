@@ -277,6 +277,37 @@ class EtfAllocationConstraintsConfig:
 
 
 @dataclass(frozen=True)
+class OptionsSocialConfig:
+    """0DTE social-sentiment watchlist (analysis/paper only; never places orders)."""
+    enabled: bool = False
+    budget_dollars: float = 50.0
+    weekday: int | None = None
+    sources: tuple[str, ...] = ("reddit",)
+    subreddit: str = "wallstreetbets"
+    reddit_limit: int = 50
+    x_query: str = "($SPY OR $QQQ OR 0DTE OR ODTE) lang:en -is:retweet -crypto -gold -xauusd"
+    x_limit: int = 50
+    max_tickers: int = 10
+    min_mentions: int = 3
+    core_universe: tuple[str, ...] = ("SPY", "QQQ")
+    # Freshness window for the 0DTE report. market_window anchors to US market sessions
+    # (America/New_York) so weekend/pre-market posts since the last close are retained;
+    # otherwise a plain rolling max_lookback_hours window is used.
+    freshness_mode: str = "market_window"
+    max_lookback_hours: float = 96.0
+    market_open_et: str = "09:30"
+    market_close_et: str = "16:00"
+    include_paper_options: bool = True
+    # Opt-out for ALWAYS-on social enrichment of the news-sentiment substrate (independent
+    # of `enabled`, which only gates the 0DTE report). Default False = always best-effort.
+    disable_social_news_enrichment: bool = False
+    # Optional, bounded, opt-in Reddit comments enrichment (folded into post text). Default off.
+    reddit_comments_enrich: bool = False
+    reddit_comments_top_posts: int = 3
+    reddit_comments_per_post: int = 5
+
+
+@dataclass(frozen=True)
 class EtfAllocationConfig:
     """ETF/core sleeve allocation. enabled:false AND mode:equal_weight both reproduce
     the historical equal-weight behavior exactly. Weights are bucket-parameterized

@@ -12,10 +12,9 @@ import json
 import logging
 import random
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
-import aiohttp
 import pandas as pd
 import robin_stocks.robinhood as rb
 import yfinance as yf
@@ -32,30 +31,6 @@ logging.getLogger("yfinance").addFilter(
         "filter": staticmethod(lambda r: "faulty response" not in r.getMessage())
     })()
 )
-
-# ---------------------------------------------------------------------------
-# Reddit sentiment
-# ---------------------------------------------------------------------------
-
-async def _fetch_reddit_date(session: aiohttp.ClientSession, date: str) -> tuple[str, Any]:
-    try:
-        async with session.get(f"https://api.tradestie.com/v1/apps/reddit?date={date}") as r:
-            r.raise_for_status()
-            return date, await r.json()
-    except Exception as e:
-        print(f"Reddit fetch error for {date}: {e}")
-        return date, None
-
-
-async def _get_reddit_sentiments_async(days: int = 7) -> dict:
-    dates = [
-        (datetime.now() - timedelta(days=i)).strftime("%m-%d-%Y")
-        for i in range(min(days, 7))
-    ]
-    async with aiohttp.ClientSession() as session:
-        results = await asyncio.gather(*[_fetch_reddit_date(session, d) for d in dates])
-    return dict(results)
-
 
 # ---------------------------------------------------------------------------
 # News — shared helpers
@@ -194,6 +169,28 @@ def get_news_for_tickers_by_symbol(
 # Pipeline function
 # ---------------------------------------------------------------------------
 
+def _enrich_news_with_social(news_df: pd.DataFrame) -> pd.DataFrame:
+    """ALWAYS merge normalized Reddit/X social items into the news frame (same
+    ["symbol","news"] schema) so the active-sleeve sentiment substrate carries social
+    provenance — independent of options_social.enabled (which only gates the 0DTE report).
+
+    Best-effort and fail-closed: any error (or missing network) returns the frame unchanged,
+    so social enrichment can never break the news pipeline. Operators can opt out by setting
+    options_social.disable_social_news_enrichment: true."""
+    try:
+        from util import OPTIONS_SOCIAL_PARAMS
+        if OPTIONS_SOCIAL_PARAMS.get("disable_social_news_enrichment", False):
+            logger.info("social news enrichment disabled (disable_social_news_enrichment).")
+            return news_df
+        from data.social_sentiment import enrich_news_with_social
+        merged = enrich_news_with_social(news_df=news_df, persist=False)
+        logger.info("News enriched with social items (Reddit/X provenance).")
+        return merged
+    except Exception as exc:
+        logger.warning("social news enrichment skipped: %s", exc)
+        return news_df
+
+
 def get_news_df(tickers: list[str], force_refresh: bool) -> pd.DataFrame | None:
     if not force_refresh:
         return read_data_as_pd("news")
@@ -214,6 +211,7 @@ def get_news_df(tickers: list[str], force_refresh: bool) -> pd.DataFrame | None:
         {"symbol": sym, "news": json.dumps(articles)}
         for sym, articles in news_by_symbol.items()
     ])
+    news_df = _enrich_news_with_social(news_df)
     store_data_as_csv("news", ["symbol", "news"], news_df)
     return read_data_as_pd("news")
 

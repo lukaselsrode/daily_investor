@@ -841,3 +841,42 @@ candidate_selection:
   min_post_cooldown_candidates: 5
 ui:
   allow_config_writes: true
+# ── 0DTE social-sentiment watchlist (ANALYSIS / PAPER ONLY) ───────────────────
+# Decision-support tool: pulls public Reddit (and X only if X_BEARER_TOKEN is set) to score
+# ticker hype/sentiment/momentum and print a 0DTE *idea* report. NOT financial advice; places
+# NO orders. `enabled` only gates the 0DTE report; the CLI `odte-social-report` runs on demand
+# regardless. Reddit is fetched via official OAuth when REDDIT_CLIENT_ID + REDDIT_CLIENT_SECRET
+# (and optional REDDIT_USER_AGENT) are set, else public JSON, else the Atom/RSS feed.
+#
+# Social news-sentiment enrichment is ALWAYS best-effort and fail-closed: during fetch-data /
+# force-refresh, Reddit/X items are normalized and merged (with source/provenance) into the
+# news substrate the active-sleeve sentiment LLM reads — independent of `enabled`. Set
+# disable_social_news_enrichment: true to opt out.
+options_social:
+  enabled: false                  # gates only the 0DTE report (NOT news enrichment)
+  disable_social_news_enrichment: false  # true = do NOT merge social into news sentiment
+  budget_dollars: 50        # max PAPER budget; start at 0 (observe only)
+  weekday: null             # 0=Mon..6=Sun; the one day/week to look (user-set later)
+  sources: [reddit, x]      # X requires X_BEARER_TOKEN env var + active X API credits
+  subreddit: wallstreetbets
+  reddit_limit: 50
+  # Optional, bounded comments enrichment (people analyze WSB *comments*, not just posts):
+  # folds the top comments of the top posts into the post text for the sentiment substrate.
+  # OFF by default so always-on news enrichment stays cheap (no extra HTTP during fetch-data).
+  reddit_comments_enrich: false   # true = fetch+fold top comments (OAuth → public JSON; cached)
+  reddit_comments_top_posts: 3    # how many top posts to pull comments for
+  reddit_comments_per_post: 5     # how many top comments per post
+  x_query: "($SPY OR $QQQ OR 0DTE OR ODTE) lang:en -is:retweet -crypto -gold -xauusd"
+  x_limit: 50
+  max_tickers: 10
+  min_mentions: 3
+  core_universe: [SPY, QQQ]
+  # Freshness: which posts the 0DTE report counts as "fresh". market_window anchors to US
+  # equity sessions (America/New_York): weekend → since last Friday 16:00 ET; weekday pre-open
+  # → since the previous close; weekday at/after open → since today 09:30 ET. This retains
+  # weekend-accumulated sentiment for Monday prep instead of relying on the UTC calendar day.
+  freshness_mode: market_window   # market_window | rolling (plain max_lookback_hours window)
+  max_lookback_hours: 96          # hard cap on how far back the window can reach
+  market_open_et: "09:30"         # regular-session open (ET)
+  market_close_et: "16:00"        # regular-session close (ET)
+  include_paper_options: true   # attach a PAPER-ONLY same-day option chain idea (yfinance; no orders)

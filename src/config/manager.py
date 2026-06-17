@@ -33,6 +33,7 @@ from .schema import (
     MomentumInputsPenaltiesConfig,
     MomentumInputsWeightsConfig,
     MomentumWarmupConfig,
+    OptionsSocialConfig,
     PeerBlendConfig,
     PeerStandardizationConfig,
     QualityChecklistConfig,
@@ -466,6 +467,35 @@ class ConfigManager:
         return ReliabilityConfig(
             enabled=bool(rel.get("enabled", False)),
             min_reliability_score=float(rel.get("min_reliability_score", 0.70)),
+        )
+
+    @cached_property
+    def options_social(self) -> OptionsSocialConfig:
+        os_cfg = self._raw.get("options_social", {}) or {}
+        _wd = os_cfg.get("weekday", None)
+        return OptionsSocialConfig(
+            enabled=bool(os_cfg.get("enabled", False)),
+            budget_dollars=float(os_cfg.get("budget_dollars", 50)),
+            weekday=(int(_wd) if _wd is not None else None),
+            sources=tuple(os_cfg.get("sources", ("reddit",))),
+            subreddit=str(os_cfg.get("subreddit", "wallstreetbets")),
+            reddit_limit=int(os_cfg.get("reddit_limit", 50)),
+            x_query=str(os_cfg.get(
+                "x_query", "($SPY OR $QQQ OR 0DTE OR ODTE) lang:en -is:retweet -crypto -gold -xauusd")),
+            x_limit=int(os_cfg.get("x_limit", 50)),
+            max_tickers=int(os_cfg.get("max_tickers", 10)),
+            min_mentions=int(os_cfg.get("min_mentions", 3)),
+            core_universe=tuple(os_cfg.get("core_universe", ("SPY", "QQQ"))),
+            freshness_mode=str(os_cfg.get("freshness_mode", "market_window")),
+            max_lookback_hours=float(os_cfg.get("max_lookback_hours", 96)),
+            market_open_et=str(os_cfg.get("market_open_et", "09:30")),
+            market_close_et=str(os_cfg.get("market_close_et", "16:00")),
+            include_paper_options=bool(os_cfg.get("include_paper_options", True)),
+            disable_social_news_enrichment=bool(
+                os_cfg.get("disable_social_news_enrichment", False)),
+            reddit_comments_enrich=bool(os_cfg.get("reddit_comments_enrich", False)),
+            reddit_comments_top_posts=int(os_cfg.get("reddit_comments_top_posts", 3)),
+            reddit_comments_per_post=int(os_cfg.get("reddit_comments_per_post", 5)),
         )
 
     @cached_property

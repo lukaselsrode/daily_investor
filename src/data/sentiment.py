@@ -158,6 +158,14 @@ Scoring guide:
 
 
 def _format_news(news_data: dict, symbol: str) -> str:
+    """Render up to 3 items for the active-sleeve LLM. News and social (Reddit/X) items are
+    rendered UNIFORMLY as articles — title, source/provenance (publisher + api_source), date,
+    link, summary/raw text — so the model reads them as one list and judges them together.
+
+    We deliberately do NOT surface a precomputed social bullish/bearish label or net score here:
+    aggregation and sentiment judgement are the LLM's job, and injecting a separate social score
+    would treat social differently, bias the model, and double-count it against the news. Raw
+    engagement counts (upvotes/comments) are factual provenance — not a verdict — and may show."""
     lines = []
     for a in news_data.get(symbol, [])[:3]:
         if not isinstance(a, dict):
@@ -167,11 +175,21 @@ def _format_news(news_data: dict, symbol: str) -> str:
         date    = a.get("formatted_date", "")
         summary = a.get("summary", "")
         if title and pub:
-            lines += [
-                f"• {title[:100]}",
-                f"  Publisher: {pub}  Date: {date}",
-                f"  Summary: {summary[:200]}",
-            ]
+            src  = a.get("api_source", "")
+            link = a.get("link", "")
+            head = f"  Publisher: {pub}  Date: {date}"
+            if src:
+                head += f"  Source: {src}"
+            lines += [f"• {title[:100]}", head]
+            # Factual provenance only (counts, not a sentiment verdict). Present on social items.
+            eng = a.get("engagement")
+            if isinstance(eng, dict) and ("score" in eng or "num_comments" in eng):
+                lines.append(
+                    f"  Engagement: {eng.get('score', 0)} upvotes, "
+                    f"{eng.get('num_comments', 0)} comments")
+            if link:
+                lines.append(f"  Link: {link}")
+            lines.append(f"  Summary: {summary[:200]}")
     return "\n".join(lines) if lines else "No news articles found"
 
 

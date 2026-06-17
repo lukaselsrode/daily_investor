@@ -126,7 +126,7 @@ def render() -> None:
 
     # ── Tab 1: Universe ───────────────────────────────────────────────────────
     with tabs[1]:
-        inner = st.tabs(["📈 Scoring", "💎 Value", "🧬 Distribution", "🎯 Candidate Pool", "🗺️ Factor Map", "🕸️ News Graph"])
+        inner = st.tabs(["📈 Scoring", "💎 Value", "🧬 Distribution", "🎯 Candidate Pool", "🗺️ Factor Map", "🕸️ News Graph", "🔎 Single Stock"])
 
         with inner[0]:
             from ui.components.scoring import render as _r
@@ -156,6 +156,10 @@ def render() -> None:
 
         with inner[5]:
             from ui.components.news_graph import render as _r
+            _r()
+
+        with inner[6]:
+            from ui.components.single_stock_analyzer import render as _r
             _r()
 
     # ── Tab 2: Analytics ──────────────────────────────────────────────────────
