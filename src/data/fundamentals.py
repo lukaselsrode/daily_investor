@@ -520,6 +520,32 @@ def _compute_reliability_scores(df: pd.DataFrame) -> pd.DataFrame:
 # Main pipeline
 # ---------------------------------------------------------------------------
 
+def _apply_classification_corrections(fundamentals: dict[str, dict], force_refresh: bool) -> None:
+    """Correct sector/industry on the raw fundamentals dict IN PLACE, BEFORE scoring,
+    so corrections flow into the PE/PB valuation benchmark, the scored columns, and
+    every downstream consumer (peer ranking, concentration, UI).
+
+    Two layers: (1) discretionary per-symbol overrides (always win), then (2) the
+    config-gated FMP cross-validation second source (fail-closed)."""
+    from util import CLASSIFICATION_OVERRIDES
+    for sym, data in fundamentals.items():
+        ov = CLASSIFICATION_OVERRIDES.get(str(sym).upper())
+        if not ov:
+            continue
+        for field in ("sector", "industry"):
+            new = ov.get(field)
+            if new and data.get(field) != new:
+                logger.info("Classification override: %s %s '%s' → '%s'",
+                            sym, field, data.get(field), new)
+                data[field] = new
+
+    try:
+        from data.classification_arbiter import cross_validate
+        cross_validate(fundamentals, allow_fetch=force_refresh)
+    except Exception as exc:
+        logger.warning("Classification cross-validation skipped: %s", exc)
+
+
 def get_fundamentals_df(
     tickers: list[str],
     force_refresh: bool,
@@ -559,31 +585,7 @@ def get_fundamentals_df(
 
     print(f"Fetched fundamentals for {len(fundamentals)} stocks")
 
-    # Discretionary per-symbol sector/industry reclassification — applied BEFORE
-    # scoring so corrections flow into the PE/PB valuation benchmark (_evaluate_stock),
-    # the scored sector/industry columns, and every downstream consumer (peer
-    # ranking, concentration, UI).
-    from util import CLASSIFICATION_OVERRIDES
-    for _sym, _data in fundamentals.items():
-        _ov = CLASSIFICATION_OVERRIDES.get(str(_sym).upper())
-        if not _ov:
-            continue
-        for _field in ("sector", "industry"):
-            _new = _ov.get(_field)
-            if _new and _data.get(_field) != _new:
-                logger.info(
-                    "Classification override: %s %s '%s' → '%s'",
-                    _sym, _field, _data.get(_field), _new,
-                )
-                _data[_field] = _new
-
-    # FMP cross-validation (borderline-only second source) — applied BEFORE scoring,
-    # after manual overrides (which win). Config-gated; fail-closed.
-    try:
-        from data.classification_arbiter import cross_validate
-        cross_validate(fundamentals, allow_fetch=force_refresh)
-    except Exception as _xv_err:
-        logger.warning("Classification cross-validation skipped: %s", _xv_err)
+    _apply_classification_corrections(fundamentals, force_refresh)
 
     _enrich_with_quotes(list(fundamentals.keys()), fundamentals)
     _enrich_with_momentum(list(fundamentals.keys()), fundamentals)
