@@ -10,12 +10,18 @@ New-style invocation:
   python -m cli report
 
 Old-style invocation via src/main.py is preserved for backward compatibility.
+
+Dispatch is table-driven: each command's body lives in a `_cmd_<name>(rest)`
+handler and `_COMMANDS` maps command names (including aliases) to handlers.
+Handlers import from `cli.commands` lazily (at call time) so tests can patch
+`cli.commands.cmd_*` before invoking `main`.
 """
 
 from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Callable
 
 from core.logging import configure_logging
 
@@ -45,9 +51,22 @@ def main(argv: list[str] | None = None) -> None:
     if "--skip-fetch-news" in rest:
         os.environ["SKIP_FETCH_NEWS"] = "1"
 
-    # --config <path>  — override which YAML the run reads.
-    # Must be applied BEFORE importing cli.commands so core/paths.CONFIG_FILE
-    # picks up the override at import time.
+    _apply_config_override(rest)
+
+    handler = _COMMANDS.get(cmd)
+    if handler is None:
+        print(f"Unknown command: {cmd!r}")
+        _print_help()
+        sys.exit(1)
+    handler(rest)
+
+
+def _apply_config_override(rest: list[str]) -> None:
+    """--config <path> — override which YAML the run reads.
+
+    Must be applied BEFORE importing cli.commands so core/paths.CONFIG_FILE
+    picks up the override at import time.
+    """
     _cfg_override = _flag_value(rest, "--config")
     if _cfg_override:
         if not os.path.isabs(_cfg_override):
@@ -58,288 +77,324 @@ def main(argv: list[str] | None = None) -> None:
         os.environ["DAILY_INVESTOR_CONFIG"] = _cfg_override
         print(f"[config override] {_cfg_override}")
 
-    from cli.commands import (
-        cmd_auto_tune,
-        cmd_auto_tune_all,
-        cmd_backtest,
-        cmd_config,
-        cmd_factor_map,
-        cmd_fetch_data,
-        cmd_fmp,
-        cmd_interaction_screen,
-        cmd_list_presets,
-        cmd_report,
-        cmd_run,
-        cmd_snapshots,
-        cmd_stability_scan,
-        cmd_tune,
-        cmd_update_outcomes,
-    )
 
-    if cmd == "list-presets":
-        cmd_list_presets()
+def _cmd_list_presets(rest: list[str]) -> None:
+    from cli.commands import cmd_list_presets
+    cmd_list_presets()
 
-    elif cmd == "fetch-data":
-        cmd_fetch_data()
 
-    elif cmd == "run":
-        skip_data = "--skip-data" in rest
-        op_mode = _flag_value(rest, "--op-mode")
-        cmd_run(skip_data=skip_data, op_mode=op_mode)
+def _cmd_fetch_data(rest: list[str]) -> None:
+    from cli.commands import cmd_fetch_data
+    cmd_fetch_data()
 
-    elif cmd == "backtest":
-        n_days = int(rest[0]) if rest and rest[0].isdigit() else 365
-        mode = _flag_value(rest, "--mode")
-        compare = "--compare" in rest
-        archetype_compare = "--archetype-compare" in rest
-        scope = _flag_value(rest, "--scope") or "overall_strategy"
-        regime_scope = _flag_value(rest, "--regime-scope") or "all"
-        if "--compare-etf-allocation" in rest:
-            # ETF sleeve before/after: forced equal-weight vs the current config allocation.
-            from backtesting.data_loader import load_and_precompute
-            from backtesting.reports import format_etf_sleeve_diagnostics
-            from backtesting.simulator import run_backtest_report, split_price_window
-            from tuning.constants import _ETF_ENABLED_SLOT, _current_params
-            _pc = load_and_precompute(n_days, mode=mode)
-            _tr, _vl = split_price_window(_pc.prices.shape[0], 0.70)
-            _eq = _current_params().copy()
-            _eq[_ETF_ENABLED_SLOT] = 0.0
-            _cfg = _current_params().copy()  # reflects config etf_allocation.enabled
-            _r_eq = run_backtest_report(_pc, _eq, _tr, _vl, scope="etf_allocation")
-            _r_cfg = run_backtest_report(_pc, _cfg, _tr, _vl, scope="etf_allocation")
-            print(format_etf_sleeve_diagnostics(
-                _r_eq.validation_result or _r_eq.train_result, label="BEFORE: equal-weight"))
-            print(format_etf_sleeve_diagnostics(
-                _r_cfg.validation_result or _r_cfg.train_result,
-                label="AFTER: current config",
-                current_weights=(_r_eq.train_result.etf_final_weights or {})))
-            return
-        cmd_backtest(n_days=n_days, mode=mode, compare=compare,
-                     archetype_compare=archetype_compare, scope=scope,
-                     regime_scope=regime_scope)
 
-    elif cmd == "tune":
-        if not rest or not rest[0].isdigit():
-            print("Usage: tune DAYS [--objective sharpe|calmar|info_ratio] [--scope ...] [--preset ...] [--regime-scope all|bullish|neutral|defensive]")
-            sys.exit(1)
-        n_days = int(rest[0])
-        objective = _flag_value(rest, "--objective") or "sharpe"
-        mode = _flag_value(rest, "--mode")
-        scope = _flag_value(rest, "--scope") or "overall_strategy"
-        preset = _flag_value(rest, "--preset")
-        regime_scope = _flag_value(rest, "--regime-scope") or "all"
-        cmd_tune(n_days=n_days, objective=objective, mode=mode, scope=scope, preset=preset, regime_scope=regime_scope)
+def _cmd_run(rest: list[str]) -> None:
+    from cli.commands import cmd_run
+    skip_data = "--skip-data" in rest
+    op_mode = _flag_value(rest, "--op-mode")
+    cmd_run(skip_data=skip_data, op_mode=op_mode)
 
-    elif cmd == "auto-tune":
-        n_days = int(rest[0]) if rest and rest[0].isdigit() else 90
-        mode = _flag_value(rest, "--mode")
-        apply = "--apply" in rest
-        force_apply = "--force-apply" in rest
-        llm_review = "--llm-review" in rest
-        scope = _flag_value(rest, "--scope") or "overall_strategy"
-        preset = _flag_value(rest, "--preset")
-        regime_scope = _flag_value(rest, "--regime-scope") or "all"
-        random_topk = int(_flag_value(rest, "--random-topk") or 0)
-        _leads_raw = _flag_value(rest, "--leads")
-        lead_vector_paths = [p for p in (_leads_raw or "").split(",") if p] or None
-        cmd_auto_tune(n_days=n_days, mode=mode, apply=apply, force_apply=force_apply, llm_review=llm_review, scope=scope, preset=preset, regime_scope=regime_scope, random_topk=random_topk, lead_vector_paths=lead_vector_paths)
 
-    elif cmd == "tune-etf-allocation":
-        _nd = _flag_value(rest, "--days")
-        n_days = int(_nd) if _nd else 1250
-        universe = _flag_value(rest, "--universe") or "configured_only"
-        _mode = _flag_value(rest, "--mode") or "regime"
-        if universe == "curated_exploration":
-            print("curated_exploration is Milestone B — not yet available. "
-                  "Use --universe configured_only.")
-            return
-        preset = "etf_defensive_only" if _mode == "defensive" else "etf_allocation"
-        random_topk = int(_flag_value(rest, "--random-topk") or 10)
-        apply = "--apply" in rest
-        force_apply = "--force-apply" in rest
-        from tuning.etf_tune import run_etf_allocation_tune
-        run_etf_allocation_tune(n_days=n_days, preset=preset, random_topk=random_topk,
-                                apply=apply, force_apply=force_apply)
-
-    elif cmd == "report-etf-allocation":
-        _nd = _flag_value(rest, "--days")
-        n_days = int(_nd) if _nd else 1250
+def _cmd_backtest(rest: list[str]) -> None:
+    from cli.commands import cmd_backtest
+    n_days = int(rest[0]) if rest and rest[0].isdigit() else 365
+    mode = _flag_value(rest, "--mode")
+    compare = "--compare" in rest
+    archetype_compare = "--archetype-compare" in rest
+    scope = _flag_value(rest, "--scope") or "overall_strategy"
+    regime_scope = _flag_value(rest, "--regime-scope") or "all"
+    if "--compare-etf-allocation" in rest:
+        # ETF sleeve before/after: forced equal-weight vs the current config allocation.
         from backtesting.data_loader import load_and_precompute
         from backtesting.reports import format_etf_sleeve_diagnostics
         from backtesting.simulator import run_backtest_report, split_price_window
-        from tuning.constants import _current_params
-        _pc = load_and_precompute(n_days, mode=None)
+        from tuning.constants import _ETF_ENABLED_SLOT, _current_params
+        _pc = load_and_precompute(n_days, mode=mode)
         _tr, _vl = split_price_window(_pc.prices.shape[0], 0.70)
-        _rep = run_backtest_report(_pc, _current_params(), _tr, _vl, scope="etf_allocation")
+        _eq = _current_params().copy()
+        _eq[_ETF_ENABLED_SLOT] = 0.0
+        _cfg = _current_params().copy()  # reflects config etf_allocation.enabled
+        _r_eq = run_backtest_report(_pc, _eq, _tr, _vl, scope="etf_allocation")
+        _r_cfg = run_backtest_report(_pc, _cfg, _tr, _vl, scope="etf_allocation")
         print(format_etf_sleeve_diagnostics(
-            _rep.validation_result or _rep.train_result, label=f"current config ({n_days}d)"))
+            _r_eq.validation_result or _r_eq.train_result, label="BEFORE: equal-weight"))
+        print(format_etf_sleeve_diagnostics(
+            _r_cfg.validation_result or _r_cfg.train_result,
+            label="AFTER: current config",
+            current_weights=(_r_eq.train_result.etf_final_weights or {})))
+        return
+    cmd_backtest(n_days=n_days, mode=mode, compare=compare,
+                 archetype_compare=archetype_compare, scope=scope,
+                 regime_scope=regime_scope)
 
-    elif cmd in ("odte-social-report", "options-social"):
-        # 0DTE social-sentiment watchlist — ANALYSIS/PAPER ONLY, places no orders.
-        # --no-fetch runs offline (cache-only/empty) for a safe dry run.
-        # --reddit-bearer-token TOKEN: OPTIONAL ephemeral read-only bearer for the WSB daily-thread
-        # comments fetch. Passed straight through as a RUNTIME arg — never stored, logged, or
-        # echoed; obtain it manually from your browser/devtools. The tool never reads cookies or
-        # mints tokens. Omit it for the default fail-closed OAuth/public behavior.
-        # --daily-thread-id / --daily-thread-url: explicit override for the WSB daily-thread when
-        # listing/search discovery can't find it. Overlaid into a COPY of the params at runtime —
-        # never written back to config.
-        from data.social_sentiment import build_odte_social_report, format_report
-        from util import OPTIONS_SOCIAL_PARAMS
-        _bearer = _flag_value(rest, "--reddit-bearer-token")
-        _dt_id = _flag_value(rest, "--daily-thread-id")
-        _dt_url = _flag_value(rest, "--daily-thread-url")
-        _dt_limit = _flag_value(rest, "--daily-thread-limit")
-        _params = None
-        if _dt_id or _dt_url or _dt_limit:
-            _params = {**OPTIONS_SOCIAL_PARAMS}   # shallow copy; global config left untouched
-            if _dt_id:
-                _params["daily_thread_id"] = _dt_id
-            if _dt_url:
-                _params["daily_thread_url"] = _dt_url
-            if _dt_limit:
-                try:
-                    _params["daily_thread_limit"] = int(_dt_limit)
-                except ValueError:
-                    print(f"--daily-thread-limit: not an integer: {_dt_limit}")
-                    sys.exit(2)
-        rep = build_odte_social_report(allow_fetch="--no-fetch" not in rest,
-                                       params=_params, reddit_bearer_token=_bearer)
-        print(format_report(rep))
 
-    elif cmd == "stability-scan":
-        mode = _flag_value(rest, "--mode")
-        out_dir = _flag_value(rest, "--output-dir")
-        cmd_stability_scan(mode=mode, output_dir=out_dir)
-
-    elif cmd == "interaction-screen":
-        mode = _flag_value(rest, "--mode")
-        out_dir = _flag_value(rest, "--output-dir")
-        profile = _flag_value(rest, "--profile") or "standard"
-        _nd = _flag_value(rest, "--days")
-        n_days = int(_nd) if _nd else 730
-        regime_scope = _flag_value(rest, "--regime-scope") or "all"
-        cmd_interaction_screen(profile=profile, n_days=n_days, mode=mode, output_dir=out_dir,
-                               regime_scope=regime_scope)
-
-    elif cmd == "auto-tune-all":
-        mode = _flag_value(rest, "--mode")
-        profile = _flag_value(rest, "--profile") or "standard"
-        _nd = _flag_value(rest, "--days")
-        n_days = int(_nd) if _nd else 730
-        _cl = _flag_value(rest, "--clusters")
-        clusters = [c.strip() for c in _cl.split(",") if c.strip()] if _cl else None
-        regime_scope = _flag_value(rest, "--regime-scope") or "all"
-        cmd_auto_tune_all(profile=profile, n_days=n_days, mode=mode, clusters=clusters,
-                          regime_scope=regime_scope)
-
-    elif cmd == "report":
-        out_dir = _flag_value(rest, "--output-dir") or "reports"
-        cmd_report(output_dir=out_dir)
-
-    elif cmd == "update-outcomes":
-        cmd_update_outcomes()
-
-    elif cmd == "experiment":
-        from cli.commands import cmd_experiment
-        days = _flag_value(rest, "--days") or "90,180,365"
-        scope = _flag_value(rest, "--scope") or "active_sleeve_compounding"
-        variants = _flag_value(rest, "--variants")
-        ex_mode = _flag_value(rest, "--mode")
-        cmd_experiment(days=days, scope=scope, variants=variants, mode=ex_mode)
-
-    elif cmd == "config":
-        sub = rest[0] if rest else ""
-        sub_rest = rest[1:] if len(rest) > 1 else []
-        if sub == "migrate-scoring":
-            dry_run = "--dry-run" in sub_rest
-            no_backup = "--no-backup" in sub_rest
-            cmd_config(action="migrate-scoring", dry_run=dry_run, no_backup=no_backup)
-        else:
-            print(f"Unknown config action: {sub!r}")
-            sys.exit(1)
-
-    elif cmd == "snapshots":
-        sub = rest[0] if rest else ""
-        sub_rest = rest[1:] if len(rest) > 1 else []
-        if sub == "rescore":
-            input_dir   = _flag_value(sub_rest, "--input")
-            output_dir  = _flag_value(sub_rest, "--output")
-            dry_run     = "--dry-run" in sub_rest
-            in_place    = "--in-place-with-backup" in sub_rest
-            overwrite   = "--overwrite-existing" in sub_rest
-            cmd_snapshots(
-                action="rescore",
-                input_dir=input_dir,
-                output_dir=output_dir,
-                dry_run=dry_run,
-                in_place_with_backup=in_place,
-                overwrite_existing=overwrite,
-            )
-        else:
-            print("Usage: snapshots rescore "
-                  "[--dry-run] [--input PATH] [--output PATH] [--in-place-with-backup] [--overwrite-existing]")
-            sys.exit(2)
-
-    elif cmd == "fmp":
-        sub = rest[0] if rest else "status"
-        sub_rest = rest[1:] if len(rest) > 1 else []
-        if sub == "status":
-            cmd_fmp(action="status")
-        elif sub == "validate-cache":
-            cmd_fmp(action="validate-cache")
-        elif sub == "backfill-prices":
-            source = _flag_value(sub_rest, "--symbols") or "current"
-            start = _flag_value(sub_rest, "--start") or "2015-01-01"
-            end = _flag_value(sub_rest, "--end") or "2030-01-01"
-            max_symbols = _int_flag(sub_rest, "--max-symbols")
-            cmd_fmp(action="backfill-prices", symbols_source=source, start=start, end=end,
-                    max_symbols=max_symbols, force="--force" in sub_rest)
-        elif sub == "backfill-statements":
-            source = _flag_value(sub_rest, "--symbols") or "current"
-            kinds_s = _flag_value(sub_rest, "--kinds")
-            kinds = [k.strip() for k in kinds_s.split(",") if k.strip()] if kinds_s else None
-            max_symbols = _int_flag(sub_rest, "--max-symbols")
-            limit = _int_flag(sub_rest, "--limit") or 44
-            cmd_fmp(action="backfill-statements", symbols_source=source, kinds=kinds,
-                    max_symbols=max_symbols, limit=limit, force="--force" in sub_rest)
-        elif sub == "backfill-delisted":
-            cmd_fmp(action="backfill-delisted", max_pages=_int_flag(sub_rest, "--max-pages") or 50)
-        elif sub == "build-dead-universe":
-            cmd_fmp(
-                action="build-dead-universe",
-                start=_flag_value(sub_rest, "--start") or "2015-01-01",
-                end=_flag_value(sub_rest, "--end") or "2030-01-01",
-                min_adv=float(_flag_value(sub_rest, "--min-adv") or 500_000.0),
-                max_symbols=_int_flag(sub_rest, "--max-symbols"),
-                allow_fetch_prices="--fetch-prices" in sub_rest,
-            )
-        else:
-            print("Usage: fmp status | validate-cache | backfill-prices | backfill-statements | "
-                  "backfill-delisted | build-dead-universe")
-            sys.exit(2)
-
-    elif cmd == "factor-map":
-        method   = _flag_value(rest, "--method") or "pca"
-        color    = _flag_value(rest, "--color")
-        clusters_str = _flag_value(rest, "--clusters")
-        clusters = int(clusters_str) if clusters_str and clusters_str.isdigit() else None
-        out      = _flag_value(rest, "--output")
-        owned    = "--owned-only" in rest
-        show     = "--show" in rest
-        cmd_factor_map(
-            method=method,
-            color_by=color,
-            kmeans_clusters=clusters,
-            output=out,
-            owned_only=owned,
-            show=show,
-        )
-
-    else:
-        print(f"Unknown command: {cmd!r}")
-        _print_help()
+def _cmd_tune(rest: list[str]) -> None:
+    from cli.commands import cmd_tune
+    if not rest or not rest[0].isdigit():
+        print("Usage: tune DAYS [--objective sharpe|calmar|info_ratio] [--scope ...] [--preset ...] [--regime-scope all|bullish|neutral|defensive]")
         sys.exit(1)
+    n_days = int(rest[0])
+    objective = _flag_value(rest, "--objective") or "sharpe"
+    mode = _flag_value(rest, "--mode")
+    scope = _flag_value(rest, "--scope") or "overall_strategy"
+    preset = _flag_value(rest, "--preset")
+    regime_scope = _flag_value(rest, "--regime-scope") or "all"
+    cmd_tune(n_days=n_days, objective=objective, mode=mode, scope=scope, preset=preset, regime_scope=regime_scope)
+
+
+def _cmd_auto_tune(rest: list[str]) -> None:
+    from cli.commands import cmd_auto_tune
+    n_days = int(rest[0]) if rest and rest[0].isdigit() else 90
+    mode = _flag_value(rest, "--mode")
+    apply = "--apply" in rest
+    force_apply = "--force-apply" in rest
+    llm_review = "--llm-review" in rest
+    scope = _flag_value(rest, "--scope") or "overall_strategy"
+    preset = _flag_value(rest, "--preset")
+    regime_scope = _flag_value(rest, "--regime-scope") or "all"
+    random_topk = int(_flag_value(rest, "--random-topk") or 0)
+    _leads_raw = _flag_value(rest, "--leads")
+    lead_vector_paths = [p for p in (_leads_raw or "").split(",") if p] or None
+    cmd_auto_tune(n_days=n_days, mode=mode, apply=apply, force_apply=force_apply, llm_review=llm_review, scope=scope, preset=preset, regime_scope=regime_scope, random_topk=random_topk, lead_vector_paths=lead_vector_paths)
+
+
+def _cmd_tune_etf_allocation(rest: list[str]) -> None:
+    _nd = _flag_value(rest, "--days")
+    n_days = int(_nd) if _nd else 1250
+    universe = _flag_value(rest, "--universe") or "configured_only"
+    _mode = _flag_value(rest, "--mode") or "regime"
+    if universe == "curated_exploration":
+        print("curated_exploration is Milestone B — not yet available. "
+              "Use --universe configured_only.")
+        return
+    preset = "etf_defensive_only" if _mode == "defensive" else "etf_allocation"
+    random_topk = int(_flag_value(rest, "--random-topk") or 10)
+    apply = "--apply" in rest
+    force_apply = "--force-apply" in rest
+    from tuning.etf_tune import run_etf_allocation_tune
+    run_etf_allocation_tune(n_days=n_days, preset=preset, random_topk=random_topk,
+                            apply=apply, force_apply=force_apply)
+
+
+def _cmd_report_etf_allocation(rest: list[str]) -> None:
+    _nd = _flag_value(rest, "--days")
+    n_days = int(_nd) if _nd else 1250
+    from backtesting.data_loader import load_and_precompute
+    from backtesting.reports import format_etf_sleeve_diagnostics
+    from backtesting.simulator import run_backtest_report, split_price_window
+    from tuning.constants import _current_params
+    _pc = load_and_precompute(n_days, mode=None)
+    _tr, _vl = split_price_window(_pc.prices.shape[0], 0.70)
+    _rep = run_backtest_report(_pc, _current_params(), _tr, _vl, scope="etf_allocation")
+    print(format_etf_sleeve_diagnostics(
+        _rep.validation_result or _rep.train_result, label=f"current config ({n_days}d)"))
+
+
+def _cmd_odte_social_report(rest: list[str]) -> None:
+    # 0DTE social-sentiment watchlist — ANALYSIS/PAPER ONLY, places no orders.
+    # --no-fetch runs offline (cache-only/empty) for a safe dry run.
+    # --reddit-bearer-token TOKEN: OPTIONAL ephemeral read-only bearer for the WSB daily-thread
+    # comments fetch. Passed straight through as a RUNTIME arg — never stored, logged, or
+    # echoed; obtain it manually from your browser/devtools. The tool never reads cookies or
+    # mints tokens. Omit it for the default fail-closed OAuth/public behavior.
+    # --daily-thread-id / --daily-thread-url: explicit override for the WSB daily-thread when
+    # listing/search discovery can't find it. Overlaid into a COPY of the params at runtime —
+    # never written back to config.
+    from data.social_sentiment import build_odte_social_report, format_report
+    from util import OPTIONS_SOCIAL_PARAMS
+    _bearer = _flag_value(rest, "--reddit-bearer-token")
+    _dt_id = _flag_value(rest, "--daily-thread-id")
+    _dt_url = _flag_value(rest, "--daily-thread-url")
+    _dt_limit = _flag_value(rest, "--daily-thread-limit")
+    _params = None
+    if _dt_id or _dt_url or _dt_limit:
+        _params = {**OPTIONS_SOCIAL_PARAMS}   # shallow copy; global config left untouched
+        if _dt_id:
+            _params["daily_thread_id"] = _dt_id
+        if _dt_url:
+            _params["daily_thread_url"] = _dt_url
+        if _dt_limit:
+            try:
+                _params["daily_thread_limit"] = int(_dt_limit)
+            except ValueError:
+                print(f"--daily-thread-limit: not an integer: {_dt_limit}")
+                sys.exit(2)
+    rep = build_odte_social_report(allow_fetch="--no-fetch" not in rest,
+                                   params=_params, reddit_bearer_token=_bearer)
+    print(format_report(rep))
+
+
+def _cmd_stability_scan(rest: list[str]) -> None:
+    from cli.commands import cmd_stability_scan
+    mode = _flag_value(rest, "--mode")
+    out_dir = _flag_value(rest, "--output-dir")
+    cmd_stability_scan(mode=mode, output_dir=out_dir)
+
+
+def _cmd_interaction_screen(rest: list[str]) -> None:
+    from cli.commands import cmd_interaction_screen
+    mode = _flag_value(rest, "--mode")
+    out_dir = _flag_value(rest, "--output-dir")
+    profile = _flag_value(rest, "--profile") or "standard"
+    _nd = _flag_value(rest, "--days")
+    n_days = int(_nd) if _nd else 730
+    regime_scope = _flag_value(rest, "--regime-scope") or "all"
+    cmd_interaction_screen(profile=profile, n_days=n_days, mode=mode, output_dir=out_dir,
+                           regime_scope=regime_scope)
+
+
+def _cmd_auto_tune_all(rest: list[str]) -> None:
+    from cli.commands import cmd_auto_tune_all
+    mode = _flag_value(rest, "--mode")
+    profile = _flag_value(rest, "--profile") or "standard"
+    _nd = _flag_value(rest, "--days")
+    n_days = int(_nd) if _nd else 730
+    _cl = _flag_value(rest, "--clusters")
+    clusters = [c.strip() for c in _cl.split(",") if c.strip()] if _cl else None
+    regime_scope = _flag_value(rest, "--regime-scope") or "all"
+    cmd_auto_tune_all(profile=profile, n_days=n_days, mode=mode, clusters=clusters,
+                      regime_scope=regime_scope)
+
+
+def _cmd_report(rest: list[str]) -> None:
+    from cli.commands import cmd_report
+    out_dir = _flag_value(rest, "--output-dir") or "reports"
+    cmd_report(output_dir=out_dir)
+
+
+def _cmd_update_outcomes(rest: list[str]) -> None:
+    from cli.commands import cmd_update_outcomes
+    cmd_update_outcomes()
+
+
+def _cmd_experiment(rest: list[str]) -> None:
+    from cli.commands import cmd_experiment
+    days = _flag_value(rest, "--days") or "90,180,365"
+    scope = _flag_value(rest, "--scope") or "active_sleeve_compounding"
+    variants = _flag_value(rest, "--variants")
+    ex_mode = _flag_value(rest, "--mode")
+    cmd_experiment(days=days, scope=scope, variants=variants, mode=ex_mode)
+
+
+def _cmd_config(rest: list[str]) -> None:
+    from cli.commands import cmd_config
+    sub = rest[0] if rest else ""
+    sub_rest = rest[1:] if len(rest) > 1 else []
+    if sub == "migrate-scoring":
+        dry_run = "--dry-run" in sub_rest
+        no_backup = "--no-backup" in sub_rest
+        cmd_config(action="migrate-scoring", dry_run=dry_run, no_backup=no_backup)
+    else:
+        print(f"Unknown config action: {sub!r}")
+        sys.exit(1)
+
+
+def _cmd_snapshots(rest: list[str]) -> None:
+    from cli.commands import cmd_snapshots
+    sub = rest[0] if rest else ""
+    sub_rest = rest[1:] if len(rest) > 1 else []
+    if sub == "rescore":
+        input_dir   = _flag_value(sub_rest, "--input")
+        output_dir  = _flag_value(sub_rest, "--output")
+        dry_run     = "--dry-run" in sub_rest
+        in_place    = "--in-place-with-backup" in sub_rest
+        overwrite   = "--overwrite-existing" in sub_rest
+        cmd_snapshots(
+            action="rescore",
+            input_dir=input_dir,
+            output_dir=output_dir,
+            dry_run=dry_run,
+            in_place_with_backup=in_place,
+            overwrite_existing=overwrite,
+        )
+    else:
+        print("Usage: snapshots rescore "
+              "[--dry-run] [--input PATH] [--output PATH] [--in-place-with-backup] [--overwrite-existing]")
+        sys.exit(2)
+
+
+def _cmd_fmp(rest: list[str]) -> None:
+    from cli.commands import cmd_fmp
+    sub = rest[0] if rest else "status"
+    sub_rest = rest[1:] if len(rest) > 1 else []
+    if sub == "status":
+        cmd_fmp(action="status")
+    elif sub == "validate-cache":
+        cmd_fmp(action="validate-cache")
+    elif sub == "backfill-prices":
+        source = _flag_value(sub_rest, "--symbols") or "current"
+        start = _flag_value(sub_rest, "--start") or "2015-01-01"
+        end = _flag_value(sub_rest, "--end") or "2030-01-01"
+        max_symbols = _int_flag(sub_rest, "--max-symbols")
+        cmd_fmp(action="backfill-prices", symbols_source=source, start=start, end=end,
+                max_symbols=max_symbols, force="--force" in sub_rest)
+    elif sub == "backfill-statements":
+        source = _flag_value(sub_rest, "--symbols") or "current"
+        kinds_s = _flag_value(sub_rest, "--kinds")
+        kinds = [k.strip() for k in kinds_s.split(",") if k.strip()] if kinds_s else None
+        max_symbols = _int_flag(sub_rest, "--max-symbols")
+        limit = _int_flag(sub_rest, "--limit") or 44
+        cmd_fmp(action="backfill-statements", symbols_source=source, kinds=kinds,
+                max_symbols=max_symbols, limit=limit, force="--force" in sub_rest)
+    elif sub == "backfill-delisted":
+        cmd_fmp(action="backfill-delisted", max_pages=_int_flag(sub_rest, "--max-pages") or 50)
+    elif sub == "build-dead-universe":
+        cmd_fmp(
+            action="build-dead-universe",
+            start=_flag_value(sub_rest, "--start") or "2015-01-01",
+            end=_flag_value(sub_rest, "--end") or "2030-01-01",
+            min_adv=float(_flag_value(sub_rest, "--min-adv") or 500_000.0),
+            max_symbols=_int_flag(sub_rest, "--max-symbols"),
+            allow_fetch_prices="--fetch-prices" in sub_rest,
+        )
+    else:
+        print("Usage: fmp status | validate-cache | backfill-prices | backfill-statements | "
+              "backfill-delisted | build-dead-universe")
+        sys.exit(2)
+
+
+def _cmd_factor_map(rest: list[str]) -> None:
+    from cli.commands import cmd_factor_map
+    method   = _flag_value(rest, "--method") or "pca"
+    color    = _flag_value(rest, "--color")
+    clusters_str = _flag_value(rest, "--clusters")
+    clusters = int(clusters_str) if clusters_str and clusters_str.isdigit() else None
+    out      = _flag_value(rest, "--output")
+    owned    = "--owned-only" in rest
+    show     = "--show" in rest
+    cmd_factor_map(
+        method=method,
+        color_by=color,
+        kmeans_clusters=clusters,
+        output=out,
+        owned_only=owned,
+        show=show,
+    )
+
+
+# Command-name → handler. Aliases (e.g. options-social) map to the same handler.
+_COMMANDS: dict[str, Callable[[list[str]], None]] = {
+    "list-presets": _cmd_list_presets,
+    "fetch-data": _cmd_fetch_data,
+    "run": _cmd_run,
+    "backtest": _cmd_backtest,
+    "tune": _cmd_tune,
+    "auto-tune": _cmd_auto_tune,
+    "tune-etf-allocation": _cmd_tune_etf_allocation,
+    "report-etf-allocation": _cmd_report_etf_allocation,
+    "odte-social-report": _cmd_odte_social_report,
+    "options-social": _cmd_odte_social_report,
+    "stability-scan": _cmd_stability_scan,
+    "interaction-screen": _cmd_interaction_screen,
+    "auto-tune-all": _cmd_auto_tune_all,
+    "report": _cmd_report,
+    "update-outcomes": _cmd_update_outcomes,
+    "experiment": _cmd_experiment,
+    "config": _cmd_config,
+    "snapshots": _cmd_snapshots,
+    "fmp": _cmd_fmp,
+    "factor-map": _cmd_factor_map,
+}
 
 
 def _flag_value(args: list[str], flag: str) -> str | None:
