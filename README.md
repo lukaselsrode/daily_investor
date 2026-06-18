@@ -697,6 +697,14 @@ or **web app**), copy its id/secret into `.env`. The daily thread is usually sti
 absent from the `hot` listing; in that case set an explicit override in `cfg/config.yaml` under
 `options_social`: `daily_thread_id: <base36 id>` or `daily_thread_url: <full /comments/ URL>`.
 
+If you don't have app OAuth creds, you may pass an **ephemeral read-only bearer token** as a
+one-off CLI argument: `daily-investor odte-social-report --reddit-bearer-token <TOKEN>`. The token
+is used only as an `Authorization: Bearer` header against `oauth.reddit.com` for that run — it is
+**never stored, never logged, never echoed**, and is **not** read from `.env` or config. You can
+obtain such a token manually from your browser/devtools; it typically expires in ~24h. The tool
+**never reads cookies, never sends a `Cookie` header, and never mints tokens** (it does not call
+`/svc/shreddit/token`). App OAuth (`REDDIT_CLIENT_ID/SECRET`) remains the preferred, durable path.
+
 ```bash
 daily-investor --help
 make fetch-data                        # verify credentials + save first snapshot

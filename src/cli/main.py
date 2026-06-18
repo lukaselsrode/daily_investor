@@ -177,8 +177,34 @@ def main(argv: list[str] | None = None) -> None:
     elif cmd in ("odte-social-report", "options-social"):
         # 0DTE social-sentiment watchlist — ANALYSIS/PAPER ONLY, places no orders.
         # --no-fetch runs offline (cache-only/empty) for a safe dry run.
+        # --reddit-bearer-token TOKEN: OPTIONAL ephemeral read-only bearer for the WSB daily-thread
+        # comments fetch. Passed straight through as a RUNTIME arg — never stored, logged, or
+        # echoed; obtain it manually from your browser/devtools. The tool never reads cookies or
+        # mints tokens. Omit it for the default fail-closed OAuth/public behavior.
+        # --daily-thread-id / --daily-thread-url: explicit override for the WSB daily-thread when
+        # listing/search discovery can't find it. Overlaid into a COPY of the params at runtime —
+        # never written back to config.
         from data.social_sentiment import build_odte_social_report, format_report
-        rep = build_odte_social_report(allow_fetch="--no-fetch" not in rest)
+        from util import OPTIONS_SOCIAL_PARAMS
+        _bearer = _flag_value(rest, "--reddit-bearer-token")
+        _dt_id = _flag_value(rest, "--daily-thread-id")
+        _dt_url = _flag_value(rest, "--daily-thread-url")
+        _dt_limit = _flag_value(rest, "--daily-thread-limit")
+        _params = None
+        if _dt_id or _dt_url or _dt_limit:
+            _params = {**OPTIONS_SOCIAL_PARAMS}   # shallow copy; global config left untouched
+            if _dt_id:
+                _params["daily_thread_id"] = _dt_id
+            if _dt_url:
+                _params["daily_thread_url"] = _dt_url
+            if _dt_limit:
+                try:
+                    _params["daily_thread_limit"] = int(_dt_limit)
+                except ValueError:
+                    print(f"--daily-thread-limit: not an integer: {_dt_limit}")
+                    sys.exit(2)
+        rep = build_odte_social_report(allow_fetch="--no-fetch" not in rest,
+                                       params=_params, reddit_bearer_token=_bearer)
         print(format_report(rep))
 
     elif cmd == "stability-scan":
@@ -365,7 +391,13 @@ COMMANDS
   odte-social-report       0DTE social-sentiment watchlist — ANALYSIS/PAPER ONLY, places NO orders.
                            Reddit (JSON+Atom fallback) + X (official API only if X_BEARER_TOKEN);
                            DAY-OF posts only; attaches a PAPER same-day option idea (yfinance);
-                           --no-fetch = offline (no network, no options lookup).
+                           --no-fetch = offline (no network, no options lookup);
+                           --reddit-bearer-token TOKEN = optional ephemeral read-only token for WSB
+                           daily-thread comments (never stored/logged; not cookies);
+                           --daily-thread-id ID / --daily-thread-url URL = override daily-thread
+                           discovery (runtime only; not persisted to config);
+                           --daily-thread-limit N = bounded comment SAMPLE size (default 100, cap
+                           500; a big thread is sampled, not read in full).
   options-social           Alias for odte-social-report (identical behavior and options).
 
 OPTIONS (run)

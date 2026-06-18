@@ -132,11 +132,23 @@ regime-sizing:               ## Random-window regime sizing/exposure grid (REGIM
 report:                      ## Quick 90-day backtest → print results + stability hint
 	$(DI) report --output-dir $(OUTPUT_DIR)
 
-OFFLINE ?=
+OFFLINE             ?=
+REDDIT_BEARER_TOKEN ?=
+DAILY_THREAD_ID     ?=
+DAILY_THREAD_URL    ?=
+DAILY_THREAD_LIMIT  ?=
 
+# Easy live daily-thread run (paste your token + thread id):
+#   make odte-report REDDIT_BEARER_TOKEN="$REDDIT_TOKEN" DAILY_THREAD_ID=1u9240r
+# Optional: DAILY_THREAD_LIMIT=200 (default 100, max 500) to read more/fewer comments.
+# You never set comment depth/nesting — that's handled with sane defaults.
 .PHONY: odte-report
-odte-report:                 ## 0DTE social watchlist — ANALYSIS/PAPER ONLY, places NO orders (OFFLINE=1 = --no-fetch: no network/options)
-	$(DI) odte-social-report $(if $(OFFLINE),--no-fetch,)
+odte-report:                 ## 0DTE social watchlist — PAPER ONLY (live: REDDIT_BEARER_TOKEN="..." DAILY_THREAD_ID=...; OFFLINE=1 for dry run; DAILY_THREAD_LIMIT optional)
+	@$(DI) odte-social-report $(if $(OFFLINE),--no-fetch,) \
+	  $(if $(REDDIT_BEARER_TOKEN),--reddit-bearer-token $(REDDIT_BEARER_TOKEN),) \
+	  $(if $(DAILY_THREAD_ID),--daily-thread-id $(DAILY_THREAD_ID),) \
+	  $(if $(DAILY_THREAD_URL),--daily-thread-url $(DAILY_THREAD_URL),) \
+	  $(if $(DAILY_THREAD_LIMIT),--daily-thread-limit $(DAILY_THREAD_LIMIT),)
 
 .PHONY: regime
 regime:                      ## Print current market regime  (live SPY + VIX fetch)

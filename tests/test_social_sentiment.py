@@ -688,6 +688,12 @@ def test_report_monday_premarket_keeps_friday_after_close(monkeypatch):
     assert {t["ticker"] for t in rep["top_tickers"]} == {"SPY"}
     assert rep["candidate"]["ticker"] == "SPY"
     assert rep["freshness_window"]["window_start_et"].startswith("2025-06-13T16:00")
+    assert rep["freshness_window"]["anchor"] == "prev_close"
+    # Wording must NOT claim 'today' when the window anchors to the previous close.
+    txt = ss.format_report(rep)
+    how_fresh = next(line for line in txt.splitlines() if line.startswith("HOW FRESH"))
+    assert "previous market close" in how_fresh and "06-13 16:00" in how_fresh
+    assert "today" not in how_fresh.lower()
 
 
 def test_report_monday_market_hours_uses_monday_open(monkeypatch):
@@ -708,6 +714,30 @@ def test_report_monday_market_hours_uses_monday_open(monkeypatch):
     tickers = {t["ticker"] for t in rep["top_tickers"]}
     assert "SPY" in tickers and "QQQ" not in tickers, f"Monday window not anchored to 09:30: {tickers}"
     assert rep["freshness_window"]["window_start_et"].startswith("2025-06-16T09:30")
+    assert rep["freshness_window"]["anchor"] == "today_open"
+    assert "since today's open (09:30 ET)" in ss.format_report(rep)
+
+
+def test_report_8am_et_preopen_freshness_wording(monkeypatch):
+    """8AM ET day-of (pre-open weekday): the window starts at the PREVIOUS close and the HOW FRESH
+    wording says 'previous market close', never 'today' (the misleading wording this fixes)."""
+    payload = {"data": {"children": [
+        {"data": {"title": "SPY 0dte calls after the close", "selftext": "", "score": 50,
+                  "num_comments": 1, "permalink": "/r/wsb/x",
+                  "created_utc": _ets(2025, 6, 16, 17, 0)}},   # Mon 17:00 ET — after Monday close
+    ]}}
+    monkeypatch.setattr(ss.requests, "get", lambda *a, **k: _FakeResp(payload))
+    rep = ss.build_odte_social_report(
+        allow_fetch=True, now=_et(2025, 6, 17, 8, 0), params={   # Tue 08:00 ET — pre-open
+            "sources": ["reddit"], "core_universe": ["SPY", "QQQ"], "min_mentions": 1,
+            "freshness_mode": "market_window", "include_paper_options": False})
+    fw = rep["freshness_window"]
+    assert fw["anchor"] == "prev_close"
+    assert fw["window_start_et"].startswith("2025-06-16T16:00")   # previous (Monday) close
+    txt = ss.format_report(rep)
+    how_fresh = next(line for line in txt.splitlines() if line.startswith("HOW FRESH"))
+    assert "previous market close (06-16 16:00 ET)" in how_fresh
+    assert "today" not in how_fresh.lower()
 
 
 def test_reddit_rss_updated_parses_timestamp():
@@ -1055,6 +1085,66 @@ def test_report_examples_support_intent_no_contradiction():
     assert "examples only, NOT instructions" in txt
 
 
+def test_intent_jinx_sarcasm_anti_signal():
+    """Real WSB idioms: a position + opposite-direction expectation is anti-signal, not the position.
+    'bought calls so it should keep dropping' = bearish, etc."""
+    assert ss.classify_odte_intent("bought calls so it should keep dropping", "SPY")["intent"] == "bearish"
+    assert ss.classify_odte_intent("buying msft calls so this shit stock tanks", "MSFT")["intent"] == "bearish"
+    assert ss.classify_odte_intent("If you buy mu now you just know it starts fading to close", "MU")["intent"] == "bearish"
+
+
+def test_intent_party_and_outcome_inverse():
+    """'bears are cooked' = bullish; 'bulls are trapped' = bearish; 'puts won't print' = bullish."""
+    assert ss.classify_odte_intent("bears are cooked", "SPY")["intent"] == "bullish"
+    assert ss.classify_odte_intent("bulls are trapped", "SPY")["intent"] == "bearish"
+    assert ss.classify_odte_intent("puts are cooked", "SPY")["intent"] == "bullish"
+    assert ss.classify_odte_intent("calls are cooked", "SPY")["intent"] == "bearish"
+    assert ss.classify_odte_intent("puts won't print", "SPY")["intent"] == "bullish"
+
+
+def test_intent_disposition_sold_is_not_directional():
+    """'sold calls' is not bullish; 'sold puts' is not bearish; 'sold calls, switched to puts' = bearish."""
+    assert ss.classify_odte_intent("sold calls", "SPY")["intent"] == "neutral"
+    assert ss.classify_odte_intent("sold puts", "SPY")["intent"] == "neutral"
+    assert ss.classify_odte_intent(
+        "Sold my ODTE calls for profit and switched to puts. Lets go!", "SPY")["intent"] == "bearish"
+
+
+def test_intent_weak_chatter_and_no_short_not_bearish():
+    """Questions / desires are weak chatter (not directional); 'do not short' is not bearish."""
+    assert ss.classify_odte_intent("is SPCX going to 135?", "SPCX")["intent"] == "neutral"
+    assert ss.classify_odte_intent("spy needs to go up", "SPY")["intent"] == "neutral"
+    assert ss.classify_odte_intent("do not short", "SPY")["intent"] != "bearish"
+    assert ss.classify_odte_intent("never short again", "SPY")["intent"] != "bearish"
+    assert ss.classify_odte_intent("I buy both QQQ calls and puts today", "QQQ")["intent"] == "neutral"
+
+
+def test_intent_multi_ticker_attribution():
+    """Cues attach to the NEAREST ticker — 'qqq calls ... TXRH' is bullish for QQQ, neutral for TXRH."""
+    txt = "Mostly qqq calls. Some shares sold on TXRH profit taking"
+    assert ss.classify_odte_intent(txt, "QQQ")["intent"] == "bullish"
+    assert ss.classify_odte_intent(txt, "TXRH")["intent"] == "neutral"
+    txt2 = "MSFT calls but NVDA puts"
+    assert ss.classify_odte_intent(txt2, "MSFT")["intent"] == "bullish"
+    assert ss.classify_odte_intent(txt2, "NVDA")["intent"] == "bearish"
+
+
+def test_intent_company_name_alias():
+    """Validated company-name aliases map to the ticker for the directional read (and no halluc.)."""
+    s = ss.summarize_odte_intent("MSFT", [{"text": "Microsoft calls printing today"}])
+    assert s["n_docs"] == 1 and s["intent"] == "bullish"
+    assert ss.summarize_odte_intent("MSFT", [{"text": "soft serve ice cream is great"}])["n_docs"] == 0
+
+
+def test_summarize_separates_mentions_from_directional_evidence():
+    """Mere mentions != directional evidence: a chatter-only ticker has n_docs>0 but
+    directional_docs==0 and neutral intent (TOP CHATTER won't show a confident lean from mentions)."""
+    ev = [{"text": "MU may actually hit 1500 next week"}, {"text": "MU MELTING UP"},
+          {"text": "is MU too high?"}]
+    s = ss.summarize_odte_intent("MU", ev)
+    assert s["n_docs"] == 3 and s["directional_docs"] == 0 and s["intent"] == "neutral"
+
+
 def test_classify_intent_contextual_phrases():
     """Phrase/context: bullish directional phrases classify bullish, bearish ones bearish."""
     assert ss.classify_odte_intent("SPY calls to the moon, buy the dip 🚀")["intent"] == "bullish"
@@ -1175,6 +1265,45 @@ def test_top_chatter_ranks_by_mentions_excludes_spy_and_spam():
     assert "AMD" in tickers
 
 
+def test_rank_top_chatter_bare_universe_tickers_excludes_jargon():
+    """With a validated optionable universe, BARE uppercase tickers (no $) count — WSB comments
+    often omit the $ — while jargon (FOMC/GEX/OI) is excluded."""
+    ev = [{"text": "MSFT 0dte calls printing"}, {"text": "MSFT calls 0dte"},
+          {"text": "MU 0dte puts"}, {"text": "TSLA 0dte calls"},
+          {"text": "FOMC GEX gamma OI 0dte wall"}]   # jargon, no real ticker
+    allowed = {"MSFT", "MU", "TSLA", "SPY", "QQQ"}
+    ranked = ss.rank_top_chatter(ev, exclude={"SPY"}, max_n=5, min_mentions=1, allowed=allowed)
+    tk = [t for t, _ in ranked]
+    assert tk[0] == "MSFT" and "MU" in tk and "TSLA" in tk
+    assert "FOMC" not in tk and "GEX" not in tk and "OI" not in tk
+
+
+def test_report_top_chatter_includes_bare_daily_comment_tickers(monkeypatch):
+    """End-to-end: daily-thread comments with BARE MSFT/TSLA surface in TOP CHATTER (validated
+    against an explicit optionable universe), while FOMC/GEX junk does not."""
+    import time as _t
+    now = _t.time()
+    listing = {"data": {"children": [
+        {"data": {"id": "1u9240r", "title": "Daily Discussion Thread for June 18, 2026",
+                  "selftext": "", "score": 1, "num_comments": 9000,
+                  "permalink": "/r/wsb/dt", "created_utc": now}}]}}
+    monkeypatch.setattr(ss.requests, "get", lambda *a, **k: _FakeResp(listing))
+    monkeypatch.setattr(ss, "fetch_reddit_comments", lambda *a, **k: [
+        {"body": "MSFT 0dte calls printing", "score": 4, "author": "u"},
+        {"body": "more MSFT 0dte calls", "score": 3, "author": "u2"},
+        {"body": "TSLA 0dte puts", "score": 2, "author": "u3"},
+        {"body": "FOMC GEX gamma wall 0dte", "score": 1, "author": "u4"}])   # junk
+    monkeypatch.setattr(ss, "_resolve_intraday_trend", lambda tk, af: {"ok": False, "status": "no data"})
+    monkeypatch.setattr(ss, "_resolve_ticker_options", lambda *a, **k: {"contracts": [], "expiry": None})
+    rep = ss.build_odte_social_report(allow_fetch=True, params={
+        "sources": ["reddit"], "core_universe": ["SPY", "QQQ"], "min_mentions": 1,
+        "top_chatter_min_mentions": 1, "top_chatter_universe": ["MSFT", "TSLA", "MU"]})
+    tickers = [c["ticker"] for c in rep["top_chatter"]]
+    assert "MSFT" in tickers and "TSLA" in tickers
+    assert "FOMC" not in tickers and "GEX" not in tickers
+    assert "included" in rep["daily_thread"]["status"]
+
+
 def test_ticker_card_directional_with_chain_is_lean():
     """(8b) Directional price + confirming social + a tradable same-day chain -> paper CALL-lean."""
     price = _spy_price(last=505.0, prev_close=500.0, open_=501.0, vwap=503.0)
@@ -1239,7 +1368,7 @@ def test_report_includes_spy_backdrop_top_chatter_and_daily_status():
     txt = ss.format_report(rep)
     assert txt.index("WHAT TO DO NOW") < txt.index("TOP CHATTER")   # SPY backdrop first
     assert "daily thread" in txt.lower()
-    assert "limited by" in txt.lower()                              # honest source caveat
+    assert "not the whole market" in txt.lower()                    # honest source caveat
     chatter = txt.split("TOP CHATTER")[1]
     for jargon in ("VWAP", "spread", "liquidity", "hype=", "sentiment="):
         assert jargon not in chatter
@@ -1276,7 +1405,7 @@ def test_daily_thread_comments_folded_into_ev_pool_and_top_chatter(monkeypatch):
     assert rep["daily_thread"]["n_comments"] == 3
     assert "included" in rep["daily_thread"]["status"]
     assert "QQQ" in [c["ticker"] for c in rep["top_chatter"]]   # comments fed top chatter
-    assert "3 included" in ss.format_report(rep)
+    assert "3 sampled, 3 included" in ss.format_report(rep)
 
 
 def test_reddit_comments_uses_oauth_bearer_when_creds_present(monkeypatch):
@@ -1320,13 +1449,268 @@ def test_no_praw_dependency_added():
     assert "import praw" not in src and "from praw" not in src
 
 
+def test_reddit_comments_bearer_token_path(monkeypatch):
+    """Explicit bearer arg hits oauth.reddit.com/comments/{id} with 'Authorization: Bearer <token>'
+    and never leaks the token into the returned comments."""
+    captured = {}
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        captured["url"], captured["headers"] = url, headers or {}
+        return _FakeResp([{}, {"data": {"children": [
+            {"kind": "t1", "data": {"body": "$QQQ 0dte calls", "score": 2, "author": "u"}}]}}])
+
+    monkeypatch.setattr(ss, "_reddit_oauth_token", lambda: None)   # no app creds
+    monkeypatch.setattr(ss.requests, "get", fake_get)
+    token = "tok_v2_SECRET_abc123"
+    out = ss.fetch_reddit_comments("1u9240r", limit=100, allow_fetch=True, bearer_token=token)
+    assert out and out[0]["body"].startswith("$QQQ")
+    assert captured["url"] == "https://oauth.reddit.com/comments/1u9240r"
+    assert captured["headers"].get("Authorization") == f"Bearer {token}"
+    assert token not in str(out)   # token never in returned data
+
+
+def test_reddit_comments_auth_order_app_over_bearer(monkeypatch):
+    """Fetch order: app OAuth preferred over bearer when app creds exist; bearer used when absent."""
+    captured = {}
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        captured["auth"] = (headers or {}).get("Authorization")
+        return _FakeResp([{}, {"data": {"children": []}}])
+
+    monkeypatch.setattr(ss.requests, "get", fake_get)
+    monkeypatch.setattr(ss, "_reddit_oauth_token", lambda: "APPTOKEN")   # app creds present
+    ss.fetch_reddit_comments("a1", allow_fetch=True, bearer_token="BEARERTOK")
+    assert captured["auth"] == "bearer APPTOKEN"     # app OAuth wins
+    monkeypatch.setattr(ss, "_reddit_oauth_token", lambda: None)         # no app creds
+    ss.fetch_reddit_comments("a2", allow_fetch=True, bearer_token="BEARERTOK")
+    assert captured["auth"] == "Bearer BEARERTOK"    # explicit bearer used
+
+
+def test_wsb_daily_thread_title_helper():
+    """Title/slug ARE derivable from the ET date; the post id is NOT (helper returns id=None)."""
+    import datetime as _dt
+    h = ss.wsb_daily_thread_title(_dt.date(2026, 6, 18))
+    assert h["title"] == "Daily Discussion Thread for June 18, 2026"
+    assert h["slug"] == "daily_discussion_thread_for_june_18_2026"
+    assert h["id"] is None
+
+
+def test_daily_thread_status_auth_label_and_no_token(monkeypatch):
+    """Status names the auth path but never the token; auth-needed only when NO app creds AND no bearer."""
+    monkeypatch.setattr(ss, "fetch_reddit_comments", lambda *a, **k: [])
+    posts = [{"id": "1u9240r", "title": "Daily Discussion Thread for June 18, 2026"}]
+    _, status, _ = ss.fetch_daily_thread_comments(posts, {}, allow_fetch=True)
+    assert "auth needed" in status
+    # bearer provided but empty result -> generic unavailable (not 'auth needed')
+    _, status2, _ = ss.fetch_daily_thread_comments(posts, {"reddit_bearer_token": "TKN"}, allow_fetch=True)
+    assert "unavailable" in status2 and "auth needed" not in status2 and "TKN" not in status2
+
+
+def test_bearer_token_plumbed_into_report_not_persisted(monkeypatch):
+    """build_odte_social_report(reddit_bearer_token=...) plumbs the token into the daily-thread
+    fetch, includes the comments, labels status '(bearer token)', and NEVER persists/renders it."""
+    import time as _t
+    now = _t.time()
+    listing = {"data": {"children": [
+        {"data": {"id": "1u9240r", "title": "Daily Discussion Thread for June 18, 2026",
+                  "selftext": "", "score": 1, "num_comments": 50,
+                  "permalink": "/r/wsb/dt", "created_utc": now}}]}}
+    monkeypatch.setattr(ss.requests, "get", lambda *a, **k: _FakeResp(listing))
+    seen = {}
+
+    def fake_comments(post_id, limit=5, ttl_s=900, allow_fetch=True, bearer_token=None):
+        seen["bearer"] = bearer_token
+        return [{"body": "$QQQ 0dte calls printing", "score": 3, "author": "u"},
+                {"body": "$QQQ 0dte calls", "score": 2, "author": "u2"}]
+
+    monkeypatch.setattr(ss, "fetch_reddit_comments", fake_comments)
+    monkeypatch.setattr(ss, "_resolve_intraday_trend", lambda tk, af: {"ok": False, "status": "no data"})
+    monkeypatch.setattr(ss, "_resolve_ticker_options", lambda *a, **k: {"contracts": [], "expiry": None})
+    token = "ephemeral_TOKEN_xyz"
+    myparams = {"sources": ["reddit"], "core_universe": ["SPY", "QQQ"], "min_mentions": 1,
+                "top_chatter_min_mentions": 2}
+    rep = ss.build_odte_social_report(allow_fetch=True, reddit_bearer_token=token, params=myparams)
+    assert seen["bearer"] == token                          # plumbed into the fetch
+    assert "reddit_bearer_token" not in myparams            # caller's params NOT mutated
+    assert rep["daily_thread"]["n_comments"] == 2
+    assert "bearer token" in rep["daily_thread"]["status"] and "included" in rep["daily_thread"]["status"]
+    assert "QQQ" in [c["ticker"] for c in rep["top_chatter"]]   # comments fed top chatter
+    txt = ss.format_report(rep)
+    assert token not in txt and token not in str(rep)       # never rendered / never in dict
+
+
+def test_cli_passes_bearer_token_and_does_not_print_it(monkeypatch, capsys):
+    """Command-level: the CLI parses --reddit-bearer-token, passes it through, and never echoes it."""
+    import data.social_sentiment as _ss
+    from cli.main import main as cli_main
+    cap = {}
+
+    def fake_build(allow_fetch=True, params=None, now=None, reddit_bearer_token=None):
+        cap["token"], cap["allow_fetch"] = reddit_bearer_token, allow_fetch
+        return {"_": 1}
+
+    monkeypatch.setattr(_ss, "build_odte_social_report", fake_build)
+    monkeypatch.setattr(_ss, "format_report", lambda rep: "RENDERED REPORT")
+    cli_main(["odte-social-report", "--reddit-bearer-token", "TOK123", "--no-fetch"])
+    out = capsys.readouterr().out
+    assert cap["token"] == "TOK123" and cap["allow_fetch"] is False
+    assert "TOK123" not in out
+
+
+def test_cli_daily_thread_override_and_bearer_plumbing(monkeypatch, capsys):
+    """CLI plumbs --daily-thread-id/--daily-thread-url + --reddit-bearer-token into the report at
+    runtime (never persisted to the global params), preserves default when absent, and never echoes
+    the token."""
+    import data.social_sentiment as _ss
+    from cli.main import main as cli_main
+    from util import OPTIONS_SOCIAL_PARAMS as _OSP
+    cap = {}
+
+    def fake_build(allow_fetch=True, params=None, now=None, reddit_bearer_token=None):
+        cap["params"], cap["token"], cap["allow_fetch"] = params, reddit_bearer_token, allow_fetch
+        return {"_": 1}
+
+    monkeypatch.setattr(_ss, "build_odte_social_report", fake_build)
+    monkeypatch.setattr(_ss, "format_report", lambda rep: "RENDERED REPORT")
+
+    # id override + bearer
+    cli_main(["odte-social-report", "--daily-thread-id", "1u9240r",
+              "--reddit-bearer-token", "TOK123", "--no-fetch"])
+    out = capsys.readouterr().out
+    assert cap["params"]["daily_thread_id"] == "1u9240r"
+    assert cap["token"] == "TOK123" and cap["allow_fetch"] is False
+    assert "TOK123" not in out
+    assert _OSP.get("daily_thread_id") != "1u9240r"   # global config NOT mutated
+
+    # url override
+    cli_main(["odte-social-report", "--daily-thread-url",
+              "https://www.reddit.com/r/wallstreetbets/comments/abc123/x/", "--no-fetch"])
+    assert cap["params"]["daily_thread_url"].endswith("abc123/x/")
+
+    # default: no override flags -> params stays None (existing behavior preserved)
+    cli_main(["odte-social-report", "--no-fetch"])
+    assert cap["params"] is None
+
+
+def test_daily_thread_noise_filter_drops_chatter_keeps_actionable():
+    """Noise filter: drop bot/banbet, off-topic, one-word/number/emoji, and bare price questions;
+    keep short STRONG actionable lines (ticker + calls/puts/strike/0dte/direction)."""
+    noise = [
+        "is SPCX going to 135?", "90", "lower", "Need a Hail Mary today 😂",
+        "Had a great breakfast then took profit, my sister called",
+        "U buying? Asking for a fren", "!banbet SPCX 150 60d", "Banbet broken",
+        "No Active BanBet",
+    ]
+    keep = [
+        "TSLA 400c send it", "MSFT puts", "MU 1150 EOD", "SPY 0dte calls",
+        "time for spy puts",
+        "Mostly qqq calls. Some shares sold on TXRH profit taking",
+    ]
+    for t in noise:
+        assert ss._is_noise_comment(t) is True, f"should be noise: {t!r}"
+    for t in keep:
+        assert ss._is_noise_comment(t) is False, f"should be kept: {t!r}"
+
+
+def test_daily_thread_noise_filter_drops_offtopic_longform_and_generic_money():
+    """v3 tightening: long off-topic comments with no ticker AND no market context are dropped,
+    and no-ticker generic-money replies are dropped (we can't see parent context)."""
+    noise = [
+        "Going to Africa and freeing slaves",
+        "Anyone else browsing r/cscareerquestions during the dump lol my autism is acting up",
+        "my balls are chafed from sitting all day",
+        "Richard Brandon gave me a handjob clifford",
+        "running late for work gonna hit the casino after",
+        "I hope so. I need my money back.",
+    ]
+    keep = [
+        "TSLA 400c send it", "MSFT puts", "SPY 0dte calls",
+        "market looks weak, fed is hawkish and yields ripping",   # no ticker but market context
+    ]
+    for t in noise:
+        assert ss._is_noise_comment(t) is True, f"should be noise: {t!r}"
+    for t in keep:
+        assert ss._is_noise_comment(t) is False, f"should be kept: {t!r}"
+
+
+def test_daily_thread_noise_filter_applied_in_fetch(monkeypatch):
+    """The noise filter runs inside fetch_daily_thread_comments: noise is excluded from the included
+    comments and the count reflects only the kept (actionable) ones."""
+    monkeypatch.setattr(ss, "fetch_reddit_comments", lambda *a, **k: [
+        {"body": "SPY 0dte calls", "score": 3, "author": "u1"},     # keep
+        {"body": "is SPCX going to 135?", "score": 1, "author": "u2"},  # drop (question)
+        {"body": "90", "score": 1, "author": "u3"},                  # drop
+        {"body": "!banbet SPCX 150 60d", "score": 1, "author": "u4"}])  # drop
+    posts = [{"id": "1u9240r", "title": "Daily Discussion Thread for June 18, 2026"}]
+    comments, status, _ = ss.fetch_daily_thread_comments(posts, {"reddit_bearer_token": "T"},
+                                                         allow_fetch=True)
+    bodies = [c["body"] for c in comments]
+    assert bodies == ["SPY 0dte calls"]
+    assert "1 included" in status and "sampled" in status
+
+
+def test_daily_thread_limit_clamped():
+    """Sample size clamps to [1, 500] (a big thread is sampled, not read in full)."""
+    assert ss._clamp_daily_limit(150) == 150
+    assert ss._clamp_daily_limit(99999) == 500     # cap
+    assert ss._clamp_daily_limit(0) == 1           # floor
+    assert ss._clamp_daily_limit("nope") == ss._DAILY_LIMIT_DEFAULT
+
+
+def test_daily_thread_limit_passed_to_fetch_and_status_says_sampled(monkeypatch):
+    """The configured daily_thread_limit is passed to the comment fetch, and the status says the
+    comments are SAMPLED (not exhaustive)."""
+    import time as _t
+    now = _t.time()
+    listing = {"data": {"children": [
+        {"data": {"id": "1u9240r", "title": "Daily Discussion Thread for June 18, 2026",
+                  "selftext": "", "score": 1, "num_comments": 11000,
+                  "permalink": "/r/wsb/dt", "created_utc": now}}]}}
+    monkeypatch.setattr(ss.requests, "get", lambda *a, **k: _FakeResp(listing))
+    seen = {}
+
+    def fake_comments(post_id, limit=5, ttl_s=900, allow_fetch=True, bearer_token=None):
+        seen["limit"] = limit
+        return [{"body": "$QQQ 0dte calls", "score": 1, "author": "u"} for _ in range(3)]
+
+    monkeypatch.setattr(ss, "fetch_reddit_comments", fake_comments)
+    monkeypatch.setattr(ss, "_resolve_intraday_trend", lambda tk, af: {"ok": False, "status": "no data"})
+    monkeypatch.setattr(ss, "_resolve_ticker_options", lambda *a, **k: {"contracts": [], "expiry": None})
+    rep = ss.build_odte_social_report(allow_fetch=True, params={
+        "sources": ["reddit"], "core_universe": ["SPY", "QQQ"], "min_mentions": 1,
+        "daily_thread_limit": 150})
+    assert seen["limit"] == 150                                  # configured sample size passed through
+    status = rep["daily_thread"]["status"]
+    assert "sampled" in status                                  # not implied exhaustive
+    assert "all" not in status.split("(")[0].lower()            # no 'all 11k' implication
+    assert "11000" not in ss.format_report(rep)                 # never claims the full count
+
+
+def test_cli_daily_thread_limit_plumbing(monkeypatch):
+    """CLI parses --daily-thread-limit into params['daily_thread_limit'] (int), runtime-only."""
+    import data.social_sentiment as _ss
+    from cli.main import main as cli_main
+    cap = {}
+
+    def fake_build(allow_fetch=True, params=None, now=None, reddit_bearer_token=None):
+        cap["params"] = params
+        return {"_": 1}
+
+    monkeypatch.setattr(_ss, "build_odte_social_report", fake_build)
+    monkeypatch.setattr(_ss, "format_report", lambda rep: "RENDERED")
+    cli_main(["odte-social-report", "--daily-thread-limit", "200", "--no-fetch"])
+    assert cap["params"]["daily_thread_limit"] == 200
+
+
 def test_no_cookie_secrets_used():
-    """Hard rule: the module never uses cookies or a cookie env secret (official OAuth only)."""
+    """Hard rule: the module never uses cookies, a cookie env secret, or the cookie/csrf token-mint
+    endpoint — official OAuth + explicit bearer arg only."""
     import inspect
     src = inspect.getsource(ss)
     assert "cookies=" not in src
     assert "REDDIT_COOKIE" not in src
     assert '"Cookie"' not in src and "'Cookie'" not in src
+    assert "shreddit/token" not in src   # no automatic cookie/csrf token minting
 
 
 def test_module_places_no_orders():

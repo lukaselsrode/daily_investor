@@ -17,6 +17,7 @@ import os
 import re
 import time
 from collections import Counter
+from datetime import date as _date
 from datetime import datetime, timedelta, timezone
 from datetime import time as dtime
 from xml.etree import ElementTree as ET
@@ -65,6 +66,8 @@ _STOPWORDS = frozenset({
     "HODL", "RIP", "ELI", "EV", "AI", "OP", "IV", "OTM", "ITM", "YOY", "QOQ", "EOY",
     # 0DTE/flow jargon that looks like a ticker but isn't (kept out of mention ranking):
     "FOMC", "OPEX", "GEX", "OI", "ALERT", "WHALE", "PR", "DTE", "ODTE", "SPX", "VIX",
+    # TA-indicator abbreviations — in 0DTE chatter these mean the indicator, not the (minor) ticker:
+    "RSI", "MACD", "EMA", "SMA",
 })
 _BULL = ("call", "calls", "moon", "rocket", "buy", "long", "bull", "bullish", "pump",
          "squeeze", "breakout", "rip", "🚀", "💎")
@@ -296,12 +299,13 @@ def _parse_reddit_comments(payload, limit: int) -> list[dict]:
 
 
 def fetch_reddit_comments(post_id: str, limit: int = 5, ttl_s: float = 900,
-                          allow_fetch: bool = True) -> list[dict]:
-    """Top-level comments for a post (official OAuth when creds present, else public JSON),
-    cache-backed and fail-closed. Returns ``[{body, score, author}]`` (<= ``limit``); ``[]`` on
-    any failure. WSB analysis often reads *comments*, not just titles — this is small, bounded,
-    and cached, and never scrapes HTML. (Atom/RSS carries no comments, so RSS-fallback posts —
-    which have no id — simply yield [].)"""
+                          allow_fetch: bool = True, bearer_token: str | None = None) -> list[dict]:
+    """Top-level comments for a post, cache-backed and fail-closed. Auth order:
+    (A) app-only OAuth when REDDIT_CLIENT_ID/SECRET are set; (B) an explicit, caller-supplied
+    ``bearer_token`` (read-only, ephemeral — passed as an ARGUMENT, never read from cookies/.env,
+    never logged); (C) anonymous public JSON. Returns ``[{body, score, author}]`` (<= ``limit``).
+    The token is used ONLY as an ``Authorization: Bearer`` header against oauth.reddit.com and is
+    never cached, returned, or logged."""
     if not post_id:
         return []
     key = f"reddit_comments_{post_id}_{limit}"
@@ -312,13 +316,17 @@ def fetch_reddit_comments(post_id: str, limit: int = 5, ttl_s: float = 900,
         return []
     token = _reddit_oauth_token()
     ua = _reddit_user_agent()
-    params = {"limit": limit, "depth": 1, "sort": "top"}
+    params = {"limit": limit, "depth": 1, "sort": "new", "raw_json": 1}
     try:
-        if token:
+        if token:   # (A) app-only OAuth
             r = requests.get(_REDDIT_OAUTH_COMMENTS_URL.format(id=post_id),
                              headers={"Authorization": f"bearer {token}", "User-Agent": ua},
                              params=params, timeout=15)
-        else:
+        elif bearer_token:   # (B) explicit caller-supplied bearer token (never logged/cached)
+            r = requests.get(_REDDIT_OAUTH_COMMENTS_URL.format(id=post_id),
+                             headers={"Authorization": f"Bearer {bearer_token}", "User-Agent": ua},
+                             params=params, timeout=15)
+        else:   # (C) anonymous public JSON
             r = requests.get(_REDDIT_COMMENTS_JSON_URL.format(id=post_id),
                              headers={"User-Agent": ua}, params=params, timeout=15)
         r.raise_for_status()
@@ -326,7 +334,7 @@ def fetch_reddit_comments(post_id: str, limit: int = 5, ttl_s: float = 900,
         _write_cache(key, comments)
         return comments
     except Exception as exc:
-        logger.warning("reddit comments fetch failed for %s (%s)", post_id, exc)
+        logger.warning("reddit comments fetch failed for %s (%s)", post_id, exc)  # never logs token
         return []
 
 
@@ -473,10 +481,11 @@ _LOSS_VERBS = frozenset({"smoked", "cooked", "crushed", "rekt", "wrecked", "dest
                          "worthless", "expired", "assigned", "tanked", "dead", "red", "losing",
                          "lost", "bust", "busted", "obliterated", "gutted"})
 # Bare directional intent words (emojis handled separately; option words handled by the grammar).
-_BULL_WORDS = frozenset({"call", "calls", "moon", "rocket", "buy", "long", "bull", "bullish",
-                         "pump", "squeeze", "breakout", "rip", "bullrun", "upside"})
-_BEAR_WORDS = frozenset({"put", "puts", "short", "sell", "bear", "bearish", "crash", "dump",
-                         "drill", "tank", "collapse", "puke", "downside"})
+_BULL_WORDS = frozenset({"call", "calls", "moon", "rocket", "buy", "buying", "bought", "long",
+                         "bull", "bullish", "pump", "squeeze", "breakout", "rip", "bullrun",
+                         "upside"})
+_BEAR_WORDS = frozenset({"put", "puts", "short", "shorting", "shorted", "sell", "bear", "bearish",
+                         "crash", "dump", "drill", "tank", "collapse", "puke", "downside"})
 # Negators CANCEL a directional cue (we do not flip to the opposite — safer + transparent).
 _NEGATORS = frozenset({"not", "no", "never", "none", "without", "avoid", "stop", "dont", "don't",
                        "isnt", "isn't", "aint", "ain't", "wont", "won't", "cant", "can't", "quit",
@@ -510,6 +519,40 @@ _FLOW_RE = re.compile(r"\b(call\s+wall|put\s+wall|gamma|gex|max\s+pain|dealers?|
                       r"gravity|open\s+interest|gamma\s+exposure|0\s*gamma|charm\s+flow)\b",
                       re.IGNORECASE)
 _STRUCT_NEXT = frozenset({"wall", "walls", "gravity"})  # 'call wall' / 'put gravity' = structure
+# DISPOSITION: closing/selling an option is NOT a fresh directional bet — 'sold calls' isn't
+# bullish, 'sold puts' isn't bearish. These cancel the call/put vote that follows them.
+_DISPOSED = frozenset({"sold", "selling", "sell", "sells", "dumping", "unloaded", "unload",
+                       "closed", "closing", "close", "exited", "exiting", "trimmed", "trimming"})
+# PARTY outcomes: 'bears cooked' = bullish, 'bulls trapped' = bearish (who's winning/losing).
+_PARTY_BULL = frozenset({"bull", "bulls"})
+_PARTY_BEAR = frozenset({"bear", "bears"})
+_PARTY_LOSS = _LOSS_VERBS | frozenset({"trapped", "wrong", "done", "finished", "fucked", "screwed"})
+_PARTY_GAIN = _GAIN_VERBS | frozenset({"right", "feasting", "eating", "correct", "winning"})
+# JINX / sarcasm: a bullish position followed (via a connector) by a bearish DIRECTION word is the
+# WSB 'my calls jinx it down' trope → bearish; mirror for puts → bullish.
+_BEAR_DIR = frozenset({"drop", "drops", "dropping", "dropped", "tank", "tanks", "tanking", "tanked",
+                       "dump", "dumps", "dumping", "fade", "fades", "fading", "faded", "crash",
+                       "crashes", "crashing", "red", "lower", "fall", "falls", "falling", "plummet",
+                       "tumble", "tumbling"})
+_BULL_DIR = frozenset({"pump", "pumps", "pumping", "pumped", "rip", "rips", "ripping", "moon",
+                       "mooning", "green", "higher", "rally", "rallies", "rallying", "melt",
+                       "melting", "breakout", "ripped"})
+_JINX_CONNECTOR = frozenset({"so", "and", "but", "watch", "now", "gonna", "cause", "because",
+                             "then", "til", "until", "till", "know", "knew", "everytime",
+                             "anytime", "whenever"})
+# Validated company-name → ticker aliases (small, hand-checked; NOT broad/hallucinated).
+_TICKER_ALIASES = {"microsoft": "MSFT", "micron": "MU", "tesla": "TSLA", "nvidia": "NVDA",
+                   "amazon": "AMZN", "apple": "AAPL", "google": "GOOGL", "alphabet": "GOOGL",
+                   "meta": "META", "netflix": "NFLX", "palantir": "PLTR", "broadcom": "AVGO"}
+_ALIAS_BY_TICKER: dict[str, list[str]] = {}
+for _name, _tk in _TICKER_ALIASES.items():
+    _ALIAS_BY_TICKER.setdefault(_tk, []).append(_name)
+
+
+def _ticker_doc_re(ticker: str) -> re.Pattern:
+    """Regex matching a ticker symbol OR a validated company-name alias (Microsoft→MSFT)."""
+    parts = [re.escape(ticker)] + [re.escape(n) for n in _ALIAS_BY_TICKER.get(ticker.upper(), [])]
+    return re.compile(r"\$?\b(" + "|".join(parts) + r")\b", re.IGNORECASE)
 
 
 def _intent_tokens(text: str) -> list[str]:
@@ -528,6 +571,44 @@ def _opt_noun_ctx(toks: list[str], i: int) -> bool:
     return i > 0 and toks[i - 1] in _OPT_DETERMINERS
 
 
+_JINX_BULL_POS = frozenset({"calls", "call", "buy", "buying", "bought", "long"})
+_JINX_BEAR_POS = frozenset({"puts", "put", "short", "shorting"})
+_CTX_WINDOW_MULTI = 5   # tighter window when >1 ticker in a comment (scope cues to the target)
+# Curated UNAMBIGUOUS tickers people often write lowercase (not English words) — used only to
+# detect a SECOND ticker in a comment so we can scope cues to the target ticker.
+_LOWERCASE_TICKERS = frozenset({"spy", "qqq", "iwm", "dia", "spx", "ndx", "vix", "tsla", "nvda",
+                                "msft", "amzn", "aapl", "googl", "meta", "nflx", "amd", "soxl",
+                                "soxs", "tqqq", "sqqq", "pltr", "avgo", "smci", "mstr"})
+
+
+def _other_tickers(text: str, toks: list[str], tkl: str) -> set[str]:
+    """Distinct OTHER ticker mentions in the text (uppercase/cashtag, plus curated lowercase index
+    tickers) — used to decide whether to scope directional cues to the target ticker."""
+    out = {s.lower() for s in _iter_symbols(text) if s not in _STOPWORDS and s.lower() != tkl}
+    out |= {t for t in toks if t in _LOWERCASE_TICKERS and t != tkl}
+    return out
+
+
+def _jinx_direction(toks: list[str]) -> str | None:
+    """WSB jinx/sarcasm: a bullish position token followed (within a window, via a connector word)
+    by a bearish DIRECTION word ('bought calls so it keeps dropping') is anti-bullish → 'bearish';
+    a bearish position followed by a bullish direction → 'bullish'. Returns None if no jinx."""
+    def _hit(positions: list[int], dirset: frozenset) -> bool:
+        for p in positions:
+            for j in range(p + 1, min(len(toks), p + 13)):
+                if toks[j] in dirset and any(
+                        toks[k] in _JINX_CONNECTOR for k in range(p + 1, j + 1)):
+                    return True
+        return False
+    bull_pos = [i for i, t in enumerate(toks) if t in _JINX_BULL_POS]
+    bear_pos = [i for i, t in enumerate(toks) if t in _JINX_BEAR_POS]
+    if _hit(bull_pos, _BEAR_DIR):
+        return "bearish"
+    if _hit(bear_pos, _BULL_DIR):
+        return "bullish"
+    return None
+
+
 def classify_odte_intent(text: str, ticker: str = "SPY") -> dict:
     """Classify the directional ODTE intent of one social text toward `ticker`.
 
@@ -543,11 +624,22 @@ def classify_odte_intent(text: str, ticker: str = "SPY") -> dict:
         return {"intent": "neutral", "bull": 0, "bear": 0, "examples": [],
                 "bull_examples": [], "bear_examples": [], "flags": ["empty"]}
     tkl = ticker.lower()
+    target_set = {tkl, "$" + tkl} | set(_ALIAS_BY_TICKER.get(ticker.upper(), []))   # MSFT + 'microsoft'
     anchors = [i for i, t in enumerate(toks)
-               if t in (tkl, "$" + tkl) or t in _OPT_CALL or t in _OPT_PUT or t in _ANCHOR_TERMS]
+               if t in target_set or t in _OPT_CALL or t in _OPT_PUT or t in _ANCHOR_TERMS]
     short = len(toks) <= _SHORT_TOKENS
+    # Multi-ticker scoping: when the comment names ANOTHER ticker, attribute each cue to its NEAREST
+    # ticker — so 'qqq calls ... TXRH' counts the calls for QQQ, not TXRH.
+    tk_positions = [i for i, t in enumerate(toks) if t in target_set]
+    others = _other_tickers(text, toks, tkl)
+    other_positions = [i for i, t in enumerate(toks) if t.lstrip("$") in others]
+    multi = bool(tk_positions) and bool(other_positions)
 
     def near(i: int) -> bool:
+        if multi:
+            dt = min((abs(i - a) for a in tk_positions), default=99)
+            do = min((abs(i - a) for a in other_positions), default=99)
+            return dt <= do and dt <= _CTX_WINDOW   # target is the nearest ticker (ties to target)
         return short or any(abs(i - a) <= _CTX_WINDOW for a in anchors)
 
     def negated(i: int) -> bool:
@@ -558,7 +650,20 @@ def classify_odte_intent(text: str, ticker: str = "SPY") -> dict:
     bull_ex: list[str] = []   # spans that VOTED bullish (intent-supporting, never negated)
     bear_ex: list[str] = []   # spans that VOTED bearish
 
+    # 0) JINX / sarcasm override: a bullish position + a later bearish DIRECTION word joined by a
+    # connector ('bought calls so it keeps dropping') is anti-bullish → bearish; mirror for puts.
+    jinx = _jinx_direction(toks)
+    if jinx == "bearish":
+        bear += 3
+        bear_ex.append("position jinx (calls→down)")
+        flags.append("jinx")
+    elif jinx == "bullish":
+        bull += 3
+        bull_ex.append("position jinx (puts→up)")
+        flags.append("jinx")
+
     # 1) Option-outcome grammar: call/put × gain/loss within a tight window → inverse logic.
+    # A negator near the verb FLIPS the outcome ('puts won't print' = puts won't gain = bullish).
     for i, t in enumerate(toks):
         if i in consumed or not (t in _OPT_CALL or t in _OPT_PUT) or not near(i):
             continue
@@ -575,14 +680,47 @@ def classify_odte_intent(text: str, ticker: str = "SPY") -> dict:
         if not verb:
             continue
         is_call = t in _OPT_CALL
+        flip = any(toks[k] in _NEGATORS
+                   for k in range(max(0, min(i, vpos) - _NEG_WINDOW), max(i, vpos)))
+        outcome_bull = (is_call and verb == "gain") or (not is_call and verb == "loss")
+        if flip:
+            outcome_bull = not outcome_bull
         span = " ".join(toks[max(0, i - 1):min(len(toks), i + 3)])
-        if (is_call and verb == "gain") or (not is_call and verb == "loss"):
+        if outcome_bull:
             bull += 2
             bull_ex.append(span)
         else:
             bear += 2
             bear_ex.append(span)
         consumed.update({i, vpos})
+        examples.append(span)
+
+    # 1b) PARTY outcome: 'bears cooked' = bullish, 'bulls trapped' = bearish (who's winning/losing).
+    for i, t in enumerate(toks):
+        if i in consumed or not (t in _PARTY_BULL or t in _PARTY_BEAR) or not near(i):
+            continue
+        outcome = None
+        for j in range(max(0, i - 2), min(len(toks), i + 4)):
+            if j == i:
+                continue
+            if toks[j] in _PARTY_GAIN:
+                outcome = "gain"
+                break
+            if toks[j] in _PARTY_LOSS:
+                outcome = "loss"
+                break
+        if outcome is None:
+            continue
+        is_bull_party = t in _PARTY_BULL
+        party_bull = (is_bull_party and outcome == "gain") or (not is_bull_party and outcome == "loss")
+        span = " ".join(toks[max(0, i - 1):min(len(toks), i + 3)])
+        if party_bull:
+            bull += 2
+            bull_ex.append(span)
+        else:
+            bear += 2
+            bear_ex.append(span)
+        consumed.add(i)
         examples.append(span)
 
     # 2) Directional multi-word phrases (negation cancels; token-consumed to avoid double count).
@@ -622,6 +760,12 @@ def classify_odte_intent(text: str, ticker: str = "SPY") -> dict:
         # ('put on someone' = English verb → ignored).
         if t in ("put", "call") and not _opt_noun_ctx(toks, i):
             continue
+        # DISPOSITION: 'sold/selling/closed calls|puts' is not a fresh directional bet → cancel.
+        # Window of 4 catches 'sold my odte calls' / 'closed the spy puts'.
+        if t in (_OPT_CALL | _OPT_PUT) and any(
+                toks[j] in _DISPOSED for j in range(max(0, i - 4), i)):
+            examples.append(f"disposed {t}")
+            continue
         if negated(i):
             examples.append(f"not {t}")
             continue
@@ -655,6 +799,9 @@ def classify_odte_intent(text: str, ticker: str = "SPY") -> dict:
     # is context, not a directional vote → neutral.
     if _FLOW_RE.search(low) and not (bull_ex or bear_ex):
         return _result("neutral", ["flow"])
+    # Explicit HEDGE: 'both calls and puts' (or 'calls and puts' together) is non-directional.
+    if jinx is None and (" both " in f" {low} ") and "call" in low and "put" in low:
+        return _result("neutral", ["hedge"])
     if bull == 0 and bear == 0:
         return _result("neutral", ["no_signal"])
     if risky and abs(net) < _RISK_MARGIN:
@@ -688,9 +835,11 @@ def summarize_odte_intent(ticker: str, ev_pool: list[dict], max_examples: int = 
     """Aggregate classify_odte_intent over the quality-gated evidence mentioning `ticker`.
 
     Sums bull/bear votes across docs and resolves a net intent with a small margin (so a single
-    keyword can't drive a verdict). Returns transparent counts, per-doc tallies, and example
-    spans for the report. ``intent`` is 'bullish'/'bearish'/'neutral'."""
-    pat = re.compile(rf"\$?\b{re.escape(ticker)}\b", re.IGNORECASE)
+    keyword can't drive a verdict). Returns SEPARATED concepts: ``n_docs`` (mention/chatter count),
+    ``directional_docs`` (docs that carried an actual bull/bear signal), the bull/bear vote totals,
+    the resolved ``intent``, and intent-supporting example spans. ``intent`` is
+    'bullish'/'bearish'/'neutral'. Matches the ticker symbol OR a validated company-name alias."""
+    pat = _ticker_doc_re(ticker)
     bull = bear = n_docs = n_bull = n_bear = 0
     bull_ex: list[str] = []
     bear_ex: list[str] = []
@@ -721,7 +870,10 @@ def summarize_odte_intent(ticker: str, ev_pool: list[dict], max_examples: int = 
                 else bear_ex if intent == "bearish" else [])[:max_examples]
     return {"ticker": ticker, "intent": intent, "bull": bull, "bear": bear,
             "bull_examples": bull_ex[:max_examples], "bear_examples": bear_ex[:max_examples],
-            "n_docs": n_docs, "n_bullish_docs": n_bull, "n_bearish_docs": n_bear,
+            # SEPARATED concepts: mention/chatter vs directional evidence vs resolved intent.
+            "n_docs": n_docs,                      # mention_count / chatter rank
+            "directional_docs": n_bull + n_bear,   # docs with an actual bull/bear signal
+            "n_bullish_docs": n_bull, "n_bearish_docs": n_bear,
             "examples": examples}
 
 
@@ -1097,11 +1249,17 @@ def _cashtag_mentions(texts) -> Counter:
 
 
 def rank_top_chatter(ev_pool: list[dict], exclude: set[str] = frozenset({"SPY"}),
-                     max_n: int = 5, min_mentions: int = 2) -> list[tuple[str, int]]:
-    """Top-N ($cashtag ticker, mentions) from the quality-gated evidence, excluding `exclude` (the
-    SPY backdrop) and below-floor names. Cashtag-only (see _cashtag_mentions) so jargon isn't shown
-    as a ticker; spam is already gone (ev_pool is post-filter)."""
-    cnt = _cashtag_mentions([c.get("text", "") for c in ev_pool])
+                     max_n: int = 5, min_mentions: int = 2,
+                     allowed: set[str] | None = None) -> list[tuple[str, int]]:
+    """Top-N (ticker, mentions) from the quality-gated evidence, excluding `exclude` (the SPY
+    backdrop) and below-floor names; spam is already gone (ev_pool is post-filter).
+
+    When `allowed` (a VALIDATED optionable universe, e.g. agg_data ∪ core) is given, bare uppercase
+    tickers count too — WSB comments often omit the `$` — but only when they're in that universe, so
+    jargon ('FOMC'/'GEX'/'OI') is excluded. Without `allowed`, falls back to cashtag-only (the safe
+    default that never surfaces jargon)."""
+    texts = [c.get("text", "") for c in ev_pool]
+    cnt = extract_ticker_mentions(texts, allowed=allowed) if allowed else _cashtag_mentions(texts)
     items = [(t, n) for t, n in cnt.items() if t not in exclude and n >= min_mentions]
     items.sort(key=lambda kv: (-kv[1], kv[0]))
     return items[:max_n]
@@ -1148,17 +1306,38 @@ def build_ticker_card(ticker: str, price: dict | None, paper_options: dict | Non
 
 def build_top_chatter(ev_pool: list[dict], allow_fetch: bool, budget: float,
                       exclude: set[str] = frozenset({"SPY"}), max_n: int = 5,
-                      min_mentions: int = 2) -> list[dict]:
-    """Build up to `max_n` paper-only ticker cards for the most-chattered OTHER names. Each card
+                      min_mentions: int = 2, allowed: set[str] | None = None) -> list[dict]:
+    """Build up to `max_n` paper-only ticker cards for the most-chattered OTHER names (ranked over a
+    VALIDATED `allowed` universe so bare uppercase tickers count but jargon doesn't). Each card
     fetches its own price/chain (gated, fail-closed); on --no-fetch every card degrades to OBSERVE.
     Reuses summarize_odte_intent for the contextual social read."""
     cards: list[dict] = []
-    for tk, n in rank_top_chatter(ev_pool, exclude, max_n, min_mentions):
+    for tk, n in rank_top_chatter(ev_pool, exclude, max_n, min_mentions, allowed):
         intent = summarize_odte_intent(tk, ev_pool)["intent"]
         price = _resolve_intraday_trend(tk, allow_fetch)
         po = _resolve_ticker_options(tk, price, intent, budget, allow_fetch)
         cards.append(build_ticker_card(tk, price, po, intent, n))
     return cards
+
+
+def _optionable_universe(p: dict, core: list[str]) -> set[str]:
+    """The VALIDATED ticker universe TOP CHATTER ranks against (so bare-uppercase WSB tickers like
+    MSFT/MU/TSLA count, but jargon like FOMC/GEX does not). Priority: an explicit
+    ``top_chatter_universe`` param (mainly for tests/power-users) ∪ core; else the cached agg_data
+    scored universe ∪ core; else just core (graceful fallback). Stopword jargon is excluded downstream
+    by extract_ticker_mentions regardless."""
+    allowed = {str(s).upper() for s in core}
+    explicit = p.get("top_chatter_universe")
+    if explicit:
+        return allowed | {str(s).upper() for s in explicit}
+    try:
+        from data.cache import read_data_as_pd
+        agg = read_data_as_pd("agg_data")
+        if agg is not None and not getattr(agg, "empty", True) and "symbol" in getattr(agg, "columns", []):
+            allowed |= {str(s).upper() for s in agg["symbol"].dropna()}
+    except Exception as exc:
+        logger.debug("optionable universe: agg_data unavailable (%s) — using core only", exc)
+    return allowed
 
 
 # ---------------------------------------------------------------------------
@@ -1173,6 +1352,20 @@ def _parse_thread_id(url: str | None) -> str:
     """Extract a base36 post id from a reddit /comments/{id}/ URL ('' if none)."""
     m = re.search(r"/comments/([a-z0-9]+)", url or "", re.IGNORECASE)
     return m.group(1) if m else ""
+
+
+def wsb_daily_thread_title(d: _date) -> dict:
+    """The WSB daily-discussion-thread human title + URL slug for an ET calendar date `d`, e.g.
+    'Daily Discussion Thread for June 18, 2026' / 'daily_discussion_thread_for_june_18_2026'.
+
+    IMPORTANT: the title/slug ARE derivable from the date, but the post id ('1u9240r') is NOT —
+    Reddit assigns it. So ``id`` is always None here; the id must come from listing/search discovery
+    or a daily_thread_id/url override. This helper exists to build the search query, not to fake a
+    URL the tool can fetch."""
+    month = d.strftime("%B")
+    title = f"Daily Discussion Thread for {month} {d.day}, {d.year}"
+    slug = f"daily_discussion_thread_for_{month.lower()}_{d.day}_{d.year}"
+    return {"title": title, "slug": slug, "id": None}
 
 
 def _fetch_reddit_search(subreddit: str, query: str, allow_fetch: bool = True,
@@ -1219,28 +1412,128 @@ def _find_daily_thread_id(posts: list[dict], params: dict, subreddit: str = "wal
     return ""
 
 
+def _reddit_auth_label(bearer_token: str | None) -> str:
+    """Which auth path fetch_reddit_comments will use, for a REDACTED status line (no token)."""
+    if os.environ.get("REDDIT_CLIENT_ID") and os.environ.get("REDDIT_CLIENT_SECRET"):
+        return "app oauth"
+    return "bearer token" if bearer_token else "public"
+
+
+_DAILY_LIMIT_DEFAULT = 100
+_DAILY_LIMIT_CAP = 500
+
+
+def _clamp_daily_limit(n) -> int:
+    """Clamp the daily-thread comment SAMPLE size to [1, _DAILY_LIMIT_CAP]. A big WSB daily thread
+    has thousands of comments; we intentionally read only a bounded first-page SAMPLE (no
+    replace_more / deep pagination) to keep runtime sane — the status says 'sampled', not 'all'."""
+    try:
+        return max(1, min(int(n), _DAILY_LIMIT_CAP))
+    except (TypeError, ValueError):
+        return _DAILY_LIMIT_DEFAULT
+
+
+# ---------------------------------------------------------------------------
+# Daily-thread comment NOISE filter (runs BEFORE ticker ranking / sentiment). WSB daily threads are
+# mostly chatter — bot/banbet commands, one-word/emoji replies, off-topic conversation, and bare
+# price questions. We keep only ACTIONABLE lines (a ticker/option/strike/day-trade cue) plus longer
+# substantive comments; everything else is dropped so it can't drive mentions or sentiment.
+# ---------------------------------------------------------------------------
+
+_BANBET_RE = re.compile(r"!?\bbanbet\b|no active banbet", re.IGNORECASE)
+_OFFTOPIC_RE = re.compile(
+    r"\b(breakfast|lunch|dinner|sister|brother|frens?|weather|coffee|girlfriend|boyfriend|wife|"
+    r"cscareerquestions|autism|autistic|slaves?|handjob|chafed|clifford|africa|casino|balls)\b"
+    r"|richard brandon|late for work", re.IGNORECASE)
+# Explicit market/trading context — a NON-ticker comment must carry at least one of these to count
+# as on-topic (generic 'money/back/profit' alone does NOT — we can't see the parent comment).
+_MARKET_CTX_RE = re.compile(
+    r"\b(market|stocks?|shares?|equit\w+|calls?|puts?|options?|strikes?|0dte|odte|theta|gamma|"
+    r"spy|qqq|spx|ndx|nasdaq|dow|sp500|fed|fomc|cpi|pce|earnings|rally|rip|dump|pump|bull\w*|"
+    r"bear\w*|short|position\w*|portfolio|ticker|premarket|tendies|bag\w*|hedge|vix|yields?|"
+    r"rate cut|rate hike|green|red candle|bid|ask|volume|iv)\b", re.IGNORECASE)
+# Options/strike cue: calls/puts/0dte/strike/theta… or a strike like '400c' / '1150p'.
+_OPT_CUE_RE = re.compile(
+    r"\b(0dte|odte|calls?|puts?|strikes?|theta|gamma|delta|premium|contracts?|leaps?)\b"
+    r"|\b\d{2,5}\s?[cp]\b", re.IGNORECASE)
+# Day-trade / direction cue (only counts as actionable WHEN a ticker is also present).
+_DAYTRADE_RE = re.compile(
+    r"\b(send it|eod|lotto|yolo|moon|rocket|long|short|buy|buying|sell|selling|bull|bear|scalp|"
+    r"breakout|squeeze|hold|hodl)\b", re.IGNORECASE)
+
+
+def _comment_is_actionable(text: str) -> bool:
+    """True when a comment carries a tradable signal: an options/strike cue (strong on its own), OR
+    a day-trade/direction cue together with a ticker. A bare price QUESTION (has '?' but no options
+    cue) is NOT actionable — it's chatter, not directional evidence."""
+    has_opt = bool(_OPT_CUE_RE.search(text or ""))
+    if "?" in (text or "") and not has_opt:
+        return False
+    if has_opt:
+        return True
+    has_ticker = any(s not in _STOPWORDS for s in _iter_symbols(text or ""))
+    return bool(_DAYTRADE_RE.search(text or "")) and has_ticker
+
+
+def _is_noise_comment(text: str) -> bool:
+    """True if a daily-thread comment is low-information noise that must NOT drive ranking/sentiment.
+    Strong actionable lines are always kept; bot/banbet tables, off-topic conversation, one-word /
+    single-number / emoji-only, and very short (<=30 char) non-actionable comments are dropped."""
+    t = (text or "").strip()
+    if not t:
+        return True
+    low = t.lower()
+    if _BANBET_RE.search(low) or low.startswith("|") or "|--" in low or "|:-" in low:
+        return True
+    if _comment_is_actionable(t):
+        return False
+    if _OFFTOPIC_RE.search(low):
+        return True
+    words = re.findall(r"[a-z0-9]+", low)
+    if len(words) <= 1:        # one word / single number / emoji-only
+        return True
+    # On-topic gate: a non-actionable comment must mention a ticker OR explicit market/trading
+    # context — otherwise it's off-topic chatter regardless of length ('Going to Africa...'),
+    # including generic-money replies with no ticker ('I hope so. I need my money back.').
+    has_ticker = any(s not in _STOPWORDS for s in _iter_symbols(t))
+    if not (has_ticker or _MARKET_CTX_RE.search(low)):
+        return True
+    return len(t) <= 30        # very short, non-actionable low-info
+
+
 def fetch_daily_thread_comments(posts: list[dict], params: dict, allow_fetch: bool = True,
-                                limit: int = 80) -> tuple[list[dict], str, str]:
-    """Official/fail-closed fetch of today's daily-thread top comments (OAuth → public JSON via
-    fetch_reddit_comments). Returns (comments, status, thread_id). Never uses cookies. When the
-    public path is blocked and no OAuth creds are set, returns 'unavailable: auth needed' rather
-    than a silent empty — so the report says so instead of a misleadingly low Reddit count."""
+                                limit: int = _DAILY_LIMIT_DEFAULT) -> tuple[list[dict], str, str]:
+    """Official/fail-closed fetch of today's daily-thread top comments. Auth order: app OAuth →
+    explicit ``params['reddit_bearer_token']`` (a caller-supplied, ephemeral, read-only token —
+    NEVER cookies, NEVER persisted/logged) → anonymous public JSON. Returns (comments, status,
+    thread_id); the status names the auth path but NEVER the token. When all paths are blocked,
+    returns 'unavailable: auth needed' rather than a silent empty (no misleadingly low count)."""
     if not allow_fetch:
         return [], "skipped (--no-fetch)", ""
     sub = params.get("subreddit", "wallstreetbets")
     tid = _find_daily_thread_id(posts, params, sub, allow_fetch)
     if not tid:
         return [], "no daily discussion thread found (listing or search)", ""
-    comments = fetch_reddit_comments(tid, limit=limit, allow_fetch=allow_fetch)
+    bearer = params.get("reddit_bearer_token") or None   # runtime arg only; never persisted/logged
+    raw = fetch_reddit_comments(tid, limit=limit, allow_fetch=allow_fetch, bearer_token=bearer)
+    # Drop low-information chatter (bot/banbet, off-topic, one-word, bare price questions) BEFORE
+    # the comments enter the evidence pool / ticker ranking / sentiment.
+    comments = [c for c in raw if not _is_noise_comment(c.get("body", "") or "")]
+    label = _reddit_auth_label(bearer)
     if comments:
-        return comments, f"ok ({len(comments)} comments)", tid
-    if not (os.environ.get("REDDIT_CLIENT_ID") and os.environ.get("REDDIT_CLIENT_SECRET")):
-        return [], "unavailable: auth needed (set REDDIT_CLIENT_ID/REDDIT_CLIENT_SECRET for OAuth)", tid
+        # Plain English: how many we read (a bounded first-page sample) vs how many survived the
+        # noise filter and were used. Never implies the whole thread (can be thousands of comments).
+        return comments, f"{len(raw)} sampled, {len(comments)} included ({label})", tid
+    if raw:   # fetched, but every sampled comment was low-signal noise
+        return [], f"{len(raw)} sampled, 0 included ({label}) — all low-signal/noise", tid
+    if not (os.environ.get("REDDIT_CLIENT_ID") and os.environ.get("REDDIT_CLIENT_SECRET")) and not bearer:
+        return [], ("unavailable: auth needed (set REDDIT_CLIENT_ID/REDDIT_CLIENT_SECRET, "
+                    "or pass --reddit-bearer-token)"), tid
     return [], "unavailable (no comments returned)", tid
 
 
 def _gather_odte_sources(p: dict, allowed: set[str] | None, allow_fetch: bool, is_fresh,
-                         now_ts: float = 0.0) -> dict:
+                         now_ts: float = 0.0, broad_allowed: set[str] | None = None) -> dict:
     """Fetch Reddit posts + X + the WSB daily-thread comments, freshness-filter, run the quality
     filter ONCE, then score & rank tickers. Deriving mentions, scoring, and the evidence pool from
     the SAME filtered set keeps them consistent — so promo/spam can't inflate a ticker's mention
@@ -1268,8 +1561,9 @@ def _gather_odte_sources(p: dict, allowed: set[str] | None, allow_fetch: bool, i
     # quality filter) and stamp ts=now so they count as fresh. If unavailable, the status says so.
     daily_comments, daily_status, tid = ([], "disabled (reddit not in sources)", "")
     if "reddit" in sources and bool(p.get("daily_thread_comments", True)):
-        daily_comments, fetch_status, tid = fetch_daily_thread_comments(posts_all, p, allow_fetch)
-        daily_status = f"{len(daily_comments)} included" if daily_comments else fetch_status
+        dlimit = _clamp_daily_limit(p.get("daily_thread_limit", _DAILY_LIMIT_DEFAULT))
+        daily_comments, daily_status, tid = fetch_daily_thread_comments(
+            posts_all, p, allow_fetch, limit=dlimit)
     thread_url = f"https://www.reddit.com/comments/{tid}" if tid else ""
 
     # Build ONE combined item list (Reddit posts + daily-thread comments + X), then run the
@@ -1293,6 +1587,13 @@ def _gather_odte_sources(p: dict, allowed: set[str] | None, allow_fetch: bool, i
     x_spam = sum(1 for c in combined if c["source"] == "x") - \
         sum(1 for c in kept if c["source"] == "x")
 
+    # SECOND quality pass against the BROAD optionable universe (for TOP CHATTER only): keeps items
+    # mentioning any validated optionable ticker (e.g. a daily-thread comment about bare MSFT/MU),
+    # which the core (SPY/QQQ) ev_pool drops. The SPY scorecard / candidate keep using `kept`.
+    broad_ev = (_quality_filter(combined, lambda c: c["text"], allowed=broad_allowed,
+                                require_options_context=True)
+                if broad_allowed and broad_allowed != allowed else kept)
+
     documents = [{"text": c["text"], "ts": c["ts"], "weight": c["weight"]} for c in kept]
     mentions = extract_ticker_mentions([c["text"] for c in kept], allowed=allowed)
     scores = score_social(mentions, documents)
@@ -1305,15 +1606,24 @@ def _gather_odte_sources(p: dict, allowed: set[str] | None, allow_fetch: bool, i
         "x_posts": x_posts, "x_posts_all": x_posts_all, "x_status": x_status,
         "x_stale": len(x_posts_all) - len(x_posts), "x_spam": x_spam,
         "ranked": ranked, "ev_pool": kept,  # ev_pool is the same filtered, quality-gated set
+        "broad_ev": broad_ev,               # broader pool for TOP CHATTER ranking
         "daily_status": daily_status, "daily_n": len(daily_comments),
     }
 
 
 def build_odte_social_report(allow_fetch: bool = True, params: dict | None = None,
-                             now: datetime | None = None) -> dict:
-    """Build the 0DTE social-sentiment IDEA report (paper/analysis only). Never places orders."""
+                             now: datetime | None = None,
+                             reddit_bearer_token: str | None = None) -> dict:
+    """Build the 0DTE social-sentiment IDEA report (paper/analysis only). Never places orders.
+
+    ``reddit_bearer_token`` is an OPTIONAL, caller-supplied, ephemeral read-only token for the WSB
+    daily-thread comments fetch (auth order: app OAuth → this token → public). It is overlaid into
+    the params at RUNTIME ONLY — never persisted to config, never logged, never returned in the
+    report dict. Omit it to keep the current fail-closed OAuth/public behavior."""
     from util import OPTIONS_SOCIAL_PARAMS
     p = params if params is not None else OPTIONS_SOCIAL_PARAMS
+    if reddit_bearer_token:
+        p = {**p, "reddit_bearer_token": reddit_bearer_token}   # runtime overlay; not persisted
 
     # Allowed-universe filter (avoids ranking arbitrary all-caps false positives): for the
     # 0DTE report, default to the explicitly configured liquid/core underlyings only
@@ -1341,10 +1651,25 @@ def build_odte_social_report(allow_fetch: bool = True, params: dict | None = Non
         win_start, win_end = now - timedelta(hours=max_lb), now
     start_ts, end_ts = win_start.timestamp(), win_end.timestamp()
 
+    # Which session anchor the window used — drives context-aware HOW FRESH wording. Mirrors
+    # market_session_window: weekend / weekday pre-open → previous close; weekday at/after open →
+    # today's open. (Rolling mode has no session anchor.)
+    _et_now = now.astimezone(_eastern())
+    if mode != "market_window":
+        fresh_anchor = "rolling"
+    elif _et_now.weekday() >= 5 or _et_now.time() < dtime(open_hm[0], open_hm[1]):
+        fresh_anchor = "prev_close"
+    else:
+        fresh_anchor = "today_open"
+
     def _fresh(ts: float) -> bool:
         return bool(ts and ts > 0 and start_ts <= ts <= end_ts + 1.0)
 
-    src = _gather_odte_sources(p, allowed, allow_fetch, _fresh, now_ts)
+    # TOP CHATTER ranks against a VALIDATED broad optionable universe (agg_data ∪ core) so bare
+    # uppercase WSB tickers (MSFT/MU/TSLA) count while jargon (FOMC/GEX) is excluded. The SPY
+    # scorecard/candidate keep the core (SPY/QQQ) allowed set.
+    broad_allowed = _optionable_universe(p, list(p.get("core_universe", ["SPY", "QQQ"])))
+    src = _gather_odte_sources(p, allowed, allow_fetch, _fresh, now_ts, broad_allowed)
     ranked, ev_pool = src["ranked"], src["ev_pool"]
 
     min_mentions = int(p.get("min_mentions", 3))
@@ -1362,14 +1687,16 @@ def build_odte_social_report(allow_fetch: bool = True, params: dict | None = Non
     social_intent = summarize_odte_intent("SPY", ev_pool)
     scorecard = build_scorecard(spy_trend, paper_options, social_intent["intent"])
 
-    # TOP CHATTER — compact paper cards for the most-chattered OTHER names (SPY is the backdrop,
-    # not a card). Derived from the same quality-gated ev_pool, so coverage is honestly limited by
-    # the configured (SPY/QQQ-biased) source query — surfaced as a caveat, never hidden.
-    top_chatter = build_top_chatter(ev_pool, allow_fetch, budget, exclude={"SPY"},
-                                    max_n=int(p.get("top_chatter_n", 5)),
-                                    min_mentions=int(p.get("top_chatter_min_mentions", 2)))
-    top_chatter_caveat = ("Top chatter is limited by the configured sources (SPY/QQQ-biased query) — "
-                          "it is not full-market coverage.")
+    # TOP CHATTER — compact paper cards for the most-chattered OTHER names (SPY is the backdrop, not
+    # a card). Ranked over the BROAD evidence pool against the validated optionable universe, so
+    # daily-thread comments about bare-uppercase names contribute. Coverage is still only the
+    # configured sources — surfaced as a caveat, never hidden.
+    top_chatter = build_top_chatter(src.get("broad_ev", ev_pool), allow_fetch, budget,
+                                    exclude={"SPY"}, max_n=int(p.get("top_chatter_n", 5)),
+                                    min_mentions=int(p.get("top_chatter_min_mentions", 2)),
+                                    allowed=broad_allowed)
+    top_chatter_caveat = ("Top chatter covers only the configured sources (this subreddit + the "
+                          "daily thread + the X query) — not the whole market.")
 
     return {
         "generated_at": now.isoformat(timespec="seconds"),
@@ -1378,6 +1705,7 @@ def build_odte_social_report(allow_fetch: bool = True, params: dict | None = Non
         "budget_dollars": budget,
         "freshness_window": {
             "mode": mode,
+            "anchor": fresh_anchor,   # today_open | prev_close | rolling — drives HOW FRESH wording
             "window_start_et": win_start.astimezone(_eastern()).isoformat(timespec="seconds"),
             "window_start_utc": win_start.isoformat(timespec="seconds"),
             "window_end_utc": win_end.isoformat(timespec="seconds"),
@@ -1419,6 +1747,20 @@ def _short_et(iso: str | None) -> str:
         return f"{iso[5:7]}-{iso[8:10]} {iso[11:16]}"  # MM-DD HH:MM
     except Exception:
         return "n/a"
+
+
+def _freshness_phrase(fw: dict) -> str:
+    """Context-aware 'how far back' wording. Pre-open/weekend windows anchor to the PREVIOUS market
+    close (so we must NOT say 'today'); regular-session windows anchor to today's open."""
+    start = _short_et(fw.get("window_start_et"))   # 'MM-DD HH:MM'
+    anchor = fw.get("anchor")
+    if anchor == "today_open":
+        return f"since today's open ({start[-5:]} ET)"           # HH:MM
+    if anchor == "prev_close":
+        return f"since the previous market close ({start} ET)"   # MM-DD HH:MM — not 'today'
+    if anchor == "rolling":
+        return f"in roughly the last {int(fw.get('max_lookback_hours', 96))}h"
+    return f"since {start} ET"
 
 
 # Plain-language verdict labels (no jargon). Maps the scorecard verdict to a beginner sentence.
@@ -1561,8 +1903,7 @@ def format_report(report: dict) -> str:
     rd, xs = report["sources"]["reddit"], report["sources"]["x"]
     lines.append("")
     lines.append(f"HOW FRESH: {rd['n_posts']} fresh Reddit posts (and {xs['n_posts']} from X) "
-                 f"since {_short_et(fw.get('window_start_et'))} ET today; "
-                 f"older or spammy posts were thrown out.")
+                 f"{_freshness_phrase(fw)}; older or spammy posts were thrown out.")
 
     # Practice-only contract examples — rounded dollars, plainly labeled. Shown ONLY when there is
     # an actual CALL/PUT lean AND the surfaced contracts match that direction; on DO NOTHING
