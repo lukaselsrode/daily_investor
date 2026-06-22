@@ -140,11 +140,17 @@ DAILY_THREAD_LIMIT  ?=
 
 # Easy live daily-thread run (paste your token + thread id):
 #   make odte-report REDDIT_BEARER_TOKEN="$REDDIT_TOKEN" DAILY_THREAD_ID=1u9240r
-# Optional: DAILY_THREAD_LIMIT=200 (default 100, max 500) to read more/fewer comments.
+# Hands-off run (for the Hermes agent): just `make odte-report` — when those vars are absent it
+# auto-loads the bearer token + daily-thread-id from ~/0dte/ (reddit_token.json/{"token","expires"}
+# or legacy ~/.reddit_token.json; daily_thread_id.txt or config.json). Explicit vars always win.
+# Optional: DAILY_THREAD_LIMIT=200 to cap comments read (default: auto-paginate the WHOLE thread).
 # You never set comment depth/nesting — that's handled with sane defaults.
+# Each run also dumps the analyzed texts to ~/0dte/{reddit,x}_text.txt (overwritten daily).
+# Agent-friendly: `make odte-report JSON=1` emits clean signal-only JSON (no paper/disclaimer prose);
+# pair with 2>/dev/null to drop log lines, e.g. `make odte-report JSON=1 2>/dev/null`.
 .PHONY: odte-report
-odte-report:                 ## 0DTE social watchlist — PAPER ONLY (live: REDDIT_BEARER_TOKEN="..." DAILY_THREAD_ID=...; OFFLINE=1 for dry run; DAILY_THREAD_LIMIT optional)
-	@$(DI) odte-social-report $(if $(OFFLINE),--no-fetch,) \
+odte-report:                 ## 0DTE social watchlist — PAPER ONLY (live: REDDIT_BEARER_TOKEN="..." DAILY_THREAD_ID=...; OFFLINE=1 dry run; JSON=1 agent output)
+	@$(DI) odte-social-report $(if $(OFFLINE),--no-fetch,) $(if $(JSON),--json,) \
 	  $(if $(REDDIT_BEARER_TOKEN),--reddit-bearer-token $(REDDIT_BEARER_TOKEN),) \
 	  $(if $(DAILY_THREAD_ID),--daily-thread-id $(DAILY_THREAD_ID),) \
 	  $(if $(DAILY_THREAD_URL),--daily-thread-url $(DAILY_THREAD_URL),) \

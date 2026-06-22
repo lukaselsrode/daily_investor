@@ -200,12 +200,35 @@ def _cmd_odte_social_report(rest: list[str]) -> None:
     # --daily-thread-id / --daily-thread-url: explicit override for the WSB daily-thread when
     # listing/search discovery can't find it. Overlaid into a COPY of the params at runtime —
     # never written back to config.
-    from data.social_sentiment import build_odte_social_report, format_report
+    from data.social_sentiment import (
+        build_odte_social_report,
+        format_report,
+        format_report_json,
+        load_0dte_runtime_config,
+    )
     from util import OPTIONS_SOCIAL_PARAMS
+    # --json is a machine contract: stdout must be ONLY the JSON. Logs go to stdout in this CLI, so
+    # silence them for the run (the diagnostics an agent needs are in the JSON's source statuses).
+    if "--json" in rest:
+        import logging
+        logging.disable(logging.ERROR)
     _bearer = _flag_value(rest, "--reddit-bearer-token")
     _dt_id = _flag_value(rest, "--daily-thread-id")
     _dt_url = _flag_value(rest, "--daily-thread-url")
     _dt_limit = _flag_value(rest, "--daily-thread-limit")
+    # Auto-config for hands-off runs (e.g. the Hermes agent): pull creds/thread-id from ~/0dte/
+    # (config.json / reddit_token.json / daily_thread_id.txt). Explicit flags always win. Also export
+    # REDDIT_CLIENT_ID/SECRET (the robust, non-expiring app-OAuth path) so the comments fetch works
+    # without a daily bearer-token refresh. Offline dry runs (--no-fetch) skip all of this.
+    if "--no-fetch" not in rest:
+        _auto = load_0dte_runtime_config()
+        for _env, _key in (("REDDIT_CLIENT_ID", "reddit_client_id"),
+                           ("REDDIT_CLIENT_SECRET", "reddit_client_secret")):
+            if _auto.get(_key) and not os.environ.get(_env):
+                os.environ[_env] = _auto[_key]
+        _bearer = _bearer or _auto.get("reddit_bearer_token")
+        if not (_dt_id or _dt_url):
+            _dt_id = _dt_id or _auto.get("daily_thread_id")
     _params = None
     if _dt_id or _dt_url or _dt_limit:
         _params = {**OPTIONS_SOCIAL_PARAMS}   # shallow copy; global config left untouched
@@ -221,7 +244,8 @@ def _cmd_odte_social_report(rest: list[str]) -> None:
                 sys.exit(2)
     rep = build_odte_social_report(allow_fetch="--no-fetch" not in rest,
                                    params=_params, reddit_bearer_token=_bearer)
-    print(format_report(rep))
+    # --json: clean, machine-ingestible payload for an agent (signal only, no paper/disclaimer prose).
+    print(format_report_json(rep) if "--json" in rest else format_report(rep))
 
 
 def _cmd_stability_scan(rest: list[str]) -> None:
@@ -447,12 +471,13 @@ COMMANDS
                            Reddit (JSON+Atom fallback) + X (official API only if X_BEARER_TOKEN);
                            DAY-OF posts only; attaches a PAPER same-day option idea (yfinance);
                            --no-fetch = offline (no network, no options lookup);
+                           --json = clean signal-only JSON for an agent (no prose; logs silenced);
                            --reddit-bearer-token TOKEN = optional ephemeral read-only token for WSB
                            daily-thread comments (never stored/logged; not cookies);
                            --daily-thread-id ID / --daily-thread-url URL = override daily-thread
                            discovery (runtime only; not persisted to config);
-                           --daily-thread-limit N = bounded comment SAMPLE size (default 100, cap
-                           500; a big thread is sampled, not read in full).
+                           --daily-thread-limit N = cap on comments read (default: auto-paginate
+                           the WHOLE thread, up to a runaway safety ceiling).
   options-social           Alias for odte-social-report (identical behavior and options).
 
 OPTIONS (run)

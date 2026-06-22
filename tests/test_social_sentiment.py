@@ -1405,7 +1405,7 @@ def test_daily_thread_comments_folded_into_ev_pool_and_top_chatter(monkeypatch):
     assert rep["daily_thread"]["n_comments"] == 3
     assert "included" in rep["daily_thread"]["status"]
     assert "QQQ" in [c["ticker"] for c in rep["top_chatter"]]   # comments fed top chatter
-    assert "3 sampled, 3 included" in ss.format_report(rep)
+    assert "3 read, 3 included" in ss.format_report(rep)
 
 
 def test_reddit_comments_uses_oauth_bearer_when_creds_present(monkeypatch):
@@ -1646,20 +1646,194 @@ def test_daily_thread_noise_filter_applied_in_fetch(monkeypatch):
                                                          allow_fetch=True)
     bodies = [c["body"] for c in comments]
     assert bodies == ["SPY 0dte calls"]
-    assert "1 included" in status and "sampled" in status
+    assert "1 included" in status and "read" in status
+
+
+def test_engagement_weight_bounded_and_monotone():
+    """Upvote weight is 1.0 at score 0 (X posts / new comments), strictly increasing, and log-damped
+    so a viral comment lifts but never swamps: +5000 stays under 5x a single ignored doc."""
+    assert ss.engagement_weight(0) == pytest.approx(1.0)
+    assert ss.engagement_weight(-50) == pytest.approx(1.0)        # net-negative floored (dropped upstream)
+    assert ss.engagement_weight(9) == pytest.approx(2.0)
+    assert ss.engagement_weight(99) == pytest.approx(3.0)
+    assert ss.engagement_weight(1) < ss.engagement_weight(42) < ss.engagement_weight(5000)
+    assert ss.engagement_weight(5000) < 5.0                       # damped, not unbounded
+
+
+def test_parse_comments_captures_vote_signals(monkeypatch):
+    """The comment parser captures the vote signals upvote-scoring needs: score, score_hidden, and
+    controversiality (defaulting safely when Reddit omits them)."""
+    payload = [
+        {"kind": "Listing", "data": {"children": []}},
+        {"kind": "Listing", "data": {"children": [
+            {"kind": "t1", "data": {"body": "SPY calls", "score": 42,
+                                    "score_hidden": True, "controversiality": 1, "author": "u/a"}},
+            {"kind": "t1", "data": {"body": "QQQ puts", "score": -8, "author": "u/b"}},
+        ]}},
+    ]
+    monkeypatch.setattr(ss.requests, "get", lambda *a, **k: _FakeResp(payload))
+    c = ss.fetch_reddit_comments("abc", limit=5)
+    assert c[0]["score_hidden"] is True and c[0]["controversiality"] == 1
+    assert c[1]["score"] == -8 and c[1]["score_hidden"] is False and c[1]["controversiality"] == 0
+
+
+def test_is_downvoted_drops_only_settled_negatives():
+    """Net-negative settled comments are rejected; positive and still-fuzzing (score_hidden) ones
+    get the benefit of the doubt and are kept."""
+    assert ss._is_downvoted({"score": -3}) is True
+    assert ss._is_downvoted({"score": 0}) is False
+    assert ss._is_downvoted({"score": 5}) is False
+    assert ss._is_downvoted({"score": -3, "score_hidden": True}) is False   # votes not settled yet
+
+
+def test_daily_thread_drops_downvoted_comments(monkeypatch):
+    """Community-rejected (net-negative) comments are dropped in the same pass as text noise, so they
+    never reach the evidence pool / ranking / sentiment."""
+    monkeypatch.setattr(ss, "fetch_reddit_comments", lambda *a, **k: [
+        {"body": "SPY 0dte calls printing", "score": 50, "author": "u1"},     # keep (upvoted)
+        {"body": "SPY 0dte puts here we go", "score": -4, "author": "u2"},     # drop (downvoted take)
+        {"body": "QQQ 0dte calls new idea", "score": 1, "score_hidden": True, "author": "u3"}])  # keep
+    posts = [{"id": "1u9240r", "title": "Daily Discussion Thread for June 18, 2026"}]
+    comments, status, _ = ss.fetch_daily_thread_comments(posts, {"reddit_bearer_token": "T"},
+                                                         allow_fetch=True)
+    bodies = [c["body"] for c in comments]
+    assert "SPY 0dte calls printing" in bodies and "QQQ 0dte calls new idea" in bodies
+    assert "SPY 0dte puts here we go" not in bodies
+    assert "2 included" in status
+
+
+def test_summarize_intent_is_upvote_weighted():
+    """A single heavily-upvoted bullish comment outweighs several low-score bearish ones: the lean
+    follows community endorsement, not raw head-count. n_docs stays an honest raw count."""
+    ev_pool = [
+        {"text": "GME calls moon bullish breakout", "score": 800},   # 1 doc, hugely upvoted
+        {"text": "GME puts short bearish", "score": 1},
+        {"text": "GME puts dump bearish crash", "score": 1},
+    ]
+    out = ss.summarize_odte_intent("GME", ev_pool)
+    assert out["intent"] == "bullish"          # upvoted bull doc wins despite being outnumbered
+    assert out["n_docs"] == 3                   # raw chatter count is honest, not weighted
+
+
+def test_rank_top_chatter_orders_by_upvotes_but_counts_raw():
+    """Ranking order follows engagement (upvoted ticker first) while the returned count stays a raw,
+    honest mention head-count for the '(N posts)' label."""
+    allowed = {"AAA", "BBB"}
+    ev_pool = [
+        {"text": "$BBB calls", "score": 500},                       # 1 mention, heavily upvoted
+        {"text": "$AAA calls", "score": 0},                         # 3 low-score mentions
+        {"text": "$AAA puts", "score": 0},
+        {"text": "$AAA again", "score": 0},
+    ]
+    ranked = ss.rank_top_chatter(ev_pool, exclude=frozenset(), max_n=5, min_mentions=1, allowed=allowed)
+    order = [t for t, _ in ranked]
+    counts = dict(ranked)
+    assert order[0] == "BBB"                    # upvoted name ranks first despite fewer mentions
+    assert counts["AAA"] == 3 and counts["BBB"] == 1   # displayed counts are raw, not weighted
+
+
+def test_recency_weight_monotone_and_bounded():
+    """Newest doc weighs 1.0; older docs decay (half every 2h) but never below the floor; missing ts
+    or no anchor → neutral 1.0."""
+    ref = 100_000.0
+    assert ss._recency_weight(ref, ref) == pytest.approx(1.0)            # newest
+    assert ss._recency_weight(ref - 7200, ref) == pytest.approx(0.5)     # one half-life older
+    assert ss._recency_weight(ref - 14400, ref) == pytest.approx(0.25)   # two half-lives older
+    assert ss._recency_weight(0, ref) == 1.0                             # no ts → neutral
+    assert ss._recency_weight(ref - 10**9, ref) == pytest.approx(0.1)    # floored, not ~0
+
+
+def test_summarize_intent_weights_recent_higher():
+    """Two equally-upvoted, opposite-direction comments: the more RECENT one steers the lean."""
+    ref = 1_700_000_000.0
+    ev_pool = [
+        {"text": "GME calls moon bullish breakout", "score": 5, "ts": ref},          # now → full weight
+        {"text": "GME puts short bearish crash dump", "score": 5, "ts": ref - 36000},  # 10h ago → decayed
+    ]
+    out = ss.summarize_odte_intent("GME", ev_pool)
+    assert out["intent"] == "bullish"     # recent bull outweighs the stale, equally-upvoted bear
+    assert out["n_docs"] == 2             # raw chatter count stays honest
+
+
+def test_v_is_not_treated_as_ticker():
+    """Bare 'V' / '$V' is the V-bounce chart pattern in 0DTE chatter, not Visa — it must not surface
+    as a mention or in TOP CHATTER."""
+    assert "V" not in ss.extract_ticker_mentions(["we get a V here", "$V bounce incoming"],
+                                                 allowed={"V", "SPY"})
+    ev_pool = [{"text": "$V V-shaped bounce", "score": 10, "ts": 1.0},
+               {"text": "$V recovery V", "score": 10, "ts": 1.0}]
+    assert "V" not in [t for t, _ in ss.rank_top_chatter(ev_pool, exclude=frozenset(),
+                                                         min_mentions=1, allowed={"V"})]
+
+
+def test_fetch_reddit_comments_paginates_more(monkeypatch):
+    """fetch_reddit_comments auto-follows 'more' links (morechildren) so a thread larger than one
+    page is fully read — the caller never manages pagination."""
+    listing = [
+        {"kind": "Listing", "data": {"children": [{"kind": "t3", "data": {"id": "abc"}}]}},
+        {"kind": "Listing", "data": {"children": [
+            {"kind": "t1", "data": {"body": "first page comment", "score": 5, "author": "u/a"}},
+            {"kind": "more", "data": {"children": ["m1", "m2"]}},
+        ]}},
+    ]
+    paged = {"json": {"data": {"things": [
+        {"kind": "t1", "data": {"body": "paged comment one", "score": 3, "author": "u/b"}},
+        {"kind": "t1", "data": {"body": "paged comment two", "score": 2, "author": "u/c"}},
+    ]}}}
+    monkeypatch.setattr(ss.requests, "get",
+                        lambda url, *a, **k: _FakeResp(paged if "morechildren" in url else listing))
+    comments = ss.fetch_reddit_comments("abc", limit=100)
+    assert [c["body"] for c in comments] == [
+        "first page comment", "paged comment one", "paged comment two"]
+
+
+def test_fetch_reddit_comments_pagination_fail_closed(monkeypatch):
+    """If a morechildren page errors, paging stops and the comments already read are kept (never
+    drops back to empty)."""
+    listing = [
+        {"kind": "Listing", "data": {"children": []}},
+        {"kind": "Listing", "data": {"children": [
+            {"kind": "t1", "data": {"body": "page one only", "score": 4, "author": "u/a"}},
+            {"kind": "more", "data": {"children": ["m1"]}},
+        ]}},
+    ]
+
+    def flaky_get(url, *a, **k):
+        if "morechildren" in url:
+            raise ss.requests.RequestException("boom")
+        return _FakeResp(listing)
+
+    monkeypatch.setattr(ss.requests, "get", flaky_get)
+    comments = ss.fetch_reddit_comments("abc", limit=100)
+    assert [c["body"] for c in comments] == ["page one only"]
+
+
+def test_comment_dict_captures_created_utc(monkeypatch):
+    """created_utc is parsed onto each comment so recency weighting has a real timestamp."""
+    payload = [
+        {"kind": "Listing", "data": {"children": []}},
+        {"kind": "Listing", "data": {"children": [
+            {"kind": "t1", "data": {"body": "SPY calls", "score": 1, "created_utc": 1_700_000_123.0,
+                                    "author": "u/a"}},
+        ]}},
+    ]
+    monkeypatch.setattr(ss.requests, "get", lambda *a, **k: _FakeResp(payload))
+    c = ss.fetch_reddit_comments("abc", limit=5)
+    assert c[0]["created_utc"] == 1_700_000_123.0
 
 
 def test_daily_thread_limit_clamped():
-    """Sample size clamps to [1, 500] (a big thread is sampled, not read in full)."""
+    """Read size clamps to [1, _DAILY_LIMIT_CAP]: by default the whole thread is auto-paginated; the
+    cap is only a runaway safety net, and a smaller value still passes through for a partial read."""
     assert ss._clamp_daily_limit(150) == 150
-    assert ss._clamp_daily_limit(99999) == 500     # cap
-    assert ss._clamp_daily_limit(0) == 1           # floor
+    assert ss._clamp_daily_limit(99999999) == ss._DAILY_LIMIT_CAP   # cap (runaway safety net)
+    assert ss._clamp_daily_limit(0) == 1                            # floor
     assert ss._clamp_daily_limit("nope") == ss._DAILY_LIMIT_DEFAULT
 
 
-def test_daily_thread_limit_passed_to_fetch_and_status_says_sampled(monkeypatch):
-    """The configured daily_thread_limit is passed to the comment fetch, and the status says the
-    comments are SAMPLED (not exhaustive)."""
+def test_daily_thread_limit_passed_to_fetch_and_status_says_read(monkeypatch):
+    """The configured daily_thread_limit is passed to the comment fetch, and the status reports how
+    many were READ (auto-paginated) vs included — using the actual count, never the raw thread size."""
     import time as _t
     now = _t.time()
     listing = {"data": {"children": [
@@ -1679,11 +1853,11 @@ def test_daily_thread_limit_passed_to_fetch_and_status_says_sampled(monkeypatch)
     rep = ss.build_odte_social_report(allow_fetch=True, params={
         "sources": ["reddit"], "core_universe": ["SPY", "QQQ"], "min_mentions": 1,
         "daily_thread_limit": 150})
-    assert seen["limit"] == 150                                  # configured sample size passed through
+    assert seen["limit"] == 150                                  # configured read size passed through
     status = rep["daily_thread"]["status"]
-    assert "sampled" in status                                  # not implied exhaustive
+    assert "read" in status                                     # reports actual comments read
     assert "all" not in status.split("(")[0].lower()            # no 'all 11k' implication
-    assert "11000" not in ss.format_report(rep)                 # never claims the full count
+    assert "11000" not in ss.format_report(rep)                 # never claims the raw thread size
 
 
 def test_cli_daily_thread_limit_plumbing(monkeypatch):

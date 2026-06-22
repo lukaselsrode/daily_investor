@@ -11,8 +11,10 @@ Network is optional: every fetch fails closed (returns empty + status), and resu
 """
 from __future__ import annotations
 
+import html
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -38,6 +40,8 @@ _REDDIT_TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
 _REDDIT_OAUTH_URL = "https://oauth.reddit.com/r/{sub}/{listing}"
 _REDDIT_COMMENTS_JSON_URL = "https://www.reddit.com/comments/{id}.json"
 _REDDIT_OAUTH_COMMENTS_URL = "https://oauth.reddit.com/comments/{id}"
+_REDDIT_MORECHILDREN_URL = "https://www.reddit.com/api/morechildren.json"
+_REDDIT_OAUTH_MORECHILDREN_URL = "https://oauth.reddit.com/api/morechildren"
 _REDDIT_SEARCH_JSON_URL = "https://www.reddit.com/r/{sub}/search.json"
 _REDDIT_OAUTH_SEARCH_URL = "https://oauth.reddit.com/r/{sub}/search"
 _X_RECENT_URL = "https://api.twitter.com/2/tweets/search/recent"
@@ -64,6 +68,9 @@ _STOPWORDS = frozenset({
     "LOL", "LMAO", "PUT", "PUTS", "CALL", "CALLS", "BUY", "SELL", "HOLD", "MOON", "BULL", "BEAR",
     "RH", "API", "CPI", "FED", "GDP", "EPS", "PE", "ROI", "WSJ", "CNBC", "SEC", "IRS", "OK", "TA",
     "HODL", "RIP", "ELI", "EV", "AI", "OP", "IV", "OTM", "ITM", "YOY", "QOQ", "EOY",
+    # 'V' in 0DTE chatter is the V-shaped-recovery / 'V bounce' pattern, NOT Visa — exclude it so
+    # "we get a V here" doesn't surface as a Visa mention (the bare-letter false positive the user hit):
+    "V",
     # 0DTE/flow jargon that looks like a ticker but isn't (kept out of mention ranking):
     "FOMC", "OPEX", "GEX", "OI", "ALERT", "WHALE", "PR", "DTE", "ODTE", "SPX", "VIX",
     # TA-indicator abbreviations — in 0DTE chatter these mean the indicator, not the (minor) ticker:
@@ -276,36 +283,102 @@ def _reddit_oauth_token() -> str | None:
         return None
 
 
-def _parse_reddit_comments(payload, limit: int) -> list[dict]:
-    """Parse Reddit's ``/comments/{id}`` JSON ([post_listing, comments_listing]) into top-level
-    comment dicts {body, score, author}. Skips non-comment ("more"/load-more) nodes."""
+def _comment_dict(d: dict) -> dict | None:
+    """One top-level comment's fields, or None for an empty body. Captures the vote signals
+    upvote-scoring needs — ``score`` (net karma ups−downs), ``score_hidden`` (Reddit's initial
+    vote-fuzzing window), ``controversiality`` (0/1, near-tied votes) — plus ``created_utc`` for
+    recency weighting (newer comments weigh more)."""
+    body = (d.get("body") or "").strip()
+    if not body:
+        return None
+    return {"body": body[:500], "score": int(d.get("score", 0) or 0),
+            "score_hidden": bool(d.get("score_hidden", False)),
+            "controversiality": int(d.get("controversiality", 0) or 0),
+            "created_utc": float(d.get("created_utc", 0.0) or 0.0),
+            "author": d.get("author")}
+
+
+def _parse_reddit_comment_listing(payload, limit: int) -> tuple[list[dict], list[str]]:
+    """Parse Reddit's ``/comments/{id}`` JSON ([post_listing, comments_listing]) into
+    (top-level comment dicts, remaining 'more'-child ids). The 'more' ids let the caller page the
+    rest of a big thread (_expand_more_comments); deeper-reply nodes are skipped."""
     try:
         children = payload[1]["data"]["children"]
     except Exception:
-        return []
+        return [], []
     out: list[dict] = []
+    more_ids: list[str] = []
     for c in children:
-        if not isinstance(c, dict) or c.get("kind") != "t1":
+        if not isinstance(c, dict):
             continue
-        d = c.get("data", {}) or {}
-        body = (d.get("body") or "").strip()
-        if not body:
+        if c.get("kind") == "more":
+            more_ids.extend((c.get("data", {}) or {}).get("children", []) or [])
             continue
-        out.append({"body": body[:500], "score": int(d.get("score", 0) or 0),
-                    "author": d.get("author")})
-        if len(out) >= limit:
-            break
-    return out
+        if c.get("kind") != "t1":
+            continue
+        cd = _comment_dict(c.get("data", {}) or {})
+        if cd and len(out) < limit:
+            out.append(cd)
+    return out, more_ids
+
+
+def _reddit_comment_auth(bearer_token: str | None) -> tuple[bool, dict]:
+    """(use_oauth, headers) for the comment endpoints, honoring the auth order app OAuth → explicit
+    caller bearer → anonymous public. Headers may carry the token but are NEVER logged."""
+    ua = _reddit_user_agent()
+    token = _reddit_oauth_token()
+    if token:                                  # (A) app-only OAuth
+        return True, {"Authorization": f"bearer {token}", "User-Agent": ua}
+    if bearer_token:                           # (B) explicit caller-supplied bearer (never logged)
+        return True, {"Authorization": f"Bearer {bearer_token}", "User-Agent": ua}
+    return False, {"User-Agent": ua}           # (C) anonymous public JSON
+
+
+def _expand_more_comments(post_id: str, out: list[dict], more_ids: list[str], limit: int,
+                          use_oauth: bool, headers: dict, max_pages: int = 120) -> list[dict]:
+    """Follow Reddit's ``more``-children links (the morechildren API, 100 ids/request) to pull the
+    WHOLE thread's top-level comments — so the caller never manages pagination. Bounded by ``limit``
+    and ``max_pages`` (a runaway safety net) and FAIL-CLOSED: any error stops paging and keeps what
+    was already collected. Extends and returns ``out`` (<= ``limit``)."""
+    url = _REDDIT_OAUTH_MORECHILDREN_URL if use_oauth else _REDDIT_MORECHILDREN_URL
+    ids = list(more_ids)
+    pages = 0
+    while ids and len(out) < limit and pages < max_pages:
+        batch, ids = ids[:100], ids[100:]
+        pages += 1
+        try:
+            r = requests.get(url, headers=headers, params={
+                "api_type": "json", "link_id": f"t3_{post_id}", "children": ",".join(batch),
+                "sort": "new", "raw_json": 1}, timeout=15)
+            r.raise_for_status()
+            things = (((r.json() or {}).get("json") or {}).get("data") or {}).get("things") or []
+        except Exception as exc:
+            logger.warning("reddit morechildren fetch failed for %s (%s)", post_id, exc)  # never logs token
+            break   # fail-closed: keep the comments already collected
+        for c in things:
+            if not isinstance(c, dict):
+                continue
+            if c.get("kind") == "more":
+                ids.extend((c.get("data", {}) or {}).get("children", []) or [])
+            elif c.get("kind") == "t1" and len(out) < limit:
+                cd = _comment_dict(c.get("data", {}) or {})
+                if cd:
+                    out.append(cd)
+    if ids and len(out) >= limit:
+        logger.info("reddit comments for %s capped at %d (%d more unfetched)", post_id, limit, len(ids))
+    return out[:limit]
 
 
 def fetch_reddit_comments(post_id: str, limit: int = 5, ttl_s: float = 900,
                           allow_fetch: bool = True, bearer_token: str | None = None) -> list[dict]:
-    """Top-level comments for a post, cache-backed and fail-closed. Auth order:
-    (A) app-only OAuth when REDDIT_CLIENT_ID/SECRET are set; (B) an explicit, caller-supplied
-    ``bearer_token`` (read-only, ephemeral — passed as an ARGUMENT, never read from cookies/.env,
-    never logged); (C) anonymous public JSON. Returns ``[{body, score, author}]`` (<= ``limit``).
-    The token is used ONLY as an ``Authorization: Bearer`` header against oauth.reddit.com and is
-    never cached, returned, or logged."""
+    """Top-level comments for a post, cache-backed and fail-closed. AUTO-PAGINATES Reddit's
+    'more comments' links so it returns the WHOLE thread's top-level comments up to ``limit`` (the
+    caller never manages paging). Auth order: (A) app-only OAuth when REDDIT_CLIENT_ID/SECRET are
+    set; (B) an explicit, caller-supplied ``bearer_token`` (read-only, ephemeral — passed as an
+    ARGUMENT, never read from cookies/.env, never logged); (C) anonymous public JSON. Returns
+    ``[{body, score, score_hidden, controversiality, created_utc, author}]`` (<= ``limit``). The
+    token is used ONLY as an ``Authorization`` header against oauth.reddit.com and is never cached,
+    returned, or logged."""
     if not post_id:
         return []
     key = f"reddit_comments_{post_id}_{limit}"
@@ -314,25 +387,17 @@ def fetch_reddit_comments(post_id: str, limit: int = 5, ttl_s: float = 900,
         return cached
     if not allow_fetch:
         return []
-    token = _reddit_oauth_token()
-    ua = _reddit_user_agent()
-    params = {"limit": limit, "depth": 1, "sort": "new", "raw_json": 1}
+    use_oauth, headers = _reddit_comment_auth(bearer_token)
+    base = _REDDIT_OAUTH_COMMENTS_URL if use_oauth else _REDDIT_COMMENTS_JSON_URL
+    # Reddit caps a single comments listing near ~500; request that, then page the rest via 'more'.
+    params = {"limit": min(limit, 500), "depth": 1, "sort": "new", "raw_json": 1}
     try:
-        if token:   # (A) app-only OAuth
-            r = requests.get(_REDDIT_OAUTH_COMMENTS_URL.format(id=post_id),
-                             headers={"Authorization": f"bearer {token}", "User-Agent": ua},
-                             params=params, timeout=15)
-        elif bearer_token:   # (B) explicit caller-supplied bearer token (never logged/cached)
-            r = requests.get(_REDDIT_OAUTH_COMMENTS_URL.format(id=post_id),
-                             headers={"Authorization": f"Bearer {bearer_token}", "User-Agent": ua},
-                             params=params, timeout=15)
-        else:   # (C) anonymous public JSON
-            r = requests.get(_REDDIT_COMMENTS_JSON_URL.format(id=post_id),
-                             headers={"User-Agent": ua}, params=params, timeout=15)
+        r = requests.get(base.format(id=post_id), headers=headers, params=params, timeout=15)
         r.raise_for_status()
-        comments = _parse_reddit_comments(r.json() or [], limit)
-        _write_cache(key, comments)
-        return comments
+        out, more_ids = _parse_reddit_comment_listing(r.json() or [], limit)
+        out = _expand_more_comments(post_id, out, more_ids, limit, use_oauth, headers)
+        _write_cache(key, out)
+        return out
     except Exception as exc:
         logger.warning("reddit comments fetch failed for %s (%s)", post_id, exc)  # never logs token
         return []
@@ -420,12 +485,42 @@ def extract_ticker_mentions(texts, allowed: set[str] | None = None) -> Counter:
     return cnt
 
 
+def engagement_weight(score) -> float:
+    """Bounded community-endorsement weight for one doc, from its net Reddit score (ups − downs):
+    ``1 + log10(1 + max(score, 0))``. A score of 0 (X posts, brand-new comments) weighs 1.0; +9 → 2.0;
+    +99 → 3.0; a viral +5000 → ~4.7. The log damping lets a strongly-upvoted comment lift a ticker's
+    rank / directional lean WITHOUT one mega-upvoted post swamping a dozen ordinary ones. Net-negative
+    comments are dropped upstream (_is_downvoted), so the max(score,0) floor only ever clamps to 0."""
+    return 1.0 + math.log10(1.0 + max(float(score or 0), 0.0))
+
+
+_RECENCY_HALF_LIFE_S = 7200.0   # 2h: a 0DTE doc loses half its weight every 2 hours of age
+
+
+def _recency_weight(ts, ref_ts, half_life_s: float = _RECENCY_HALF_LIFE_S, floor: float = 0.1) -> float:
+    """Recency multiplier in (floor, 1]: 1.0 for the newest doc, halving every ``half_life_s`` of age
+    measured against the most-recent doc (``ref_ts``). In a 0DTE session a comment from an hour ago is
+    worth more than one from the open, so newer chatter steers the read. Floored so old-but-relevant
+    chatter still counts a little; missing/zero ts (or no ref) → 1.0 (neutral)."""
+    if not ts or not ref_ts or ts >= ref_ts:
+        return 1.0
+    return max(floor, 0.5 ** ((ref_ts - ts) / half_life_s))
+
+
+def _doc_weight(score, ts, ref_ts) -> float:
+    """Combined per-doc weight = community endorsement (upvotes) × recency (newer = heavier)."""
+    return engagement_weight(score) * _recency_weight(ts, ref_ts)
+
+
 def score_social(mentions: Counter, documents: list[dict]) -> dict:
     """RAW-CHATTER ranking heuristic (coarse keyword tally) — per-ticker transparent scores from
-    `documents` (each {text, ts, weight}):
-      hype      = share of total mentions (0..1)
-      sentiment = (bull-bear)/(bull+bear) over docs mentioning the ticker (-1..1)
+    `documents` (each {text, ts, weight}), where ``weight`` is the doc's net Reddit score:
+      hype      = share of total mentions (0..1)               [raw mention share — honest count]
+      sentiment = (bull-bear)/(bull+bear) over docs mentioning the ticker (-1..1), with each doc's
+                  bull/bear keyword hits weighted by _doc_weight (upvotes × recency) so upvoted AND
+                  recent comments drive the lean while ignored or stale ones barely register
       momentum  = share of the ticker's mention-docs newer than the median doc timestamp (0..1)
+    bull/bear are reported as RAW keyword counts (display honesty); only `sentiment` is weighted.
 
     NOTE: this is intentionally SEPARATE from the SPY decision scorecard. It drives only the
     'CROWD CHATTER' mention ranking and the candidate's option-chain direction. The scorecard's
@@ -434,28 +529,35 @@ def score_social(mentions: Counter, documents: list[dict]) -> dict:
     total = sum(mentions.values()) or 1
     ts_all = sorted(d.get("ts", 0.0) for d in documents)
     median_ts = ts_all[len(ts_all) // 2] if ts_all else 0.0
+    ref_ts = ts_all[-1] if ts_all else 0.0    # newest doc — recency anchor for _doc_weight
     out: dict = {}
     for tk, n in mentions.items():
         tkl = tk.lower()
         pat = re.compile(rf"\$?\b{re.escape(tkl)}\b", re.IGNORECASE)
-        bull = bear = recent = hits = 0
+        bull = bear = recent = hits = 0       # raw keyword / doc counts (display)
+        bull_w = bear_w = 0.0                  # upvote × recency-weighted keyword strength (drives sentiment)
         for d in documents:
             txt = (d.get("text", "") or "")
             if not pat.search(txt):
                 continue
             hits += 1
             low = txt.lower()
-            bull += sum(low.count(w) for w in _BULL)
-            bear += sum(low.count(w) for w in _BEAR)
+            w = _doc_weight(d.get("weight", 0), d.get("ts", 0.0), ref_ts)
+            nb = sum(low.count(x) for x in _BULL)
+            nk = sum(low.count(x) for x in _BEAR)
+            bull += nb
+            bear += nk
+            bull_w += w * nb
+            bear_w += w * nk
             if d.get("ts", 0.0) >= median_ts:
                 recent += 1
-        denom = (bull + bear) or 1
+        denom_w = (bull_w + bear_w) or 1.0
         out[tk] = {
             "mentions": int(n),
             "hype": round(n / total, 4),
             "bull": int(bull),
             "bear": int(bear),
-            "sentiment": round((bull - bear) / denom, 3),
+            "sentiment": round((bull_w - bear_w) / denom_w, 3),
             "momentum": round(recent / hits, 3) if hits else 0.0,
         }
     return out
@@ -840,7 +942,9 @@ def summarize_odte_intent(ticker: str, ev_pool: list[dict], max_examples: int = 
     the resolved ``intent``, and intent-supporting example spans. ``intent`` is
     'bullish'/'bearish'/'neutral'. Matches the ticker symbol OR a validated company-name alias."""
     pat = _ticker_doc_re(ticker)
-    bull = bear = n_docs = n_bull = n_bear = 0
+    bull = bear = 0.0                       # upvote × recency-weighted bull/bear vote totals (drive intent)
+    n_docs = n_bull = n_bear = 0           # raw doc counts (honest display / chatter rank)
+    ref_ts = max((c.get("ts", 0.0) or 0.0 for c in ev_pool), default=0.0)   # newest doc — recency anchor
     bull_ex: list[str] = []
     bear_ex: list[str] = []
     for c in ev_pool:
@@ -848,9 +952,10 @@ def summarize_odte_intent(ticker: str, ev_pool: list[dict], max_examples: int = 
         if not pat.search(txt):
             continue
         n_docs += 1
+        w = _doc_weight(c.get("score", 0), c.get("ts", 0.0), ref_ts)   # upvoted AND recent weigh more
         r = classify_odte_intent(txt, ticker)
-        bull += r["bull"]
-        bear += r["bear"]
+        bull += w * r["bull"]
+        bear += w * r["bear"]
         if r["intent"] == "bullish":
             n_bull += 1
         elif r["intent"] == "bearish":
@@ -868,7 +973,7 @@ def summarize_odte_intent(ticker: str, ev_pool: list[dict], max_examples: int = 
     # examples must SUPPORT the resolved intent (not just any matched span). Neutral shows none.
     examples = (bull_ex if intent == "bullish"
                 else bear_ex if intent == "bearish" else [])[:max_examples]
-    return {"ticker": ticker, "intent": intent, "bull": bull, "bear": bear,
+    return {"ticker": ticker, "intent": intent, "bull": round(bull, 2), "bear": round(bear, 2),
             "bull_examples": bull_ex[:max_examples], "bear_examples": bear_ex[:max_examples],
             # SEPARATED concepts: mention/chatter vs directional evidence vs resolved intent.
             "n_docs": n_docs,                      # mention_count / chatter rank
@@ -1257,11 +1362,24 @@ def rank_top_chatter(ev_pool: list[dict], exclude: set[str] = frozenset({"SPY"})
     When `allowed` (a VALIDATED optionable universe, e.g. agg_data ∪ core) is given, bare uppercase
     tickers count too — WSB comments often omit the `$` — but only when they're in that universe, so
     jargon ('FOMC'/'GEX'/'OI') is excluded. Without `allowed`, falls back to cashtag-only (the safe
-    default that never surfaces jargon)."""
-    texts = [c.get("text", "") for c in ev_pool]
-    cnt = extract_ticker_mentions(texts, allowed=allowed) if allowed else _cashtag_mentions(texts)
-    items = [(t, n) for t, n in cnt.items() if t not in exclude and n >= min_mentions]
-    items.sort(key=lambda kv: (-kv[1], kv[0]))
+    default that never surfaces jargon).
+
+    ORDER is weighted by _doc_weight (upvotes × recency — a ticker carried by upvoted, recent
+    comments outranks one carried by ignored or stale ones), but the floor and the returned count
+    stay RAW mention counts so the report's '(N posts)' label remains an honest head-count."""
+    raw: Counter = Counter()       # honest mention count — what the report shows / the floor checks
+    wt: Counter = Counter()        # upvote × recency-weighted mention strength — what we rank by
+    ref_ts = max((c.get("ts", 0.0) or 0.0 for c in ev_pool), default=0.0)   # newest doc — recency anchor
+    for c in ev_pool:
+        text = c.get("text", "") or ""
+        per_doc = (extract_ticker_mentions([text], allowed=allowed) if allowed
+                   else _cashtag_mentions([text]))
+        w = _doc_weight(c.get("score", 0), c.get("ts", 0.0), ref_ts)
+        for sym, k in per_doc.items():
+            raw[sym] += k
+            wt[sym] += k * w
+    items = [(t, n) for t, n in raw.items() if t not in exclude and n >= min_mentions]
+    items.sort(key=lambda kv: (-wt[kv[0]], kv[0]))
     return items[:max_n]
 
 
@@ -1419,14 +1537,14 @@ def _reddit_auth_label(bearer_token: str | None) -> str:
     return "bearer token" if bearer_token else "public"
 
 
-_DAILY_LIMIT_DEFAULT = 100
-_DAILY_LIMIT_CAP = 500
+_DAILY_LIMIT_DEFAULT = 10000   # default: read the WHOLE thread (fetch_reddit_comments auto-paginates)
+_DAILY_LIMIT_CAP = 10000       # hard safety ceiling so a runaway thread can't page forever
 
 
 def _clamp_daily_limit(n) -> int:
-    """Clamp the daily-thread comment SAMPLE size to [1, _DAILY_LIMIT_CAP]. A big WSB daily thread
-    has thousands of comments; we intentionally read only a bounded first-page SAMPLE (no
-    replace_more / deep pagination) to keep runtime sane — the status says 'sampled', not 'all'."""
+    """Clamp the daily-thread comment read size to [1, _DAILY_LIMIT_CAP]. fetch_reddit_comments
+    auto-paginates 'more comments', so by default we read the WHOLE thread (up to the cap); the cap
+    is just a runaway safety net. Lower it (daily_thread_limit) for a faster, partial read."""
     try:
         return max(1, min(int(n), _DAILY_LIMIT_CAP))
     except (TypeError, ValueError):
@@ -1501,6 +1619,16 @@ def _is_noise_comment(text: str) -> bool:
     return len(t) <= 30        # very short, non-actionable low-info
 
 
+def _is_downvoted(c: dict) -> bool:
+    """True if the community actively REJECTED a comment (net score < 0) — a take the crowd voted
+    down, which must not drive ranking/sentiment. Comments still inside Reddit's initial
+    vote-fuzzing window (``score_hidden``) get the benefit of the doubt and are KEPT: you can't
+    penalize a take the crowd hasn't finished voting on yet."""
+    if c.get("score_hidden"):
+        return False
+    return int(c.get("score", 0) or 0) < 0
+
+
 def fetch_daily_thread_comments(posts: list[dict], params: dict, allow_fetch: bool = True,
                                 limit: int = _DAILY_LIMIT_DEFAULT) -> tuple[list[dict], str, str]:
     """Official/fail-closed fetch of today's daily-thread top comments. Auth order: app OAuth →
@@ -1516,20 +1644,184 @@ def fetch_daily_thread_comments(posts: list[dict], params: dict, allow_fetch: bo
         return [], "no daily discussion thread found (listing or search)", ""
     bearer = params.get("reddit_bearer_token") or None   # runtime arg only; never persisted/logged
     raw = fetch_reddit_comments(tid, limit=limit, allow_fetch=allow_fetch, bearer_token=bearer)
-    # Drop low-information chatter (bot/banbet, off-topic, one-word, bare price questions) BEFORE
-    # the comments enter the evidence pool / ticker ranking / sentiment.
-    comments = [c for c in raw if not _is_noise_comment(c.get("body", "") or "")]
+    # Drop low-information chatter (bot/banbet, off-topic, one-word, bare price questions) AND
+    # community-rejected takes (net-negative score, _is_downvoted) BEFORE the comments enter the
+    # evidence pool / ticker ranking / sentiment. Upvote scoring then weights the survivors.
+    comments = [c for c in raw
+                if not _is_noise_comment(c.get("body", "") or "") and not _is_downvoted(c)]
     label = _reddit_auth_label(bearer)
     if comments:
-        # Plain English: how many we read (a bounded first-page sample) vs how many survived the
-        # noise filter and were used. Never implies the whole thread (can be thousands of comments).
-        return comments, f"{len(raw)} sampled, {len(comments)} included ({label})", tid
-    if raw:   # fetched, but every sampled comment was low-signal noise
-        return [], f"{len(raw)} sampled, 0 included ({label}) — all low-signal/noise", tid
+        # Plain English: how many we READ (auto-paginated, up to the safety cap) vs how many survived
+        # the noise/downvote filter and were used.
+        return comments, f"{len(raw)} read, {len(comments)} included ({label})", tid
+    if raw:   # fetched, but every comment read was low-signal noise
+        return [], f"{len(raw)} read, 0 included ({label}) — all low-signal/noise", tid
     if not (os.environ.get("REDDIT_CLIENT_ID") and os.environ.get("REDDIT_CLIENT_SECRET")) and not bearer:
         return [], ("unavailable: auth needed (set REDDIT_CLIENT_ID/REDDIT_CLIENT_SECRET, "
                     "or pass --reddit-bearer-token)"), tid
     return [], "unavailable (no comments returned)", tid
+
+
+_ODTE_DIR = os.path.expanduser("~/0dte")
+
+
+def _read_json(path: str) -> dict:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            d = json.load(fh)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _unexpired_token(obj: dict) -> str | None:
+    """Return the bearer token from a {token|reddit_token, expires|reddit_token_expires} dict, or
+    None if absent or already expired. Accepts epoch in seconds or milliseconds."""
+    tok = obj.get("token") or obj.get("reddit_token")
+    if not tok or not isinstance(tok, str):
+        return None
+    exp = obj.get("expires") or obj.get("reddit_token_expires")
+    if exp:
+        try:
+            exp = float(exp)
+            if exp > 1e12:          # milliseconds → seconds
+                exp /= 1000.0
+            if exp <= time.time():
+                return None         # expired — skip silently
+        except (TypeError, ValueError):
+            pass
+    return tok
+
+
+def load_0dte_runtime_config() -> dict:
+    """Best-effort runtime config so ``make odte-report`` can run with NO env/flags (for the Hermes
+    agent). Reads ``~/0dte/`` in priority order; fail-soft (returns {} on any problem); the token
+    value is NEVER logged. Returns any subset of {'reddit_bearer_token', 'daily_thread_id'}.
+
+    App OAuth:     ~/0dte/config.json {"reddit_client_id","reddit_client_secret"} — the ROBUST,
+                   non-expiring auth (preferred over the bearer token, which expires daily).
+    Bearer token:  ~/0dte/config.json → ~/0dte/reddit_token.json → legacy ~/.reddit_token.json
+                   (expired tokens are skipped). The reddit_token.json format is the same
+                   {"token","expires"} your daily refresh already writes — just move it here.
+    Daily thread:  ~/0dte/config.json {"daily_thread_id"} → ~/0dte/daily_thread_id.txt (first line).
+    """
+    cfg = _read_json(os.path.join(_ODTE_DIR, "config.json"))
+    out: dict = {}
+
+    cid, secret = cfg.get("reddit_client_id"), cfg.get("reddit_client_secret")
+    if cid and secret:
+        out["reddit_client_id"], out["reddit_client_secret"] = str(cid), str(secret)
+
+    token = (_unexpired_token(cfg)
+             or _unexpired_token(_read_json(os.path.join(_ODTE_DIR, "reddit_token.json")))
+             or _unexpired_token(_read_json(os.path.join(_ODTE_DIR, ".reddit_token.json")))   # dotted variant
+             or _unexpired_token(_read_json(os.path.expanduser("~/.reddit_token.json"))))      # legacy home
+    if token:
+        out["reddit_bearer_token"] = token
+
+    tid = cfg.get("daily_thread_id")
+    if not tid:
+        try:
+            with open(os.path.join(_ODTE_DIR, "daily_thread_id.txt"), encoding="utf-8") as fh:
+                tid = fh.readline().strip()
+        except Exception:
+            tid = ""
+    if tid:
+        out["daily_thread_id"] = str(tid).strip()
+    return out
+
+
+_RSS_BOILERPLATE = re.compile(r"\s*submitted by\s*/u/\S+\s*\[link\]\s*\[comments\]\s*$", re.I)
+
+
+def _clean_dump_text(text: str) -> str:
+    """Make a raw social doc readable on one line: unescape HTML entities (``&#39;``→``'``,
+    ``&quot;``→``"``, ``&#32;``→space, ``&amp;``→``&``), strip the Reddit RSS
+    ``submitted by /u/x [link] [comments]`` tail, drop stray ``[link]``/``[comments]`` markers,
+    and collapse all whitespace to single spaces."""
+    t = html.unescape(text or "")
+    t = _RSS_BOILERPLATE.sub("", t)
+    return " ".join(t.replace("[link]", " ").replace("[comments]", " ").split()).strip()
+
+
+def _dump_analyzed_texts(combined: list[dict]) -> None:
+    """Overwrite ``~/0dte/reddit_text.txt`` and ``~/0dte/x_text.txt`` with the CLEANED texts this run
+    analyzed (one document per line) — Reddit (hot posts + WSB daily-thread comments) vs X — each file
+    prefixed with a ``# <date> | …`` header showing exactly what was captured (so a small file from a
+    failed daily-comments fetch is obvious at a glance). Fail-soft (never breaks the report). A file is
+    only rewritten when that source produced ≥1 in-window doc, so a failed X (or Reddit) fetch does NOT
+    clobber the prior day's file."""
+    try:
+        out_dir = os.path.expanduser("~/0dte")
+        n = {"reddit": 0, "reddit_daily_comment": 0, "x": 0}
+        reddit_lines, x_lines = [], []
+        for c in combined:
+            src = c.get("source", "reddit")
+            text = _clean_dump_text(c.get("text", ""))
+            if not text:
+                continue
+            (x_lines if src == "x" else reddit_lines).append(text)
+            n[src] = n.get(src, 0) + 1
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        files = (
+            ("reddit_text.txt", reddit_lines,
+             f"# {stamp} | reddit: {n['reddit']} hot posts + {n['reddit_daily_comment']} daily-thread comments"),
+            ("x_text.txt", x_lines, f"# {stamp} | x: {n['x']} tweets"),
+        )
+        wrote = []
+        for name, lines, header in files:
+            if not lines:
+                continue
+            os.makedirs(out_dir, exist_ok=True)
+            with open(os.path.join(out_dir, name), "w", encoding="utf-8") as fh:
+                fh.write(header + "\n" + "\n".join(lines) + "\n")
+            wrote.append(f"{len(lines)} {name}")
+        if wrote:
+            logger.info("dumped analyzed social texts -> %s (%s)", out_dir, ", ".join(wrote))
+    except Exception as exc:  # pragma: no cover - dump is best-effort, never fatal
+        logger.debug("analyzed-text dump to ~/0dte failed: %s", exc)
+
+
+def _base_x_query_tickers(x_query: str) -> set[str]:
+    """Tickers the fixed X query already asks about (so cross-source enrichment doesn't re-search
+    them). Cashtags in the query plus the SPY/QQQ core."""
+    return {m.upper() for m in re.findall(r"\$([A-Za-z]{1,5})", x_query or "")} | {"SPY", "QQQ"}
+
+
+def _wsb_top_tickers(posts: list[dict], daily_comments: list[dict], universe: set[str] | None,
+                     exclude: set[str], top_n: int, min_mentions: int) -> list[str]:
+    """Most-mentioned tickers across the WSB chatter (hot posts + daily-thread comments), restricted
+    to `universe` (validated/optionable) and minus `exclude`. Empty when no validated universe."""
+    if not universe:
+        return []
+    texts = [f"{q.get('title', '')} {q.get('selftext', '')}" for q in posts]
+    texts += [(c.get("body", "") or "") for c in daily_comments]
+    counts = extract_ticker_mentions(texts, allowed=universe)
+    return [t for t, n in counts.most_common() if t not in exclude and n >= min_mentions][:top_n]
+
+
+def _cross_source_x_enrich(p: dict, posts: list[dict], daily_comments: list[dict],
+                           allowed: set[str] | None, broad_allowed: set[str] | None,
+                           allow_fetch: bool, is_fresh) -> tuple[list[dict], str]:
+    """Reddit → X cross-pollination: give the tickers trending in WSB their own X search (the fixed
+    x_query only ever asks about SPY/QQQ), so the scorer sees BOTH platforms for the same name.
+    Bounded (top-N validated tickers, one cached X call) and config-gated (default on). Returns
+    (fresh enrichment tweets tagged like base X posts, human-readable status)."""
+    if "x" not in p.get("sources", ["reddit"]) or not bool(p.get("cross_source_x_enrich", True)):
+        return [], "disabled"
+    picks = _wsb_top_tickers(
+        posts, daily_comments, universe=(broad_allowed or allowed),
+        exclude=_base_x_query_tickers(p.get("x_query", "")),
+        top_n=int(p.get("cross_source_x_top_n", 5)),
+        min_mentions=int(p.get("cross_source_x_min_mentions", 2)))
+    if not picks:
+        return [], "no eligible WSB tickers"
+    if not allow_fetch:
+        return [], f"skipped (--no-fetch): would query {', '.join(picks)}"
+    query = "(" + " OR ".join(f"${t}" for t in picks) + ") lang:en -is:retweet"
+    enr, st = fetch_x_mentions(query, limit=int(p.get("x_limit", 50)))
+    enr = [t for t in enr if is_fresh(_parse_x_ts(t.get("created_at", "")))]
+    return enr, f"{st}: +{len(enr)} tweets for {', '.join(picks)}"
 
 
 def _gather_odte_sources(p: dict, allowed: set[str] | None, allow_fetch: bool, is_fresh,
@@ -1566,18 +1858,31 @@ def _gather_odte_sources(p: dict, allowed: set[str] | None, allow_fetch: bool, i
             posts_all, p, allow_fetch, limit=dlimit)
     thread_url = f"https://www.reddit.com/comments/{tid}" if tid else ""
 
+    # Cross-source enrichment (Reddit → X): the tickers WSB is buzzing about get their OWN X search
+    # (the fixed x_query only asks SPY/QQQ), folded in as ordinary X docs so the scorer/cards see
+    # both platforms for the same name. On by default; disable via cross_source_x_enrich: false.
+    x_enrich, x_enrich_status = _cross_source_x_enrich(
+        p, posts, daily_comments, allowed, broad_allowed, allow_fetch, is_fresh)
+    x_base_n = len(x_posts)          # base-fetch fresh count (before enrichment) for an accurate stale stat
+    x_posts = x_posts + x_enrich
+
     # Build ONE combined item list (Reddit posts + daily-thread comments + X), then run the
     # transparent spam/quality filter ONCE.
     combined = [{"text": f"{q['title']} {q['selftext']}", "ts": q.get("created_utc", 0.0),
                  "weight": q.get("score", 0), "title": q["title"][:140], "score": q["score"],
                  "url": q["permalink"], "source": "reddit"} for q in posts]
-    combined += [{"text": c.get("body", "") or "", "ts": now_ts, "weight": int(c.get("score", 0) or 0),
+    # Daily-thread comments carry their REAL created_utc (so recency weighting favors fresher intraday
+    # chatter); fall back to now_ts only when the timestamp is missing, so they still count as fresh.
+    combined += [{"text": c.get("body", "") or "", "ts": (c.get("created_utc") or now_ts),
+                  "weight": int(c.get("score", 0) or 0),
                   "title": (c.get("body", "") or "")[:140], "score": int(c.get("score", 0) or 0),
                   "url": thread_url, "source": "reddit_daily_comment"} for c in daily_comments]
     combined += [{"text": t.get("text", ""), "ts": _parse_x_ts(t.get("created_at", "")),
                   "weight": 0, "title": (t.get("text", "") or "")[:140], "score": 0,
                   "url": f"https://twitter.com/i/web/status/{t.get('id', '')}", "source": "x"}
                  for t in x_posts]
+    # Dump the in-window texts this run analyzed to ~/0dte/{reddit,x}_text.txt (overwritten each run).
+    _dump_analyzed_texts(combined)
     # ODTE evidence requires an allowed ticker + options/day-trading context (drops generic
     # SPY/QQQ chatter and risk-management platitudes that aren't 0DTE signal).
     kept = _quality_filter(combined, lambda c: c["text"], allowed=allowed,
@@ -1604,7 +1909,8 @@ def _gather_odte_sources(p: dict, allowed: set[str] | None, allow_fetch: bool, i
         "posts": posts, "posts_all": posts_all,
         "reddit_stale": len(posts_all) - len(posts), "reddit_spam": reddit_spam,
         "x_posts": x_posts, "x_posts_all": x_posts_all, "x_status": x_status,
-        "x_stale": len(x_posts_all) - len(x_posts), "x_spam": x_spam,
+        "x_stale": len(x_posts_all) - x_base_n, "x_spam": x_spam,
+        "x_enrich_status": x_enrich_status, "x_enrich_n": len(x_enrich),
         "ranked": ranked, "ev_pool": kept,  # ev_pool is the same filtered, quality-gated set
         "broad_ev": broad_ev,               # broader pool for TOP CHATTER ranking
         "daily_status": daily_status, "daily_n": len(daily_comments),
@@ -1718,7 +2024,8 @@ def build_odte_social_report(allow_fetch: bool = True, params: dict | None = Non
                        "n_quality": len(src["posts"]) - src["reddit_spam"]},
             "x": {"status": src["x_status"], "n_posts": len(src["x_posts"]),
                   "n_fetched": len(src["x_posts_all"]), "n_stale_filtered": src["x_stale"],
-                  "n_filtered": src["x_spam"], "n_quality": len(src["x_posts"]) - src["x_spam"]},
+                  "n_filtered": src["x_spam"], "n_quality": len(src["x_posts"]) - src["x_spam"],
+                  "enrich_status": src.get("x_enrich_status", "n/a"), "n_enrich": src.get("x_enrich_n", 0)},
         },
         "top_tickers": [{"ticker": tk, **s} for tk, s in ranked],
         "candidate": candidate,
@@ -1867,6 +2174,51 @@ def _card_line(card: dict, budget: float) -> str:
     return line
 
 
+def _json_contracts(o: dict) -> list[dict]:
+    return [{"type": k.get("option_type"), "strike": k.get("strike"),
+             "cost_est": k.get("premium_cost_estimate"), "above_budget": bool(k.get("above_budget"))}
+            for k in (o.get("contracts") or [])]
+
+
+def format_report_json(report: dict) -> str:
+    """Compact, machine-ingestible JSON of the 0DTE read for an agent — signal only, no human-safety
+    prose, banners, or disclaimers. `direction` is up/down/none; everything is plain JSON types."""
+    sc = report.get("scorecard") or {}
+    pt = report.get("spy_trend", {}) or {}
+    si = report.get("social_intent") or {}
+    src = report.get("sources", {}) or {}
+    xs, rd = src.get("x", {}) or {}, src.get("reddit", {}) or {}
+    _dir = {"CALL-leaning": "up", "PUT-leaning": "down", "OBSERVE": "none"}
+    _cdir = {"bullish": "up", "bearish": "down", "neutral": "none"}
+    payload = {
+        "generated_at": report.get("generated_at"),
+        "spy": {
+            "verdict": sc.get("verdict", "OBSERVE"),
+            "direction": _dir.get(sc.get("verdict", "OBSERVE"), "none"),
+            "confidence": sc.get("confidence", "low"),
+            "reasons": sc.get("reasons", []),
+            "price": {"ok": pt.get("ok"), "pct_vs_prev_close": pt.get("pct_vs_prev_close"),
+                      "above_vwap": pt.get("above_vwap")},
+            "social": {"intent": si.get("intent"), "n_docs": si.get("n_docs", 0)},
+            "contracts": _json_contracts(report.get("paper_options", {}) or {}),
+        },
+        "freshness": report.get("freshness_window", {}),
+        "sources": {
+            "reddit": {"n_posts": rd.get("n_posts"), "n_quality": rd.get("n_quality"),
+                       "daily_thread": (report.get("daily_thread", {}) or {}).get("status")},
+            "x": {"n_posts": xs.get("n_posts"), "status": xs.get("status"),
+                  "cross_source_enrich": xs.get("enrich_status"), "n_enrich": xs.get("n_enrich", 0)},
+        },
+        "top_chatter": [
+            {"ticker": c.get("ticker"), "mentions": c.get("mentions", 0), "verdict": c.get("verdict"),
+             "direction": _cdir.get(c.get("price_dir"), "none"), "contracts": _json_contracts(c)}
+            for c in (report.get("top_chatter") or [])
+        ],
+        "candidate": report.get("candidate"),
+    }
+    return json.dumps(payload, indent=2, default=str)
+
+
 def format_report(report: dict) -> str:
     """Beginner-friendly text rendering of build_odte_social_report(): answers (1) what to do now,
     (2) why in 3 tiny bullets, (3) what would change the answer — in plain language a newcomer can
@@ -1904,6 +2256,8 @@ def format_report(report: dict) -> str:
     lines.append("")
     lines.append(f"HOW FRESH: {rd['n_posts']} fresh Reddit posts (and {xs['n_posts']} from X) "
                  f"{_freshness_phrase(fw)}; older or spammy posts were thrown out.")
+    if xs.get("n_enrich", 0):
+        lines.append(f"   Cross-source: also searched X for WSB's hot tickers ({xs.get('enrich_status', '')}).")
 
     # Practice-only contract examples — rounded dollars, plainly labeled. Shown ONLY when there is
     # an actual CALL/PUT lean AND the surfaced contracts match that direction; on DO NOTHING

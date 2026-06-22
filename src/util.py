@@ -691,6 +691,12 @@ OPTIONS_SOCIAL_PARAMS: dict = {
     "reddit_comments_enrich":    bool(_os_cfg.get("reddit_comments_enrich", False)),
     "reddit_comments_top_posts": int(_os_cfg.get("reddit_comments_top_posts", 3)),
     "reddit_comments_per_post":  int(_os_cfg.get("reddit_comments_per_post", 5)),
+    # Cross-source enrichment (Reddit → X): give the tickers trending in WSB their OWN X search so
+    # the scorer sees both platforms for the same name (the fixed x_query only asks SPY/QQQ). ON by
+    # default; one extra cached X call per run for the top-N validated/optionable tickers.
+    "cross_source_x_enrich":       bool(_os_cfg.get("cross_source_x_enrich", True)),
+    "cross_source_x_top_n":        int(_os_cfg.get("cross_source_x_top_n", 5)),
+    "cross_source_x_min_mentions": int(_os_cfg.get("cross_source_x_min_mentions", 2)),
 }
 
 # ---------------------------------------------------------------------------
