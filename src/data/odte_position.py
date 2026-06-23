@@ -27,8 +27,20 @@ active_trade.json schema (all fields optional unless noted; unknown keys are ign
   entry_price:      premium per share at entry (e.g. 1.00)        [for P/L]
   quantity:         contracts (1 => single-contract scalp semantics)
   entry_time:       ISO (passed through)
-  take_profit_pct:  scale/exit take-profit trigger (default 0.35; sane range 0.35-0.50)
-  strong_exit_pct:  strong/default full-exit trigger (default 0.60)
+  take_profit_pct:  scale take-profit trigger (default 0.35; sane range 0.35-0.50)  [legacy/back-compat]
+  strong_exit_pct:  strong-profit trigger (default 0.60)                            [legacy/back-compat]
+  profit_rules:     optional mode-aware overrides (any subset; falls back to the mode profile):
+                      take_profit_pct, strong_exit_pct,
+                      take_profit_action      (qty-agnostic +35-50% action override),
+                      single_contract_action, multi_contract_action  (+35-50%, by quantity),
+                      strong_exit_action      (+60% action override)
+                    The TAKE_PROFIT trigger fires at the same bands for every mode; only the
+                    recommended ACTION differs by mode (decision-only — never an order):
+                      scalp  -> single: exit            / multi: scale_keep_runner  / strong: exit_all
+                      trend  -> protect_profit (alert, not forced exit)             / strong: trail_or_exit_on_stall
+                      lotto  -> hold_but_alert                                      / strong: harvest_optional
+                      runner -> trail_runner                                       / strong: trail_runner
+                    Unknown/blank mode uses the scalp profile (original behavior).
   bid_floor:        per-share bid at/under which the option is treated near-worthless (default 0.05)
   thesis:           { underlying_stop, spy_stop, qqq_stop, vix_stop, vixy_stop }  (any subset)
                     A "stop" is the level that KILLS the thesis when crossed AGAINST the position.
@@ -63,9 +75,31 @@ DECISION_FILENAME = "position_decision.json"
 
 STATE_VERSION = 1
 
-DEFAULT_TAKE_PROFIT_PCT = 0.35   # +35% — lower bound of the 35-50% scalp take-profit band
-DEFAULT_STRONG_EXIT_PCT = 0.60   # +60% — strong / default full-exit trigger
+DEFAULT_TAKE_PROFIT_PCT = 0.35   # +35% — lower bound of the 35-50% take-profit band
+DEFAULT_STRONG_EXIT_PCT = 0.60   # +60% — strong-profit trigger
 DEFAULT_BID_FLOOR = 0.05         # per-share bid at/under which an option is treated near-worthless
+
+# Mode-specific profit semantics. The TAKE_PROFIT TRIGGER fires at the same +35% / +60% bands for
+# every mode, but the recommended ACTION is mode-aware so a single-contract trend/lotto/runner is
+# NOT force-exited like a scalp. `single_contract_action`/`multi_contract_action` drive the +35-50%
+# "scale" stage (by quantity); `strong_exit_action` drives the +60% "strong" stage. Plans override
+# any of these via plan["profit_rules"] (see _resolve_profit_config). An unknown/blank mode falls
+# back to the scalp profile — preserving the original single=exit / multi=scale_keep_runner behavior.
+_MODE_PROFIT_PROFILES: dict[str, dict] = {
+    "scalp":  {"take_profit_pct": DEFAULT_TAKE_PROFIT_PCT, "strong_exit_pct": DEFAULT_STRONG_EXIT_PCT,
+               "single_contract_action": "exit", "multi_contract_action": "scale_keep_runner",
+               "strong_exit_action": "exit_all"},
+    "trend":  {"take_profit_pct": DEFAULT_TAKE_PROFIT_PCT, "strong_exit_pct": DEFAULT_STRONG_EXIT_PCT,
+               "single_contract_action": "protect_profit", "multi_contract_action": "protect_profit",
+               "strong_exit_action": "trail_or_exit_on_stall"},
+    "lotto":  {"take_profit_pct": DEFAULT_TAKE_PROFIT_PCT, "strong_exit_pct": DEFAULT_STRONG_EXIT_PCT,
+               "single_contract_action": "hold_but_alert", "multi_contract_action": "hold_but_alert",
+               "strong_exit_action": "harvest_optional"},
+    "runner": {"take_profit_pct": DEFAULT_TAKE_PROFIT_PCT, "strong_exit_pct": DEFAULT_STRONG_EXIT_PCT,
+               "single_contract_action": "trail_runner", "multi_contract_action": "trail_runner",
+               "strong_exit_action": "trail_runner"},
+}
+_DEFAULT_PROFIT_PROFILE = _MODE_PROFIT_PROFILES["scalp"]   # backward-compatible default
 
 # Primary-decision priority (most urgent first). HOLD is the implicit default.
 _PRIORITY = ["RESTRICTED", "THESIS_DEAD", "BID_FLOOR", "TIME_RISK", "TAKE_PROFIT",
@@ -134,6 +168,30 @@ def _compute_pnl_pct(plan: dict, snapshot: dict) -> float | None:
     if mark is not None and entry not in (None, 0.0):
         return mark / entry - 1.0
     return None
+
+
+def _resolve_profit_config(plan: dict, mode: str, qty: int) -> dict:
+    """Resolve mode-aware take-profit thresholds + actions, honoring overrides.
+
+    Precedence (most specific wins): plan["profit_rules"][k] -> legacy top-level take_profit_pct/
+    strong_exit_pct -> the mode profile (scalp profile for unknown/blank mode). The +35-50% "scale"
+    action is qty-aware: single_contract_action when qty<=1, else multi_contract_action; a
+    qty-agnostic profit_rules.take_profit_action overrides both. strong_exit_action drives +60%."""
+    profile = _MODE_PROFIT_PROFILES.get(mode, _DEFAULT_PROFIT_PROFILE)
+    pr = plan.get("profit_rules") or {}
+    tp = (_num(pr.get("take_profit_pct")) or _num(plan.get("take_profit_pct"))
+          or profile["take_profit_pct"])
+    strong = (_num(pr.get("strong_exit_pct")) or _num(plan.get("strong_exit_pct"))
+              or profile["strong_exit_pct"])
+    if qty <= 1:
+        scale_action = (pr.get("single_contract_action") or pr.get("take_profit_action")
+                        or profile["single_contract_action"])
+    else:
+        scale_action = (pr.get("multi_contract_action") or pr.get("take_profit_action")
+                        or profile["multi_contract_action"])
+    strong_action = pr.get("strong_exit_action") or profile["strong_exit_action"]
+    return {"tp": float(tp), "strong": float(strong),
+            "scale_action": scale_action, "strong_action": strong_action}
 
 
 def _thesis_breaches(option_type: str, thesis: dict, snapshot: dict) -> list[str]:
@@ -224,23 +282,24 @@ def evaluate_position(plan: dict | None, snapshot: dict | None,
     bid = _num(snapshot.get("option_bid"))
     can_value = pnl_pct is not None or bid is not None
 
-    tp = float(_num(plan.get("take_profit_pct")) or DEFAULT_TAKE_PROFIT_PCT)
-    strong = float(_num(plan.get("strong_exit_pct")) or DEFAULT_STRONG_EXIT_PCT)
     bid_floor = float(_num(plan.get("bid_floor")) if plan.get("bid_floor") is not None
                       else DEFAULT_BID_FLOOR)
 
-    # 1) Take-profit. Strong (+60%) => full exit, all modes. Scale (+35%) => exit a single-contract
-    #    scalp, else sell partial and keep a runner.
+    # 1) Take-profit. Same +35% / +60% bands for every mode, but the recommended ACTION is
+    #    mode-aware (see _MODE_PROFIT_PROFILES): a single-contract trend/lotto/runner is alerted
+    #    (protect_profit / hold_but_alert / trail_runner), NOT force-exited like a scalp. Plans
+    #    override thresholds/actions via plan["profit_rules"].
     if pnl_pct is not None:
-        if pnl_pct >= strong:
-            triggers.append({"type": "TAKE_PROFIT", "stage": "strong", "action": "exit_all",
+        pc = _resolve_profit_config(plan, mode, qty)
+        label = mode or "default"
+        if pnl_pct >= pc["strong"]:
+            triggers.append({"type": "TAKE_PROFIT", "stage": "strong", "action": pc["strong_action"],
                              "pnl_pct": round(pnl_pct, 4),
-                             "detail": f"+{pnl_pct:.0%} >= strong exit {strong:.0%}"})
-        elif pnl_pct >= tp:
-            action = "exit" if (mode == "scalp" or qty <= 1) else "scale_keep_runner"
-            triggers.append({"type": "TAKE_PROFIT", "stage": "scale", "action": action,
+                             "detail": f"+{pnl_pct:.0%} >= strong {pc['strong']:.0%} ({label})"})
+        elif pnl_pct >= pc["tp"]:
+            triggers.append({"type": "TAKE_PROFIT", "stage": "scale", "action": pc["scale_action"],
                              "pnl_pct": round(pnl_pct, 4),
-                             "detail": f"+{pnl_pct:.0%} >= take-profit {tp:.0%}"})
+                             "detail": f"+{pnl_pct:.0%} >= take-profit {pc['tp']:.0%} ({label})"})
 
     # 2) Thesis death.
     breaches = _thesis_breaches(option_type, plan.get("thesis") or {}, snapshot)

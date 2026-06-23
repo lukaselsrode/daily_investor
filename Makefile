@@ -176,6 +176,19 @@ odte-watchdog:               ## 0DTE script-only watchdog — NO LLM/Robinhood (
 odte-position:               ## 0DTE live-position decision watchdog — NO orders/broker (SNAPSHOT=path; JSON=1)
 	@$(DI) odte-position $(if $(SNAPSHOT),--snapshot $(SNAPSHOT),) $(if $(PLAN),--plan $(PLAN),) $(if $(JSON),--json,)
 
+# 0DTE decision journal — local/offline, NO broker/LLM/secrets. Append events, then report.
+#   make odte-journal EVENT='{"event_type":"postmortem","trade_id":"t1","mode":"scalp",...}'
+#   make odte-journal EVENT_FILE=~/0dte/event.json
+#   make odte-journal-report JSON=1          # metrics JSON
+#   make odte-journal-report WRITE=1         # writes ~/0dte/reports/{md,csv}
+.PHONY: odte-journal
+odte-journal:                ## Append a 0DTE journal event (EVENT='{...}' or EVENT_FILE=path; JSON=1)
+	@$(DI) odte-journal $(if $(EVENT),--event-json '$(EVENT)',) $(if $(EVENT_FILE),--event $(EVENT_FILE),) $(if $(JSON),--json,)
+
+.PHONY: odte-journal-report
+odte-journal-report:         ## Summarize the 0DTE journal (JSON=1 metrics; WRITE=1 md/csv artifacts)
+	@$(DI) odte-journal-report $(if $(JSON),--json,) $(if $(WRITE),--write,) $(if $(OUT_DIR),--out-dir $(OUT_DIR),)
+
 .PHONY: regime
 regime:                      ## Print current market regime  (live SPY + VIX fetch)
 	$(PYTHON) -c "import sys; sys.path.insert(0, '$(SRC)'); from strategy.regimes import RegimeDetector; s = RegimeDetector().detect(); dma = f'{s.spy_vs_200dma_pct:+.2%}' if s.spy_vs_200dma_pct is not None else 'N/A'; print(f'Regime: {s.regime.upper()}  |  Confidence: {s.confidence:.0%}  |  VIX: {s.vix}  |  SPY vs 200DMA: {dma}'); print('Notes:', '  '.join(s.notes) if s.notes else 'none')"

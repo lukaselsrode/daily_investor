@@ -30,37 +30,111 @@ def _types(result):
 
 def test_scalp_take_profit_band_35_to_50():
     # Single-contract scalp up +40% -> TAKE_PROFIT scale, action exit (a single contract can't scale).
+    # time_rules={} isolates the profit axis (no wall-clock TIME_RISK interference).
     for mark in (1.35, 1.42, 1.50):
-        r = op.evaluate_position(_scalp_plan(), {"option_mark": mark})
+        r = op.evaluate_position(_scalp_plan(time_rules={}), {"option_mark": mark})
         assert r["decision"] == "TAKE_PROFIT"
         tp = next(t for t in r["triggers"] if t["type"] == "TAKE_PROFIT")
         assert tp["stage"] == "scale" and tp["action"] == "exit"
 
 
 def test_take_profit_below_band_holds():
-    r = op.evaluate_position(_scalp_plan(), {"option_mark": 1.20})   # +20% < 35%
+    r = op.evaluate_position(_scalp_plan(time_rules={}), {"option_mark": 1.20})   # +20% < 35%
     assert r["decision"] == "HOLD"
     assert "TAKE_PROFIT" not in _types(r)
 
 
 def test_strong_exit_at_60pct():
-    r = op.evaluate_position(_scalp_plan(), {"option_mark": 1.62})   # +62%
+    r = op.evaluate_position(_scalp_plan(time_rules={}), {"option_mark": 1.62})   # +62%
     assert r["decision"] == "TAKE_PROFIT"
     tp = next(t for t in r["triggers"] if t["type"] == "TAKE_PROFIT")
     assert tp["stage"] == "strong" and tp["action"] == "exit_all"
 
 
-def test_runner_scales_keeps_runner_not_full_exit():
-    # Multi-contract runner at +40% -> scale and KEEP a runner (not a single-contract exit).
-    plan = _scalp_plan(mode="runner", quantity=3, thesis={}, time_rules={})
+def test_multi_contract_scalp_scales_keeps_runner():
+    # Multi-contract scalp at +40% -> sell partial and KEEP a runner (not a full exit).
+    plan = _scalp_plan(quantity=3, thesis={}, time_rules={})
     r = op.evaluate_position(plan, {"option_mark": 1.40})
     tp = next(t for t in r["triggers"] if t["type"] == "TAKE_PROFIT")
-    assert tp["action"] == "scale_keep_runner"
+    assert tp["stage"] == "scale" and tp["action"] == "scale_keep_runner"
 
 
 def test_pnl_pct_supplied_directly_wins():
     r = op.evaluate_position(_scalp_plan(thesis={}, time_rules={}), {"pnl_pct": 0.61})
     assert r["decision"] == "TAKE_PROFIT" and r["pnl_pct"] == 0.61
+
+
+# --- mode-specific profit semantics (single contract, +40%) ----------------------------------
+
+def _mode_plan(mode, **over):
+    plan = _scalp_plan(mode=mode, quantity=1, thesis={}, time_rules={})
+    plan.update(over)
+    return plan
+
+
+def _tp_action(res):
+    return next(t for t in res["triggers"] if t["type"] == "TAKE_PROFIT")["action"]
+
+
+def test_single_contract_trend_protects_not_exits():
+    # trend +40% single-contract -> alert to protect profit, NOT a forced exit.
+    r = op.evaluate_position(_mode_plan("trend"), {"option_mark": 1.40})
+    assert r["decision"] == "TAKE_PROFIT"
+    tp = next(t for t in r["triggers"] if t["type"] == "TAKE_PROFIT")
+    assert tp["stage"] == "scale" and tp["action"] == "protect_profit"
+    assert tp["action"] not in ("exit", "exit_all")
+
+
+def test_single_contract_lotto_not_forced_exit():
+    r = op.evaluate_position(_mode_plan("lotto"), {"option_mark": 1.40})
+    tp = next(t for t in r["triggers"] if t["type"] == "TAKE_PROFIT")
+    assert tp["action"] == "hold_but_alert"
+    assert tp["action"] not in ("exit", "exit_all")
+
+
+def test_single_contract_runner_trails_not_exits():
+    r = op.evaluate_position(_mode_plan("runner"), {"option_mark": 1.40})
+    tp = next(t for t in r["triggers"] if t["type"] == "TAKE_PROFIT")
+    assert tp["action"] == "trail_runner"
+    assert tp["action"] not in ("exit", "exit_all")
+
+
+def test_strong_60_mode_semantics_no_accidental_exit_all():
+    # +62% must NOT force exit_all for trend/runner; scalp still exits all.
+    trend = op.evaluate_position(_mode_plan("trend"), {"option_mark": 1.62})
+    runner = op.evaluate_position(_mode_plan("runner"), {"option_mark": 1.62})
+    scalp = op.evaluate_position(_mode_plan("scalp"), {"option_mark": 1.62})
+    assert _tp_action(trend) == "trail_or_exit_on_stall" and _tp_action(trend) != "exit_all"
+    assert _tp_action(runner) == "trail_runner" and _tp_action(runner) != "exit_all"
+    assert _tp_action(scalp) == "exit_all"
+
+
+def test_profit_rules_override_can_force_trend_exit():
+    # An explicit override can force a forced exit on a trend trade if the trader wants it.
+    plan = _mode_plan("trend", profit_rules={"take_profit_action": "exit_all"})
+    r = op.evaluate_position(plan, {"option_mark": 1.40})   # +40% scale stage
+    tp = next(t for t in r["triggers"] if t["type"] == "TAKE_PROFIT")
+    assert tp["action"] == "exit_all"
+    # ...and a strong-stage override too.
+    plan2 = _mode_plan("runner", profit_rules={"strong_exit_action": "exit_all"})
+    r2 = op.evaluate_position(plan2, {"option_mark": 1.62})
+    assert next(t for t in r2["triggers"] if t["type"] == "TAKE_PROFIT")["action"] == "exit_all"
+
+
+def test_profit_rules_threshold_override():
+    # Override the take-profit threshold; +25% should now trigger for a trend single-contract.
+    plan = _mode_plan("trend", profit_rules={"take_profit_pct": 0.20})
+    r = op.evaluate_position(plan, {"option_mark": 1.25})
+    tp = next(t for t in r["triggers"] if t["type"] == "TAKE_PROFIT")
+    assert tp["stage"] == "scale" and tp["action"] == "protect_profit"
+
+
+def test_thesis_death_outranks_profit_when_both_fire():
+    # trend +40% (protect_profit) AND a dead thesis -> primary decision is THESIS_DEAD.
+    plan = _mode_plan("trend", thesis={"underlying_stop": 500.0})
+    r = op.evaluate_position(plan, {"option_mark": 1.40, "underlying_last": 498.0})
+    assert r["decision"] == "THESIS_DEAD"
+    assert {"TAKE_PROFIT", "THESIS_DEAD"} <= _types(r)   # both fired
 
 
 # --- thesis death ----------------------------------------------------------------------------

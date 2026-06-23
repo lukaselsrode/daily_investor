@@ -293,6 +293,54 @@ def _cmd_odte_position(rest: list[str]) -> None:
         print(json.dumps(payload, separators=(",", ":"), default=str))
 
 
+def _cmd_odte_journal(rest: list[str]) -> None:
+    # Append one event to the local 0DTE decision journal (~/0dte/decision_journal.jsonl). Local/
+    # offline — NO broker, NO LLM, NO secrets. Supply the event with --event-json '{...}' or
+    # --event PATH (a JSON file). NVDA/employer-restricted underlyings are tagged restricted on
+    # store and kept out of experiments/metrics. --json prints the stored event.
+    import json
+
+    from data.odte_journal import append_event
+    journal = _flag_value(rest, "--journal")
+    ev_json = _flag_value(rest, "--event-json")
+    ev_path = _flag_value(rest, "--event")
+    if ev_json is None and ev_path is None:
+        print("odte-journal: provide --event-json '{...}' or --event PATH")
+        sys.exit(2)
+    try:
+        raw = ev_json if ev_json is not None else open(os.path.expanduser(ev_path)).read()
+        event = json.loads(raw)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"odte-journal: could not read event JSON: {exc}")
+        sys.exit(2)
+    if not isinstance(event, dict):
+        print("odte-journal: event JSON must be an object")
+        sys.exit(2)
+    stored = append_event(event, journal_path=journal)
+    if "--json" in rest:
+        print(json.dumps(stored, separators=(",", ":"), default=str))
+    else:
+        print(f"appended {stored.get('event_type')} seq={stored.get('seq')} "
+              f"trade={stored.get('trade_id')}")
+
+
+def _cmd_odte_journal_report(rest: list[str]) -> None:
+    # Summarize the 0DTE decision journal into deterministic metrics + Markdown/CSV artifacts.
+    # Local/offline — NO broker, NO LLM. --json prints the metrics payload; default prints Markdown.
+    # --write (or --out-dir DIR) writes ~/0dte/reports/odte_journal_report.md + _summary.csv.
+    import json
+
+    from data.odte_journal import build_report
+    journal = _flag_value(rest, "--journal")
+    out_dir = _flag_value(rest, "--out-dir")
+    res = build_report(journal_path=journal, out_dir=out_dir, write_artifacts="--write" in rest)
+    if "--json" in rest:
+        print(json.dumps({**res["summary"], "artifacts": res["artifacts"]},
+                         separators=(",", ":"), default=str))
+    else:
+        print(res["markdown"])
+
+
 def _cmd_stability_scan(rest: list[str]) -> None:
     from cli.commands import cmd_stability_scan
     mode = _flag_value(rest, "--mode")
@@ -455,6 +503,8 @@ _COMMANDS: dict[str, Callable[[list[str]], None]] = {
     "options-social": _cmd_odte_social_report,
     "odte-watchdog": _cmd_odte_watchdog,
     "odte-position": _cmd_odte_position,
+    "odte-journal": _cmd_odte_journal,
+    "odte-journal-report": _cmd_odte_journal_report,
     "stability-scan": _cmd_stability_scan,
     "interaction-screen": _cmd_interaction_screen,
     "auto-tune-all": _cmd_auto_tune_all,
@@ -542,6 +592,15 @@ COMMANDS
                            NO_POSITION; compact JSON on an actionable decision. --snapshot PATH or
                            --snapshot-json '{...}' supply the live values; --plan / --state-dir
                            override defaults; --json always prints.
+  odte-journal             Append one event to the local 0DTE decision journal
+                           (~/0dte/decision_journal.jsonl) — local/offline, NO broker/LLM/secrets.
+                           --event-json '{...}' or --event PATH supplies the event (event_type +
+                           free-form thesis/decision/outcome/experiment fields); NVDA/restricted
+                           underlyings are tagged and kept out of metrics. --json prints the stored event.
+  odte-journal-report      Summarize the decision journal into deterministic metrics + Markdown/CSV
+                           (trades by mode, hit rate, avg P/L, MFE capture, rule violations, timing,
+                           experiments, lessons). --json prints metrics; default prints Markdown;
+                           --write (or --out-dir DIR) writes ~/0dte/reports/ artifacts.
 
 OPTIONS (run)
   --skip-data              Reuse existing CSV data
