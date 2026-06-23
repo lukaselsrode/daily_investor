@@ -678,6 +678,10 @@ OPTIONS_SOCIAL_PARAMS: dict = {
     "max_tickers":    int(_os_cfg.get("max_tickers", 10)),
     "min_mentions":   int(_os_cfg.get("min_mentions", 3)),
     "core_universe":  list(_os_cfg.get("core_universe", ["SPY", "QQQ"])),
+    # Employer/compliance underlyings hard-blocked from tradable emission in the 0DTE report
+    # (contracts stripped, never a candidate). The NVDA floor is enforced in code regardless of
+    # this list (see data.social_sentiment.RESTRICTED_EMPLOYER_TICKERS); this only ADDS names.
+    "restricted_underlyings": list(_os_cfg.get("restricted_underlyings", ["NVDA"])),
     "freshness_mode":  str(_os_cfg.get("freshness_mode", "market_window")),
     "max_lookback_hours": float(_os_cfg.get("max_lookback_hours", 96)),
     "market_open_et":  str(_os_cfg.get("market_open_et", "09:30")),

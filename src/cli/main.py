@@ -248,6 +248,23 @@ def _cmd_odte_social_report(rest: list[str]) -> None:
     print(format_report_json(rep) if "--json" in rest else format_report(rep))
 
 
+def _cmd_odte_watchdog(rest: list[str]) -> None:
+    # Script-only 0DTE watchdog — NO LLM, NO Robinhood, places no orders. Runs the LOCAL report,
+    # diffs the actionable candidate vs the prior run, and writes ~/0dte/{watchdog_state,triggers}.json.
+    # stdout contract for a no_agent cron: EMPTY when nothing actionable; compact one-line JSON when a
+    # trigger fires. --json always prints the compact state. --no-fetch runs offline (cache-only).
+    import json
+    import logging
+    logging.disable(logging.ERROR)   # keep stdout a clean machine contract
+    from data.odte_watchdog import run_watchdog
+    state_dir = _flag_value(rest, "--state-dir")
+    policy = _flag_value(rest, "--policy")
+    payload = run_watchdog(state_dir=state_dir or os.path.expanduser("~/0dte"),
+                           policy_path=policy, allow_fetch="--no-fetch" not in rest)
+    if "--json" in rest or payload.get("alert"):
+        print(json.dumps(payload, separators=(",", ":"), default=str))
+
+
 def _cmd_stability_scan(rest: list[str]) -> None:
     from cli.commands import cmd_stability_scan
     mode = _flag_value(rest, "--mode")
@@ -408,6 +425,7 @@ _COMMANDS: dict[str, Callable[[list[str]], None]] = {
     "report-etf-allocation": _cmd_report_etf_allocation,
     "odte-social-report": _cmd_odte_social_report,
     "options-social": _cmd_odte_social_report,
+    "odte-watchdog": _cmd_odte_watchdog,
     "stability-scan": _cmd_stability_scan,
     "interaction-screen": _cmd_interaction_screen,
     "auto-tune-all": _cmd_auto_tune_all,
@@ -479,6 +497,13 @@ COMMANDS
                            --daily-thread-limit N = cap on comments read (default: auto-paginate
                            the WHOLE thread, up to a runaway safety ceiling).
   options-social           Alias for odte-social-report (identical behavior and options).
+  odte-watchdog            Script-only 0DTE watchdog — NO LLM, NO Robinhood, places NO orders.
+                           Runs the LOCAL report, diffs the actionable candidate vs the prior run,
+                           writes ~/0dte/{watchdog_state,triggers}.json. For a no_agent cron:
+                           EMPTY stdout when nothing actionable, compact one-line JSON on a trigger
+                           (new/changed non-restricted candidate, or missing/invalid policy).
+                           --json always prints state; --no-fetch runs offline (cache-only);
+                           --policy PATH / --state-dir DIR override the defaults (~/0dte/).
 
 OPTIONS (run)
   --skip-data              Reuse existing CSV data

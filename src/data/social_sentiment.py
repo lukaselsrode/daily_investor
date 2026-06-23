@@ -1187,11 +1187,62 @@ def _collect_odte_evidence(ticker: str, ev_pool: list[dict], now_ts: float,
     return evidence
 
 
+# ---------------------------------------------------------------------------
+# Employer / compliance restricted underlyings — HARD, code-level block.
+# These symbols can NEVER be emitted as a tradable 0DTE candidate or carry option contracts in
+# the report. Enforced HERE (not only in the controller prompt / controller_policy.json) so a
+# misconfigured run, a tampered policy file, or a forgetful agent can never surface a tradable
+# chain for them. NVDA is the user's employer — strictly forbidden as a trade vehicle; it may
+# appear ONLY as read-only market context tagged RESTRICTED_EMPLOYER with contracts stripped.
+# Config (options_social.restricted_underlyings) may ADD names but can never remove this floor.
+# ---------------------------------------------------------------------------
+RESTRICTED_EMPLOYER_TICKERS = frozenset({"NVDA"})
+
+
+def _restricted_underlyings(p: dict | None = None) -> set[str]:
+    """Underlyings hard-blocked from tradable emission: always the RESTRICTED_EMPLOYER_TICKERS
+    floor (NVDA), plus any config-supplied extras (options_social.restricted_underlyings). Config
+    can ADD, never remove."""
+    extra: set[str] = set()
+    try:
+        src = p
+        if src is None:
+            from util import OPTIONS_SOCIAL_PARAMS
+            src = OPTIONS_SOCIAL_PARAMS
+        extra = {str(s).upper() for s in (src or {}).get("restricted_underlyings", [])}
+    except Exception:
+        extra = set()
+    return set(RESTRICTED_EMPLOYER_TICKERS) | extra
+
+
+def is_restricted_underlying(ticker: str | None, p: dict | None = None) -> bool:
+    """True when `ticker` is employer/compliance-restricted (never tradable in the 0DTE report)."""
+    return bool(ticker) and str(ticker).upper() in _restricted_underlyings(p)
+
+
+def _restricted_card(ticker: str, social_direction: str | None, mentions: int = 0) -> dict:
+    """Read-only RESTRICTED_EMPLOYER context card — same shape as build_ticker_card but with every
+    contract field stripped and a hard restricted marker. Surfaced as market context, never as a
+    tradable idea."""
+    return {
+        "ticker": str(ticker).upper(), "mentions": int(mentions),
+        "verdict": "RESTRICTED_EMPLOYER", "confidence": "n/a", "price_dir": None,
+        "social": social_direction, "contracts": [],
+        "note": ("RESTRICTED_EMPLOYER — employer restriction; read-only market context only, "
+                 "NOT tradable. No orders for this symbol under any circumstance."),
+        "restricted": True, "restricted_reason": "employer",
+        "available_contracts": [], "options_expiry": None, "options_status": "restricted_employer",
+    }
+
+
 def _select_odte_candidate(ranked: list, ev_pool: list[dict], min_mentions: int,
                            now_ts: float) -> dict | None:
     """First ranked ticker clearing the mention floor with nonzero directional sentiment, plus its
-    evidence. Returns None when nothing qualifies."""
+    evidence. Returns None when nothing qualifies. Employer/compliance-restricted symbols (e.g.
+    NVDA) are never eligible — they can't be a tradable candidate."""
     for tk, s in ranked:
+        if is_restricted_underlying(tk):
+            continue   # hard employer/compliance block — never a tradable candidate
         if s["mentions"] >= min_mentions and abs(s["sentiment"]) > 0.0:
             return {
                 "ticker": tk,
@@ -1321,6 +1372,8 @@ def _resolve_paper_options(candidate: dict | None, budget: float, include: bool,
     disabled, or under --no-fetch; fails closed on any lookup error."""
     if not (candidate and include and allow_fetch):
         return {"status": "skipped (no candidate / disabled / --no-fetch)", "contracts": []}
+    if is_restricted_underlying(candidate.get("ticker")):
+        return {"status": "restricted_employer", "contracts": []}   # never resolve a chain
     try:
         from data.odte_options import build_paper_options
         return build_paper_options(candidate["ticker"], candidate["direction"], budget,
@@ -1407,6 +1460,10 @@ def build_ticker_card(ticker: str, price: dict | None, paper_options: dict | Non
     """One compact, PAPER-only beginner card for a single name. Verdict uses the shared gate
     (price required; social confirm-only). A same-day chain that doesn't exist → OBSERVE (you
     can't 0DTE-trade it). OBSERVE carries NO contracts. Never an instruction to trade."""
+    # Employer/compliance-restricted symbols (e.g. NVDA) short-circuit to a read-only
+    # RESTRICTED_EMPLOYER card with all contracts stripped — never tradable.
+    if is_restricted_underlying(ticker):
+        return _restricted_card(ticker, social_direction, mentions)
     po = paper_options or {}
     liq_ok = _liquidity_ok(po)
     d = _decide_verdict(price, social_direction, liq_ok)
@@ -1419,7 +1476,12 @@ def build_ticker_card(ticker: str, price: dict | None, paper_options: dict | Non
     contracts = [k for k in po.get("contracts", []) if k.get("option_type") == want] if want else []
     return {"ticker": ticker, "mentions": int(mentions), "verdict": verdict,
             "confidence": confidence, "price_dir": d["price_dir"],
-            "social": social_direction, "contracts": contracts, "note": note}
+            "social": social_direction, "contracts": contracts, "note": note,
+            # Full resolved same-day chain (price-implied side), kept regardless of verdict so a
+            # consumer/agent sees the tradable contracts even on OBSERVE. `contracts` stays the
+            # human-report-filtered list (only shown on a lean).
+            "available_contracts": list(po.get("contracts", [])),
+            "options_expiry": po.get("expiry"), "options_status": po.get("status")}
 
 
 def build_top_chatter(ev_pool: list[dict], allow_fetch: bool, budget: float,
@@ -1432,6 +1494,10 @@ def build_top_chatter(ev_pool: list[dict], allow_fetch: bool, budget: float,
     cards: list[dict] = []
     for tk, n in rank_top_chatter(ev_pool, exclude, max_n, min_mentions, allowed):
         intent = summarize_odte_intent(tk, ev_pool)["intent"]
+        if is_restricted_underlying(tk):
+            # Employer/compliance block: surface as read-only context only — no price/chain fetch.
+            cards.append(_restricted_card(tk, intent, n))
+            continue
         price = _resolve_intraday_trend(tk, allow_fetch)
         po = _resolve_ticker_options(tk, price, intent, budget, allow_fetch)
         cards.append(build_ticker_card(tk, price, po, intent, n))
@@ -2174,10 +2240,14 @@ def _card_line(card: dict, budget: float) -> str:
     return line
 
 
-def _json_contracts(o: dict) -> list[dict]:
+def _json_klist(klist: list | None) -> list[dict]:
     return [{"type": k.get("option_type"), "strike": k.get("strike"),
              "cost_est": k.get("premium_cost_estimate"), "above_budget": bool(k.get("above_budget"))}
-            for k in (o.get("contracts") or [])]
+            for k in (klist or [])]
+
+
+def _json_contracts(o: dict) -> list[dict]:
+    return _json_klist((o or {}).get("contracts"))
 
 
 def format_report_json(report: dict) -> str:
@@ -2201,6 +2271,7 @@ def format_report_json(report: dict) -> str:
                       "above_vwap": pt.get("above_vwap")},
             "social": {"intent": si.get("intent"), "n_docs": si.get("n_docs", 0)},
             "contracts": _json_contracts(report.get("paper_options", {}) or {}),
+            "options_status": (report.get("paper_options", {}) or {}).get("status"),
         },
         "freshness": report.get("freshness_window", {}),
         "sources": {
@@ -2209,11 +2280,20 @@ def format_report_json(report: dict) -> str:
             "x": {"n_posts": xs.get("n_posts"), "status": xs.get("status"),
                   "cross_source_enrich": xs.get("enrich_status"), "n_enrich": xs.get("n_enrich", 0)},
         },
+        # Every chattered ticker carries its full resolved same-day chain (price-implied side), so an
+        # executing agent sees the tradable contracts for each name — not just the directional ones.
         "top_chatter": [
             {"ticker": c.get("ticker"), "mentions": c.get("mentions", 0), "verdict": c.get("verdict"),
-             "direction": _cdir.get(c.get("price_dir"), "none"), "contracts": _json_contracts(c)}
+             "direction": _cdir.get(c.get("price_dir"), "none"),
+             # Employer/compliance restriction (e.g. NVDA): contracts are forced empty regardless.
+             "restricted": bool(c.get("restricted")),
+             "restricted_reason": c.get("restricted_reason"),
+             "options_expiry": c.get("options_expiry"), "options_status": c.get("options_status"),
+             "contracts": [] if c.get("restricted") else _json_klist(c.get("available_contracts"))}
             for c in (report.get("top_chatter") or [])
         ],
+        # Top-level candidate (restored for downstream consumers). _select_odte_candidate never
+        # returns a restricted symbol, so the candidate is guaranteed non-restricted / tradable-eligible.
         "candidate": report.get("candidate"),
     }
     return json.dumps(payload, indent=2, default=str)

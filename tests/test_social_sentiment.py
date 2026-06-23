@@ -6,6 +6,7 @@ extraction (stopwords excluded), transparent scoring, Reddit fetch parse + grace
 X skip without token, the report shape (candidate/evidence/disclaimer/risk), and the
 hard guardrail that the module places no orders / imports no execution code.
 """
+import json
 import os
 import sys
 
@@ -1899,3 +1900,137 @@ def test_module_places_no_orders():
         src = inspect.getsource(mod)
         for f in forbidden:
             assert f not in src, f"{mod.__name__} must not reference {f!r}"
+
+
+# ---------------------------------------------------------------------------
+# Employer/compliance restriction — NVDA must never be tradable (hard, code-level).
+# ---------------------------------------------------------------------------
+
+def test_is_restricted_underlying_floor_includes_nvda():
+    assert ss.is_restricted_underlying("NVDA") is True
+    assert ss.is_restricted_underlying("nvda") is True   # case-insensitive
+    assert ss.is_restricted_underlying("TSLA") is False
+    assert "NVDA" in ss.RESTRICTED_EMPLOYER_TICKERS
+
+
+def test_build_ticker_card_restricts_employer_symbol():
+    # Even handed a live chain, an NVDA card must strip every contract and tag RESTRICTED_EMPLOYER.
+    card = ss.build_ticker_card(
+        "NVDA",
+        price={"ok": True, "last": 100.0, "prev_close": 98.0, "above_vwap": True},
+        paper_options={"expiry": "2026-06-22", "status": "ok",
+                       "contracts": [{"option_type": "call", "strike": 100,
+                                      "premium_cost_estimate": 50, "above_budget": False,
+                                      "spread_pct": 0.1}]},
+        social_direction="bullish", mentions=7)
+    assert card["verdict"] == "RESTRICTED_EMPLOYER"
+    assert card["restricted"] is True
+    assert card["restricted_reason"] == "employer"
+    assert card["contracts"] == []
+    assert card["available_contracts"] == []
+    assert card["options_status"] == "restricted_employer"
+
+
+def test_top_chatter_restricts_nvda_without_fetch():
+    ev_pool = [{"text": "NVDA calls printing, NVDA breakout, load NVDA", "score": 50, "ts": 1.0}]
+    cards = ss.build_top_chatter(ev_pool, allow_fetch=False, budget=50.0,
+                                 max_n=5, min_mentions=2, allowed={"NVDA"})
+    assert len(cards) == 1
+    c = cards[0]
+    assert c["ticker"] == "NVDA"
+    assert c["restricted"] is True and c["verdict"] == "RESTRICTED_EMPLOYER"
+    assert c["contracts"] == [] and c["available_contracts"] == []
+
+
+def test_select_candidate_skips_restricted_symbol():
+    ranked = [("NVDA", {"mentions": 50, "sentiment": 0.9}),
+              ("TSLA", {"mentions": 10, "sentiment": 0.5})]
+    cand = ss._select_odte_candidate(ranked, ev_pool=[], min_mentions=3, now_ts=0.0)
+    assert cand is not None and cand["ticker"] == "TSLA"
+
+
+def test_resolve_paper_options_blocks_restricted_candidate():
+    po = ss._resolve_paper_options({"ticker": "NVDA", "direction": "bullish"},
+                                   budget=50.0, include=True, allow_fetch=True)
+    assert po["status"] == "restricted_employer"
+    assert po["contracts"] == []
+
+
+def test_format_report_json_strips_restricted_and_keeps_candidate():
+    # Synthetic report whose NVDA chatter wrongly carries contracts — the formatter must strip them,
+    # and the top-level candidate (TSLA) must survive for downstream consumers.
+    report = {
+        "generated_at": "2026-06-22T10:00:00",
+        "scorecard": {"verdict": "CALL-leaning", "confidence": "low", "reasons": []},
+        "spy_trend": {"ok": True, "pct_vs_prev_close": 0.5, "above_vwap": True},
+        "social_intent": {"intent": "bullish", "n_docs": 3},
+        "sources": {"reddit": {"n_posts": 5, "n_quality": 5},
+                    "x": {"n_posts": 0, "status": "skipped"}},
+        "freshness_window": {},
+        "paper_options": {"status": "ok", "contracts": []},
+        "daily_thread": {"status": "n/a"},
+        "candidate": {"ticker": "TSLA", "direction": "bullish", "mentions": 9},
+        "top_chatter": [
+            {**ss._restricted_card("NVDA", "bullish", 8),
+             "available_contracts": [{"option_type": "call", "strike": 100,
+                                      "premium_cost_estimate": 50, "above_budget": False}]},
+            {"ticker": "TSLA", "mentions": 9, "verdict": "CALL-leaning", "price_dir": "bullish",
+             "available_contracts": [{"option_type": "call", "strike": 250,
+                                      "premium_cost_estimate": 40, "above_budget": False}],
+             "options_expiry": "2026-06-22", "options_status": "ok"},
+        ],
+    }
+    out = json.loads(ss.format_report_json(report))
+    nvda = next(c for c in out["top_chatter"] if c["ticker"] == "NVDA")
+    assert nvda["restricted"] is True
+    assert nvda["restricted_reason"] == "employer"
+    assert nvda["verdict"] == "RESTRICTED_EMPLOYER"
+    assert nvda["contracts"] == []            # contracts stripped even though available_contracts set
+    tsla = next(c for c in out["top_chatter"] if c["ticker"] == "TSLA")
+    assert tsla["contracts"] and tsla["contracts"][0]["strike"] == 250   # non-restricted keeps chain
+    assert out["candidate"]["ticker"] == "TSLA"   # top-level candidate restored
+
+
+# ---------------------------------------------------------------------------
+# Script-only 0DTE watchdog — NO LLM, NO Robinhood. State/trigger writer.
+# ---------------------------------------------------------------------------
+
+def test_watchdog_new_candidate_triggers_then_dedupes(tmp_path, monkeypatch):
+    import data.odte_watchdog as wd
+    rep = {"scorecard": {"verdict": "CALL-leaning"},
+           "candidate": {"ticker": "TSLA", "direction": "bullish"}, "top_chatter": []}
+    monkeypatch.setattr(ss, "build_odte_social_report", lambda allow_fetch=True: rep)
+    pol = tmp_path / "controller_policy.json"
+    pol.write_text(json.dumps({"mode": "experimental_breathe"}))
+    p1 = wd.run_watchdog(state_dir=str(tmp_path), policy_path=str(pol), allow_fetch=False)
+    assert p1["alert"] is True
+    assert any(t["type"] == "new_candidate" for t in p1["triggers"])
+    assert (tmp_path / "watchdog_state.json").exists()
+    assert (tmp_path / "triggers.json").exists()
+    # Same candidate next run -> no repeat trigger (deduped via persisted state).
+    p2 = wd.run_watchdog(state_dir=str(tmp_path), policy_path=str(pol), allow_fetch=False)
+    assert all(t["type"] != "new_candidate" for t in p2["triggers"])
+
+
+def test_watchdog_restricted_candidate_never_actionable(tmp_path, monkeypatch):
+    import data.odte_watchdog as wd
+    rep = {"scorecard": {"verdict": "OBSERVE"},
+           "candidate": {"ticker": "NVDA", "direction": "bullish"},   # defensive: must be ignored
+           "top_chatter": [ss._restricted_card("NVDA", "bullish", 5)]}
+    monkeypatch.setattr(ss, "build_odte_social_report", lambda allow_fetch=True: rep)
+    pol = tmp_path / "controller_policy.json"
+    pol.write_text(json.dumps({"mode": "x"}))
+    p = wd.run_watchdog(state_dir=str(tmp_path), policy_path=str(pol), allow_fetch=False)
+    assert p["candidate"] is None                       # restricted symbol never surfaced as candidate
+    assert "NVDA" in p["restricted_chatter"]
+    assert all(t["type"] != "new_candidate" for t in p["triggers"])
+
+
+def test_watchdog_missing_policy_triggers(tmp_path, monkeypatch):
+    import data.odte_watchdog as wd
+    monkeypatch.setattr(ss, "build_odte_social_report",
+                        lambda allow_fetch=True: {"scorecard": {}, "candidate": None, "top_chatter": []})
+    p = wd.run_watchdog(state_dir=str(tmp_path),
+                        policy_path=str(tmp_path / "nope.json"), allow_fetch=False)
+    assert p["alert"] is True
+    assert any(t["type"].startswith("policy_") for t in p["triggers"])

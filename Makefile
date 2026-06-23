@@ -156,6 +156,16 @@ odte-report:                 ## 0DTE social watchlist — PAPER ONLY (live: REDD
 	  $(if $(DAILY_THREAD_URL),--daily-thread-url $(DAILY_THREAD_URL),) \
 	  $(if $(DAILY_THREAD_LIMIT),--daily-thread-limit $(DAILY_THREAD_LIMIT),)
 
+# Script-only 0DTE watchdog — NO LLM, NO Robinhood, places NO orders. Runs the LOCAL report,
+# diffs the actionable candidate vs the prior run, and writes ~/0dte/{watchdog_state,triggers}.json.
+# Empty stdout when nothing actionable; compact one-line JSON on a trigger. For a no_agent cron.
+#   make odte-watchdog            # cron form: empty unless a trigger fires
+#   make odte-watchdog JSON=1     # always print compact state
+#   make odte-watchdog OFFLINE=1  # offline dry run (cache-only, no network)
+.PHONY: odte-watchdog
+odte-watchdog:               ## 0DTE script-only watchdog — NO LLM/Robinhood (JSON=1 state; OFFLINE=1 dry run)
+	@$(DI) odte-watchdog $(if $(OFFLINE),--no-fetch,) $(if $(JSON),--json,)
+
 .PHONY: regime
 regime:                      ## Print current market regime  (live SPY + VIX fetch)
 	$(PYTHON) -c "import sys; sys.path.insert(0, '$(SRC)'); from strategy.regimes import RegimeDetector; s = RegimeDetector().detect(); dma = f'{s.spy_vs_200dma_pct:+.2%}' if s.spy_vs_200dma_pct is not None else 'N/A'; print(f'Regime: {s.regime.upper()}  |  Confidence: {s.confidence:.0%}  |  VIX: {s.vix}  |  SPY vs 200DMA: {dma}'); print('Notes:', '  '.join(s.notes) if s.notes else 'none')"
