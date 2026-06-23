@@ -1311,14 +1311,14 @@ def test_ticker_card_directional_with_chain_is_lean():
     po = {"expiry": "2026-06-17", "contracts": [
         {"option_type": "call", "strike": 505, "ask": 0.30, "premium_cost_estimate": 30,
          "spread_pct": 0.05, "volume": 1000, "above_budget": False}]}
-    card = ss.build_ticker_card("NVDA", price, po, "bullish", mentions=7)
+    card = ss.build_ticker_card("AMD", price, po, "bullish", mentions=7)
     assert card["verdict"] == "CALL-leaning" and card["confidence"] == "medium"
     assert card["contracts"] and card["contracts"][0]["option_type"] == "call"
 
 
 def test_ticker_card_social_only_observes():
     """(8c) No usable price (social-only) -> OBSERVE, no contracts."""
-    card = ss.build_ticker_card("NVDA", {"ok": False, "status": "no data"},
+    card = ss.build_ticker_card("AMD", {"ok": False, "status": "no data"},
                                 {"expiry": "2026-06-17", "contracts": []}, "bullish", mentions=9)
     assert card["verdict"] == "OBSERVE" and card["contracts"] == []
 
@@ -1326,7 +1326,7 @@ def test_ticker_card_social_only_observes():
 def test_ticker_card_no_chain_observes():
     """(8d) No same-day options chain -> OBSERVE even with a directional price (can't 0DTE-trade)."""
     price = _spy_price(last=505.0, prev_close=500.0, open_=501.0, vwap=503.0)
-    card = ss.build_ticker_card("NVDA", price, {"expiry": None, "contracts": []}, "bullish", 4)
+    card = ss.build_ticker_card("AMD", price, {"expiry": None, "contracts": []}, "bullish", 4)
     assert card["verdict"] == "OBSERVE" and card["note"] == "no same-day options"
     assert card["contracts"] == []
 
