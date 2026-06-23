@@ -166,6 +166,16 @@ odte-report:                 ## 0DTE social watchlist — PAPER ONLY (live: REDD
 odte-watchdog:               ## 0DTE script-only watchdog — NO LLM/Robinhood (JSON=1 state; OFFLINE=1 dry run)
 	@$(DI) odte-watchdog $(if $(OFFLINE),--no-fetch,) $(if $(JSON),--json,)
 
+# Broker-AWARE, DECISION-ONLY live-position watchdog — places NO orders, NO broker/LLM calls.
+# Reads ~/0dte/active_trade.json + a caller-supplied snapshot (Hermes feeds real MCP broker values;
+# never faked) and writes ~/0dte/{position_state,position_decision}.json. Empty stdout on HOLD/
+# NO_POSITION; compact JSON on an actionable decision.
+#   make odte-position JSON=1                 # always print the decision
+#   make odte-position SNAPSHOT=~/0dte/snap.json JSON=1   # feed a live snapshot file
+.PHONY: odte-position
+odte-position:               ## 0DTE live-position decision watchdog — NO orders/broker (SNAPSHOT=path; JSON=1)
+	@$(DI) odte-position $(if $(SNAPSHOT),--snapshot $(SNAPSHOT),) $(if $(PLAN),--plan $(PLAN),) $(if $(JSON),--json,)
+
 .PHONY: regime
 regime:                      ## Print current market regime  (live SPY + VIX fetch)
 	$(PYTHON) -c "import sys; sys.path.insert(0, '$(SRC)'); from strategy.regimes import RegimeDetector; s = RegimeDetector().detect(); dma = f'{s.spy_vs_200dma_pct:+.2%}' if s.spy_vs_200dma_pct is not None else 'N/A'; print(f'Regime: {s.regime.upper()}  |  Confidence: {s.confidence:.0%}  |  VIX: {s.vix}  |  SPY vs 200DMA: {dma}'); print('Notes:', '  '.join(s.notes) if s.notes else 'none')"

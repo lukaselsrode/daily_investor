@@ -265,6 +265,34 @@ def _cmd_odte_watchdog(rest: list[str]) -> None:
         print(json.dumps(payload, separators=(",", ":"), default=str))
 
 
+def _cmd_odte_position(rest: list[str]) -> None:
+    # BROKER-AWARE but DECISION-ONLY 0DTE position watchdog. Places NO orders, makes NO broker/LLM
+    # calls. Reads the active trade plan (~/0dte/active_trade.json) + a caller-supplied live snapshot
+    # (Hermes feeds real broker/market values via MCP — never faked here), emits TAKE_PROFIT /
+    # THESIS_DEAD / BID_FLOOR / TIME_RISK / MONITORING_DEGRADED / HOLD, and writes
+    # ~/0dte/{position_state,position_decision}.json. stdout: EMPTY when HOLD/NO_POSITION (cron form),
+    # compact one-line JSON on an actionable decision; --json always prints.
+    import json
+    import logging
+    logging.disable(logging.ERROR)   # keep stdout a clean machine contract
+    from data.odte_position import run_position_watchdog
+    plan = _flag_value(rest, "--plan")
+    snap_path = _flag_value(rest, "--snapshot")
+    snap_json = _flag_value(rest, "--snapshot-json")
+    state_dir = _flag_value(rest, "--state-dir")
+    snapshot = None
+    if snap_json is not None:
+        try:
+            snapshot = json.loads(snap_json)
+        except json.JSONDecodeError as exc:
+            print(f"--snapshot-json: invalid JSON: {exc}")
+            sys.exit(2)
+    payload = run_position_watchdog(plan_path=plan, snapshot=snapshot, snapshot_path=snap_path,
+                                    state_dir=state_dir or os.path.expanduser("~/0dte"))
+    if "--json" in rest or payload.get("alert"):
+        print(json.dumps(payload, separators=(",", ":"), default=str))
+
+
 def _cmd_stability_scan(rest: list[str]) -> None:
     from cli.commands import cmd_stability_scan
     mode = _flag_value(rest, "--mode")
@@ -426,6 +454,7 @@ _COMMANDS: dict[str, Callable[[list[str]], None]] = {
     "odte-social-report": _cmd_odte_social_report,
     "options-social": _cmd_odte_social_report,
     "odte-watchdog": _cmd_odte_watchdog,
+    "odte-position": _cmd_odte_position,
     "stability-scan": _cmd_stability_scan,
     "interaction-screen": _cmd_interaction_screen,
     "auto-tune-all": _cmd_auto_tune_all,
@@ -504,6 +533,15 @@ COMMANDS
                            (new/changed non-restricted candidate, or missing/invalid policy).
                            --json always prints state; --no-fetch runs offline (cache-only);
                            --policy PATH / --state-dir DIR override the defaults (~/0dte/).
+  odte-position            Broker-AWARE, DECISION-ONLY live-position watchdog — places NO orders,
+                           makes NO broker/LLM calls. Reads the active trade plan
+                           (~/0dte/active_trade.json) + a caller-supplied live snapshot (Hermes feeds
+                           real broker/market values via MCP) and emits TAKE_PROFIT / THESIS_DEAD /
+                           BID_FLOOR / TIME_RISK / MONITORING_DEGRADED / HOLD. Writes
+                           ~/0dte/{position_state,position_decision}.json. EMPTY stdout on HOLD/
+                           NO_POSITION; compact JSON on an actionable decision. --snapshot PATH or
+                           --snapshot-json '{...}' supply the live values; --plan / --state-dir
+                           override defaults; --json always prints.
 
 OPTIONS (run)
   --skip-data              Reuse existing CSV data
