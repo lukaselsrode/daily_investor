@@ -197,6 +197,15 @@ odte-journal-report:         ## Summarize the 0DTE journal (JSON=1 metrics; WRIT
 odte-gamma-map:              ## 0DTE gamma/pin map from exported quote rows — NO broker (INPUT=path; SPOT=; JSON=1; WRITE=1)
 	@$(DI) odte-gamma-map $(if $(INPUT),--input $(INPUT),) $(if $(SPOT),--spot $(SPOT),) $(if $(UNDERLYING),--underlying $(UNDERLYING),) $(if $(EXPIRATION),--expiration $(EXPIRATION),) $(if $(JSON),--json,) $(if $(WRITE),--write,)
 
+# FMP single-name context for 0DTE meme/squeeze SANITY — read-only, NO orders, NO options/gamma.
+# Cheap FMP stable fundamentals (profile/quote/shares-float/key-metrics-ttm/news) + squeeze profile.
+# FMP options are unavailable; Robinhood stays the gamma source. Fail-closed without FMP_KEY.
+#   make odte-fmp-context SYMBOL=WEN JSON=1
+#   make odte-fmp-context SYMBOL=WEN WRITE=1   # writes ~/0dte/reports/ artifacts
+.PHONY: odte-fmp-context
+odte-fmp-context:            ## FMP meme/squeeze sanity context — NO orders/options (SYMBOL=WEN; JSON=1; WRITE=1)
+	@$(DI) odte-fmp-context $(SYMBOL) $(if $(JSON),--json,) $(if $(WRITE),--write,) $(if $(OUT_DIR),--out-dir $(OUT_DIR),)
+
 .PHONY: regime
 regime:                      ## Print current market regime  (live SPY + VIX fetch)
 	$(PYTHON) -c "import sys; sys.path.insert(0, '$(SRC)'); from strategy.regimes import RegimeDetector; s = RegimeDetector().detect(); dma = f'{s.spy_vs_200dma_pct:+.2%}' if s.spy_vs_200dma_pct is not None else 'N/A'; print(f'Regime: {s.regime.upper()}  |  Confidence: {s.confidence:.0%}  |  VIX: {s.vix}  |  SPY vs 200DMA: {dma}'); print('Notes:', '  '.join(s.notes) if s.notes else 'none')"

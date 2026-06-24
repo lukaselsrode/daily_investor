@@ -368,6 +368,25 @@ def _cmd_odte_gamma_map(rest: list[str]) -> None:
           else render_markdown(gmap))
 
 
+def _cmd_odte_fmp_context(rest: list[str]) -> None:
+    # FMP single-name context for 0DTE meme/squeeze SANITY — read-only, NO orders, NO options/gamma.
+    # Fetches cheap FMP *stable* fundamentals (profile/quote/shares-float/key-metrics-ttm/news) and
+    # classifies a squeeze_profile. FMP options endpoints are unavailable, so fmp_options_available
+    # is always false (Robinhood remains the gamma/options source). Fail-closed without FMP_KEY.
+    # NOT wired into odte-watchdog (which stays cheap/no-network). Never prints the API key.
+    import json
+
+    from data.odte_fmp_context import render_markdown, run_fmp_context
+    symbol = rest[0] if rest and not rest[0].startswith("--") else None
+    if not symbol:
+        print("odte-fmp-context: provide a SYMBOL, e.g. `odte-fmp-context WEN --json`")
+        sys.exit(2)
+    ctx = run_fmp_context(symbol, allow_fetch="--no-fetch" not in rest,
+                          out_dir=_flag_value(rest, "--out-dir"), write="--write" in rest)
+    print(json.dumps(ctx, separators=(",", ":"), default=str) if "--json" in rest
+          else render_markdown(ctx))
+
+
 def _cmd_stability_scan(rest: list[str]) -> None:
     from cli.commands import cmd_stability_scan
     mode = _flag_value(rest, "--mode")
@@ -533,6 +552,7 @@ _COMMANDS: dict[str, Callable[[list[str]], None]] = {
     "odte-journal": _cmd_odte_journal,
     "odte-journal-report": _cmd_odte_journal_report,
     "odte-gamma-map": _cmd_odte_gamma_map,
+    "odte-fmp-context": _cmd_odte_fmp_context,
     "stability-scan": _cmd_stability_scan,
     "interaction-screen": _cmd_interaction_screen,
     "auto-tune-all": _cmd_auto_tune_all,
@@ -637,6 +657,14 @@ COMMANDS
                            it does NOT infer dealer net GEX / gamma flip (RH doesn't expose it).
                            --spot/--underlying/--expiration refine; --json prints the map; --write
                            (or --out-dir DIR) writes ~/0dte/reports/odte_gamma_map_<sym>.{md,json}.
+  odte-fmp-context SYMBOL  FMP single-name context for meme/squeeze SANITY — read-only, NO orders,
+                           NO options/gamma. Fetches cheap FMP stable fundamentals (profile, quote,
+                           shares-float, key-metrics-ttm, a few news) and classifies a squeeze_profile
+                           (tiny/small/mid/large float). FMP options are unavailable so
+                           fmp_options_available is always false — Robinhood stays the gamma/options
+                           source. Fail-closed without FMP_KEY (never printed). --json prints the
+                           context; --write (or --out-dir DIR) writes ~/0dte/reports/ artifacts;
+                           --no-fetch runs offline. NOT used by odte-watchdog (kept cheap/no-network).
 
 OPTIONS (run)
   --skip-data              Reuse existing CSV data
