@@ -341,6 +341,33 @@ def _cmd_odte_journal_report(rest: list[str]) -> None:
         print(res["markdown"])
 
 
+def _cmd_odte_gamma_map(rest: list[str]) -> None:
+    # 0DTE option-chain gamma / pin map — PURE/OFFLINE, NO broker, NO LLM, NO network. Reads option
+    # quote rows that Hermes/RH exported to a JSON file (--input PATH) or string (--input-json '...').
+    # HONEST: absolute gamma/OI concentration only — labeled gamma_regime=pin_risk_only_not_dealer_gex;
+    # it does NOT infer dealer net GEX / gamma flip (RH doesn't expose that). --spot/--underlying/
+    # --expiration refine the read; --json prints the map; --write (or --out-dir) writes artifacts.
+    import json
+
+    from data.odte_gamma_map import render_markdown, run_gamma_map
+    input_path = _flag_value(rest, "--input")
+    input_json = _flag_value(rest, "--input-json")
+    if input_path is None and input_json is None:
+        print("odte-gamma-map: provide --input PATH or --input-json '{...}'")
+        sys.exit(2)
+    try:
+        gmap = run_gamma_map(input_path=input_path, input_json=input_json,
+                             spot=_flag_value(rest, "--spot"),
+                             underlying=_flag_value(rest, "--underlying"),
+                             expiration=_flag_value(rest, "--expiration"),
+                             out_dir=_flag_value(rest, "--out-dir"), write="--write" in rest)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"odte-gamma-map: could not read/parse input: {exc}")
+        sys.exit(2)
+    print(json.dumps(gmap, separators=(",", ":"), default=str) if "--json" in rest
+          else render_markdown(gmap))
+
+
 def _cmd_stability_scan(rest: list[str]) -> None:
     from cli.commands import cmd_stability_scan
     mode = _flag_value(rest, "--mode")
@@ -505,6 +532,7 @@ _COMMANDS: dict[str, Callable[[list[str]], None]] = {
     "odte-position": _cmd_odte_position,
     "odte-journal": _cmd_odte_journal,
     "odte-journal-report": _cmd_odte_journal_report,
+    "odte-gamma-map": _cmd_odte_gamma_map,
     "stability-scan": _cmd_stability_scan,
     "interaction-screen": _cmd_interaction_screen,
     "auto-tune-all": _cmd_auto_tune_all,
@@ -601,6 +629,14 @@ COMMANDS
                            (trades by mode, hit rate, avg P/L, MFE capture, rule violations, timing,
                            experiments, lessons). --json prints metrics; default prints Markdown;
                            --write (or --out-dir DIR) writes ~/0dte/reports/ artifacts.
+  odte-gamma-map           0DTE option-chain gamma / pin map — PURE/OFFLINE, NO broker/LLM/network.
+                           Reads option-quote rows Hermes/RH exported (--input PATH or
+                           --input-json '{...}') and computes ABSOLUTE gamma/OI concentration:
+                           call/put walls, max-gamma strike, ATM-straddle expected move, pin risk,
+                           quote freshness. HONEST — labeled gamma_regime=pin_risk_only_not_dealer_gex;
+                           it does NOT infer dealer net GEX / gamma flip (RH doesn't expose it).
+                           --spot/--underlying/--expiration refine; --json prints the map; --write
+                           (or --out-dir DIR) writes ~/0dte/reports/odte_gamma_map_<sym>.{md,json}.
 
 OPTIONS (run)
   --skip-data              Reuse existing CSV data
