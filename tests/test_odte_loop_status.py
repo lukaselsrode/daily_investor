@@ -196,6 +196,17 @@ def test_stale_live_decision_is_degraded():
     assert any("stale" in s for s in r["reasons"])
 
 
+def test_live_scalp_decision_stales_fast_for_hawk_mode():
+    # 0DTE scalp management should not allow a hours-old default. If a live contract has not had a
+    # fresh management decision for >10 minutes, the loop should surface DEGRADED so Hermes treats it
+    # as a risk event rather than continuing to scan.
+    r = ls.derive_loop_state(active_trade=_open_plan(),
+                             position_decision={"decision": "HOLD", "underlying": "SPY",
+                                                "ts": _ts(minutes_ago=11)}, now=NOW)
+    assert r["state"] == "DEGRADED"
+    assert r["loop_stage"] == "degraded"
+
+
 def test_malformed_live_artifact_degrades_not_crashes():
     # active_trade present-but-malformed while a plan looks open -> DEGRADED, never an exception.
     r = ls.derive_loop_state(active_trade=_open_plan(), errors={"active_trade"}, now=NOW)
