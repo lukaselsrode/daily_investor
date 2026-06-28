@@ -32,6 +32,10 @@ Two writers feed the journal: the repo's own bridges (`event_from_position_decis
 into `data/odte/`. The ingester exists because `build_report` reads only the JSONL — loose artifacts
 were previously invisible post-day.
 
+`odte_loop_status` (§6b) is the read-only **"where am I?"** surface over this loop: it summarizes the
+artifacts above into the current state (`SCAN…REVIEWED`/`DEGRADED`) + the next command, without
+re-deriving any gate or decision.
+
 ---
 
 ## 2. Storage paths
@@ -207,6 +211,51 @@ make odte-entry-gate TRIGGER=... JOURNAL=1          # also append the entry_deci
 > does NOT connect to a broker. Live funds/PDT must still be re-checked by the manager
 > (`budget_check`). `gamma`/`account` weighting is intentionally binary (pass/fail), not scored —
 > revisit only if the manager needs finer gradations.
+
+### 6b. Loop status (where am I?) — `odte_loop_status`
+
+`derive_loop_state(active_trade=None, position_decision=None, triggers=None, journal_events=None, *,
+errors=None, now=None)` is a **PURE/OFFLINE** state machine that gives the controller **one read-only
+surface** for the whole cycle: `scan → thesis → entry → watch → exit → review`. It **re-derives no
+gate or decision** — it only *summarizes* the artifacts the other tools already wrote — and it places
+no orders / makes no broker/LLM calls. `run_loop_status(state_dir=None)` reads the canonical files
+(`active_trade.json`, `position_decision.json`, `triggers.json`, and the latest `entry_decision` /
+`postmortem` in `decision_journal.jsonl`) and resolves the state; the IO wrapper supplies the wall
+clock so the pure core stays clock-free and unit-testable.
+
+| State | Means | `next_command` | `executable` |
+|---|---|---|---|
+| `SCAN` | nothing actionable | `odte-watchdog` | false |
+| `CANDIDATE` | non-restricted candidate on the board, scan_only/observe | `odte-entry-gate` | false |
+| `GATED` | entry-gate record exists, **not** execution-allowed | `odte-entry-gate --promote-to-execution` | false |
+| `PROMOTED` | entry-gate record is execution-allowed | `odte-position` | true |
+| `ENTERED` | plan open, no live decision computed yet | `odte-position --snapshot …` | true |
+| `MANAGING` | live position + a current decision (HOLD or an exit trigger) | `odte-position --snapshot …` | true |
+| `EXITED` | last trade closed, no `postmortem` yet | `odte-journal` → `odte-ingest-artifacts` | false |
+| `REVIEWED` | last trade closed and reviewed — idle | `odte-journal-report` | false |
+| `DEGRADED` | live position can't be valued, or a live artifact is malformed/stale | `odte-position` / `odte-ingest-artifacts` | false |
+
+**Priority ladder (highest first):** a **live position always outranks** the scan/candidate/gate lane —
+managing or exiting an open trade beats chasing a new one. So `MANAGING`/`ENTERED` (and a `DEGRADED`
+on a live position) win over `PROMOTED`/`GATED`/`CANDIDATE`/`SCAN`. A closed-but-unreviewed trade
+(`EXITED`) outranks a fresh gate/candidate (review before re-entry) but stops nagging once it is
+older than `STALE_TRADE_HOURS` (so an abandoned trade can't mask a genuinely new scan). An
+`entry_decision` dated at/before the last close is the **closed trade's own** gate (already consumed)
+and is ignored — only a current-cycle gate drives `GATED`/`PROMOTED`. A live `position_decision`
+older than `STALE_DECISION_MINUTES` is treated as flying blind → `DEGRADED`.
+
+**Fail-soft:** missing artifacts read as `SCAN`; a present-but-malformed **live** artifact
+(`active_trade`/`position_decision`) → `DEGRADED`; nothing raises. The payload carries `state`,
+`loop_stage`, `executable`, `next_action`, `next_command`, `reasons`, a small `context`, and an
+`artifacts` map of per-file read status (`ok|missing|invalid` + journal event count).
+
+CLI: `odte-loop-status` (`make odte-loop-status`). `--json` prints the compact machine payload;
+default prints Markdown; `--state-dir DIR` overrides `data/odte/`.
+
+```bash
+make odte-loop-status            # Markdown: where in the loop + the next command to run
+make odte-loop-status JSON=1     # compact machine payload (clean stdout contract)
+```
 
 ---
 

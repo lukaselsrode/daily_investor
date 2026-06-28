@@ -245,6 +245,14 @@ odte-entry-gate:             ## 0DTE thesis->entry gate — NO orders/broker (TR
 odte-fmp-context:            ## FMP meme/squeeze sanity context — NO orders/options (SYMBOL=WEN; JSON=1; WRITE=1)
 	@$(DI) odte-fmp-context $(SYMBOL) $(if $(JSON),--json,) $(if $(WRITE),--write,) $(if $(OUT_DIR),--out-dir $(OUT_DIR),)
 
+# One read-only surface for the live loop: summarizes data/odte artifacts (active_trade /
+# position_decision / triggers / decision_journal) into the current state + next command. PURE/OFFLINE.
+#   make odte-loop-status            # Markdown: where in the loop + what runs next
+#   make odte-loop-status JSON=1     # compact machine payload
+.PHONY: odte-loop-status
+odte-loop-status:            ## 0DTE loop state machine — where in scan→exit→review + next command (JSON=1)
+	@$(DI) odte-loop-status $(if $(STATE_DIR),--state-dir $(STATE_DIR),) $(if $(JSON),--json,)
+
 .PHONY: regime
 regime:                      ## Print current market regime  (live SPY + VIX fetch)
 	$(PYTHON) -c "import sys; sys.path.insert(0, '$(SRC)'); from strategy.regimes import RegimeDetector; s = RegimeDetector().detect(); dma = f'{s.spy_vs_200dma_pct:+.2%}' if s.spy_vs_200dma_pct is not None else 'N/A'; print(f'Regime: {s.regime.upper()}  |  Confidence: {s.confidence:.0%}  |  VIX: {s.vix}  |  SPY vs 200DMA: {dma}'); print('Notes:', '  '.join(s.notes) if s.notes else 'none')"

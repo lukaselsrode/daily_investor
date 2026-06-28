@@ -558,6 +558,24 @@ def _cmd_odte_fmp_context(rest: list[str]) -> None:
           else render_markdown(ctx))
 
 
+def _cmd_odte_loop_status(rest: list[str]) -> None:
+    # PURE/OFFLINE 0DTE loop state machine — NO broker, NO LLM, places NO orders. Summarizes the
+    # canonical data/odte artifacts (active_trade / position_decision / triggers / decision_journal)
+    # into the current loop state (SCAN/CANDIDATE/GATED/PROMOTED/ENTERED/MANAGING/EXITED/REVIEWED/
+    # DEGRADED) + the next command to run. Re-derives no gate/decision; a live position always
+    # outranks the scan/candidate/gate lane. --json prints the compact payload; default prints Markdown.
+    # Quiet by design: the readers only emit stderr logs (no stdout writes), so --json stdout is a
+    # clean machine contract without any process-wide logging override.
+    import json
+
+    from data.odte_loop_status import render_markdown, run_loop_status
+    payload = run_loop_status(state_dir=_flag_value(rest, "--state-dir"))
+    if "--json" in rest:
+        print(json.dumps(payload, separators=(",", ":"), default=str))
+    else:
+        print(render_markdown(payload))
+
+
 def _cmd_stability_scan(rest: list[str]) -> None:
     from cli.commands import cmd_stability_scan
     mode = _flag_value(rest, "--mode")
@@ -729,6 +747,7 @@ _COMMANDS: dict[str, Callable[[list[str]], None]] = {
     "odte-day-score": _cmd_odte_day_score,
     "odte-entry-gate": _cmd_odte_entry_gate,
     "odte-fmp-context": _cmd_odte_fmp_context,
+    "odte-loop-status": _cmd_odte_loop_status,
     "stability-scan": _cmd_stability_scan,
     "interaction-screen": _cmd_interaction_screen,
     "auto-tune-all": _cmd_auto_tune_all,
@@ -874,6 +893,17 @@ COMMANDS
                            source. Fail-closed without FMP_KEY (never printed). --json prints the
                            context; --write (or --out-dir DIR) writes data/odte/reports/ artifacts;
                            --no-fetch runs offline. NOT used by odte-watchdog (kept cheap/no-network).
+  odte-loop-status         PURE/OFFLINE 0DTE loop state machine — NO broker/LLM, places NO orders.
+                           Summarizes the canonical data/odte artifacts (active_trade,
+                           position_decision, triggers, decision_journal) into the current loop state
+                           — SCAN / CANDIDATE / GATED / PROMOTED / ENTERED / MANAGING / EXITED /
+                           REVIEWED / DEGRADED — plus the next command to run (odte-watchdog,
+                           odte-entry-gate, odte-position, odte-journal, …). Re-derives NO gate or
+                           decision; a LIVE position always outranks the scan/candidate/gate lane;
+                           missing artifacts read as SCAN and a malformed/stale live artifact
+                           DEGRADES rather than crashing. --json prints the compact payload (clean
+                           machine contract); default prints Markdown; --state-dir DIR overrides
+                           data/odte/.
 
 OPTIONS (run)
   --skip-data              Reuse existing CSV data
