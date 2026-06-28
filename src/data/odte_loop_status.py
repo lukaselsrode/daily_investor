@@ -55,9 +55,10 @@ _INACTIVE_STATUS = {"closed", "exited", "flat", "done"}
 _NO_POSITION_DECISIONS = {"", "NO_POSITION", "RESTRICTED"}
 
 # A live-position decision older than this (when a wall clock is supplied) is treated as flying blind.
-# This must stay tight for 0DTE scalp HAWK mode: the live controller runs every ~2 minutes, so a
-# 10-minute-old management decision means several checks were missed or the feed/cron is degraded.
-STALE_DECISION_MINUTES = 10
+# This must stay tight for 0DTE scalp HAWK mode: the live controller should poll a held contract
+# around every 30 seconds inside the holding branch, so a >2-minute-old management decision means
+# several checks were missed or the feed/cron is degraded.
+STALE_DECISION_MINUTES = 2
 # A closed trade older than this stops nagging EXITED so it can't mask a genuinely fresh scan.
 STALE_TRADE_HOURS = 36
 
