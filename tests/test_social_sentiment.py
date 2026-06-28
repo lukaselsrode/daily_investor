@@ -1942,6 +1942,39 @@ def test_top_chatter_restricts_nvda_without_fetch():
     assert c["contracts"] == [] and c["available_contracts"] == []
 
 
+def test_top_chatter_one_stuck_ticker_does_not_block_others(monkeypatch):
+    """Bounded/fail-closed enrichment: a hung ticker degrades to an OBSERVE card with a fetch_status
+    while the others still resolve — one bad name never stalls or aborts the scan. Cards are scan-tier
+    (execution_allowed False), and NVDA stays restricted."""
+    ev_pool = [
+        {"text": "AMD calls ripping bullish breakout AMD", "score": 80, "ts": 3.0},
+        {"text": "TSLA puts bearish TSLA drilling", "score": 70, "ts": 2.0},
+        {"text": "NVDA calls printing NVDA", "score": 90, "ts": 1.0},
+    ]
+
+    def _fake_trend(ticker, allow_fetch):
+        if ticker == "TSLA":
+            import time as _t
+            _t.sleep(2.0)                      # hang one ticker
+        return {"ok": True, "last": 100.0, "prev_close": 99.0, "above_vwap": True,
+                "pct_vs_prev_close": 0.01}
+    monkeypatch.setattr(ss, "_resolve_intraday_trend", _fake_trend)
+    monkeypatch.setattr(ss, "_resolve_ticker_options",
+                        lambda tk, price, intent, budget, allow_fetch: {"status": "ok", "contracts": []})
+
+    cards = ss.build_top_chatter(ev_pool, allow_fetch=True, budget=50.0, max_n=5, min_mentions=1,
+                                 allowed={"AMD", "TSLA", "NVDA"}, timeout_s=0.3)
+    by = {c["ticker"]: c for c in cards}
+    assert "fetch_status" not in by["AMD"]                       # AMD resolved ok (no degradation)
+    assert by["TSLA"].get("fetch_status") == "timeout"          # stuck ticker degraded, not fatal
+    assert by["TSLA"]["contracts"] == []
+    # scan-tier markers on the non-restricted cards
+    for tk in ("AMD", "TSLA"):
+        assert by[tk]["tier"] == "scan" and by[tk]["execution_allowed"] is False
+    # NVDA remains the restricted read-only card
+    assert by["NVDA"]["restricted"] is True and by["NVDA"]["verdict"] == "RESTRICTED_EMPLOYER"
+
+
 def test_select_candidate_skips_restricted_symbol():
     ranked = [("NVDA", {"mentions": 50, "sentiment": 0.9}),
               ("TSLA", {"mentions": 10, "sentiment": 0.5})]
@@ -2034,3 +2067,187 @@ def test_watchdog_missing_policy_triggers(tmp_path, monkeypatch):
                         policy_path=str(tmp_path / "nope.json"), allow_fetch=False)
     assert p["alert"] is True
     assert any(t["type"].startswith("policy_") for t in p["triggers"])
+
+
+def test_watchdog_enriched_decision_context_is_conservative(tmp_path, monkeypatch):
+    """The enriched trigger payload carries the observability schema, and the scan/trigger lane is
+    HARD non-executable: scan_only True, execution_allowed False, confirmation_needed True — even for
+    a strong directional candidate. Old fields remain present (additive, non-breaking)."""
+    import data.odte_watchdog as wd
+    rep = {"scorecard": {"verdict": "CALL-leaning", "confidence": "medium", "reasons": ["above vwap"]},
+           "candidate": {"ticker": "TSLA", "direction": "bullish", "mentions": 9, "sentiment": 0.6},
+           "social_intent": {"intent": "bullish", "n_docs": 5},
+           "spy_trend": {"pct_vs_prev_close": 0.4, "above_vwap": True}, "top_chatter": []}
+    monkeypatch.setattr(ss, "build_odte_social_report", lambda allow_fetch=True: rep)
+    pol = tmp_path / "controller_policy.json"
+    pol.write_text(json.dumps({"mode": "x"}))
+    p = wd.run_watchdog(state_dir=str(tmp_path), policy_path=str(pol), allow_fetch=False)
+    # invariants of the trigger lane
+    assert p["scan_only"] is True and p["execution_allowed"] is False
+    dc = p["decision_context"]
+    assert dc["confirmation_needed"] is True and dc["execution_allowed"] is False and dc["scan_only"] is True
+    assert dc["required_confirmations"] and dc["risk_notes"]
+    assert dc["thesis"]["direction"] == "bullish" and dc["confidence"] == "medium"
+    assert dc["observed_market_context"]["above_vwap"] is True
+    assert dc["social_context"]["intent"] == "bullish"
+    assert dc["gamma_context"].get("basis") == "pin_risk_only_not_dealer_gex"
+    # old consumers still find their fields
+    assert p["candidate"]["ticker"] == "TSLA" and "spy_verdict" in p
+
+
+def test_watchdog_appends_scan_only_trigger_event(tmp_path, monkeypatch):
+    """A watchdog run folds its trigger into the co-located journal as a scan-tier event that can
+    NEVER execute (scan_only True / execution_allowed False), with provenance to triggers.json."""
+    import data.odte_journal as oj
+    import data.odte_watchdog as wd
+    rep = {"scorecard": {"verdict": "CALL-leaning", "confidence": "medium", "reasons": ["x"]},
+           "candidate": {"ticker": "TSLA", "direction": "bullish", "mentions": 9}, "top_chatter": []}
+    monkeypatch.setattr(ss, "build_odte_social_report", lambda allow_fetch=True: rep)
+    pol = tmp_path / "controller_policy.json"
+    pol.write_text(json.dumps({"mode": "x"}))
+    wd.run_watchdog(state_dir=str(tmp_path), policy_path=str(pol), allow_fetch=False)
+    rows = oj.read_events(str(tmp_path / "decision_journal.jsonl"))
+    assert len(rows) == 1
+    e = rows[0]
+    assert e["event_type"] == "watchdog_trigger" and e["source"] == "watchdog"
+    assert e["scan_only"] is True and e["execution_allowed"] is False
+    assert e["raw_artifact_path"].endswith("triggers.json") and e["raw_artifact_sha"]
+
+
+def test_watchdog_journal_failure_never_crashes(tmp_path, monkeypatch):
+    """Journaling errors must not affect the trigger payload or crash the watchdog."""
+    import data.odte_journal as oj
+    import data.odte_watchdog as wd
+    monkeypatch.setattr(ss, "build_odte_social_report",
+                        lambda allow_fetch=True: {"scorecard": {"verdict": "OBSERVE"},
+                                                  "candidate": None, "top_chatter": []})
+    monkeypatch.setattr(oj, "append_decision_journal",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    pol = tmp_path / "controller_policy.json"
+    pol.write_text(json.dumps({"mode": "x"}))
+    p = wd.run_watchdog(state_dir=str(tmp_path), policy_path=str(pol), allow_fetch=False)
+    assert "alert" in p and (tmp_path / "triggers.json").exists()   # payload + files intact
+    assert oj.read_events(str(tmp_path / "decision_journal.jsonl")) == []
+
+
+def test_watchdog_decision_context_vetoes_restricted_and_observe(tmp_path, monkeypatch):
+    """A restricted (NVDA) / OBSERVE situation yields veto_reasons and stays non-executable."""
+    import data.odte_watchdog as wd
+    rep = {"scorecard": {"verdict": "OBSERVE"},
+           "candidate": {"ticker": "NVDA", "direction": "bullish"},
+           "top_chatter": [ss._restricted_card("NVDA", "bullish", 5)]}
+    monkeypatch.setattr(ss, "build_odte_social_report", lambda allow_fetch=True: rep)
+    pol = tmp_path / "controller_policy.json"
+    pol.write_text(json.dumps({"mode": "x"}))
+    p = wd.run_watchdog(state_dir=str(tmp_path), policy_path=str(pol), allow_fetch=False)
+    assert p["execution_allowed"] is False
+    assert "no_directional_edge" in p["decision_context"]["veto_reasons"]
+    # candidate is suppressed (restricted) so thesis is None, never actionable
+    assert p["candidate"] is None and p["decision_context"]["thesis"] is None
+
+
+# ---------------------------------------------------------------------------
+# Expanded 0DTE/options scanning universe — assert the SHIPPED config carries a
+# broad, liquid watchlist (NOT hardcoded thresholds: we read the live config so the
+# test tracks cfg/config.yaml). NVDA stays excluded AND hard-restricted in code.
+# ---------------------------------------------------------------------------
+
+def _live_options_social():
+    """The live, shipped options_social config (cfg/config.yaml) — not a synthetic dict, so these
+    tests track the real watchlist per the project's live-config test philosophy."""
+    from config.manager import ConfigManager
+    return ConfigManager().options_social
+
+
+def test_shipped_core_universe_is_broad_liquid_and_excludes_nvda():
+    uni = set(_live_options_social().core_universe)
+    # Materially broader than the old SPY/QQQ pair.
+    assert {"SPY", "QQQ"} <= uni and len(uni) >= 12
+    # True-daily 0DTE index ETFs present (Cboe's daily-expiry ETF set).
+    assert {"SPY", "QQQ", "IWM"} <= uni
+    # XSP (cash-settled mini-SPX) is in the broad scan universe as a tiny-account-friendly,
+    # true-daily 0DTE name (scan-only — NOT part of the live execution core).
+    assert "XSP" in uni
+    # Sector coverage (not single-name-concentrated): at least a few sector/thematic ETFs.
+    assert len({"SMH", "XLF", "XLE", "XLK", "XBI", "TLT", "GLD"} & uni) >= 4
+    # Liquid mega-cap single names this account can trade.
+    assert {"AAPL", "MSFT", "META", "TSLA", "AMD"} <= uni
+    # NVDA is NEVER a tradable underlying — must not be in the configured universe...
+    assert "NVDA" not in uni
+    # ...and is hard-restricted in code regardless of config (defense in depth).
+    assert ss.is_restricted_underlying("NVDA") is True
+    # No accidental duplicates.
+    assert len(uni) == len(_live_options_social().core_universe)
+
+
+def test_shipped_x_query_includes_expanded_tradables_not_nvda():
+    q = _live_options_social().x_query
+    # The always-watch liquid core appears as cashtags, plus the 0DTE terms.
+    for cash in ("$SPY", "$QQQ", "$IWM", "$AAPL", "$MSFT", "$TSLA", "$AMD", "$MU"):
+        assert cash in q, f"{cash} missing from x_query"
+    assert "0DTE" in q and "ODTE" in q
+    # NVDA is never a queried cashtag (employer restriction).
+    assert "$NVDA" not in q
+    # Still bounded (well under the X recent-search query length cap).
+    assert len(q) <= 512
+
+
+_EXPANDED_NOISE_PAYLOAD = {"data": {"children": [
+    # NVDA is loudest, but it is employer-restricted → must NOT be the tradable candidate.
+    {"data": {"title": "NVDA calls printing, NVDA breakout, load NVDA", "selftext": "long NVDA",
+              "score": 500, "num_comments": 9, "permalink": "/r/wsb/nvda",
+              "created_utc": 1_700_000_000.0}},
+    {"data": {"title": "AMD calls ripping, bullish breakout, AMD long", "selftext": "buy AMD",
+              "score": 300, "num_comments": 5, "permalink": "/r/wsb/amd",
+              "created_utc": 1_700_000_000.0}},
+    # Random all-caps noise that is NOT in the universe — must be filtered out.
+    {"data": {"title": "GETOUT FOMO ZZZZ to the moon", "selftext": "",
+              "score": 100, "num_comments": 1, "permalink": "/r/wsb/noise",
+              "created_utc": 1_700_000_000.0}},
+]}}
+
+
+def test_expanded_universe_filters_noise_and_ranks_tradables(monkeypatch):
+    """With the LIVE expanded universe as the allow-list, chatter for in-universe names ranks while
+    random all-caps noise is dropped. NVDA is absent (not in the configured universe) and never the
+    tradable candidate."""
+    uni = list(_live_options_social().core_universe)
+    monkeypatch.setattr(ss.requests, "get", lambda *a, **k: _FakeResp(_EXPANDED_NOISE_PAYLOAD))
+    import data.cache as _cache
+    monkeypatch.setattr(_cache, "read_data_as_pd", lambda ds: None)  # force allow-list = core_universe
+    # now must be AFTER the payload's created_utc (1_700_000_000 == 2023-11-14 22:13 UTC) or the
+    # rolling window drops the posts as future-dated; the huge lookback then covers them.
+    rep = ss.build_odte_social_report(allow_fetch=True, now=_et(2023, 11, 15, 12, 0), params={
+        "sources": ["reddit"], "core_universe": uni, "max_tickers": 10, "min_mentions": 1,
+        "freshness_mode": "rolling", "max_lookback_hours": 1_000_000,
+        "include_paper_options": False})
+    ranked = {t["ticker"] for t in rep["top_tickers"]}
+    # Only configured-universe names rank; random noise + NVDA (not in universe) leak nothing.
+    assert ranked <= set(uni), f"non-universe leaked: {ranked - set(uni)}"
+    assert not ({"GETOUT", "FOMO", "ZZZZ", "NVDA"} & ranked)
+    assert "AMD" in ranked   # in-universe tradable name is present
+    assert rep["candidate"] is None or rep["candidate"]["ticker"] != "NVDA"
+
+
+def test_nvda_stays_restricted_even_if_misconfigured_into_universe(monkeypatch):
+    """Defense in depth: even if NVDA is (wrongly) added to core_universe, the CODE block keeps it
+    from ever becoming a tradable candidate and strips contracts from any chatter card for it."""
+    monkeypatch.setattr(ss.requests, "get", lambda *a, **k: _FakeResp(_EXPANDED_NOISE_PAYLOAD))
+    import data.cache as _cache
+    monkeypatch.setattr(_cache, "read_data_as_pd", lambda ds: None)
+    # allow_fetch=True so the monkeypatched reddit payload is actually consumed, and now is AFTER
+    # the payload's created_utc (2023-11-14 22:13 UTC) so the rolling window keeps the posts.
+    rep = ss.build_odte_social_report(allow_fetch=True, now=_et(2023, 11, 15, 12, 0), params={
+        "sources": ["reddit"], "core_universe": ["SPY", "QQQ", "AMD", "NVDA"],  # NVDA forced in
+        "max_tickers": 10, "min_mentions": 1, "freshness_mode": "rolling",
+        "max_lookback_hours": 1_000_000, "include_paper_options": False})
+    # NVDA is the loudest, but it is NEVER the tradable candidate.
+    assert rep["candidate"] is None or rep["candidate"]["ticker"] != "NVDA"
+    # Any NVDA chatter card is the read-only restricted card with contracts stripped.
+    for card in rep.get("top_chatter", []):
+        if card["ticker"] == "NVDA":
+            assert card.get("restricted") is True and card["verdict"] == "RESTRICTED_EMPLOYER"
+            assert card["contracts"] == [] and card["available_contracts"] == []
+            break
+    else:
+        raise AssertionError("NVDA should surface as a restricted context card when in-universe")

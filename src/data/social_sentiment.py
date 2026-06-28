@@ -22,13 +22,14 @@ from collections import Counter
 from datetime import date as _date
 from datetime import datetime, timedelta, timezone
 from datetime import time as dtime
+from pathlib import Path
 from xml.etree import ElementTree as ET
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pandas as pd
 import requests
 
-from core.paths import DATA_DIR
+from core.paths import DATA_DIR, ODTE_SCRAPE_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -1484,23 +1485,58 @@ def build_ticker_card(ticker: str, price: dict | None, paper_options: dict | Non
             "options_expiry": po.get("expiry"), "options_status": po.get("status")}
 
 
+# Per-ticker enrichment is bounded + per-ticker-timeout + fail-closed so one slow/hung name can't
+# stall the whole scan. These are SCAN-tier knobs (decision-support only) — see odte_concurrency.
+_TOP_CHATTER_MAX_WORKERS = 4
+_TOP_CHATTER_TIMEOUT_S = 20.0
+
+
 def build_top_chatter(ev_pool: list[dict], allow_fetch: bool, budget: float,
                       exclude: set[str] = frozenset({"SPY"}), max_n: int = 5,
-                      min_mentions: int = 2, allowed: set[str] | None = None) -> list[dict]:
+                      min_mentions: int = 2, allowed: set[str] | None = None,
+                      max_workers: int = _TOP_CHATTER_MAX_WORKERS,
+                      timeout_s: float = _TOP_CHATTER_TIMEOUT_S) -> list[dict]:
     """Build up to `max_n` paper-only ticker cards for the most-chattered OTHER names (ranked over a
     VALIDATED `allowed` universe so bare uppercase tickers count but jargon doesn't). Each card
-    fetches its own price/chain (gated, fail-closed); on --no-fetch every card degrades to OBSERVE.
-    Reuses summarize_odte_intent for the contextual social read."""
+    fetches its own price/chain with BOUNDED concurrency + a per-ticker timeout + fail-closed
+    degradation: a slow/hung or failing ticker becomes an OBSERVE card (no contracts, an
+    `options_status` of timeout/error) instead of stalling or aborting the scan. On --no-fetch every
+    card degrades to OBSERVE. Cards are SCAN-tier: `tier="scan"`, `execution_allowed=False` — this
+    list never authorizes a trade. Reuses summarize_odte_intent for the contextual social read."""
+    from data.odte_concurrency import bounded_gather
+
+    ranked = list(rank_top_chatter(ev_pool, exclude, max_n, min_mentions, allowed))
+    intents = {tk: summarize_odte_intent(tk, ev_pool)["intent"] for tk, _ in ranked}
+    fetch_list = [(tk, n) for tk, n in ranked if not is_restricted_underlying(tk)]
+
+    def _enrich(item):
+        tk, _n = item
+        price = _resolve_intraday_trend(tk, allow_fetch)
+        po = _resolve_ticker_options(tk, price, intents[tk], budget, allow_fetch)
+        return price, po
+
+    gathered = bounded_gather(_enrich, fetch_list, max_workers=max_workers, timeout_s=timeout_s)
+    by_ticker: dict[str, dict] = {fetch_list[i][0]: g for i, g in enumerate(gathered)}
+
     cards: list[dict] = []
-    for tk, n in rank_top_chatter(ev_pool, exclude, max_n, min_mentions, allowed):
-        intent = summarize_odte_intent(tk, ev_pool)["intent"]
+    for tk, n in ranked:
+        intent = intents[tk]
         if is_restricted_underlying(tk):
             # Employer/compliance block: surface as read-only context only — no price/chain fetch.
             cards.append(_restricted_card(tk, intent, n))
             continue
-        price = _resolve_intraday_trend(tk, allow_fetch)
-        po = _resolve_ticker_options(tk, price, intent, budget, allow_fetch)
-        cards.append(build_ticker_card(tk, price, po, intent, n))
+        g = by_ticker.get(tk) or {"ok": False, "status": "skipped"}
+        if g["ok"]:
+            price, po = g["result"]
+            card = build_ticker_card(tk, price, po, intent, n)
+        else:
+            # fail-closed: a timeout/error/skip yields a safe OBSERVE card (no contracts).
+            card = build_ticker_card(tk, None, {"status": g["status"]}, intent, n)
+            card["fetch_status"] = g["status"]
+        # Scan-tier marker: these cards are decision-support, NEVER an execution authorization.
+        card["tier"] = "scan"
+        card["execution_allowed"] = False
+        cards.append(card)
     return cards
 
 
@@ -1810,15 +1846,32 @@ def _clean_dump_text(text: str) -> str:
     return " ".join(t.replace("[link]", " ").replace("[comments]", " ").split()).strip()
 
 
-def _dump_analyzed_texts(combined: list[dict]) -> None:
-    """Overwrite ``~/0dte/reddit_text.txt`` and ``~/0dte/x_text.txt`` with the CLEANED texts this run
-    analyzed (one document per line) — Reddit (hot posts + WSB daily-thread comments) vs X — each file
-    prefixed with a ``# <date> | …`` header showing exactly what was captured (so a small file from a
-    failed daily-comments fetch is obvious at a glance). Fail-soft (never breaks the report). A file is
-    only rewritten when that source produced ≥1 in-window doc, so a failed X (or Reddit) fetch does NOT
-    clobber the prior day's file."""
+# Per-kind cap on retained scrape-text snapshots (keep the most recent N of each); the UI reads the
+# whole history from data/odte/scrape/, so this just bounds disk growth over many runs.
+_SCRAPE_RETENTION = 500
+
+
+def _prune_scrape_snapshots(out_dir: str, kind: str, keep: int = _SCRAPE_RETENTION) -> None:
+    """Delete all but the most recent ``keep`` ``<kind>_text_*.txt`` snapshots. Best-effort."""
     try:
-        out_dir = os.path.expanduser("~/0dte")
+        files = sorted(Path(out_dir).glob(f"{kind}_text_*.txt"))
+        for stale in files[:-keep]:
+            stale.unlink(missing_ok=True)
+    except Exception as exc:  # pragma: no cover - prune is best-effort
+        logger.debug("scrape-snapshot prune (%s) failed: %s", kind, exc)
+
+
+def _dump_analyzed_texts(combined: list[dict]) -> None:
+    """Write the CLEANED texts this run analyzed (one document per line) — Reddit (hot posts + WSB
+    daily-thread comments) vs X — as TIMESTAMPED snapshots under ``data/odte/scrape/`` so the history
+    accumulates over time (``reddit_text_YYYY_MM_DD_HH_MM.txt`` / ``x_text_YYYY_MM_DD_HH_MM.txt``),
+    plus a stable ``reddit_text.txt`` / ``x_text.txt`` "latest" pointer for back-compat. Each file is
+    prefixed with a ``# <date> | …`` header showing exactly what was captured (so a small file from a
+    failed daily-comments fetch is obvious at a glance). Fail-soft (never breaks the report). A kind is
+    only written when it produced ≥1 in-window doc, so a failed X (or Reddit) fetch does NOT write an
+    empty snapshot. Old snapshots are pruned to the most recent ``_SCRAPE_RETENTION`` per kind."""
+    try:
+        out_dir = ODTE_SCRAPE_DIR
         n = {"reddit": 0, "reddit_daily_comment": 0, "x": 0}
         reddit_lines, x_lines = [], []
         for c in combined:
@@ -1828,24 +1881,30 @@ def _dump_analyzed_texts(combined: list[dict]) -> None:
                 continue
             (x_lines if src == "x" else reddit_lines).append(text)
             n[src] = n.get(src, 0) + 1
-        stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        now = datetime.now()
+        stamp = now.strftime("%Y-%m-%d %H:%M")
+        ts = now.strftime("%Y_%m_%d_%H_%M")
         files = (
-            ("reddit_text.txt", reddit_lines,
+            ("reddit", reddit_lines,
              f"# {stamp} | reddit: {n['reddit']} hot posts + {n['reddit_daily_comment']} daily-thread comments"),
-            ("x_text.txt", x_lines, f"# {stamp} | x: {n['x']} tweets"),
+            ("x", x_lines, f"# {stamp} | x: {n['x']} tweets"),
         )
         wrote = []
-        for name, lines, header in files:
+        for kind, lines, header in files:
             if not lines:
                 continue
             os.makedirs(out_dir, exist_ok=True)
-            with open(os.path.join(out_dir, name), "w", encoding="utf-8") as fh:
-                fh.write(header + "\n" + "\n".join(lines) + "\n")
-            wrote.append(f"{len(lines)} {name}")
+            body = header + "\n" + "\n".join(lines) + "\n"
+            # Timestamped snapshot (history) + stable latest pointer (back-compat).
+            for name in (f"{kind}_text_{ts}.txt", f"{kind}_text.txt"):
+                with open(os.path.join(out_dir, name), "w", encoding="utf-8") as fh:
+                    fh.write(body)
+            _prune_scrape_snapshots(out_dir, kind)
+            wrote.append(f"{len(lines)} {kind}")
         if wrote:
             logger.info("dumped analyzed social texts -> %s (%s)", out_dir, ", ".join(wrote))
     except Exception as exc:  # pragma: no cover - dump is best-effort, never fatal
-        logger.debug("analyzed-text dump to ~/0dte failed: %s", exc)
+        logger.debug("analyzed-text dump to %s failed: %s", ODTE_SCRAPE_DIR, exc)
 
 
 def _base_x_query_tickers(x_query: str) -> set[str]:

@@ -239,3 +239,53 @@ def test_run_position_watchdog_no_plan_is_quiet(tmp_path):
     assert payload["alert"] is False
     assert payload["decision"] == "NO_POSITION"
     assert payload["plan_status"] == "missing"
+
+
+# --- standardized journal wiring (fail-safe) -------------------------------------------------
+
+def _read_journal(tmp_path):
+    import data.odte_journal as oj
+    return oj.read_events(str(tmp_path / "decision_journal.jsonl"))
+
+
+def test_position_watchdog_appends_standardized_management_check(tmp_path):
+    """An actionable decision is folded into the co-located journal as a non-executable
+    management_check, with provenance pointing at position_decision.json."""
+    plan_path = tmp_path / "active_trade.json"
+    plan_path.write_text(json.dumps(_scalp_plan(thesis={}, time_rules={})))
+    payload = op.run_position_watchdog(plan_path=str(plan_path), snapshot={"option_mark": 1.62},
+                                       state_dir=str(tmp_path))
+    rows = _read_journal(tmp_path)
+    assert len(rows) == 1
+    e = rows[0]
+    assert e["event_type"] == "management_check" and e["source"] == "position"
+    assert e["decision"] == payload["decision"].lower() or e.get("decision_detail")
+    assert e["execution_allowed"] is False                       # never an execution authorization
+    assert e["raw_artifact_path"].endswith("position_decision.json")
+    assert e["raw_artifact_sha"]
+
+
+def test_position_watchdog_hold_and_no_position_stdout_unchanged(tmp_path):
+    """The decision/stdout contract is unchanged by journaling (HOLD/NO_POSITION still quiet)."""
+    # NO_POSITION (missing plan)
+    p1 = op.run_position_watchdog(plan_path=str(tmp_path / "nope.json"), snapshot={},
+                                  state_dir=str(tmp_path))
+    assert p1["alert"] is False and p1["decision"] == "NO_POSITION"
+    # journaling still records the check, but the payload is untouched
+    assert "raw_artifact_path" not in p1 and set(p1) >= {"alert", "decision", "triggers", "pnl_pct"}
+
+
+def test_position_watchdog_journal_failure_never_crashes(monkeypatch, tmp_path):
+    """If journaling raises, the watchdog still returns its decision and writes its files."""
+    import data.odte_journal as oj
+
+    def _boom(*a, **k):
+        raise RuntimeError("journal exploded")
+    monkeypatch.setattr(oj, "append_decision_journal", _boom)
+    plan_path = tmp_path / "active_trade.json"
+    plan_path.write_text(json.dumps(_scalp_plan(thesis={}, time_rules={})))
+    payload = op.run_position_watchdog(plan_path=str(plan_path), snapshot={"option_mark": 1.62},
+                                       state_dir=str(tmp_path))
+    assert payload["decision"] == "TAKE_PROFIT"                  # unchanged
+    assert (tmp_path / "position_decision.json").exists()        # files still written
+    assert _read_journal(tmp_path) == []                         # nothing journaled, no crash

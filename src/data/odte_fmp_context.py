@@ -26,9 +26,11 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+from core.paths import ODTE_REPORT_DIR
+
 logger = logging.getLogger(__name__)
 
-DEFAULT_REPORT_DIR = os.path.expanduser("~/0dte/reports")
+DEFAULT_REPORT_DIR = ODTE_REPORT_DIR
 _BASE = "https://financialmodelingprep.com/stable"
 DEFAULT_NEWS_LIMIT = 3
 

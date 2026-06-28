@@ -53,9 +53,11 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+from core.paths import ODTE_REPORT_DIR
+
 logger = logging.getLogger(__name__)
 
-DEFAULT_REPORT_DIR = os.path.expanduser("~/0dte/reports")
+DEFAULT_REPORT_DIR = ODTE_REPORT_DIR
 
 # The honest regime label — surfaced on every output so no consumer mistakes this for dealer GEX.
 GAMMA_REGIME_LABEL = "pin_risk_only_not_dealer_gex"
@@ -238,6 +240,37 @@ def load_rows(obj) -> tuple[list, dict]:
             if isinstance(obj.get(k), list):
                 return obj[k], meta
     return [], meta
+
+
+def rh_rows_from_quotes(quotes, instruments=None) -> list[dict]:
+    """PURE/no-network. Pair Robinhood option *quote / market-data* dicts with their *instrument*
+    dicts — the two SEPARATE arrays the Robinhood option endpoints return (market-data /
+    ``get_option_market_data_by_id`` + instrument / ``get_option_instrument_data``) — into flat rows
+    that ``build_gamma_map`` / ``normalize_row``
+    consume directly. Each quote is joined to its instrument by id/url; the instrument's contract
+    fields (strike/type/expiration/chain_symbol) fill the gaps the quote lacks, while the quote's
+    live greeks/OI/volume/mark win on key overlap. Rows that still resolve no usable strike/side
+    (no matching instrument) are dropped rather than guessed.
+
+    `quotes` may be a list of quote dicts (flat, nested {quote:{...}}, or quote-only with an
+    instrument_id/url) OR a wrapper dict whose rows live under rows/results/option_quotes/quotes/
+    data. `instruments` is the companion array/map (list of instrument dicts, or {id: dict}); if
+    omitted, the quotes must already carry their own strike/type.
+
+    HONEST: emits ABSOLUTE per-contract gamma/OI rows ONLY. It neither needs nor invents dealer
+    positioning — feeding these rows to ``build_gamma_map`` yields pin-risk concentration, NEVER
+    dealer net GEX / gamma flip / sign (Robinhood does not expose that)."""
+    raw_rows, meta = load_rows(quotes)
+    inst_src = instruments if instruments is not None else meta.get("instruments")
+    inst_map = _index_instruments(inst_src) if inst_src is not None else {}
+    out: list[dict] = []
+    for q in raw_rows:
+        if not isinstance(q, dict):
+            continue
+        merged = _flatten_row(q, inst_map)
+        if normalize_row(merged) is not None:   # keep only rows with a usable strike/side
+            out.append(merged)
+    return out
 
 
 def _empty_strike() -> dict:

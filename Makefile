@@ -145,7 +145,7 @@ DAILY_THREAD_LIMIT  ?=
 # or legacy ~/.reddit_token.json; daily_thread_id.txt or config.json). Explicit vars always win.
 # Optional: DAILY_THREAD_LIMIT=200 to cap comments read (default: auto-paginate the WHOLE thread).
 # You never set comment depth/nesting — that's handled with sane defaults.
-# Each run also dumps the analyzed texts to ~/0dte/{reddit,x}_text.txt (overwritten daily).
+# Each run also dumps analyzed texts to data/odte/scrape/{reddit,x}_text.txt plus timestamped snapshots.
 # Agent-friendly: `make odte-report JSON=1` emits clean signal-only JSON (no paper/disclaimer prose);
 # pair with 2>/dev/null to drop log lines, e.g. `make odte-report JSON=1 2>/dev/null`.
 .PHONY: odte-report
@@ -157,7 +157,7 @@ odte-report:                 ## 0DTE social watchlist — PAPER ONLY (live: REDD
 	  $(if $(DAILY_THREAD_LIMIT),--daily-thread-limit $(DAILY_THREAD_LIMIT),)
 
 # Script-only 0DTE watchdog — NO LLM, NO Robinhood, places NO orders. Runs the LOCAL report,
-# diffs the actionable candidate vs the prior run, and writes ~/0dte/{watchdog_state,triggers}.json.
+# diffs the actionable candidate vs the prior run, and writes data/odte/{watchdog_state,triggers}.json.
 # Empty stdout when nothing actionable; compact one-line JSON on a trigger. For a no_agent cron.
 #   make odte-watchdog            # cron form: empty unless a trigger fires
 #   make odte-watchdog JSON=1     # always print compact state
@@ -167,23 +167,27 @@ odte-watchdog:               ## 0DTE script-only watchdog — NO LLM/Robinhood (
 	@$(DI) odte-watchdog $(if $(OFFLINE),--no-fetch,) $(if $(JSON),--json,)
 
 # Broker-AWARE, DECISION-ONLY live-position watchdog — places NO orders, NO broker/LLM calls.
-# Reads ~/0dte/active_trade.json + a caller-supplied snapshot (Hermes feeds real MCP broker values;
-# never faked) and writes ~/0dte/{position_state,position_decision}.json. Empty stdout on HOLD/
+# Reads data/odte/active_trade.json + a caller-supplied snapshot (Hermes feeds real MCP broker values;
+# never faked) and writes data/odte/{position_state,position_decision}.json. Empty stdout on HOLD/
 # NO_POSITION; compact JSON on an actionable decision.
 #   make odte-position JSON=1                 # always print the decision
-#   make odte-position SNAPSHOT=~/0dte/snap.json JSON=1   # feed a live snapshot file
+#   make odte-position SNAPSHOT=data/odte/snap.json JSON=1   # feed a live snapshot file
 .PHONY: odte-position
 odte-position:               ## 0DTE live-position decision watchdog — NO orders/broker (SNAPSHOT=path; JSON=1)
 	@$(DI) odte-position $(if $(SNAPSHOT),--snapshot $(SNAPSHOT),) $(if $(PLAN),--plan $(PLAN),) $(if $(JSON),--json,)
 
 # 0DTE decision journal — local/offline, NO broker/LLM/secrets. Append events, then report.
 #   make odte-journal EVENT='{"event_type":"postmortem","trade_id":"t1","mode":"scalp",...}'
-#   make odte-journal EVENT_FILE=~/0dte/event.json
+#   make odte-journal EVENT_FILE=data/odte/event.json
 #   make odte-journal-report JSON=1          # metrics JSON
-#   make odte-journal-report WRITE=1         # writes ~/0dte/reports/{md,csv}
+#   make odte-journal-report WRITE=1         # writes data/odte/reports/{md,csv}
 .PHONY: odte-journal
 odte-journal:                ## Append a 0DTE journal event (EVENT='{...}' or EVENT_FILE=path; JSON=1)
 	@$(DI) odte-journal $(if $(EVENT),--event-json '$(EVENT)',) $(if $(EVENT_FILE),--event $(EVENT_FILE),) $(if $(JSON),--json,)
+
+.PHONY: odte-ingest-artifacts
+odte-ingest-artifacts:       ## Fold loose data/odte/*.json controller artifacts into the journal — idempotent (DATE=YYYY-MM-DD; DRYRUN=1; DAYPACKET=1; JSON=1)
+	@$(DI) odte-ingest-artifacts $(if $(DATE),--date $(DATE),) $(if $(DRYRUN),--dry-run,) $(if $(DAYPACKET),--day-packet,) $(if $(DATA_DIR),--data-dir $(DATA_DIR),) $(if $(JOURNAL),--journal $(JOURNAL),) $(if $(JSON),--json,)
 
 .PHONY: odte-journal-report
 odte-journal-report:         ## Summarize the 0DTE journal (JSON=1 metrics; WRITE=1 md/csv artifacts)
@@ -191,17 +195,52 @@ odte-journal-report:         ## Summarize the 0DTE journal (JSON=1 metrics; WRIT
 
 # 0DTE option-chain gamma / pin map — PURE/OFFLINE (no broker/LLM/network). Reads option-quote rows
 # Hermes/RH exported to INPUT=path; honest concentration only (NOT dealer GEX).
-#   make odte-gamma-map INPUT=~/0dte/spy_chain.json SPOT=734.8 UNDERLYING=SPY JSON=1
-#   make odte-gamma-map INPUT=~/0dte/spy_chain.json WRITE=1   # writes ~/0dte/reports/ artifacts
+#   make odte-gamma-map INPUT=data/odte/spy_chain.json SPOT=734.8 UNDERLYING=SPY JSON=1
+#   make odte-gamma-map INPUT=data/odte/spy_chain.json WRITE=1   # writes data/odte/reports/ artifacts
 .PHONY: odte-gamma-map
 odte-gamma-map:              ## 0DTE gamma/pin map from exported quote rows — NO broker (INPUT=path; SPOT=; JSON=1; WRITE=1)
 	@$(DI) odte-gamma-map $(if $(INPUT),--input $(INPUT),) $(if $(SPOT),--spot $(SPOT),) $(if $(UNDERLYING),--underlying $(UNDERLYING),) $(if $(EXPIRATION),--expiration $(EXPIRATION),) $(if $(JSON),--json,) $(if $(WRITE),--write,)
+
+# Pair the two SEPARATE arrays Robinhood returns (option quotes/market-data + option instruments)
+# into flat rows odte-gamma-map consumes — PURE/OFFLINE (no broker/LLM/network). HONEST: ABSOLUTE
+# gamma/OI rows only, never dealer GEX. Pipe the output into odte-gamma-map via INPUT=.
+#   make odte-rh-rows QUOTES=data/odte/spy_quotes.json INSTRUMENTS=data/odte/spy_instruments.json OUT=data/odte/spy_chain.json
+#   make odte-gamma-map INPUT=data/odte/spy_chain.json SPOT=734.8 UNDERLYING=SPY JSON=1
+.PHONY: odte-rh-rows
+odte-rh-rows:                ## Pair RH option quotes+instruments into gamma-map rows — NO broker (QUOTES=path; INSTRUMENTS=path; OUT=path)
+	@$(DI) odte-rh-rows $(if $(QUOTES),--quotes $(QUOTES),) $(if $(INSTRUMENTS),--instruments $(INSTRUMENTS),) $(if $(OUT),--out $(OUT),)
+
+# 0DTE candidate vehicle/contract score — PURE/OFFLINE, NO broker/network/LLM. This is the
+# non-sentiment "is this a good or bad bet for the day?" layer. Feed it a candidate contract plus
+# optional market/gamma JSON gathered by the controller; it returns GOOD_BET / WATCH / BAD_BET.
+#   make odte-vehicle-score CONTRACT=data/odte/candidate.json MARKET=data/odte/market.json GAMMA=data/odte/reports/odte_gamma_map_qqq.json BP=108 JSON=1
+.PHONY: odte-vehicle-score
+odte-vehicle-score:          ## 0DTE non-sentiment vehicle score — NO broker (CONTRACT=path; MARKET=path; GAMMA=path; BP=; JSON=1)
+	@$(DI) odte-vehicle-score $(if $(CONTRACT),--contract $(CONTRACT),) $(if $(MARKET),--market $(MARKET),) $(if $(GAMMA),--gamma $(GAMMA),) $(if $(DIRECTION),--direction $(DIRECTION),) $(if $(BP),--buying-power $(BP),) $(if $(JSON),--json,) $(if $(WRITE),--write,)
+
+# 0DTE day-regime score — PURE/OFFLINE, NO broker/network/LLM. The "is today a GOOD_DAY to press
+# directional 0DTE, a CHOP day to scalp, or an AVOID day to stay flat?" layer, scored from a market
+# snapshot (VIX/VIXY, gap, per-index ORB/VWAP, expected move, minutes-to-close). Companion to
+# odte-vehicle-score (which scores one contract).
+#   make odte-day-score MARKET=data/odte/market.json GAMMA=data/odte/reports/odte_gamma_map_qqq.json JSON=1
+.PHONY: odte-day-score
+odte-day-score:              ## 0DTE non-sentiment day score — NO broker (MARKET=path; GAMMA=path; JSON=1; WRITE=1)
+	@$(DI) odte-day-score $(if $(MARKET),--market $(MARKET),) $(if $(GAMMA),--gamma $(GAMMA),) $(if $(JSON),--json,) $(if $(WRITE),--write,) $(if $(OUT_DIR),--out-dir $(OUT_DIR),)
+
+# PURE/OFFLINE thesis->entry gate. Assembles a journalable entry-gate decision (enter/deny/veto/
+# observe) from the upstream artifacts. Records intent ONLY — places NO orders, NO broker/network/LLM.
+# execution_allowed is True only when every required gate is explicitly true and not scan_only/restricted.
+#   make odte-entry-gate TRIGGER=data/odte/triggers.json DAY_SCORE=data/odte/reports/odte_day_score.json VEHICLE=data/odte/reports/odte_vehicle_score_qqq.json BROKER=data/odte/broker.json JSON=1
+#   make odte-entry-gate TRIGGER=data/odte/triggers.json ... JOURNAL=1   # also append an entry_decision event
+.PHONY: odte-entry-gate
+odte-entry-gate:             ## 0DTE thesis->entry gate — NO orders/broker (TRIGGER=; DAY_SCORE=; VEHICLE=; GAMMA=; BROKER=; SCAN_ONLY=1; PROMOTE=1; JOURNAL=1; JSON=1)
+	@$(DI) odte-entry-gate $(if $(TRIGGER),--trigger $(TRIGGER),) $(if $(CANDIDATE),--candidate $(CANDIDATE),) $(if $(DAY_SCORE),--day-score $(DAY_SCORE),) $(if $(VEHICLE),--vehicle-score $(VEHICLE),) $(if $(GAMMA),--gamma $(GAMMA),) $(if $(BROKER),--broker $(BROKER),) $(if $(SCAN_ONLY),--scan-only,) $(if $(PROMOTE),--promote-to-execution,) $(if $(JOURNAL),--journal,) $(if $(JSON),--json,) $(if $(WRITE),--write,) $(if $(OUT_DIR),--out-dir $(OUT_DIR),)
 
 # FMP single-name context for 0DTE meme/squeeze SANITY — read-only, NO orders, NO options/gamma.
 # Cheap FMP stable fundamentals (profile/quote/shares-float/key-metrics-ttm/news) + squeeze profile.
 # FMP options are unavailable; Robinhood stays the gamma source. Fail-closed without FMP_KEY.
 #   make odte-fmp-context SYMBOL=WEN JSON=1
-#   make odte-fmp-context SYMBOL=WEN WRITE=1   # writes ~/0dte/reports/ artifacts
+#   make odte-fmp-context SYMBOL=WEN WRITE=1   # writes data/odte/reports/ artifacts
 .PHONY: odte-fmp-context
 odte-fmp-context:            ## FMP meme/squeeze sanity context — NO orders/options (SYMBOL=WEN; JSON=1; WRITE=1)
 	@$(DI) odte-fmp-context $(SYMBOL) $(if $(JSON),--json,) $(if $(WRITE),--write,) $(if $(OUT_DIR),--out-dir $(OUT_DIR),)

@@ -8,6 +8,7 @@ SECTIONS = [
     ("💼", "Portfolio",   "portfolio"),
     ("🔬", "Research",    "research"),
     ("✅", "Validation",  "validation"),
+    ("🎰", "0DTE",        "odte"),
     ("⚙️",  "System",     "system"),
 ]
 

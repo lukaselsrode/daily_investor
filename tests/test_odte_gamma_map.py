@@ -233,6 +233,63 @@ def test_run_gamma_map_wrapper_with_instruments_and_quote_only(tmp_path):
     assert g["underlying"] == "SPY"
 
 
+# --- rh_rows_from_quotes: pair the two separate RH arrays -------------------------------------
+
+def _rh_market_data_and_instruments(url_ids=True, as_list=True):
+    """Two SEPARATE robin_stocks-shaped arrays: flat market-data quotes (greeks/OI at top level,
+    referencing an instrument by url/id) + a companion instruments array (strike/type/expiration)."""
+    quotes, instruments = [], []
+    for i, (side, k, g, oi, mark, vol) in enumerate(_SCEN):
+        iid = f"id{i}"
+        ref = f"https://api.robinhood.com/options/instruments/{iid}/" if url_ids else iid
+        quotes.append({"instrument" if url_ids else "instrument_id": ref,
+                       "mark_price": f"{mark}", "gamma": f"{g}", "open_interest": oi,
+                       "volume": vol, "updated_at": FRESH})
+        instruments.append({"id": iid, "url": ref, "chain_symbol": "SPY",
+                            "expiration_date": "2026-06-24", "strike_price": f"{k:.4f}", "type": side})
+    return quotes, (instruments if as_list else {inst["id"]: inst for inst in instruments})
+
+
+def test_rh_rows_from_quotes_pairs_two_arrays_url():
+    quotes, instruments = _rh_market_data_and_instruments(url_ids=True)
+    rows = gm.rh_rows_from_quotes(quotes, instruments=instruments)
+    assert len(rows) == len(_SCEN)
+    g = gm.build_gamma_map(rows, spot=600, now=NOW)   # rows feed straight into the map
+    _assert_scenario_a(g)
+
+
+def test_rh_rows_from_quotes_pairs_two_arrays_id_and_map():
+    quotes, instruments = _rh_market_data_and_instruments(url_ids=False, as_list=False)
+    rows = gm.rh_rows_from_quotes(quotes, instruments=instruments)
+    _assert_scenario_a(gm.build_gamma_map(rows, spot=600, now=NOW))
+
+
+def test_rh_rows_drops_unjoinable_quotes():
+    # A quote whose instrument is absent from the array resolves no strike/side -> dropped, not guessed.
+    quotes, instruments = _rh_market_data_and_instruments(url_ids=False, as_list=True)
+    quotes.append({"instrument_id": "ghost", "gamma": "0.5", "open_interest": 9999})
+    rows = gm.rh_rows_from_quotes(quotes, instruments=instruments)
+    assert len(rows) == len(_SCEN)   # the ghost row is dropped
+    assert all(gm.normalize_row(r) is not None for r in rows)
+
+
+def test_rh_rows_from_self_describing_quotes_need_no_instruments():
+    # Quotes that already carry strike/type (flat) pass through without an instruments array.
+    quotes = [_row("call", 600, 0.06, 500, mark=2.0), _row("put", 600, 0.06, 500, mark=1.8)]
+    rows = gm.rh_rows_from_quotes(quotes)
+    assert len(rows) == 2
+    g = gm.build_gamma_map(rows, spot=600, now=NOW)
+    assert g["max_gamma_strike"] == 600.0
+
+
+def test_rh_rows_from_wrapper_with_embedded_instruments():
+    # The quotes arg may itself be a wrapper carrying its own instruments map.
+    rows_q, instruments = _quote_only_rows_and_instruments()
+    wrapper = {"rows": rows_q, "instruments": instruments}
+    rows = gm.rh_rows_from_quotes(wrapper)
+    _assert_scenario_a(gm.build_gamma_map(rows, spot=600, now=NOW))
+
+
 def test_run_gamma_map_from_wrapper_and_writes_artifacts(tmp_path):
     wrapper = {"underlying": "SPY", "expiration": "2026-06-24", "spot": 600, "rows": _scenario_a()}
     inp = tmp_path / "chain.json"

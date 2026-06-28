@@ -4,7 +4,7 @@ This is the discipline layer for an ALREADY-OPEN 0DTE option. Unlike the social 
 (``odte_watchdog.py``, which never touches a position), this module reasons about a live trade —
 but it still places NO orders and makes NO broker/LLM calls. It is pure decision logic:
 
-    active trade plan (~/0dte/active_trade.json)  +  live snapshot (fed by Hermes from MCP)
+    active trade plan (data/odte/active_trade.json)  +  live snapshot (fed by Hermes from MCP)
         -> structured triggers: TAKE_PROFIT / THESIS_DEAD / BID_FLOOR / TIME_RISK /
            MONITORING_DEGRADED / HOLD / NO_POSITION / RESTRICTED
 
@@ -57,6 +57,7 @@ live snapshot schema (caller-supplied; real broker/market values only)
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -64,11 +65,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from core.paths import ODTE_DATA_DIR, atomic_write_text
+
 logger = logging.getLogger(__name__)
 
 _ET = ZoneInfo("America/New_York")
 
-DEFAULT_STATE_DIR = os.path.expanduser("~/0dte")
+DEFAULT_STATE_DIR = ODTE_DATA_DIR
 DEFAULT_PLAN_FILENAME = "active_trade.json"
 STATE_FILENAME = "position_state.json"
 DECISION_FILENAME = "position_decision.json"
@@ -377,6 +380,32 @@ def run_position_watchdog(plan_path: str | None = None, snapshot: dict | None = 
         "plan_status": plan_status,
         "snapshot_status": snap_status,
     }
-    (sdir / STATE_FILENAME).write_text(json.dumps(state, indent=2, default=str))
-    (sdir / DECISION_FILENAME).write_text(json.dumps(payload, indent=2, default=str))
+    # Atomic writes (tmp + os.replace): a crash mid-write must not leave a truncated state/decision
+    # file for the next poll to misread.
+    decision_text = json.dumps(payload, indent=2, default=str)
+    atomic_write_text(sdir / STATE_FILENAME, json.dumps(state, indent=2, default=str))
+    atomic_write_text(sdir / DECISION_FILENAME, decision_text)
+    _journal_position_decision(payload, decision_text, sdir / DECISION_FILENAME)
     return payload
+
+
+def _journal_position_decision(payload: dict, decision_text: str, decision_path: Path) -> None:
+    """Best-effort: fold the position decision into the standardized decision journal as a
+    `management_check`. FULLY fail-safe — any error here is swallowed so it can NEVER change the
+    decision, the stdout contract, or crash the poll. NOT an execution authorization: this records a
+    monitoring decision on an EXISTING position; `execution_allowed` stays False."""
+    try:
+        from data.odte_journal import append_decision_journal, event_from_position_decision
+        ev = event_from_position_decision(payload)
+        ev["ts"] = payload.get("ts")
+        # Provenance + content-addressed idempotency: each poll's distinct payload → distinct id;
+        # re-journaling the identical decision file dedupes.
+        ev["raw_artifact_path"] = str(decision_path)
+        ev["raw_artifact_sha"] = hashlib.sha1(decision_text.encode("utf-8")).hexdigest()[:16]
+        ev["execution_allowed"] = False
+        # Journal co-located with the state files (so a tmp state_dir in tests/dry-runs never touches
+        # the real journal; in production decision_path.parent is data/odte/).
+        jp = str(decision_path.parent / "decision_journal.jsonl")
+        append_decision_journal(ev, source="position", event_type="management_check", journal_path=jp)
+    except Exception as exc:        # never let journaling affect the watchdog
+        logger.debug("position decision journaling skipped (%s)", exc)

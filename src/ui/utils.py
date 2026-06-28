@@ -4,6 +4,7 @@ ui/utils.py — Shared path constants and helpers for all UI components.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -19,6 +20,14 @@ LOG_PATH = ROOT / "investment_bot.log"
 
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
+
+# 0DTE storage lives under the app data tree (data/odte/); secrets stay in ~/0dte/. Imported after
+# the sys.path insert above so `core` resolves regardless of launch context.
+from core.paths import ODTE_DATA_DIR, ODTE_REPORT_DIR, ODTE_SCRAPE_DIR
+
+ODTE_DATA_DIR   = Path(ODTE_DATA_DIR)
+ODTE_REPORT_DIR = Path(ODTE_REPORT_DIR)
+ODTE_SCRAPE_DIR = Path(ODTE_SCRAPE_DIR)
 
 
 # ---------------------------------------------------------------------------
@@ -46,6 +55,58 @@ def list_csv_files() -> dict[str, Path]:
     for p in sorted(DATA_DIR.glob("*.csv"), reverse=True):
         out[p.name] = p
     return out
+
+
+# ---------------------------------------------------------------------------
+# 0DTE store loaders (read-only; all fail-soft, never raise into the UI)
+# ---------------------------------------------------------------------------
+
+def load_odte_json(name: str) -> dict | None:
+    """Read a JSON file from data/odte/ (e.g. 'active_trade.json'). None if absent/invalid."""
+    p = ODTE_DATA_DIR / name
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text())
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def load_odte_jsonl(name: str = "decision_journal.jsonl") -> list[dict]:
+    """Read a JSONL file from data/odte/ into a list of dicts. Skips malformed lines; [] if absent."""
+    p = ODTE_DATA_DIR / name
+    if not p.exists():
+        return []
+    out: list[dict] = []
+    try:
+        for line in p.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(obj, dict):
+                out.append(obj)
+    except Exception:
+        return out
+    return out
+
+
+def list_scrape_snapshots(kind: str) -> list[Path]:
+    """Return timestamped scrape-text snapshots for 'reddit' or 'x', oldest→newest.
+
+    Excludes the stable '{kind}_text.txt' latest pointer (only the dated snapshots).
+    """
+    return sorted(ODTE_SCRAPE_DIR.glob(f"{kind}_text_*.txt"))
+
+
+def latest_scrape_snapshot(kind: str) -> Path | None:
+    """Most recent timestamped scrape snapshot for 'reddit' or 'x' (None if none exist)."""
+    snaps = list_scrape_snapshots(kind)
+    return snaps[-1] if snaps else None
 
 
 def load_config_raw() -> dict:

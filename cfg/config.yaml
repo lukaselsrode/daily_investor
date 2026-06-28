@@ -977,11 +977,61 @@ options_social:
   reddit_comments_enrich: false   # true = fetch+fold top comments (OAuth → public JSON; cached)
   reddit_comments_top_posts: 3    # how many top posts to pull comments for
   reddit_comments_per_post: 5     # how many top comments per post
-  x_query: "($SPY OR $QQQ OR 0DTE OR ODTE) lang:en -is:retweet -crypto -gold -xauusd"
+  # X/social collection query. Bounded by design: it asks about the always-watch liquid core
+  # (true-daily 0DTE index ETFs + the most-chattered mega-caps) OR the 0DTE/ODTE terms — it does
+  # NOT enumerate the whole core_universe (that would bloat the query and the API spend). The rest
+  # of the universe still gets X coverage on demand via cross_source_x_enrich, which gives the
+  # tickers actually trending in WSB their own X search. NVDA is intentionally NOT a cashtag here
+  # (employer-restricted; never a trade vehicle). -crypto/-gold/-xauusd drop forex/crypto spam.
+  x_query: "($SPY OR $QQQ OR $IWM OR $SMH OR $AAPL OR $MSFT OR $AMZN OR $META OR $TSLA OR $AMD OR $MU OR $AVGO OR $HOOD OR $COIN OR 0DTE OR ODTE) lang:en -is:retweet -crypto -gold -xauusd"
   x_limit: 50
   max_tickers: 10
   min_mentions: 3
-  core_universe: [SPY, QQQ]
+  # ── Options/0DTE scanning WATCHLIST (NOT an auto-trade list) ────────────────────────────────
+  # This allow-list is what the 0DTE report ranks chatter against, so the report surfaces liquid,
+  # options-suitable underlyings instead of arbitrary all-caps false positives. Surfacing a name
+  # here ≠ trading it: every candidate is still re-checked live (price/chain fetch + spread caps),
+  # and it is decision-support only — the tool places NO orders.
+  #
+  # Selection criteria (evidence-backed; see docs/odte_universe_selection.md for sources):
+  #   • Liquidity: heavy underlying volume + high option open interest ⇒ many MMs quoting ⇒ tight
+  #     fills. Penny-ish ATM bid-ask spreads keep slippage from dominating a tiny-account position.
+  #   • Short-dated availability: SPY/QQQ/IWM carry TRUE daily 0DTE chains (expire every session,
+  #     per Cboe's 6-product set: SPX/SPY/XSP/NDX/QQQ/IWM); the mega-caps & sector ETFs carry
+  #     Mon/Wed/Fri (top names also Tue/Thu in 2026) short-dated chains + standard weeklies.
+  #   • Sector coverage: broad index ETFs + sector ETFs (semis/financials/energy/tech/biotech/
+  #     rates/gold) so the scan isn't single-name-concentrated and diffuses single-stock event risk.
+  #   • Account-fit & compliance: only names this account can actually trade; NO illiquid/meme
+  #     tickers; NVDA is OMITTED as a trade vehicle (employer restriction). If NVDA appears in
+  #     chatter the code surfaces it ONLY as a read-only RESTRICTED_EMPLOYER context card with all
+  #     contracts stripped (RESTRICTED_EMPLOYER_TICKERS in src/data/social_sentiment.py) — enforced
+  #     in code, so this list never needs (and must never be relied on) to keep NVDA out.
+  core_universe:
+  - SPY        # true-daily 0DTE; deepest, penny-wide ATM — the index-ETF backbone
+  - QQQ        # true-daily 0DTE; Nasdaq-100
+  - IWM        # true-daily 0DTE; Russell 2000 small-caps
+  - XSP        # true-daily 0DTE, cash-settled mini-SPX (1/10 SPX notional) — tiny-account-friendly
+               #   IF broker liquidity/spreads are acceptable; SCAN-ONLY, not in the live exec core
+  - SMH        # semis sector ETF (liquid weeklies; semis exposure WITHOUT trading NVDA)
+  - XLF        # financials sector ETF
+  - XLE        # energy sector ETF
+  - XLK        # technology sector ETF
+  - XBI        # biotech sector ETF (event-driven, deep options)
+  - TLT        # long-duration Treasuries (rates/macro hedge leg)
+  - GLD        # gold ETF (macro/risk-off leg; short-dated chains)
+  - AAPL       # mega-cap; among most-liquid single-name short-dated chains
+  - MSFT       # mega-cap
+  - AMZN       # mega-cap
+  - GOOGL      # mega-cap
+  - META       # mega-cap; most-liquid single-name 0DTE tier
+  - TSLA       # mega-cap; highest single-name 0DTE volume tier
+  - AMD        # liquid semis single name (already account-tradable)
+  - MU         # liquid semis single name (already account-tradable)
+  - AVGO       # liquid semis/mega-cap
+  - JPM        # money-center bank; deep, liquid chains
+  - BAC        # money-center bank
+  - HOOD       # fintech/broker the account already trades; liquid weeklies
+  - COIN       # crypto-proxy single name the account already trades; liquid weeklies
   # Freshness: which posts the 0DTE report counts as "fresh". market_window anchors to US
   # equity sessions (America/New_York): weekend → since last Friday 16:00 ET; weekday pre-open
   # → since the previous close; weekday at/after open → since today 09:30 ET. This retains

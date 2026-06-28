@@ -250,16 +250,17 @@ def _cmd_odte_social_report(rest: list[str]) -> None:
 
 def _cmd_odte_watchdog(rest: list[str]) -> None:
     # Script-only 0DTE watchdog — NO LLM, NO Robinhood, places no orders. Runs the LOCAL report,
-    # diffs the actionable candidate vs the prior run, and writes ~/0dte/{watchdog_state,triggers}.json.
+    # diffs the actionable candidate vs the prior run, and writes data/odte/{watchdog_state,triggers}.json.
+    # The controller policy it checks is a secret read from ~/0dte/ (override with --policy).
     # stdout contract for a no_agent cron: EMPTY when nothing actionable; compact one-line JSON when a
     # trigger fires. --json always prints the compact state. --no-fetch runs offline (cache-only).
     import json
     import logging
     logging.disable(logging.ERROR)   # keep stdout a clean machine contract
-    from data.odte_watchdog import run_watchdog
+    from data.odte_watchdog import DEFAULT_STATE_DIR, run_watchdog
     state_dir = _flag_value(rest, "--state-dir")
     policy = _flag_value(rest, "--policy")
-    payload = run_watchdog(state_dir=state_dir or os.path.expanduser("~/0dte"),
+    payload = run_watchdog(state_dir=state_dir or DEFAULT_STATE_DIR,
                            policy_path=policy, allow_fetch="--no-fetch" not in rest)
     if "--json" in rest or payload.get("alert"):
         print(json.dumps(payload, separators=(",", ":"), default=str))
@@ -267,15 +268,15 @@ def _cmd_odte_watchdog(rest: list[str]) -> None:
 
 def _cmd_odte_position(rest: list[str]) -> None:
     # BROKER-AWARE but DECISION-ONLY 0DTE position watchdog. Places NO orders, makes NO broker/LLM
-    # calls. Reads the active trade plan (~/0dte/active_trade.json) + a caller-supplied live snapshot
+    # calls. Reads the active trade plan (data/odte/active_trade.json) + a caller-supplied live snapshot
     # (Hermes feeds real broker/market values via MCP — never faked here), emits TAKE_PROFIT /
     # THESIS_DEAD / BID_FLOOR / TIME_RISK / MONITORING_DEGRADED / HOLD, and writes
-    # ~/0dte/{position_state,position_decision}.json. stdout: EMPTY when HOLD/NO_POSITION (cron form),
+    # data/odte/{position_state,position_decision}.json. stdout: EMPTY when HOLD/NO_POSITION (cron form),
     # compact one-line JSON on an actionable decision; --json always prints.
     import json
     import logging
     logging.disable(logging.ERROR)   # keep stdout a clean machine contract
-    from data.odte_position import run_position_watchdog
+    from data.odte_position import DEFAULT_STATE_DIR, run_position_watchdog
     plan = _flag_value(rest, "--plan")
     snap_path = _flag_value(rest, "--snapshot")
     snap_json = _flag_value(rest, "--snapshot-json")
@@ -288,13 +289,13 @@ def _cmd_odte_position(rest: list[str]) -> None:
             print(f"--snapshot-json: invalid JSON: {exc}")
             sys.exit(2)
     payload = run_position_watchdog(plan_path=plan, snapshot=snapshot, snapshot_path=snap_path,
-                                    state_dir=state_dir or os.path.expanduser("~/0dte"))
+                                    state_dir=state_dir or DEFAULT_STATE_DIR)
     if "--json" in rest or payload.get("alert"):
         print(json.dumps(payload, separators=(",", ":"), default=str))
 
 
 def _cmd_odte_journal(rest: list[str]) -> None:
-    # Append one event to the local 0DTE decision journal (~/0dte/decision_journal.jsonl). Local/
+    # Append one event to the local 0DTE decision journal (data/odte/decision_journal.jsonl). Local/
     # offline — NO broker, NO LLM, NO secrets. Supply the event with --event-json '{...}' or
     # --event PATH (a JSON file). NVDA/employer-restricted underlyings are tagged restricted on
     # store and kept out of experiments/metrics. --json prints the stored event.
@@ -324,10 +325,45 @@ def _cmd_odte_journal(rest: list[str]) -> None:
               f"trade={stored.get('trade_id')}")
 
 
+def _cmd_odte_ingest_artifacts(rest: list[str]) -> None:
+    # Fold loose data/odte/*.json controller/watchdog artifacts (controller_*, event_*, candidate_*,
+    # market_snapshot_*, *vehicle_score*, *gamma_map*) into the decision journal IDEMPOTENTLY, so a
+    # full trading day can be reconstructed for post-day self-eval. Read-only over source files — NO
+    # broker, NO LLM, NO orders, never deletes the artifacts. --date YYYY-MM-DD restricts to one day;
+    # --dry-run reports what would be appended without writing; --json prints the summary.
+    import json
+
+    from data.odte_journal import build_day_packet, ingest_loose_artifacts
+    date = _flag_value(rest, "--date")
+    journal = _flag_value(rest, "--journal")
+    summary = ingest_loose_artifacts(
+        data_dir=_flag_value(rest, "--data-dir"),
+        journal_path=journal,
+        trade_date=date,
+        dry_run="--dry-run" in rest)
+    # Optional additive day packet (data/odte/days/YYYY-MM-DD/*.jsonl) — derived from the journal,
+    # off unless --day-packet; never written on a dry run (nothing was journaled).
+    if "--day-packet" in rest and "--dry-run" not in rest:
+        summary["day_packet"] = build_day_packet(trade_date=date, journal_path=journal)
+    if "--json" in rest:
+        print(json.dumps(summary, separators=(",", ":"), default=str))
+    else:
+        if summary["dry_run"]:
+            print(f"[dry-run] scanned {summary['files_scanned']} | would-append "
+                  f"{summary['events_would_append']} | duplicates {summary['duplicates_skipped']} | "
+                  f"errors {summary['errors']}")
+        else:
+            print(f"scanned {summary['files_scanned']} | appended {summary['events_appended']} | "
+                  f"duplicates {summary['duplicates_skipped']} | errors {summary['errors']}")
+        if summary["by_event_type"]:
+            print("  by_event_type: " + ", ".join(f"{k}={v}" for k, v in
+                                                   sorted(summary["by_event_type"].items())))
+
+
 def _cmd_odte_journal_report(rest: list[str]) -> None:
     # Summarize the 0DTE decision journal into deterministic metrics + Markdown/CSV artifacts.
     # Local/offline — NO broker, NO LLM. --json prints the metrics payload; default prints Markdown.
-    # --write (or --out-dir DIR) writes ~/0dte/reports/odte_journal_report.md + _summary.csv.
+    # --write (or --out-dir DIR) writes data/odte/reports/odte_journal_report.md + _summary.csv.
     import json
 
     from data.odte_journal import build_report
@@ -366,6 +402,141 @@ def _cmd_odte_gamma_map(rest: list[str]) -> None:
         sys.exit(2)
     print(json.dumps(gmap, separators=(",", ":"), default=str) if "--json" in rest
           else render_markdown(gmap))
+
+
+def _cmd_odte_rh_rows(rest: list[str]) -> None:
+    # PURE/OFFLINE, NO broker/LLM/network. Pair the two SEPARATE arrays Robinhood returns — option
+    # quotes/market-data and option instruments — into flat rows that odte-gamma-map consumes
+    # directly. --quotes PATH / --quotes-json '...' supply the quote/market-data array; --instruments
+    # PATH / --instruments-json '...' supply the companion instruments array (optional if quotes
+    # already carry strike/type). Prints a JSON list of rows (pipe/feed to `odte-gamma-map --input`);
+    # --out PATH writes it instead. HONEST: emits ABSOLUTE gamma/OI rows only — never dealer GEX.
+    import json
+
+    from data.odte_gamma_map import rh_rows_from_quotes
+    q_json, q_path = _flag_value(rest, "--quotes-json"), _flag_value(rest, "--quotes")
+    i_json, i_path = _flag_value(rest, "--instruments-json"), _flag_value(rest, "--instruments")
+    if q_json is None and q_path is None:
+        print("odte-rh-rows: provide --quotes PATH or --quotes-json '[...]'")
+        sys.exit(2)
+    try:
+        quotes = json.loads(q_json if q_json is not None
+                            else open(os.path.expanduser(q_path)).read())
+        instruments = None
+        if i_json is not None or i_path is not None:
+            instruments = json.loads(i_json if i_json is not None
+                                     else open(os.path.expanduser(i_path)).read())
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"odte-rh-rows: could not read/parse input: {exc}")
+        sys.exit(2)
+    rows = rh_rows_from_quotes(quotes, instruments=instruments)
+    out_path = _flag_value(rest, "--out")
+    payload = json.dumps(rows, separators=(",", ":"), default=str)
+    if out_path:
+        path = os.path.expanduser(out_path)
+        with open(path, "w") as f:
+            f.write(payload)
+        print(f"wrote {len(rows)} rows -> {path}")
+    else:
+        print(payload)
+
+
+def _cmd_odte_vehicle_score(rest: list[str]) -> None:
+    # Offline non-sentiment score for whether a candidate 0DTE contract/vehicle is a GOOD_BET,
+    # WATCH, or BAD_BET for the day. Places NO orders and makes NO broker/network/LLM calls.
+    import json
+
+    from data.odte_vehicle_score import render_markdown, run_vehicle_score
+    contract_path = _flag_value(rest, "--contract")
+    contract_json = _flag_value(rest, "--contract-json")
+    if contract_path is None and contract_json is None:
+        print("odte-vehicle-score: provide --contract PATH or --contract-json '{...}'")
+        sys.exit(2)
+    try:
+        payload = run_vehicle_score(
+            contract_path=contract_path,
+            contract_json=contract_json,
+            market_path=_flag_value(rest, "--market"),
+            market_json=_flag_value(rest, "--market-json"),
+            gamma_path=_flag_value(rest, "--gamma"),
+            gamma_json=_flag_value(rest, "--gamma-json"),
+            direction=_flag_value(rest, "--direction"),
+            buying_power=_flag_value(rest, "--buying-power"),
+            out_dir=_flag_value(rest, "--out-dir"),
+            write="--write" in rest,
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"odte-vehicle-score: could not read/parse input: {exc}")
+        sys.exit(2)
+    print(json.dumps(payload, separators=(",", ":"), default=str) if "--json" in rest
+          else render_markdown(payload))
+
+
+def _cmd_odte_day_score(rest: list[str]) -> None:
+    # Offline non-sentiment score for the whole trading day: GOOD_DAY / CHOP / AVOID. Companion to
+    # odte-vehicle-score (which scores one contract). Places NO orders, NO broker/network/LLM calls.
+    import json
+
+    from data.odte_day_score import render_markdown, run_day_score
+    try:
+        payload = run_day_score(
+            market_path=_flag_value(rest, "--market"),
+            market_json=_flag_value(rest, "--market-json"),
+            gamma_path=_flag_value(rest, "--gamma"),
+            gamma_json=_flag_value(rest, "--gamma-json"),
+            out_dir=_flag_value(rest, "--out-dir"),
+            write="--write" in rest,
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"odte-day-score: could not read/parse input: {exc}")
+        sys.exit(2)
+    print(json.dumps(payload, separators=(",", ":"), default=str) if "--json" in rest
+          else render_markdown(payload))
+
+
+def _cmd_odte_entry_gate(rest: list[str]) -> None:
+    # PURE/OFFLINE thesis->entry gate. Assembles a journalable entry-gate decision record from the
+    # upstream artifacts (watchdog trigger, candidate, day/vehicle score, gamma map, broker snapshot).
+    # Records intent ONLY — places NO orders, makes NO broker/network/LLM calls. execution_allowed is
+    # True only when every required gate is explicitly true and the record is not scan_only/restricted.
+    # scan_only is INHERITED from the trigger/candidate by default (the watchdog lane is scan_only=true);
+    # --scan-only forces it, and --promote-to-execution is the explicit opt-in to demote an inherited
+    # scan_only record to the execution tier. --journal appends an entry_decision event (idempotent).
+    import json
+
+    from data.odte_entry_gate import render_markdown, run_entry_gate
+    try:
+        payload = run_entry_gate(
+            trigger_path=_flag_value(rest, "--trigger"),
+            trigger_json=_flag_value(rest, "--trigger-json"),
+            candidate_path=_flag_value(rest, "--candidate"),
+            candidate_json=_flag_value(rest, "--candidate-json"),
+            day_score_path=_flag_value(rest, "--day-score"),
+            day_score_json=_flag_value(rest, "--day-score-json"),
+            vehicle_score_path=_flag_value(rest, "--vehicle-score"),
+            vehicle_score_json=_flag_value(rest, "--vehicle-score-json"),
+            gamma_path=_flag_value(rest, "--gamma"),
+            gamma_json=_flag_value(rest, "--gamma-json"),
+            broker_path=_flag_value(rest, "--broker"),
+            broker_json=_flag_value(rest, "--broker-json"),
+            # Default None => INHERIT scan_only from the trigger/candidate (watchdog is scan_only=True);
+            # --scan-only forces it True. --promote-to-execution is the explicit opt-in to demote an
+            # (inherited) scan_only record to the execution tier.
+            scan_only=True if "--scan-only" in rest else None,
+            promote_to_execution="--promote-to-execution" in rest,
+            out_dir=_flag_value(rest, "--out-dir"),
+            write="--write" in rest,
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"odte-entry-gate: could not read/parse input: {exc}")
+        sys.exit(2)
+    if "--journal" in rest:
+        from data.odte_journal import append_decision_journal, event_from_entry_gate
+        ev = event_from_entry_gate(payload)
+        append_decision_journal(ev, source="entry_gate", event_type="entry_decision",
+                                journal_path=_flag_value(rest, "--journal-path"))
+    print(json.dumps(payload, separators=(",", ":"), default=str) if "--json" in rest
+          else render_markdown(payload))
 
 
 def _cmd_odte_fmp_context(rest: list[str]) -> None:
@@ -550,8 +721,13 @@ _COMMANDS: dict[str, Callable[[list[str]], None]] = {
     "odte-watchdog": _cmd_odte_watchdog,
     "odte-position": _cmd_odte_position,
     "odte-journal": _cmd_odte_journal,
+    "odte-ingest-artifacts": _cmd_odte_ingest_artifacts,
     "odte-journal-report": _cmd_odte_journal_report,
     "odte-gamma-map": _cmd_odte_gamma_map,
+    "odte-rh-rows": _cmd_odte_rh_rows,
+    "odte-vehicle-score": _cmd_odte_vehicle_score,
+    "odte-day-score": _cmd_odte_day_score,
+    "odte-entry-gate": _cmd_odte_entry_gate,
     "odte-fmp-context": _cmd_odte_fmp_context,
     "stability-scan": _cmd_stability_scan,
     "interaction-screen": _cmd_interaction_screen,
@@ -626,29 +802,30 @@ COMMANDS
   options-social           Alias for odte-social-report (identical behavior and options).
   odte-watchdog            Script-only 0DTE watchdog — NO LLM, NO Robinhood, places NO orders.
                            Runs the LOCAL report, diffs the actionable candidate vs the prior run,
-                           writes ~/0dte/{watchdog_state,triggers}.json. For a no_agent cron:
+                           writes data/odte/{watchdog_state,triggers}.json. For a no_agent cron:
                            EMPTY stdout when nothing actionable, compact one-line JSON on a trigger
                            (new/changed non-restricted candidate, or missing/invalid policy).
                            --json always prints state; --no-fetch runs offline (cache-only);
-                           --policy PATH / --state-dir DIR override the defaults (~/0dte/).
+                           --state-dir DIR overrides the data dir; the controller policy is a secret
+                           read from ~/0dte/controller_policy.json (--policy PATH overrides).
   odte-position            Broker-AWARE, DECISION-ONLY live-position watchdog — places NO orders,
                            makes NO broker/LLM calls. Reads the active trade plan
-                           (~/0dte/active_trade.json) + a caller-supplied live snapshot (Hermes feeds
+                           (data/odte/active_trade.json) + a caller-supplied live snapshot (Hermes feeds
                            real broker/market values via MCP) and emits TAKE_PROFIT / THESIS_DEAD /
                            BID_FLOOR / TIME_RISK / MONITORING_DEGRADED / HOLD. Writes
-                           ~/0dte/{position_state,position_decision}.json. EMPTY stdout on HOLD/
+                           data/odte/{position_state,position_decision}.json. EMPTY stdout on HOLD/
                            NO_POSITION; compact JSON on an actionable decision. --snapshot PATH or
                            --snapshot-json '{...}' supply the live values; --plan / --state-dir
                            override defaults; --json always prints.
   odte-journal             Append one event to the local 0DTE decision journal
-                           (~/0dte/decision_journal.jsonl) — local/offline, NO broker/LLM/secrets.
+                           (data/odte/decision_journal.jsonl) — local/offline, NO broker/LLM/secrets.
                            --event-json '{...}' or --event PATH supplies the event (event_type +
                            free-form thesis/decision/outcome/experiment fields); NVDA/restricted
                            underlyings are tagged and kept out of metrics. --json prints the stored event.
   odte-journal-report      Summarize the decision journal into deterministic metrics + Markdown/CSV
                            (trades by mode, hit rate, avg P/L, MFE capture, rule violations, timing,
                            experiments, lessons). --json prints metrics; default prints Markdown;
-                           --write (or --out-dir DIR) writes ~/0dte/reports/ artifacts.
+                           --write (or --out-dir DIR) writes data/odte/reports/ artifacts.
   odte-gamma-map           0DTE option-chain gamma / pin map — PURE/OFFLINE, NO broker/LLM/network.
                            Reads option-quote rows Hermes/RH exported (--input PATH or
                            --input-json '{...}') and computes ABSOLUTE gamma/OI concentration:
@@ -656,14 +833,46 @@ COMMANDS
                            quote freshness. HONEST — labeled gamma_regime=pin_risk_only_not_dealer_gex;
                            it does NOT infer dealer net GEX / gamma flip (RH doesn't expose it).
                            --spot/--underlying/--expiration refine; --json prints the map; --write
-                           (or --out-dir DIR) writes ~/0dte/reports/odte_gamma_map_<sym>.{md,json}.
+                           (or --out-dir DIR) writes data/odte/reports/odte_gamma_map_<sym>.{md,json}.
+  odte-rh-rows             Pair the two SEPARATE arrays Robinhood returns (option quotes/market-data
+                           + option instruments) into flat rows that odte-gamma-map consumes —
+                           PURE/OFFLINE, NO broker/LLM/network. --quotes PATH / --quotes-json '[...]'
+                           supply the quote array; --instruments PATH / --instruments-json '[...]'
+                           supply the companion instruments (optional if quotes carry strike/type).
+                           Joins each quote to its instrument by id/url; prints a JSON row list (feed
+                           to `odte-gamma-map --input`), or --out PATH writes it. HONEST: ABSOLUTE
+                           gamma/OI rows only — never dealer GEX.
+  odte-vehicle-score       PURE/OFFLINE non-sentiment GOOD_BET/WATCH/BAD_BET score for a candidate
+                           contract/vehicle. Inputs: --contract PATH or --contract-json '{...}', plus
+                           optional --market/--market-json and --gamma/--gamma-json; --buying-power N
+                           adds account-fit scoring. Uses tape/VWAP, VIXY, gamma/pin/expected move,
+                           liquidity/spread, and BP fit — no orders, no network, no sentiment.
+  odte-day-score           PURE/OFFLINE non-sentiment GOOD_DAY/CHOP/AVOID score for the whole
+                           trading day (companion to odte-vehicle-score, which scores one contract).
+                           Inputs: --market PATH or --market-json '{...}' (vix, vix/vixy change,
+                           gap_pct, {spy,qqq,iwm}_above_vwap, {sym}_orb_state, expected_move_pct,
+                           minutes_to_close) plus optional --gamma/--gamma-json (derives expected
+                           move from the ATM band). Scores trend + volatility + gap + expected-move
+                           + late-day theta — no orders, no network, no sentiment. --json prints the
+                           payload; --write (or --out-dir DIR) writes data/odte/reports/ artifact.
+  odte-entry-gate          PURE/OFFLINE thesis->entry gate — assembles a journalable entry-gate
+                           decision (enter/deny/veto/observe) from upstream artifacts: --trigger,
+                           --candidate, --day-score, --vehicle-score, --gamma, --broker (each PATH or
+                           a *-json '{...}'). execution_allowed is True ONLY when every required gate
+                           (day_regime + vehicle + directional_thesis + account) is explicitly true and
+                           the record is not scan_only / restricted; missing inputs fail closed.
+                           scan_only is INHERITED from the trigger/candidate by default (the watchdog
+                           lane is scan_only=true); --scan-only forces it, and --promote-to-execution
+                           is the explicit opt-in to demote an inherited scan_only record to the
+                           execution tier. Records intent ONLY — no orders/broker/network. --journal
+                           appends an entry_decision event to the decision journal; --json/--write.
   odte-fmp-context SYMBOL  FMP single-name context for meme/squeeze SANITY — read-only, NO orders,
                            NO options/gamma. Fetches cheap FMP stable fundamentals (profile, quote,
                            shares-float, key-metrics-ttm, a few news) and classifies a squeeze_profile
                            (tiny/small/mid/large float). FMP options are unavailable so
                            fmp_options_available is always false — Robinhood stays the gamma/options
                            source. Fail-closed without FMP_KEY (never printed). --json prints the
-                           context; --write (or --out-dir DIR) writes ~/0dte/reports/ artifacts;
+                           context; --write (or --out-dir DIR) writes data/odte/reports/ artifacts;
                            --no-fetch runs offline. NOT used by odte-watchdog (kept cheap/no-network).
 
 OPTIONS (run)
