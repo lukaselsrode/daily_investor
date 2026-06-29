@@ -14,6 +14,8 @@ managing/exiting an open trade beats chasing a new one. Reads, never writes; pla
 Inputs (all read by ``run_loop_status``; ``derive_loop_state`` is the pure core, given the payloads):
   active_trade.json        the current plan/position  (``odte_position``/controller)
   position_decision.json   the latest live-position decision  (``odte-position``)
+  active_candidate.json    a pre-entry setup being watched hawkishly  (``odte-candidate-watch``)
+  candidate_decision.json  latest pre-entry watch decision  (``odte-candidate-watch``)
   triggers.json            the latest scan/trigger lane payload  (``odte-watchdog``)
   decision_journal.jsonl   the journal — latest ``entry_decision`` (gate) + any ``postmortem`` (review)
 
@@ -42,6 +44,8 @@ SCHEMA_VERSION = 1
 DEFAULT_STATE_DIR = ODTE_DATA_DIR
 PLAN_FILENAME = "active_trade.json"
 POSITION_DECISION_FILENAME = "position_decision.json"
+ACTIVE_CANDIDATE_FILENAME = "active_candidate.json"
+CANDIDATE_DECISION_FILENAME = "candidate_decision.json"
 TRIGGERS_FILENAME = "triggers.json"
 JOURNAL_FILENAME = "decision_journal.jsonl"
 
@@ -160,6 +164,8 @@ def _latest_event(events: list[dict], event_type: str) -> dict | None:
 
 def derive_loop_state(active_trade: dict | None = None,
                       position_decision: dict | None = None,
+                      active_candidate: dict | None = None,
+                      candidate_decision: dict | None = None,
                       triggers: dict | None = None,
                       journal_events: list[dict] | None = None,
                       *, errors: set[str] | None = None,
@@ -173,6 +179,8 @@ def derive_loop_state(active_trade: dict | None = None,
     events = journal_events or []
     plan = _dict(active_trade)
     pdec = _dict(position_decision)
+    acand = _dict(active_candidate)
+    cdec = _dict(candidate_decision)
     trig = _dict(triggers)
     reasons: list[str] = []
 
@@ -247,6 +255,36 @@ def derive_loop_state(active_trade: dict | None = None,
     if gate_exec:
         reasons.append(f"entry gate execution-allowed ({gate.get('underlying') or '?'})")
         return _payload("PROMOTED", reasons, now, live=False, context=_gate_ctx(gate))
+
+    # Pre-entry candidate HAWK lane. A live/open position and an execution-allowed gate still win,
+    # but an actively watched candidate should outrank stale/non-executable gates so the controller
+    # keeps checking confirmation/degradation instead of falling back to a slow broad scan. Candidate
+    # watch is never executable by itself; CONFIRM_ENTRY means "build/promote a fresh entry gate".
+    watch_decision = str(cdec.get("decision") or acand.get("decision") or "").upper()
+    watched = _dict(cdec.get("candidate")) or acand
+    watch_live = bool(watched.get("ticker") or watched.get("underlying") or watched.get("symbol"))
+    inactive_watch = {"DEGRADED_NO_TRADE", "EXPIRED_NO_CONFIRMATION", ""}
+    if watch_live and watch_decision not in inactive_watch:
+        if watch_decision == "CONFIRM_ENTRY":
+            reasons.append("candidate watch confirmed setup; build a fresh entry gate")
+            payload = _payload("CANDIDATE", reasons, now, live=False,
+                               context=_candidate_watch_ctx(watched, cdec, confirmed=True))
+            payload["next_command"] = "odte-entry-gate"
+            payload["next_action"] = "candidate confirmed — assemble/promote a fresh entry gate"
+            return payload
+        if watch_decision == "BROKER_BLOCKED":
+            reasons.append("candidate watch blocked by broker/review lane")
+            payload = _payload("CANDIDATE", reasons, now, live=False,
+                               context=_candidate_watch_ctx(watched, cdec, confirmed=False))
+            payload["next_command"] = "verify-broker-review-lane"
+            payload["next_action"] = "execution lane blocked — verify/repair broker review before promotion"
+            return payload
+        reasons.append(f"candidate watch active ({watch_decision or 'KEEP_WATCHING'})")
+        payload = _payload("CANDIDATE", reasons, now, live=False,
+                           context=_candidate_watch_ctx(watched, cdec, confirmed=False))
+        payload["next_command"] = "odte-candidate-watch"
+        payload["next_action"] = "candidate HAWK — keep checking confirm/degrade before broad scan"
+        return payload
     if newer_candidate_after_gate:
         reasons.append("newer scan candidate supersedes prior non-executable gate")
         reasons.append(f"candidate {candidate.get('ticker')} {candidate.get('direction') or ''} "
@@ -281,6 +319,13 @@ def _gate_ctx(gate: dict) -> dict:
             "execution_allowed": bool(gate.get("execution_allowed", False))}
 
 
+def _candidate_watch_ctx(candidate: dict, decision: dict, *, confirmed: bool) -> dict:
+    return {"underlying": candidate.get("ticker") or candidate.get("underlying") or candidate.get("symbol"),
+            "direction": candidate.get("direction"), "candidate_watch": True,
+            "candidate_decision": decision.get("decision"), "confirmed": confirmed,
+            "scan_only": True, "execution_allowed": False}
+
+
 def _payload(state: str, reasons: list[str], now: datetime | None, *, live: bool,
              context: dict) -> dict:
     stage, executable = _STAGE[state]
@@ -313,18 +358,25 @@ def run_loop_status(state_dir: str | None = None, *, now: datetime | None = None
     base = Path(os.path.expanduser(state_dir or DEFAULT_STATE_DIR))
     plan, plan_status = _read_json(base / PLAN_FILENAME)
     pdec, pdec_status = _read_json(base / POSITION_DECISION_FILENAME)
+    acand, acand_status = _read_json(base / ACTIVE_CANDIDATE_FILENAME)
+    cdec, cdec_status = _read_json(base / CANDIDATE_DECISION_FILENAME)
     trig, trig_status = _read_json(base / TRIGGERS_FILENAME)
     journal = base / JOURNAL_FILENAME
     events = read_events(str(journal)) if journal.exists() else []
 
     errors = {name for name, st in (("active_trade", plan_status),
                                     ("position_decision", pdec_status),
+                                    ("active_candidate", acand_status),
+                                    ("candidate_decision", cdec_status),
                                     ("triggers", trig_status)) if st == "invalid"}
-    payload = derive_loop_state(active_trade=plan, position_decision=pdec, triggers=trig,
+    payload = derive_loop_state(active_trade=plan, position_decision=pdec,
+                                active_candidate=acand, candidate_decision=cdec, triggers=trig,
                                 journal_events=events, errors=errors, now=now)
     payload["artifacts"] = {
         "active_trade": plan_status,
         "position_decision": pdec_status,
+        "active_candidate": acand_status,
+        "candidate_decision": cdec_status,
         "triggers": trig_status,
         "journal_events": len(events),
     }

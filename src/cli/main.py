@@ -539,6 +539,38 @@ def _cmd_odte_entry_gate(rest: list[str]) -> None:
           else render_markdown(payload))
 
 
+
+def _cmd_odte_candidate_watch(rest: list[str]) -> None:
+    # PURE/OFFLINE pre-entry candidate HAWK lane. Watches a candidate until confirm/degrade, but
+    # places NO orders, makes NO broker/network/LLM calls, and never sets execution_allowed=True.
+    import json
+
+    from data.odte_candidate_watch import render_markdown, run_candidate_watch
+    try:
+        payload = run_candidate_watch(
+            candidate_path=_flag_value(rest, "--candidate"),
+            candidate_json=_flag_value(rest, "--candidate-json"),
+            market_path=_flag_value(rest, "--market"),
+            market_json=_flag_value(rest, "--market-json"),
+            day_score_path=_flag_value(rest, "--day-score"),
+            day_score_json=_flag_value(rest, "--day-score-json"),
+            vehicle_score_path=_flag_value(rest, "--vehicle-score"),
+            vehicle_score_json=_flag_value(rest, "--vehicle-score-json"),
+            gamma_path=_flag_value(rest, "--gamma"),
+            gamma_json=_flag_value(rest, "--gamma-json"),
+            broker_health_path=_flag_value(rest, "--broker-health"),
+            broker_health_json=_flag_value(rest, "--broker-health-json"),
+            state_dir=_flag_value(rest, "--state-dir"),
+            write="--write" in rest,
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"odte-candidate-watch: could not read/parse input: {exc}")
+        sys.exit(2)
+    print(json.dumps(payload, separators=(",", ":"), default=str) if "--json" in rest
+          else render_markdown(payload))
+
+
+
 def _cmd_odte_fmp_context(rest: list[str]) -> None:
     # FMP single-name context for 0DTE meme/squeeze SANITY — read-only, NO orders, NO options/gamma.
     # Fetches cheap FMP *stable* fundamentals (profile/quote/shares-float/key-metrics-ttm/news) and
@@ -746,6 +778,7 @@ _COMMANDS: dict[str, Callable[[list[str]], None]] = {
     "odte-vehicle-score": _cmd_odte_vehicle_score,
     "odte-day-score": _cmd_odte_day_score,
     "odte-entry-gate": _cmd_odte_entry_gate,
+    "odte-candidate-watch": _cmd_odte_candidate_watch,
     "odte-fmp-context": _cmd_odte_fmp_context,
     "odte-loop-status": _cmd_odte_loop_status,
     "stability-scan": _cmd_stability_scan,
@@ -885,6 +918,14 @@ COMMANDS
                            is the explicit opt-in to demote an inherited scan_only record to the
                            execution tier. Records intent ONLY — no orders/broker/network. --journal
                            appends an entry_decision event to the decision journal; --json/--write.
+  odte-candidate-watch     PURE/OFFLINE pre-entry candidate HAWK lane — watches a potential ETF/index
+                           setup until CONFIRM_ENTRY / KEEP_WATCHING / DEGRADED_NO_TRADE /
+                           EXPIRED_NO_CONFIRMATION / BROKER_BLOCKED. Supports SPY/QQQ/XSP/IWM tape-only
+                           momentum candidates from VWAP/ORB/VIXY inputs, but never places orders and
+                           never sets execution_allowed=true; confirmed candidates still need a fresh
+                           odte-entry-gate + broker review. --candidate/--market/--day-score/
+                           --vehicle-score/--gamma/--broker-health; --write stores
+                           data/odte/{active_candidate,candidate_decision}.json.
   odte-fmp-context SYMBOL  FMP single-name context for meme/squeeze SANITY — read-only, NO orders,
                            NO options/gamma. Fetches cheap FMP stable fundamentals (profile, quote,
                            shares-float, key-metrics-ttm, a few news) and classifies a squeeze_profile

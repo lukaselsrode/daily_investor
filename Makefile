@@ -236,6 +236,10 @@ odte-day-score:              ## 0DTE non-sentiment day score — NO broker (MARK
 odte-entry-gate:             ## 0DTE thesis->entry gate — NO orders/broker (TRIGGER=; DAY_SCORE=; VEHICLE=; GAMMA=; BROKER=; SCAN_ONLY=1; PROMOTE=1; JOURNAL=1; JSON=1)
 	@$(DI) odte-entry-gate $(if $(TRIGGER),--trigger $(TRIGGER),) $(if $(CANDIDATE),--candidate $(CANDIDATE),) $(if $(DAY_SCORE),--day-score $(DAY_SCORE),) $(if $(VEHICLE),--vehicle-score $(VEHICLE),) $(if $(GAMMA),--gamma $(GAMMA),) $(if $(BROKER),--broker $(BROKER),) $(if $(SCAN_ONLY),--scan-only,) $(if $(PROMOTE),--promote-to-execution,) $(if $(JOURNAL),--journal,) $(if $(JSON),--json,) $(if $(WRITE),--write,) $(if $(OUT_DIR),--out-dir $(OUT_DIR),)
 
+.PHONY: odte-candidate-watch
+odte-candidate-watch:        ## 0DTE pre-entry candidate HAWK — NO orders/broker (CANDIDATE=; MARKET=; DAY_SCORE=; VEHICLE=; GAMMA=; BROKER_HEALTH=; WRITE=1; JSON=1)
+	@$(DI) odte-candidate-watch $(if $(CANDIDATE),--candidate $(CANDIDATE),) $(if $(MARKET),--market $(MARKET),) $(if $(DAY_SCORE),--day-score $(DAY_SCORE),) $(if $(VEHICLE),--vehicle-score $(VEHICLE),) $(if $(GAMMA),--gamma $(GAMMA),) $(if $(BROKER_HEALTH),--broker-health $(BROKER_HEALTH),) $(if $(STATE_DIR),--state-dir $(STATE_DIR),) $(if $(WRITE),--write,) $(if $(JSON),--json,)
+
 # FMP single-name context for 0DTE meme/squeeze SANITY — read-only, NO orders, NO options/gamma.
 # Cheap FMP stable fundamentals (profile/quote/shares-float/key-metrics-ttm/news) + squeeze profile.
 # FMP options are unavailable; Robinhood stays the gamma source. Fail-closed without FMP_KEY.
