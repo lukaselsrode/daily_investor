@@ -77,10 +77,13 @@ _STOPWORDS = frozenset({
     # TA-indicator abbreviations — in 0DTE chatter these mean the indicator, not the (minor) ticker:
     "RSI", "MACD", "EMA", "SMA",
 })
-_BULL = ("call", "calls", "moon", "rocket", "buy", "long", "bull", "bullish", "pump",
-         "squeeze", "breakout", "rip", "🚀", "💎")
+_BULL = ("call", "calls", "moon", "mooning", "moonshot", "rocket", "buy", "long", "bull",
+         "bullish", "pump", "squeeze", "breakout", "rip", "ripping", "tendies", "printing",
+         "diamond hands", "hold the line", "send it", "🚀", "💎")
 _BEAR = ("put", "puts", "short", "sell", "bear", "bearish", "crash", "dump", "drill",
-         "tank", "collapse", "puke")
+         "tank", "tanking", "tanked", "collapse", "puke", "cooked", "toast", "rug", "rugged",
+         "rug pull", "bagholder", "bagholders", "bagholding", "exit liquidity", "dead cat",
+         "capitulation", "guh")
 
 
 # ---------------------------------------------------------------------------
@@ -579,25 +582,30 @@ _OPT_PUT = frozenset({"put", "puts"})
 # vice-versa. "printing"/"smoked" are the canonical WSB gain/loss verbs.
 _GAIN_VERBS = frozenset({"print", "prints", "printing", "printed", "ripping", "ripped",
                          "mooning", "mooned", "squeezing", "green", "won", "winning", "banger",
-                         "tendies", "hit", "hits"})
+                         "tendies", "hit", "hits", "loaded", "loading"})
 _LOSS_VERBS = frozenset({"smoked", "cooked", "crushed", "rekt", "wrecked", "destroyed",
                          "worthless", "expired", "assigned", "tanked", "dead", "red", "losing",
-                         "lost", "bust", "busted", "obliterated", "gutted"})
+                         "lost", "bust", "busted", "obliterated", "gutted", "toast", "rugged",
+                         "rug", "bagholder", "bagholders", "bagholding", "trapped"})
 # Bare directional intent words (emojis handled separately; option words handled by the grammar).
 _BULL_WORDS = frozenset({"call", "calls", "moon", "rocket", "buy", "buying", "bought", "long",
                          "bull", "bullish", "pump", "squeeze", "breakout", "rip", "bullrun",
-                         "upside"})
+                         "upside", "mooning", "moonshot", "tendies"})
 _BEAR_WORDS = frozenset({"put", "puts", "short", "shorting", "shorted", "sell", "bear", "bearish",
-                         "crash", "dump", "drill", "tank", "collapse", "puke", "downside"})
+                         "crash", "dump", "drill", "tank", "tanking", "tanked", "collapse", "puke",
+                         "downside", "cooked", "toast", "rug", "rugged", "bagholder", "bagholders",
+                         "bagholding", "guh"})
 # Negators CANCEL a directional cue (we do not flip to the opposite — safer + transparent).
 _NEGATORS = frozenset({"not", "no", "never", "none", "without", "avoid", "stop", "dont", "don't",
                        "isnt", "isn't", "aint", "ain't", "wont", "won't", "cant", "can't", "quit",
                        "fade", "against", "anti"})
 _BULL_PHRASES = (("buy", "the", "dip"), ("to", "the", "moon"), ("load", "up"), ("send", "it"),
-                 ("bottom", "is", "in"))
+                 ("bottom", "is", "in"), ("diamond", "hands"), ("hold", "the", "line"),
+                 ("loaded", "calls"), ("calls", "loaded"), ("calls", "printing"))
 _BEAR_PHRASES = (("go", "to", "zero"), ("going", "to", "zero"), ("bag", "holder"),
                  ("dead", "cat"), ("catching", "knives"), ("falling", "knife"),
-                 ("top", "is", "in"))
+                 ("top", "is", "in"), ("exit", "liquidity"), ("rug", "pull"),
+                 ("paper", "hands"), ("iv", "crush"), ("puts", "printing"))
 _QUESTION_RISK_RE = re.compile(
     r"\?|\bnfa\b|not financial advice|do your own|\bdyor\b|should i\b|is it too late|"
     r"am i (cooked|screwed|fucked)|thoughts\b", re.IGNORECASE)
@@ -606,7 +614,8 @@ _NEG_WINDOW = 3       # tokens before a cue scanned for a negator
 _SHORT_TOKENS = 40    # texts at/under this token length count cues regardless of proximity
 _RISK_MARGIN = 3      # questions/risk-warnings need this net margin to stay directional
 _ANCHOR_TERMS = frozenset({"0dte", "odte", "strike", "strikes", "contract", "contracts",
-                           "option", "options", "spx", "expiry", "expiration"})
+                           "option", "options", "spx", "expiry", "expiration", "yolo", "fd", "fds",
+                           "lotto", "lottos", "scalp", "scalps", "premium", "theta", "gamma"})
 # A bare SINGULAR 'put'/'call' is an option noun (not an English verb) only with this context:
 # an options term / a number / a $strike nearby, or a determiner/transaction word right before it.
 _OPT_DETERMINERS = frozenset({"a", "an", "the", "my", "this", "that", "some", "sell", "sold",
@@ -799,21 +808,22 @@ def classify_odte_intent(text: str, ticker: str = "SPY") -> dict:
         examples.append(span)
 
     # 1b) PARTY outcome: 'bears cooked' = bullish, 'bulls trapped' = bearish (who's winning/losing).
+    # Prefer the nearest outcome word; when tied, prefer the word AFTER the party token so
+    # "puts printing, bulls cooked" reads as bulls losing, not bulls printing.
     for i, t in enumerate(toks):
         if i in consumed or not (t in _PARTY_BULL or t in _PARTY_BEAR) or not near(i):
             continue
-        outcome = None
+        candidates: list[tuple[int, int, str]] = []
         for j in range(max(0, i - 2), min(len(toks), i + 4)):
             if j == i:
                 continue
             if toks[j] in _PARTY_GAIN:
-                outcome = "gain"
-                break
-            if toks[j] in _PARTY_LOSS:
-                outcome = "loss"
-                break
-        if outcome is None:
+                candidates.append((abs(j - i), 0 if j > i else 1, "gain"))
+            elif toks[j] in _PARTY_LOSS:
+                candidates.append((abs(j - i), 0 if j > i else 1, "loss"))
+        if not candidates:
             continue
+        _, _, outcome = min(candidates)
         is_bull_party = t in _PARTY_BULL
         party_bull = (is_bull_party and outcome == "gain") or (not is_bull_party and outcome == "loss")
         span = " ".join(toks[max(0, i - 1):min(len(toks), i + 3)])

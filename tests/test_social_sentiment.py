@@ -95,6 +95,47 @@ def test_score_social_sentiment_sign_and_momentum():
     assert 0.0 <= sc["GME"]["momentum"] <= 1.0
 
 
+def test_wsb_slang_contextual_intent_examples():
+    cases = [
+        ("SPY", "SPY 0DTE YOLO calls printing", "bullish"),
+        ("QQQ", "QQQ puts printing, bulls cooked", "bearish"),
+        ("MU", "MU bears are cooked, calls send it", "bullish"),
+        ("TSLA", "TSLA bagholders cooked, exit liquidity", "bearish"),
+        ("IWM", "IWM diamond hands my calls", "bullish"),
+        ("SPY", "SPY tanking hard, puts printing", "bearish"),
+        ("QQQ", "QQQ moon mission, calls loaded", "bullish"),
+    ]
+    for ticker, text, expected in cases:
+        got = ss.classify_odte_intent(text, ticker)
+        assert got["intent"] == expected, (ticker, text, got)
+
+
+def test_yolo_alone_is_context_not_ticker_or_direction():
+    mentions = ss.extract_ticker_mentions(["YOLO"])
+    assert not mentions
+    got = ss.classify_odte_intent("YOLO", "SPY")
+    assert got["intent"] == "neutral"
+    assert got["bull"] == 0 and got["bear"] == 0
+
+
+def test_score_social_wsb_slang_terms_without_ticker_noise():
+    docs = [
+        {"text": "SPY 0DTE YOLO calls printing", "ts": 10.0},
+        {"text": "QQQ puts printing, bulls cooked", "ts": 10.0},
+        {"text": "TSLA bagholders cooked, exit liquidity", "ts": 10.0},
+        {"text": "IWM diamond hands my calls", "ts": 10.0},
+        {"text": "YOLO FD FDS PUTS CALLS", "ts": 10.0},
+    ]
+    mentions = ss.extract_ticker_mentions([d["text"] for d in docs])
+    for sw in ("YOLO", "FD", "FDS", "PUTS", "CALLS"):
+        assert sw not in mentions
+    sc = ss.score_social(mentions, docs)
+    assert sc["SPY"]["sentiment"] > 0
+    assert sc["QQQ"]["sentiment"] < 0
+    assert sc["TSLA"]["sentiment"] < 0
+    assert sc["IWM"]["sentiment"] > 0
+
+
 def test_fetch_reddit_parses_and_caches(monkeypatch):
     monkeypatch.setattr(ss.requests, "get", lambda *a, **k: _FakeResp(_reddit_payload()))
     posts = ss.fetch_reddit_posts(limit=10)
