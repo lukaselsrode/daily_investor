@@ -61,6 +61,12 @@ _NO_POSITION_DECISIONS = {"", "NO_POSITION", "RESTRICTED"}
 STALE_DECISION_MINUTES = 2
 # A closed trade older than this stops nagging EXITED so it can't mask a genuinely fresh scan.
 STALE_TRADE_HOURS = 36
+# A FAILED entry gate (present, not execution-allowed) stops being sticky once a fresh scan candidate
+# lands at least this many minutes after it: on a real trend day the tape keeps moving, so an old
+# NO_TRADE/deny gate must not pin the loop at GATED forever when a materially newer watchdog candidate
+# shows up. Only DENIED gates are superseded — an execution-allowed (PROMOTED) gate is never demoted
+# by a scan, and the candidate this falls through to stays scan_only/observe (never executable).
+SUPERSEDE_GATE_MINUTES = 15
 
 # state → (human loop stage, whether an execution-tier action is authorized by the artifacts).
 # Only a live trade (ENTERED/MANAGING) or an execution-allowed gate (PROMOTED) is "executable".
@@ -226,6 +232,12 @@ def derive_loop_state(active_trade: dict | None = None,
 
     candidate = _dict(trig.get("candidate"))
     trig_candidate = bool(candidate.get("ticker")) and not candidate.get("restricted")
+    trig_ts = _parse_ts(trig.get("ts") or trig.get("generated_at"))
+    newer_candidate_after_gate = False
+    if trig_candidate and gate_fresh and not gate_exec and gate_ts is not None and trig_ts is not None:
+        newer_candidate_after_gate = (
+            (trig_ts - gate_ts).total_seconds() / 60.0 >= SUPERSEDE_GATE_MINUTES
+        )
 
     if closed_trade and not reviewed and recent_close:
         reasons.append(f"trade {trade_id or '?'} closed, no postmortem yet")
@@ -235,6 +247,14 @@ def derive_loop_state(active_trade: dict | None = None,
     if gate_exec:
         reasons.append(f"entry gate execution-allowed ({gate.get('underlying') or '?'})")
         return _payload("PROMOTED", reasons, now, live=False, context=_gate_ctx(gate))
+    if newer_candidate_after_gate:
+        reasons.append("newer scan candidate supersedes prior non-executable gate")
+        reasons.append(f"candidate {candidate.get('ticker')} {candidate.get('direction') or ''} "
+                       f"(scan_only/observe)".strip())
+        return _payload("CANDIDATE", reasons, now, live=False, context={
+            "underlying": candidate.get("ticker"), "direction": candidate.get("direction"),
+            "spy_verdict": trig.get("spy_verdict"), "scan_only": True,
+            "superseded_gate_decision": gate.get("decision")})
     if gate_fresh:
         reasons.append(f"entry gate present, not execution-allowed (decision={gate.get('decision')})")
         return _payload("GATED", reasons, now, live=False, context=_gate_ctx(gate))

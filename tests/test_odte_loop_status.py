@@ -140,6 +140,49 @@ def test_fresh_gate_outranks_scan_trigger():
     assert r["state"] == "GATED"
 
 
+def test_newer_trigger_supersedes_prior_failed_gate_without_execution():
+    # A failed gate is not sticky forever. If a materially newer scan candidate appears later in the
+    # same day, surface it as a fresh CANDIDATE so the controller can build a new gate. This still
+    # stays scan-tier/non-executable; it never silently promotes to PROMOTED.
+    gate = _entry_decision(decision="NO_TRADE_FINAL_TAPE_RECLAIM_FAILED",
+                           ts=_ts(minutes_ago=30), execution_allowed=False)
+    trig = _candidate_triggers(ts=_ts(minutes_ago=1), alert=True,
+                               candidate={"ticker": "QQQ", "direction": "bullish"})
+    r = ls.derive_loop_state(triggers=trig, journal_events=[gate], now=NOW)
+    assert r["state"] == "CANDIDATE"
+    assert r["executable"] is False
+    assert r["context"]["scan_only"] is True
+    assert r["context"]["underlying"] == "QQQ"
+    assert r["context"]["superseded_gate_decision"] == "NO_TRADE_FINAL_TAPE_RECLAIM_FAILED"
+
+
+def test_older_trigger_does_not_supersede_failed_gate():
+    gate = _entry_decision(decision="NO_TRADE_FINAL_TAPE_RECLAIM_FAILED",
+                           ts=_ts(minutes_ago=5), execution_allowed=False)
+    trig = _candidate_triggers(ts=_ts(minutes_ago=30), alert=True,
+                               candidate={"ticker": "QQQ", "direction": "bullish"})
+    r = ls.derive_loop_state(triggers=trig, journal_events=[gate], now=NOW)
+    assert r["state"] == "GATED"
+
+
+def test_not_materially_newer_trigger_does_not_supersede_failed_gate():
+    gate = _entry_decision(decision="NO_TRADE_FINAL_TAPE_RECLAIM_FAILED",
+                           ts=_ts(minutes_ago=10), execution_allowed=False)
+    trig = _candidate_triggers(ts=_ts(minutes_ago=1), alert=True,
+                               candidate={"ticker": "QQQ", "direction": "bullish"})
+    r = ls.derive_loop_state(triggers=trig, journal_events=[gate], now=NOW)
+    assert r["state"] == "GATED"
+
+
+def test_newer_trigger_does_not_downgrade_execution_allowed_gate():
+    gate = _entry_decision(decision="enter", ts=_ts(minutes_ago=30), execution_allowed=True)
+    trig = _candidate_triggers(ts=_ts(minutes_ago=1), alert=True,
+                               candidate={"ticker": "QQQ", "direction": "bullish"})
+    r = ls.derive_loop_state(triggers=trig, journal_events=[gate], now=NOW)
+    assert r["state"] == "PROMOTED"
+    assert r["executable"] is True
+
+
 def test_stale_gate_from_prior_trade_is_ignored():
     # A gate dated BEFORE the closed trade's close is that trade's own (consumed) gate -> not GATED.
     # The closed+reviewed trade falls through to REVIEWED, not a stale PROMOTED.
