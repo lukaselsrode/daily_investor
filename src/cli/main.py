@@ -230,8 +230,15 @@ def _cmd_odte_social_report(rest: list[str]) -> None:
         if not (_dt_id or _dt_url):
             _dt_id = _dt_id or _auto.get("daily_thread_id")
     _params = None
-    if _dt_id or _dt_url or _dt_limit:
+    _budget_override = os.environ.get("ODTE_BUDGET_DOLLARS") or os.environ.get("ODTE_OPTIONS_BUDGET_DOLLARS")
+    if _dt_id or _dt_url or _dt_limit or _budget_override:
         _params = {**OPTIONS_SOCIAL_PARAMS}   # shallow copy; global config left untouched
+        if _budget_override:
+            try:
+                _params["budget_dollars"] = float(_budget_override)
+            except ValueError:
+                print(f"ODTE_BUDGET_DOLLARS: not a number: {_budget_override}")
+                sys.exit(2)
         if _dt_id:
             _params["daily_thread_id"] = _dt_id
         if _dt_url:
@@ -591,17 +598,26 @@ def _cmd_odte_fmp_context(rest: list[str]) -> None:
 
 
 def _cmd_odte_loop_status(rest: list[str]) -> None:
-    # PURE/OFFLINE 0DTE loop state machine — NO broker, NO LLM, places NO orders. Summarizes the
+    # PURE/OFFLINE 0DTE loop state machine — NO broker call, NO LLM, places NO orders. Summarizes the
     # canonical data/odte artifacts (active_trade / position_decision / triggers / decision_journal)
     # into the current loop state (SCAN/CANDIDATE/GATED/PROMOTED/ENTERED/MANAGING/EXITED/REVIEWED/
-    # DEGRADED) + the next command to run. Re-derives no gate/decision; a live position always
-    # outranks the scan/candidate/gate lane. --json prints the compact payload; default prints Markdown.
-    # Quiet by design: the readers only emit stderr logs (no stdout writes), so --json stdout is a
-    # clean machine contract without any process-wide logging override.
+    # DEGRADED) plus a coarse cron POSTURE (MANAGE_POSITION / SCOUT_FRESH_SETUP / WAIT_FRESH_CONFIRMATION
+    # / FLAT_NO_TRADE / STALE_DATA_BLOCKED / BROKER_DEGRADED) + the next command to run. FLAT_NO_TRADE is
+    # the normal idle tick (flat/reviewed/empty heartbeat) and never says "stale"; STALE_DATA_BLOCKED is
+    # only an actual stale/malformed artifact blocking action. Re-derives no gate/decision; a live
+    # position always outranks the scan/candidate/gate lane. --broker-health PATH (or the
+    # ODTE_BROKER_HEALTH env, else the durable data/odte/broker_health.json) feeds a SUPPLIED/PROBED
+    # broker-health payload Hermes wrote from an MCP/CLI probe — the module never calls the broker
+    # itself. This surface is the LIVE controller entrypoint, so it fails closed by default: an unknown/
+    # missing broker lane cannot authorize a live order (posture BROKER_DEGRADED when a position/setup
+    # needs the lane). --offline relaxes that for pure decision-support (unknown lane reported, not
+    # blocked). --json prints the compact payload; default prints Markdown. Quiet: readers log to stderr.
     import json
 
     from data.odte_loop_status import render_markdown, run_loop_status
-    payload = run_loop_status(state_dir=_flag_value(rest, "--state-dir"))
+    payload = run_loop_status(state_dir=_flag_value(rest, "--state-dir"),
+                              broker_health_path=_flag_value(rest, "--broker-health"),
+                              live_mode="--offline" not in rest)
     if "--json" in rest:
         print(json.dumps(payload, separators=(",", ":"), default=str))
     else:
@@ -934,17 +950,26 @@ COMMANDS
                            source. Fail-closed without FMP_KEY (never printed). --json prints the
                            context; --write (or --out-dir DIR) writes data/odte/reports/ artifacts;
                            --no-fetch runs offline. NOT used by odte-watchdog (kept cheap/no-network).
-  odte-loop-status         PURE/OFFLINE 0DTE loop state machine — NO broker/LLM, places NO orders.
+  odte-loop-status         PURE/OFFLINE 0DTE loop state machine — NO broker call/LLM, places NO orders.
                            Summarizes the canonical data/odte artifacts (active_trade,
                            position_decision, triggers, decision_journal) into the current loop state
                            — SCAN / CANDIDATE / GATED / PROMOTED / ENTERED / MANAGING / EXITED /
-                           REVIEWED / DEGRADED — plus the next command to run (odte-watchdog,
-                           odte-entry-gate, odte-position, odte-journal, …). Re-derives NO gate or
-                           decision; a LIVE position always outranks the scan/candidate/gate lane;
-                           missing artifacts read as SCAN and a malformed/stale live artifact
-                           DEGRADES rather than crashing. --json prints the compact payload (clean
-                           machine contract); default prints Markdown; --state-dir DIR overrides
-                           data/odte/.
+                           REVIEWED / DEGRADED — plus a coarse cron POSTURE (MANAGE_POSITION /
+                           SCOUT_FRESH_SETUP / WAIT_FRESH_CONFIRMATION / FLAT_NO_TRADE /
+                           STALE_DATA_BLOCKED / BROKER_DEGRADED; FLAT_NO_TRADE is the normal idle tick
+                           and never says "stale", STALE_DATA_BLOCKED is a real stale/malformed block),
+                           per-artifact freshness (age/TTL), and the next command to run (odte-watchdog,
+                           odte-entry-gate, odte-position, odte-journal, …). --broker-health PATH (or
+                           ODTE_BROKER_HEALTH env, else data/odte/broker_health.json) folds a SUPPLIED/
+                           PROBED broker-health payload Hermes wrote from an MCP/CLI probe (no broker
+                           call here) so the lane reads ok/down/stale/read-only-fallback and live orders
+                           are BLOCKED when it can't be trusted. Fails closed by default (live mode):
+                           unknown/missing broker can't authorize a live order; --offline relaxes for
+                           pure decision-support. Re-derives NO gate or decision; a LIVE
+                           position always outranks the scan/candidate/gate lane; missing artifacts
+                           read as SCAN and a malformed/stale live artifact DEGRADES rather than
+                           crashing. --json prints the compact payload (clean machine contract);
+                           default prints Markdown; --state-dir DIR overrides data/odte/.
 
 OPTIONS (run)
   --skip-data              Reuse existing CSV data

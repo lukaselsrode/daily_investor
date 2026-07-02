@@ -250,12 +250,19 @@ odte-fmp-context:            ## FMP meme/squeeze sanity context — NO orders/op
 	@$(DI) odte-fmp-context $(SYMBOL) $(if $(JSON),--json,) $(if $(WRITE),--write,) $(if $(OUT_DIR),--out-dir $(OUT_DIR),)
 
 # One read-only surface for the live loop: summarizes data/odte artifacts (active_trade /
-# position_decision / triggers / decision_journal) into the current state + next command. PURE/OFFLINE.
-#   make odte-loop-status            # Markdown: where in the loop + what runs next
+# position_decision / triggers / decision_journal) into the current state + coarse cron POSTURE
+# (MANAGE_POSITION / SCOUT_FRESH_SETUP / WAIT_FRESH_CONFIRMATION / FLAT_NO_TRADE / STALE_DATA_BLOCKED /
+# BROKER_DEGRADED; FLAT_NO_TRADE = normal idle tick, never "stale") + per-artifact freshness + next
+# command. PURE/OFFLINE — makes NO broker call. BROKER_HEALTH=path (else data/odte/broker_health.json)
+# folds a SUPPLIED/PROBED broker-health JSON (Hermes writes it from an MCP/CLI probe) so the lane reads
+# ok/down/stale/read-only-fallback. Fails closed by default (live mode): unknown/missing broker can't
+# authorize a live order. OFFLINE=1 relaxes to pure decision-support.
+#   make odte-loop-status            # Markdown: posture + where in the loop + what runs next
 #   make odte-loop-status JSON=1     # compact machine payload
+#   make odte-loop-status BROKER_HEALTH=data/odte/broker_health.json JSON=1
 .PHONY: odte-loop-status
-odte-loop-status:            ## 0DTE loop state machine — where in scan→exit→review + next command (JSON=1)
-	@$(DI) odte-loop-status $(if $(STATE_DIR),--state-dir $(STATE_DIR),) $(if $(JSON),--json,)
+odte-loop-status:            ## 0DTE loop state machine — posture + where in scan→exit→review + next command (BROKER_HEALTH=path; OFFLINE=1; JSON=1)
+	@$(DI) odte-loop-status $(if $(STATE_DIR),--state-dir $(STATE_DIR),) $(if $(BROKER_HEALTH),--broker-health $(BROKER_HEALTH),) $(if $(OFFLINE),--offline,) $(if $(JSON),--json,)
 
 .PHONY: regime
 regime:                      ## Print current market regime  (live SPY + VIX fetch)
