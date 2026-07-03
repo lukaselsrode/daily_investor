@@ -67,11 +67,17 @@ _PEER_DIAGNOSTIC_COLS = {
 # instrument_type is fetched from Robinhood and merged onto the universe in
 # data.market.get_data — not produced by the per-stock _evaluate_stock loop.
 _MARKET_STRUCTURE_COLS = {"instrument_type"}
+# Dollar-volume features are batch-merged by data.volume_features (FMP cache),
+# not produced by the per-stock _evaluate_stock loop.
+_VOLUME_FEATURE_COLS = {
+    "dollar_vol_5d", "dollar_vol_21d", "dollar_vol_63d", "dollar_vol_cv_63d",
+}
 _BASE_AGG_COLUMNS = [
     c for c in AGG_DATA_COLUMNS
     if c not in _RELIABILITY_COLS
     and c not in _PEER_DIAGNOSTIC_COLS
     and c not in _MARKET_STRUCTURE_COLS
+    and c not in _VOLUME_FEATURE_COLS
 ]
 
 

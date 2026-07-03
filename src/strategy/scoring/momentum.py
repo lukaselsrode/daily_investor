@@ -38,16 +38,28 @@ def _trend_structure_series(df: pd.DataFrame) -> pd.Series:
     ), index=df.index)
 
 
-def _compute_anchor(df: pd.DataFrame, weights: dict, penalties: dict, clamp: tuple[float, float]) -> pd.Series:
-    """Cross-sectional weighted-sum of momentum input ranks (no peer grouping)."""
-    raw_inputs = {
+def _relative_volume_series(df: pd.DataFrame) -> pd.Series:
+    """Short- vs long-window dollar volume (5d/63d) — volume-confirmed moves rank higher."""
+    dv5 = safe_col(df, "dollar_vol_5d")
+    dv63 = safe_col(df, "dollar_vol_63d")
+    return dv5 / dv63.where(dv63 > 0)
+
+
+def _momentum_inputs(df: pd.DataFrame) -> dict[str, pd.Series]:
+    return {
         "rs_3m":           safe_col(df, "rs_3m"),
         "rs_6m":           safe_col(df, "rs_6m"),
         "risk_adj_3m":     safe_col(df, "risk_adj_momentum_3m"),
         "trend_structure": _trend_structure_series(df),
         "return_1m":       safe_col(df, "return_1m"),
         "return_5d":       safe_col(df, "return_5d"),
+        "rel_volume":      _relative_volume_series(df),
     }
+
+
+def _compute_anchor(df: pd.DataFrame, weights: dict, penalties: dict, clamp: tuple[float, float]) -> pd.Series:
+    """Cross-sectional weighted-sum of momentum input ranks (no peer grouping)."""
+    raw_inputs = _momentum_inputs(df)
     score = pd.Series(0.0, index=df.index)
     w_total = sum(weights.values())
     if w_total < 1e-9:
@@ -95,14 +107,7 @@ def apply_momentum(df: pd.DataFrame, scoring_cfg: dict | None = None) -> None:
         return
 
     weights = {k: v / wp_total for k, v in wp.items()}
-    inputs = {
-        "rs_3m":           safe_col(df, "rs_3m"),
-        "rs_6m":           safe_col(df, "rs_6m"),
-        "risk_adj_3m":     safe_col(df, "risk_adj_momentum_3m"),
-        "trend_structure": _trend_structure_series(df),
-        "return_1m":       safe_col(df, "return_1m"),
-        "return_5d":       safe_col(df, "return_5d"),
-    }
+    inputs = _momentum_inputs(df)
 
     ind_total = pd.Series(0.0, index=df.index)
     sec_total = pd.Series(0.0, index=df.index)
@@ -111,7 +116,10 @@ def apply_momentum(df: pd.DataFrame, scoring_cfg: dict | None = None) -> None:
     fallback_reasons: list[pd.Series] = []
 
     for name, vals in inputs.items():
-        w = weights[name]
+        w = weights.get(name, 0.0)
+        if w <= 0:
+            # Zero-weight inputs must not contaminate the fallback-reason diagnostic.
+            continue
         blended, ind, sec, mkt, reason = compute_peer_relative(
             vals, df, cfg, higher_is_better=True,
         )
@@ -137,8 +145,11 @@ def apply_momentum(df: pd.DataFrame, scoring_cfg: dict | None = None) -> None:
 
     rank_order = {"industry": 0, "sector": 1, "market": 2, "missing": 3}
     inv = {v: k for k, v in rank_order.items()}
-    coded = pd.concat([r.map(rank_order).fillna(3) for r in fallback_reasons], axis=1)
-    worst = coded.max(axis=1).map(inv)
+    if fallback_reasons:
+        coded = pd.concat([r.map(rank_order).fillna(3) for r in fallback_reasons], axis=1)
+        worst = coded.max(axis=1).map(inv)
+    else:
+        worst = pd.Series("missing", index=df.index)
 
     # Cross-sectional anchor: same weighted-sum but without peer grouping.
     anchor_blend = float(factor.get("anchor_blend", 0.0))

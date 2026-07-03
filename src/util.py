@@ -255,6 +255,10 @@ def _factor(name: str, defaults: dict) -> dict:
         # The legacy `v2_blend` key is migrated to `anchor_blend` by `migrate-scoring`.
         "anchor_blend":                  float(raw.get("anchor_blend",
                                                        defaults.get("anchor_blend", 0.0))),
+        # benchmark_blend (value, peer-2): weight on the cfg/ratios.yaml
+        # sector-benchmark anchor (rank of pe_comp/pb_comp). 0.0 = off.
+        "benchmark_blend":               float(raw.get("benchmark_blend",
+                                                       defaults.get("benchmark_blend", 0.0))),
     }
     if "distress" in raw or name == "value":
         d = raw.get("distress", {})
@@ -273,6 +277,22 @@ SCORING_PARAMS: dict = {
     # the curated dict dropped them and the param vector always seeded 0.0.
     "quality_low_vol_blend":   float(_sc.get("quality_low_vol_blend",   0.0)),
     "momentum_residual_blend": float(_sc.get("momentum_residual_blend", 0.0)),
+    # peer-2 quality liquidity: multi-horizon dollar-volume level + consistency.
+    "quality_liquidity": {
+        "horizon_weights": {
+            "dv_5d":  float(_sc.get("quality_liquidity", {}).get("horizon_weights", {}).get("dv_5d",  0.20)),
+            "dv_21d": float(_sc.get("quality_liquidity", {}).get("horizon_weights", {}).get("dv_21d", 0.30)),
+            "dv_63d": float(_sc.get("quality_liquidity", {}).get("horizon_weights", {}).get("dv_63d", 0.50)),
+        },
+        "min_coverage": float(_sc.get("quality_liquidity", {}).get("min_coverage", 0.30)),
+    },
+    "quality_analyst": {
+        "min_num_ratings": int(_sc.get("quality_analyst", {}).get("min_num_ratings", 5)),
+    },
+    # Peer-quality component weights (empty = code defaults in strategy.scoring.quality).
+    "quality_components": {
+        str(k): float(v) for k, v in (_sc.get("quality_components") or {}).items()
+    },
     "peer_standardization": {
         "group_by":          str(_sc_ps.get("group_by",          "industry")),
         "fallback_group_by": str(_sc_ps.get("fallback_group_by", "sector")),
@@ -298,6 +318,8 @@ SCORING_PARAMS: dict = {
             "trend_structure": float(_sc_mi_w.get("trend_structure", 0.15)),
             "return_1m":       float(_sc_mi_w.get("return_1m",       0.10)),
             "return_5d":       float(_sc_mi_w.get("return_5d",       0.05)),
+            # Volume confirmation (peer-2): 5d/63d dollar-volume ratio; 0.0 = off.
+            "rel_volume":      float(_sc_mi_w.get("rel_volume",      0.0)),
         },
         "penalties": {
             "falling_knife_3m_threshold":  float(_sc_mi_p.get("falling_knife_3m_threshold",  -0.15)),
@@ -935,6 +957,11 @@ METRIC_KEYS: list[str] = [
     "industry",
     "sector",
     "volume",
+    # peer-2 dollar-volume features (populated by data.volume_features from the FMP cache)
+    "dollar_vol_5d",
+    "dollar_vol_21d",
+    "dollar_vol_63d",
+    "dollar_vol_cv_63d",
     "pe_ratio",
     "pb_ratio",
     "dividend_yield",

@@ -1,0 +1,359 @@
+=== make ic baseline Fri Jul  3 17:02:50 EDT 2026 ===
+.venv/bin/python -c "import sys; sys.path.insert(0, 'src'); from strategy.research import FactorResearchEngine; engine = FactorResearchEngine(); ic = engine.compute_multi_horizon_ic(); summ = engine.compute_ic_summary(ic); print(summ.sort_values(['factor','horizon_days']).to_string(index=False) if not summ.empty else 'Not enough snapshots — need ≥ 2')"
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+/Users/lukaselsrode/dev_work/daily_investor/src/research/ic_engine.py:188: ConstantInputWarning: An input array is constant; the correlation coefficient is not defined.
+  ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
+        factor  horizon_days  mean_ic   icir  hit_rate  t_stat  n_periods  cumulative_ic
+  income_score             5   0.0316  0.242     0.568   1.602         44          1.389
+  income_score            20   0.0393  0.542     0.692   3.388         39          1.532
+  income_score            60  -0.0023 -0.039     0.455  -0.183         22         -0.051
+momentum_score             5   0.0060  0.047     0.500   0.313         44          0.266
+momentum_score            20   0.0148  0.164     0.564   1.023         39          0.579
+momentum_score            60  -0.0654 -0.806     0.227  -3.780         22         -1.438
+ quality_score             5   0.0475  0.593     0.727   3.931         44          2.089
+ quality_score            20   0.0887  2.634     1.000  16.452         39          3.461
+ quality_score            60   0.0240  0.664     0.727   3.115         22          0.527
+  value_metric             5   0.0073  0.061     0.523   0.405         44          0.321
+  value_metric            20   0.0398  0.502     0.667   3.135         39          1.552
+  value_metric            60  -0.0581 -0.929     0.091  -4.358         22         -1.278
+   value_score             5   0.0004  0.004     0.432   0.024         44          0.017
+   value_score            20  -0.0103 -0.172     0.410  -1.075         39         -0.402
+   value_score            60   0.0303  0.597     0.682   2.798         22          0.667
+
+=== gauntlet_compare standard 730 baseline Fri Jul  3 17:02:55 EDT 2026 ===
+/Users/lukaselsrode/dev_work/daily_investor/src/backtesting/data_loader.py:458: RuntimeWarning: All-NaN slice encountered
+  lo = np.nanmin(window, axis=0)
+/Users/lukaselsrode/dev_work/daily_investor/src/backtesting/data_loader.py:459: RuntimeWarning: All-NaN slice encountered
+  hi = np.nanmax(window, axis=0)
+/Users/lukaselsrode/dev_work/daily_investor/src/backtesting/data_loader.py:512: RuntimeWarning: Mean of empty slice
+  ma50 = np.nanmean(w50, axis=0)
+/opt/homebrew/lib/python3.14/site-packages/numpy/lib/_nanfunctions_impl.py:1997: RuntimeWarning: Degrees of freedom <= 0 for slice.
+  var = nanvar(a, axis=axis, dtype=dtype, out=out, ddof=ddof,
+/Users/lukaselsrode/dev_work/daily_investor/src/backtesting/data_loader.py:518: RuntimeWarning: Mean of empty slice
+  ma200 = np.nanmean(w200, axis=0)
+Regime labels: the first 200 days lack 200DMA history and default to 'bullish'. Compute labels on the full load before slicing windows to avoid this in sub-windows.
+Gauntlet compare — profile=standard (horizon=mixed), 730d, scope=active_sleeve_compounding, index_pct pinned 0.9
+Loading full-universe data …
+Survivorship-free load: 3891 symbols × 730 days (FMP cache)
+Precomputed: 3880 stocks, 9 ETFs, 730 trading days (lookahead bias: SURVIVORSHIP_FREE (MEDIUM: static current-snapshot fundamentals)). Ready.
+PIT fundamentals: per-day value/quality/income panels built (no static-snapshot look-ahead).
+
+=== INCUMBENT (income-led, live config) ===
+  weights:   value 0.250 | quality 0.400 | income 0.250 | momentum 0.100
+  index_pct: 0.9000  metric_threshold: 0.8947
+  OOS gate:  pass (all gates pass)
+  robust score: 0.1919   overfit: 0%
+  per-horizon:
+ horizon (days)  median excess  median Sharpe  % beating  median DD  robust score
+             30       0.016124       3.658353        0.6  -0.068286      0.191928
+             60       0.028512       2.096312        0.7  -0.104832      0.097413
+             90       0.112241       2.608847        1.0  -0.106782      0.227606
+            120       0.123774       2.341825        1.0  -0.106311      0.229407
+            180       0.090322       2.078502        0.9  -0.109101      0.105775
+
+=== CANDIDATE (value-led open optimum) ===
+  weights:   value 0.215 | quality 0.396 | income 0.022 | momentum 0.367
+  index_pct: 0.9000  metric_threshold: 0.8947
+  OOS gate:  pass (all gates pass)
+  robust score: 0.1364   overfit: 0%
+  per-horizon:
+ horizon (days)  median excess  median Sharpe  % beating  median DD  robust score
+             30       0.035427       2.003679        0.6  -0.078931      0.114663
+             60       0.049020       1.713183        0.9  -0.095955      0.136406
+             90       0.093067       2.067081        0.9  -0.101451      0.203520
+            120       0.160937       1.979254        0.9  -0.114394      0.186297
+            180       0.064938       1.495049        0.9  -0.121510      0.038368
+
+================================================================
+VERDICT (active-sleeve robust score, index_pct=0.90):
+  incumbent=0.1919  candidate=0.1364  Δ=-0.0555
+  → INCUMBENT holds — candidate does NOT clear it
+================================================================
+=== done Fri Jul  3 17:06:41 EDT 2026 ===

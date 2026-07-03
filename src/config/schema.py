@@ -90,6 +90,8 @@ class MomentumInputsWeightsConfig:
     trend_structure: float = 0.15
     return_1m: float = 0.10
     return_5d: float = 0.05
+    # peer-2 volume confirmation (5d/63d dollar-volume ratio); 0.0 = off
+    rel_volume: float = 0.0
 
 
 @dataclass(frozen=True)

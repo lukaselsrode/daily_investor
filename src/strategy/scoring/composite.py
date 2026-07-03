@@ -56,7 +56,10 @@ def _regime_tilt_weights(sw: dict, regime: str | None) -> dict:
 
 # Snapshot stamp written into every scored DataFrame so loaders know the
 # engine revision used. Bump when peer-relative math changes meaningfully.
-SCORING_MODEL_VERSION = "peer-1"
+# peer-2: quality liquidity components move from share-ADV to multi-horizon dollar
+# volume + consistency (with market_cap / analyst-conviction extras), momentum gains
+# an optional rel_volume input, value gains an optional sector-benchmark blend.
+SCORING_MODEL_VERSION = "peer-2"
 
 
 def _apply_falling_knife_guard(df: pd.DataFrame) -> None:

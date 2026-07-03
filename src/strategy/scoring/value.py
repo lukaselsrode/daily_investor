@@ -96,6 +96,23 @@ def apply_value(df: pd.DataFrame, scoring_cfg: dict | None = None) -> None:
         anchor[neg_eps_mask] -= neg_pen
         score = blend_with_anchor(score, anchor, anchor_blend, clamp=(clamp_lo, clamp_hi))
 
+    # Sector-benchmark anchor: pe_comp/pb_comp are benchmark/ratio vs the cfg/ratios.yaml
+    # sector [PE, PB] pairs (higher = cheaper vs sector norm). Ranked cross-sectionally so
+    # stale absolute benchmark levels wash out; only relative sector-drift remains.
+    benchmark_blend = float(factor.get("benchmark_blend", 0.0))
+    if benchmark_blend > 0.0:
+        from .peer import _pct_rank_series
+        pe_comp = safe_col(df, "pe_comp")
+        pb_comp = safe_col(df, "pb_comp")
+        if pe_comp.notna().any() or pb_comp.notna().any():
+            bench_anchor = (
+                pe_w * _pct_rank_series(pe_comp).fillna(0.0)
+                + pb_w * _pct_rank_series(pb_comp).fillna(0.0)
+            )
+            bench_anchor[distress_mask] -= dist_pen
+            bench_anchor[neg_eps_mask] -= neg_pen
+            score = blend_with_anchor(score, bench_anchor, benchmark_blend, clamp=(clamp_lo, clamp_hi))
+
     df["value_score"] = score
     df["value_industry_rank"] = pe_w * pe_ind.fillna(0.0) + pb_w * pb_ind.fillna(0.0)
     df["value_sector_rank"]   = pe_w * pe_sec.fillna(0.0) + pb_w * pb_sec.fillna(0.0)

@@ -535,6 +535,34 @@ scoring:
   #   stripped) into the MOMENTUM factor. Strongest single-factor fwd-IC on the
   #   substrate but fails the robust multi-seed backtest (above).
   momentum_residual_blend: 0.0
+  # ── peer-2 quality liquidity (2026-07-03) ─────────────────────────────────
+  # Quality's liquidity input moved from raw share-ADV to multi-horizon DOLLAR
+  # volume (close×volume from the FMP price cache) + consistency (low CV of daily
+  # dollar volume = stable institutional participation). Share volume favored
+  # cheap low-priced names and double-counted the hard 500k-share gates.
+  quality_liquidity:
+    horizon_weights:
+      dv_5d: 0.20
+      dv_21d: 0.30
+      dv_63d: 0.50
+    # Components whose input column is (near-)absent in a frame are dropped and
+    # the remaining component weights renormalize (old snapshot vintages).
+    min_coverage: 0.30
+  quality_analyst:
+    min_num_ratings: 5
+  # Peer-quality component weights (config-fixed, NOT tuner slots — 9 correlated
+  # DOF on a ~160-snapshot substrate is pure overfit surface). dollar_volume +
+  # volume_consistency together carry the 0.20 mass share-ADV held in peer-1.
+  quality_components:
+    dollar_volume: 0.12
+    volume_consistency: 0.08
+    has_positive_pe: 0.20
+    has_positive_pb: 0.10
+    no_distress_pe: 0.20
+    healthy_yield: 0.10
+    position_52w: 0.05
+    market_cap: 0.05
+    analyst_conviction: 0.05
   peer_standardization:
     group_by: industry
     fallback_group_by: sector
@@ -560,6 +588,10 @@ scoring:
         pe_penalty: 0.3
         negative_eps_penalty: 0.25
       anchor_blend: 0.5
+      # Sector-benchmark-relative valuation (rank of pe_comp/pb_comp vs the
+      # cfg/ratios.yaml sector norms). 0.0 = off; tunable DE slot; adopt only
+      # on forward-IC evidence (peer-2 runbook step F).
+      benchmark_blend: 0.0
     quality:
       enabled: true
       peer_relative: true
@@ -596,6 +628,9 @@ scoring:
       trend_structure: 0.4264
       return_1m: 0.0074
       return_5d: 0.0207
+      # Volume confirmation: 5d/63d dollar-volume ratio (peer-2). 0.0 = off;
+      # tunable DE slot, frozen by default.
+      rel_volume: 0.0
     penalties:
       falling_knife_3m_threshold: -0.15
       falling_knife_penalty: 0.25

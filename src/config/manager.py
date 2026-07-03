@@ -310,6 +310,7 @@ class ConfigManager:
                     trend_structure=float(mi_w.get("trend_structure", 0.15)),
                     return_1m=float(mi_w.get("return_1m", 0.10)),
                     return_5d=float(mi_w.get("return_5d", 0.05)),
+                    rel_volume=float(mi_w.get("rel_volume", 0.0)),
                 ),
                 penalties=MomentumInputsPenaltiesConfig(
                     falling_knife_3m_threshold=float(mi_p.get("falling_knife_3m_threshold", -0.15)),
