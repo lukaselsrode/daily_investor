@@ -598,7 +598,10 @@ scoring:
       use_legacy_checklist_fallback: true
       anchor_blend: 0.7
     momentum:
-      enabled: false
+      # 2026-07-03 (peer-2): false silently routed momentum through the non-peer
+      # anchor path despite its composite weight. Peer-relative momentum enabled;
+      # gauntlet-compared vs the anchor path before promotion (runbook step E).
+      enabled: true
     income:
       enabled: true
       peer_relative: true
