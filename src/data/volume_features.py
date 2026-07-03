@@ -49,6 +49,8 @@ class DollarVolumeCache:
 
     @staticmethod
     def _load(symbol: str) -> tuple[np.ndarray, np.ndarray] | None:
+        if not symbol or not isinstance(symbol, str):
+            return None
         path = _price_path(symbol)
         try:
             df = pd.read_parquet(path, columns=["close", "volume"])
@@ -122,8 +124,12 @@ def add_dollar_volume_features(
         return 0.0
 
     cache = cache if cache is not None else DollarVolumeCache()
-    feats = compute_features_asof(df["symbol"].astype(str).tolist(), asof, cache)
-    aligned = feats.reindex(df["symbol"].astype(str).values)
+    # pandas string dtype keeps NaN through .astype(str) — map missing symbols to ""
+    # (never in the cache → NaN features) instead of letting float NaN reach the
+    # cache path builder.
+    symbols = ["" if pd.isna(s) else str(s) for s in df["symbol"].tolist()]
+    feats = compute_features_asof(symbols, asof, cache)
+    aligned = feats.reindex(symbols)
     for col in FEATURE_COLS:
         df[col] = aligned[col].to_numpy()
 
