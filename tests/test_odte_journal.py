@@ -646,3 +646,71 @@ def test_process_quality_renders_in_markdown_report(tmp_path):
     md = oj.build_report(journal_path=jp)["markdown"]
     assert "Process quality & loss diagnosis" in md
     assert "bad process lucky outcome" in md
+
+
+def test_experiments_and_lessons_are_deduped(tmp_path):
+    jp = _journal(tmp_path)
+    exp = {"event_type": "experiment", "trade_id": "t1", "hypothesis": "Wait for reclaim",
+           "promote_if": "better", "kill_if": "worse"}
+    oj.append_event(exp, journal_path=jp)
+    oj.append_event({**exp, "source": "ingest:event"}, journal_path=jp)
+    lesson = {"event_type": "postmortem", "trade_id": "t1", "lessons": ["Harvest target zone"]}
+    oj.append_event(lesson, journal_path=jp)
+    oj.append_event({**lesson, "ts": "2026-06-30T15:00:00Z"}, journal_path=jp)
+    s = oj.summarize(oj.read_events(jp))
+    assert len(s["experiments"]) == 1
+    assert len(s["lessons"]) == 1
+
+
+def test_time_bucket_high_action_window_and_markdown(tmp_path):
+    jp = _journal(tmp_path)
+    oj.append_event({"event_type": "order_filled", "trade_id": "morning", "mode": "scalp",
+                     "ts": "2026-06-30T13:45:00+00:00"}, journal_path=jp)  # 09:45 ET
+    oj.append_event({"event_type": "order_closed", "trade_id": "morning", "mode": "scalp",
+                     "ts": "2026-06-30T13:50:00+00:00", "realized_pnl": 5.0}, journal_path=jp)
+    oj.append_event({"event_type": "order_filled", "trade_id": "late", "mode": "scalp",
+                     "ts": "2026-06-30T19:45:00+00:00"}, journal_path=jp)  # 15:45 ET
+    oj.append_event({"event_type": "order_closed", "trade_id": "late", "mode": "scalp",
+                     "ts": "2026-06-30T19:55:00+00:00", "realized_pnl": -2.0}, journal_path=jp)
+    res = oj.build_report(journal_path=jp)
+    buckets = res["summary"]["by_time_bucket"]
+    assert buckets["high_action_0930_1300"]["closed"] == 1
+    assert buckets["late_1530_close"]["closed"] == 1
+    assert "Time-of-day buckets" in res["markdown"]
+    assert "high_action_0930_1300" in res["markdown"]
+    assert "Canonical strategy guardrails" in res["markdown"]
+    assert "Stale artifacts are never authority" in res["markdown"]
+
+
+def test_day_packet_generates_postmortem_sections_without_overwriting_human_notes(tmp_path):
+    jp = _journal(tmp_path)
+    td = "2026-06-30"
+    oj.append_event({"event_type": "postmortem", "trade_date": td, "trade_id": "QQQ-T1",
+                     "contract": "QQQ 736C", "entry_price": 0.85, "exit_price": 1.14,
+                     "realized_pnl_dollars_gross": 29.0,
+                     "what_worked": ["Harvested target zone"],
+                     "what_failed_or_risked": ["Broker lane stale"],
+                     "durable_rule": "Harvest target zone wins"}, journal_path=jp)
+    oj.append_event({"event_type": "experiment", "trade_date": td, "trade_id": "QQQ-T1",
+                     "hypothesis": "Reclaim/retest after support break",
+                     "promote_if": "reduces whipsaws", "kill_if": "worsens losses"}, journal_path=jp)
+    out_root = str(tmp_path / "odte")
+    s = oj.build_day_packet(trade_date=td, journal_path=jp, out_root=out_root)
+    pm = tmp_path / "odte" / "days" / td / "postmortem.md"
+    text = pm.read_text()
+    assert s["files"]["postmortem.md"] == 1
+    assert "## What went well" in text
+    assert "Harvested target zone" in text
+    assert "## What did not go well / risks" in text
+    assert "Broker lane stale" in text
+    assert "## Experiments for tomorrow" in text
+    assert "Reclaim/retest" in text
+    assert "## Canonical strategy guardrails" in text
+    assert "stale_artifact_veto" in text
+
+    pm.write_text("# human notes")
+    s2 = oj.build_day_packet(trade_date=td, journal_path=jp, out_root=out_root)
+    assert pm.read_text() == "# human notes"
+    generated = tmp_path / "odte" / "days" / td / "postmortem.generated.md"
+    assert s2["files"]["postmortem.generated.md"] == 1
+    assert "Harvested target zone" in generated.read_text()

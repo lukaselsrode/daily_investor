@@ -100,14 +100,17 @@ etfs:
 # benefit is partly look-ahead-inflated (quality persists ~0.7 yr/yr, so partial not total);
 # +0.321 is an optimistic ceiling. PROVISIONAL pending point-in-time quality + survivorship-free data.
 # 2026-06-11: rebalanced to the income/trend-led bear-validated candidate
-# (value/quality/income/momentum 0.064/0.323/0.051/0.562 -> below). Selected by
+# (value/quality/income/momentum 0.064/0.323/0.051/0.562). Selected by
 # the 1250d tournament (train includes the 2022 bear), passed rw gate, symmetric
 # multi-horizon confirm, and the stress gauntlet (GFC'08..2022) vs the incumbent.
+# 2026-07-01: manual quality-led rebalance (user-directed) — quality is the primary
+# metric, income + value tied second, momentum a small tilt. NOT yet gauntlet-validated;
+# re-run scripts/gauntlet_compare.py before promoting this as the tuned incumbent.
 score_weights:
-  value: 0.1354
-  quality: 0.1263
-  income: 0.5747
-  momentum: 0.1636
+  value: 0.25
+  quality: 0.40
+  income: 0.25
+  momentum: 0.10
 valuation_guardrails:
   max_pe_component: 5.0
   max_pb_component: 5.45

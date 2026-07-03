@@ -1,0 +1,36 @@
+{
+  "event_type": "order_closed",
+  "trade_id": "IWM-2026-06-24-295P-6a3c15d3",
+  "underlying": "IWM",
+  "mode": "scalp",
+  "option_id": "2a6c2930-7796-40a8-9f67-9f557c8ec439",
+  "option_type": "put",
+  "strike": 295,
+  "expiration": "2026-06-24",
+  "quantity": 1,
+  "decision": {
+    "action": "THESIS_DEAD_EXIT_FILLED",
+    "reasons": [
+      "IWM reclaimed/held above thesis-death level ~296.6; quote observed 296.86 at 2026-06-24T18:19:25Z",
+      "SPY also back in reclaim zone near 733.8 and QQQ above 709; risk-off continuation no longer clean",
+      "Single-contract scalp: no averaging and no new entries; exited instead of hoping"
+    ]
+  },
+  "outcome": {
+    "entry_price": 0.32,
+    "exit_price": 0.11,
+    "realized_pnl": -21.0,
+    "rule_violations": [],
+    "lessons": [
+      "For single-contract 0DTE scalps, exit promptly when the underlying reclaims the thesis-death level."
+    ]
+  },
+  "broker": {
+    "entry_order_id": "6a3c15d3-7974-4e96-8fd9-e762e9821964",
+    "exit_order_id": "6a3c1fca-4863-42bd-bc35-86c3194d1f6b",
+    "exit_execution_timestamp": "2026-06-24T18:19:54.377000Z",
+    "exit_limit_price": 0.09,
+    "exit_fill_price": 0.11,
+    "sell_review_total_fee": 0.04
+  }
+}

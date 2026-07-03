@@ -43,6 +43,11 @@ except ImportError:                    # pragma: no cover - non-POSIX fallback
     fcntl = None
 
 from core.paths import ODTE_DATA_DIR, ODTE_REPORT_DIR
+from data.odte_strategy_policy import (
+    canonical_guardrails,
+    classify_strategy_window,
+    window_descriptions,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -113,10 +118,24 @@ def _parse_ts(s) -> datetime | None:
     if not s:
         return None
     try:
-        dt = datetime.fromisoformat(str(s))
+        raw = str(s).replace("Z", "+00:00")
+        dt = datetime.fromisoformat(raw)
         return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
     except Exception:
         return None
+
+
+def _time_bucket(ts) -> str:
+    """ET time-of-day bucket for ODTE self-eval. This is descriptive, never execution authority."""
+    return classify_strategy_window(ts)
+
+
+def _dedupe_key(*parts) -> tuple:
+    cleaned = []
+    for part in parts:
+        text = re.sub(r"\s+", " ", str(part or "").strip().lower())
+        cleaned.append(text)
+    return tuple(cleaned)
 
 
 def _held_minutes(events: list[dict]) -> float | None:
@@ -567,17 +586,83 @@ def _classify_day_stream(e: dict) -> str:
     return "controller_events"
 
 
-def _day_postmortem_stub(trade_date: str, buckets: dict) -> str:
-    """A minimal, human-editable postmortem scaffold (only written if absent). The self-eval report
-    (build_report) fills the analytical answers; this is the per-day narrative space."""
+def _day_postmortem_content(trade_date: str, buckets: dict) -> str:
+    """Generated day-review draft from journal streams. It is intentionally conservative and only
+    summarizes recorded events; no broker/LLM calls and no invented causes."""
+    trades = buckets.get("trades", [])
+    controllers = buckets.get("controller_events", [])
+    postmortems = [e for e in controllers + trades if e.get("event_type") == "postmortem"]
+    experiments = [e for e in controllers + trades if e.get("event_type") == "experiment" or _get(e, "hypothesis")]
+    no_trades = [e for e in controllers if str(e.get("event_type") or "").endswith("no_trade_decision")]
+    closed = [e for e in postmortems + trades if _num(e.get("realized_pnl_dollars_gross")) is not None]
+    pnl = sum(_num(e.get("realized_pnl_dollars_gross")) or 0.0 for e in closed)
+
     lines = [f"# 0DTE postmortem — {trade_date}", "",
-             "_Auto-scaffold from the decision journal; edit freely. Counts:_", ""]
-    for s in _DAY_STREAMS:
-        lines.append(f"- **{s}**: {len(buckets.get(s, []))}")
-    lines += ["", "## What happened", "", "## Thesis right or wrong?", "",
-              "## Entry vs exit", "", "## Gamma/pin helped or hurt?", "",
-              "## Social helped or distracted?", "", "## Keep / change next session", ""]
-    return "\n".join(lines)
+             "_Generated from the decision journal; edit freely._", "",
+             "## What happened", ""]
+    if closed:
+        for e in closed:
+            tid = e.get("trade_id") or e.get("contract") or e.get("underlying") or "trade"
+            entry = e.get("entry_price")
+            exit_price = e.get("exit_price") or e.get("close_price")
+            rp = _num(e.get("realized_pnl_dollars_gross"))
+            pct = _num(e.get("realized_pnl_pct_gross"))
+            ret = f", {pct * 100:+.1f}%" if pct is not None else ""
+            lines.append(f"- **{tid}**: entry `{entry}`, exit `{exit_price}`, gross **{rp:+.2f}**{ret}.")
+        lines.append(f"- Day closed-trade gross P/L from recorded postmortems: **{pnl:+.2f}**.")
+    else:
+        lines.append("- No closed trades with realized P/L were recorded for this day packet.")
+    if no_trades:
+        lines.append(f"- No-trade decisions recorded: **{len(no_trades)}**.")
+
+    worked = []
+    risks = []
+    durable = []
+    for e in postmortems:
+        worked.extend(str(x) for x in _list(e, "what_worked"))
+        risks.extend(str(x) for x in _list(e, "what_failed_or_risked"))
+        if e.get("durable_rule"):
+            durable.append(str(e["durable_rule"]))
+    lines += ["", "## What went well", ""]
+    lines += [f"- {x}" for x in dict.fromkeys(worked)] or ["- No explicit `what_worked` notes recorded yet."]
+    lines += ["", "## What did not go well / risks", ""]
+    lines += [f"- {x}" for x in dict.fromkeys(risks)] or ["- No explicit risk notes recorded yet."]
+    lines += ["", "## Experiments for tomorrow", ""]
+    seen_exp = set()
+    exp_lines = []
+    for e in experiments:
+        hyp = _get(e, "hypothesis")
+        if not hyp:
+            continue
+        key = _dedupe_key(e.get("trade_id"), hyp, _get(e, "promote_if"), _get(e, "kill_if"))
+        if key in seen_exp:
+            continue
+        seen_exp.add(key)
+        exp_lines.append(f"- **{hyp}**")
+        if _get(e, "promote_if"):
+            exp_lines.append(f"  - Promote if: {_get(e, 'promote_if')}")
+        if _get(e, "kill_if"):
+            exp_lines.append(f"  - Kill if: {_get(e, 'kill_if')}")
+    lines += exp_lines or ["- No experiments queued from journal events."]
+    lines += ["", "## Keep / change next session", ""]
+    if durable:
+        lines += ["**Keep**", *[f"- {x}" for x in dict.fromkeys(durable)], ""]
+    lines += ["**Change / inspect**",
+              "- Treat 09:30–13:00 ET as the high-action observation window; it is context, not permission to trade.",
+              "- Ignore stale candidates/gates after review/TTL; rebuild fresh thesis/gate before any new entry.",
+              "", "## Canonical strategy guardrails", ""]
+    for guardrail in canonical_guardrails():
+        lines.append(f"- **{guardrail['title']}** (`{guardrail['key']}`): {guardrail['rule']}")
+    return "\n".join(lines) + "\n"
+
+
+def _day_postmortem_stub(trade_date: str, buckets: dict) -> str:
+    return _day_postmortem_content(trade_date, buckets)
+
+
+def _is_auto_postmortem(text: str) -> bool:
+    return ("_Auto-scaffold from the decision journal" in text or
+            "## What happened\n\n## Thesis right or wrong?" in text)
 
 
 def build_day_packet(trade_date: str | None = None, journal_path: str | None = None,
@@ -605,9 +690,17 @@ def build_day_packet(trade_date: str | None = None, journal_path: str | None = N
             summary["files"][f"{stream}.jsonl"] = len(evs)
             summary["events_written"] += len(evs)
         pm = root / "postmortem.md"
+        generated = _day_postmortem_content(td, buckets)
         if not pm.exists():
-            pm.write_text(_day_postmortem_stub(td, buckets))
-        summary["files"]["postmortem.md"] = 1
+            pm.write_text(generated)
+            summary["files"]["postmortem.md"] = 1
+        elif _is_auto_postmortem(pm.read_text()):
+            pm.write_text(generated)
+            summary["files"]["postmortem.md"] = 1
+        else:
+            gp = root / "postmortem.generated.md"
+            gp.write_text(generated)
+            summary["files"]["postmortem.generated.md"] = 1
     except Exception as exc:
         logger.warning("build_day_packet failed (%s): %s", td, exc)
         summary["error"] = str(exc)
@@ -973,12 +1066,15 @@ def summarize(events: list[dict]) -> dict:
         violations = [v for e in evs for v in _list(e, "rule_violations")]
         if restricted:
             violations.append(f"RESTRICTED_EMPLOYER: {underlying or 'restricted'} must never be traded")
+        entry_ts = next((_parse_ts(e.get("ts")) for e in evs if e.get("event_type") in _ENTRY_EVENTS), None)
         trade_rows.append({
             "trade_id": tid, "mode": str(_first(evs, "mode") or "unknown"),
             "underlying": underlying, "restricted": restricted,
             "realized_pnl": realized, "mfe": mfe, "mae": _last_num(evs, "mae"),
             "closed": realized is not None, "win": realized is not None and realized > 0,
             "rule_violations": violations, "held_minutes": _held_minutes(evs),
+            "entry_ts": entry_ts.isoformat() if entry_ts else None,
+            "time_bucket": _time_bucket(entry_ts.isoformat() if entry_ts else _first(evs, "ts")),
             # explicit self-eval fields (used as-is when present; never fabricated):
             "loss_category": _first(evs, "loss_category"),
             "diagnosis": _first(evs, "diagnosis"),
@@ -994,14 +1090,22 @@ def summarize(events: list[dict]) -> dict:
     held = [t["held_minutes"] for t in closed if t["held_minutes"] is not None]
 
     by_mode: dict[str, dict] = {}
+    by_time_bucket: dict[str, dict] = {}
     for t in measurable:
+        b = by_time_bucket.setdefault(t["time_bucket"],
+                                      {"trades": 0, "closed": 0, "wins": 0, "realized_pnl": 0.0})
+        b["trades"] += 1
+        if t["closed"]:
+            b["closed"] += 1
+            b["realized_pnl"] += t["realized_pnl"]
+            b["wins"] += int(t["win"])
         d = by_mode.setdefault(t["mode"], {"trades": 0, "closed": 0, "wins": 0, "realized_pnl": 0.0})
         d["trades"] += 1
         if t["closed"]:
             d["closed"] += 1
             d["realized_pnl"] += t["realized_pnl"]
             d["wins"] += int(t["win"])
-    for d in by_mode.values():
+    for d in list(by_mode.values()) + list(by_time_bucket.values()):
         d["realized_pnl"] = round(d["realized_pnl"], 4)
         d["hit_rate"] = round(d["wins"] / d["closed"], 4) if d["closed"] else None
 
@@ -1011,18 +1115,31 @@ def summarize(events: list[dict]) -> dict:
             violation_counts.update(_list(e, "rule_violations"))
 
     experiments = []
+    seen_experiments: set[tuple] = set()
     for e in events:
         if e.get("restricted"):
             continue   # never surface a restricted symbol as a forward experiment
         if e.get("event_type") == "experiment" or _get(e, "hypothesis"):
+            key = _dedupe_key(e.get("trade_id"), _get(e, "hypothesis"), _get(e, "promote_if"),
+                              _get(e, "kill_if"))
+            if key in seen_experiments:
+                continue
+            seen_experiments.add(key)
             experiments.append({
                 "hypothesis": _get(e, "hypothesis"), "metric": _get(e, "metric"),
                 "promote_if": _get(e, "promote_if"), "kill_if": _get(e, "kill_if"),
                 "status": _get(e, "status") or "open", "trade_id": e.get("trade_id"),
             })
 
-    lessons = [{"trade_id": e.get("trade_id"), "lesson": x}
-               for e in events for x in _list(e, "lessons")]
+    lessons = []
+    seen_lessons: set[tuple] = set()
+    for e in events:
+        for x in _list(e, "lessons"):
+            key = _dedupe_key(e.get("trade_id"), x)
+            if key in seen_lessons:
+                continue
+            seen_lessons.add(key)
+            lessons.append({"trade_id": e.get("trade_id"), "lesson": x})
 
     return {
         "n_events": len(events),
@@ -1036,6 +1153,7 @@ def summarize(events: list[dict]) -> dict:
         "avg_held_minutes": round(sum(held) / len(held), 1) if held else None,
         "n_management_checks": by_type.get("management_check", 0),
         "by_mode": by_mode,
+        "by_time_bucket": by_time_bucket,
         "rule_violations": dict(violation_counts),
         "n_rule_violations": int(sum(violation_counts.values())),
         "restricted_flags": sorted(set(restricted_flags)),
@@ -1045,6 +1163,8 @@ def summarize(events: list[dict]) -> dict:
         "lessons": lessons,
         "pnl_sequence": [t["realized_pnl"] for t in closed],
         "process_quality": _process_quality(trade_rows),
+        "canonical_guardrails": canonical_guardrails(),
+        "time_window_policy": window_descriptions(),
     }
 
 
@@ -1131,6 +1251,25 @@ def render_markdown(summary: dict, now: datetime | None = None) -> str:
         hr = "n/a" if d["hit_rate"] is None else f"{d['hit_rate'] * 100:.0f}%"
         lines.append(f"| {mode} | {d['trades']} | {d['closed']} | {hr} | {money(d['realized_pnl'])} "
                      f"| `{_bar(d['realized_pnl'], max_pl)}` |")
+
+    buckets = s.get("by_time_bucket", {})
+    if buckets:
+        lines += ["", "## Time-of-day buckets", "",
+                  "_Descriptive only — time window is not execution permission._", "",
+                  "| Bucket | Trades | Closed | Hit | P/L |",
+                  "|--------|-------:|-------:|----:|----:|"]
+        order = ["high_action_0930_1300", "midday_1300_1530", "late_1530_close",
+                 "outside_regular", "unknown"]
+        for bucket in [b for b in order if b in buckets] + sorted(set(buckets) - set(order)):
+            d = buckets[bucket]
+            hr = "n/a" if d["hit_rate"] is None else f"{d['hit_rate'] * 100:.0f}%"
+            lines.append(f"| {bucket} | {d['trades']} | {d['closed']} | {hr} | {money(d['realized_pnl'])} |")
+
+    guardrails = s.get("canonical_guardrails", [])
+    if guardrails:
+        lines += ["", "## Canonical strategy guardrails", ""]
+        for g in guardrails:
+            lines.append(f"- **{g.get('title')}** (`{g.get('key')}`): {g.get('rule')}")
 
     pq = s.get("process_quality", {})
     if pq.get("n_diagnosed"):

@@ -1,0 +1,8 @@
+Read-only Robinhood MCP option quote lane. Do not review/place/cancel orders.
+Target account number 435050133, but only quote market data now.
+Using today 2026-06-26 expiration, fetch option instruments and quotes for these candidate bands:
+- HOOD calls strikes 97, 98, 99, 100 exp 2026-06-26
+- COIN calls strikes 149, 150, 152.5, 155 exp 2026-06-26
+- MSFT calls strikes 370, 372.5, 375, 377.5 exp 2026-06-26
+- IWM puts strikes 297, 298, 299 exp 2026-06-26
+Return JSON only: {ok, generated_at, candidates:[{chain_symbol, expiration, strike, type, instrument_id/url, bid, ask, mark, last, delta, gamma, iv, open_interest, volume, updated_at, spread_pct, estimated_debit, liquidity_notes}], errors}. If an exact lookup fails, use chain listing narrowly around that underlying/expiration/type/strike. Do not say unavailable until broader listing checked.
