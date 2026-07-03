@@ -589,9 +589,13 @@ scoring:
         negative_eps_penalty: 0.25
       anchor_blend: 0.5
       # Sector-benchmark-relative valuation (rank of pe_comp/pb_comp vs the
-      # cfg/ratios.yaml sector norms). 0.0 = off; tunable DE slot; adopt only
-      # on forward-IC evidence (peer-2 runbook step F).
-      benchmark_blend: 0.0
+      # cfg/ratios.yaml sector norms). Tunable DE slot (bound 0.6).
+      # 2026-07-03 adopted 0.45: forward-IC sweep {0,.1,.2,.3,.45,.6} monotone
+      # improving at 21d AND 63d (value_score 63d IC +0.032 t2.9 -> +0.052 t4.8),
+      # confirmed on BOTH date-split halves; 0.45 keeps DE headroom below the
+      # bound. Invisible to run_simulation (sim value already uses pe_comp/pb_comp)
+      # -> IC is the validation surface for this knob.
+      benchmark_blend: 0.45
     quality:
       enabled: true
       peer_relative: true
