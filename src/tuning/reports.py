@@ -292,6 +292,19 @@ def _diff_table(
         ("scoring.momentum_inputs.weights.trend",        cur_mom_norm[3],   mom_norm[3]),
         ("scoring.momentum_inputs.weights.return_1m",    cur_mom_norm[4],   mom_norm[4]),
     ]
+    # peer-2 add-on slots (raw values; rel_volume renormalizes with the momentum
+    # group at write time).
+    if len(best_params) > _REL_VOLUME_SLOT and len(cur) > _REL_VOLUME_SLOT:
+        rows.append((
+            "scoring.momentum_inputs.weights.rel_volume",
+            cur[_REL_VOLUME_SLOT], best_params[_REL_VOLUME_SLOT],
+        ))
+    _vb_slot = _REL_VOLUME_SLOT + 1
+    if len(best_params) > _vb_slot and len(cur) > _vb_slot:
+        rows.append((
+            "scoring.factors.value.benchmark_blend",
+            cur[_vb_slot], best_params[_vb_slot],
+        ))
 
     # Append archetype lifecycle rows when the params vector includes them.
     if len(best_params) > _ARCH_SLOT_OFFSET and len(cur) > _ARCH_SLOT_OFFSET:
