@@ -223,9 +223,23 @@ def load_and_precompute(
         )
 
     for col in ["value_metric", "volume", "pe_comp", "pb_comp",
-                "quality_score", "income_score", "position_52w", "return_1m"]:
+                "quality_score", "income_score", "position_52w", "return_1m",
+                "dollar_vol_5d", "dollar_vol_21d", "dollar_vol_63d", "dollar_vol_cv_63d"]:
         if col in agg_df.columns:
             agg_df[col] = pd.to_numeric(agg_df[col], errors="coerce")
+
+    # Transition guard (peer-2): an agg_data CSV written before the dollar-volume
+    # ETL carries no liquidity features — backfill once from the FMP cache so the
+    # static scoring path uses the same quality inputs as live. Cache-only, seconds.
+    if "dollar_vol_63d" not in agg_df.columns:
+        try:
+            import datetime as _dt
+
+            from data.volume_features import add_dollar_volume_features
+            add_dollar_volume_features(agg_df, asof=_dt.date.today(), fallback_from_adv=True)
+        except Exception as _dv_exc:
+            logger.warning("dollar-volume backfill of agg_data failed (%s) — "
+                           "quality scores fall back to coverage-dropped components.", _dv_exc)
 
     agg_df = agg_df.dropna(subset=["symbol"]).copy()
     agg_df["volume"]       = agg_df["volume"].fillna(0)
@@ -351,10 +365,19 @@ def load_and_precompute(
     stock_prices    = closes[stock_cols].values.astype(np.float64)
     # Causal daily dollar-volume aligned to the final stock order (survivorship-free path only).
     dollar_volume_daily = None
+    rel_volume_daily = None
     if _sf_dollar_vol is not None:
         dollar_volume_daily = (
             _sf_dollar_vol.reindex(index=closes.index, columns=stock_cols).values.astype(np.float64)
         )
+        # peer-2 momentum confirmation input: trailing-5d / trailing-63d mean dollar
+        # volume, causal (rolling windows end at each row). min_periods mirror the
+        # live feature module so backtest and ETL agree on when the signal exists.
+        from data.volume_features import _MIN_ROWS as _DV_MIN_ROWS
+        _dv_frame = pd.DataFrame(dollar_volume_daily)
+        _dv5 = _dv_frame.rolling(5, min_periods=_DV_MIN_ROWS["dollar_vol_5d"]).mean()
+        _dv63 = _dv_frame.rolling(63, min_periods=_DV_MIN_ROWS["dollar_vol_63d"]).mean()
+        rel_volume_daily = (_dv5 / _dv63.where(_dv63 > 0)).to_numpy(dtype=np.float64)
     # Per-day tradeability aligned to the final stock order (survivorship-free path only):
     # True through each symbol's last NATIVE print — blocks buys past the delist date.
     tradeable_mask_daily = None
@@ -584,6 +607,7 @@ def load_and_precompute(
         market_caps=market_caps_arr,
         momentum_scores=cur_mom,
         dollar_volume_daily=dollar_volume_daily,
+        rel_volume_daily=rel_volume_daily,
         excluded_mask=excluded_mask_arr,
         vix_prices=vix_prices,
         tradeable_mask_daily=tradeable_mask_daily,
@@ -613,6 +637,7 @@ def load_and_precompute(
                 volume=volume_arr,
                 rebalance_freq=int(BACKTEST_PARAMS.get("rebalance_frequency_days", 5)),
                 scoring_cfg=SCORING_PARAMS,
+                dollar_volume_daily=dollar_volume_daily,
             )
             precomp = precomp._replace(
                 pe_comp_daily=_panels["pe_comp_daily"],

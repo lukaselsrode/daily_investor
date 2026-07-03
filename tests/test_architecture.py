@@ -189,6 +189,9 @@ _KNOWN_EXCEPTIONS: set[tuple[str, str]] = {
     # data.fundamentals calls strategy scoring functions when saving snapshots.
     # Tracked as future refactor: move score computation out of the data layer.
     ("data/fundamentals.py", "strategy"),
+    # data.market persists the post-enrichment snapshot (peer-2 moved the save
+    # after the market-structure/graph merges). Same tracked debt as above.
+    ("data/market.py", "strategy"),
 }
 
 

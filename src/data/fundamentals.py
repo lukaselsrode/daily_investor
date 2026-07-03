@@ -15,6 +15,7 @@ Functions:
 
 from __future__ import annotations
 
+import datetime
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -29,7 +30,6 @@ from data.cache import read_data_as_pd, store_data_as_csv
 from data.valuation import get_investment_ratios
 from strategy.scoring.composite import compute_metric
 from strategy.snapshots import backfill_from_csvs as _backfill_snapshots  # noqa: F401
-from strategy.snapshots import save_snapshot as _save_snapshot
 from util import (
     AGG_DATA_COLUMNS,
     EARNINGS_PARAMS,
@@ -620,6 +620,15 @@ def get_fundamentals_df(
         len(rows), len(filtered_stocks), len(fundamentals),
     )
 
+    # PIT dollar-volume features for quality/momentum scoring (peer-2). Cache-only
+    # (never networks); a stale FMP cache degrades to share-ADV × price for the 21d
+    # horizon and logs a coverage warning rather than blocking the daily run.
+    try:
+        from data.volume_features import add_dollar_volume_features
+        add_dollar_volume_features(df_raw, asof=datetime.date.today(), fallback_from_adv=True)
+    except Exception as _dv_err:
+        logger.warning("dollar-volume features failed (non-fatal): %s", _dv_err)
+
     # Regime-aware scoring: in confirmed-bull regime the composite tilts toward
     # momentum (alpha engine). Best-effort — if regime detection fails, score
     # regime-neutral (no tilt) rather than block the pipeline.
@@ -663,10 +672,10 @@ def get_fundamentals_df(
 
     df_raw = _compute_reliability_scores(df_raw)
 
-    try:
-        _save_snapshot(df_raw)
-    except Exception as _snap_err:
-        logger.warning("Snapshot save failed (non-fatal): %s", _snap_err)
+    # Snapshot persistence moved to data.market.get_data AFTER the market-structure
+    # + graph enrichment merges (peer-2), so historical snapshots carry market_cap /
+    # analyst columns the quality factor now reads. Saving here would freeze the
+    # pre-enrichment frame forever.
 
     if "sector" in df_raw.columns:
         sector_counts = df_raw["sector"].value_counts()

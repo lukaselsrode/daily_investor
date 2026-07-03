@@ -61,6 +61,9 @@ _NON_ARCHETYPE_PATHS: tuple[str, ...] = (
     "scoring.momentum_inputs.weights.trend_structure",
     "scoring.momentum_inputs.weights.return_1m",
     "scoring.momentum_inputs.weights.return_5d",
+    # peer-2 add-on slots (appended at the end of the vector)
+    "scoring.momentum_inputs.weights.rel_volume",
+    "scoring.factors.value.benchmark_blend",
 )
 
 # Reused building blocks (keeps composite presets in sync with their parts).
@@ -83,6 +86,8 @@ _MOMENTUM_INPUTS = (
     "scoring.momentum_inputs.weights.trend_structure",
     "scoring.momentum_inputs.weights.return_1m",
     "scoring.momentum_inputs.weights.return_5d",
+    # peer-2: volume confirmation (5d/63d dollar-volume ratio)
+    "scoring.momentum_inputs.weights.rel_volume",
 )
 _ARCH_FIELDS = (
     "harvest_profit_threshold",
@@ -147,6 +152,14 @@ _PRESETS: dict[str, dict] = {
             "scoring.quality_low_vol_blend",
             "scoring.momentum_residual_blend",
         ],
+        "phase2": False,
+    },
+    "active_value_benchmark": {
+        "description": "peer-2 value sector-benchmark blend (scoring.factors.value."
+                       "benchmark_blend): rank of pe_comp/pb_comp vs the cfg/ratios.yaml "
+                       "sector norms blended into value_score. Frozen OFF in config; "
+                       "adopt only on forward-IC + OOS evidence.",
+        "unfreeze": ["scoring.factors.value.benchmark_blend"],
         "phase2": False,
     },
 

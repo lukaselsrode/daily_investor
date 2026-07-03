@@ -89,6 +89,11 @@ class PrecomputedData(NamedTuple):
     pb_comp_daily: np.ndarray | None = None
     quality_scores_daily: np.ndarray | None = None
     income_scores_daily: np.ndarray | None = None
+    # (n_days, n_stocks) causal relative volume — trailing-5d mean dollar volume /
+    # trailing-63d mean (peer-2 momentum confirmation input). Built from
+    # dollar_volume_daily by the survivorship-free loader; None → the rel_volume
+    # momentum input scores neutral (matching live when the columns are absent).
+    rel_volume_daily: np.ndarray | None = None
 
 
 @dataclass

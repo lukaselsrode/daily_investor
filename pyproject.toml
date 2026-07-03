@@ -211,6 +211,7 @@ forbidden_modules = [
 ignore_imports = [
     "data.fundamentals -> strategy.scoring.composite",
     "data.fundamentals -> strategy.snapshots",
+    "data.market -> strategy.snapshots",
 ]
 
 [[tool.importlinter.contracts]]

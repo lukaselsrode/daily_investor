@@ -411,13 +411,15 @@ class MigrationReport:
     after_value_metric_mean: float = 0.0
     top_score_shifts: list[tuple[str, float, float]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    # peer-2 volume backfill: per-file fraction of rows with cache-backed dollar_vol_63d.
+    volume_feature_coverage: dict[str, float] = field(default_factory=dict)
 
     def pretty(self) -> str:
         lines = [
             f"Snapshot rescore ({'DRY RUN' if self.dry_run else 'WRITE'})",
             f"  files processed:           {self.files_processed}",
             f"  files rescored:            {self.files_rescored}",
-            f"  skipped (already peer-1):  {self.files_skipped_already_migrated}",
+            f"  skipped (already current): {self.files_skipped_already_migrated}",
             f"  skipped (errors):          {self.files_skipped_error}",
             f"  backups created:           {self.backups_created}",
             f"  rows rescored:             {self.rows_rescored}",
@@ -426,6 +428,15 @@ class MigrationReport:
             f"  nan value_metric rows:     {self.nan_value_metric_rows}",
             f"  value_metric mean (before/after): {self.before_value_metric_mean:.3f} / {self.after_value_metric_mean:.3f}",
         ]
+        if self.volume_feature_coverage:
+            covs = list(self.volume_feature_coverage.values())
+            low = {f: c for f, c in self.volume_feature_coverage.items() if c < 0.50}
+            lines.append(
+                f"  dollar-volume coverage:    mean {sum(covs) / len(covs):.1%}, "
+                f"min {min(covs):.1%} ({len(low)} file(s) < 50%)"
+            )
+            for f, c in sorted(low.items()):
+                lines.append(f"    LOW {f}: {c:.1%}")
         if self.fallback_usage:
             lines.append("  fallback usage:")
             for k, v in sorted(self.fallback_usage.items(), key=lambda kv: -kv[1]):
@@ -458,6 +469,7 @@ def rescore_snapshots(
     overwrite_existing: bool = False,
     in_place_with_backup: bool = False,
     scoring_cfg: dict | None = None,
+    backfill_volume: bool = True,
 ) -> MigrationReport:
     """Rescore snapshots under the unified peer engine. Writes canonical column names.
 
@@ -474,6 +486,11 @@ def rescore_snapshots(
     - dry_run=True: writes nothing, only logs and tallies.
     - overwrite_existing=False (default): files already at the current engine
       version are skipped (idempotent).
+    - backfill_volume=True (default): before rescoring, point-in-time dollar-volume
+      features (data.volume_features) are merged from the FMP price cache using
+      trailing windows ending at the snapshot's stem date; files that pre-date the
+      volume column also get a synthesized share-ADV `volume` (dollar_vol_21d /
+      current_price) so the legacy checklist stays cross-sectional.
     """
     from strategy.scoring.composite import (
         SCORING_MODEL_VERSION,
@@ -500,6 +517,9 @@ def rescore_snapshots(
     before_means: list[float] = []
     after_means: list[float] = []
     shifts: list[tuple[str, float, float]] = []
+    # One shared FMP-cache reader across all files — per-file construction would
+    # reread thousands of price parquets.
+    _volume_cache = None
 
     for snap_path in sorted(input_path.glob("*.parquet")):
         if snap_path.name.endswith(".bak.parquet"):
@@ -516,6 +536,27 @@ def rescore_snapshots(
         if _is_already_current_engine(df) and not overwrite_existing:
             report.files_skipped_already_migrated += 1
             continue
+
+        if backfill_volume and (
+            "dollar_vol_63d" not in df.columns or overwrite_existing
+        ):
+            if _volume_cache is None:
+                from data.volume_features import DollarVolumeCache
+                _volume_cache = DollarVolumeCache()
+            try:
+                from data.volume_features import add_dollar_volume_features
+                asof = _stem_to_date(snap_path.stem)
+                coverage = add_dollar_volume_features(
+                    df, asof, _volume_cache, fallback_from_adv=True
+                )
+                report.volume_feature_coverage[snap_path.name] = coverage
+                if "volume" not in df.columns and "current_price" in df.columns:
+                    px = pd.to_numeric(df["current_price"], errors="coerce")
+                    df["volume"] = (df["dollar_vol_21d"] / px.where(px > 0)).round(0)
+            except ValueError:
+                report.errors.append(
+                    f"{snap_path.name}: unparseable stem date — volume backfill skipped"
+                )
 
         if "sector" not in df.columns:
             df["sector"] = pd.NA

@@ -86,6 +86,14 @@ def get_data(refresh: bool = False) -> pd.DataFrame:
     # archetype classification, backtest scoring, risk checks) silently lost
     # market_cap / analyst / instrument_type until the next full refresh.
     if refresh and not result.empty:
+        # Snapshot AFTER enrichment (peer-2): the parquet history now carries the
+        # market-structure (market_cap, analyst_*) and graph columns. Never saved
+        # on refresh=False — a stripped frame must not overwrite enriched history.
+        try:
+            from strategy.snapshots import save_snapshot as _save_snapshot
+            _save_snapshot(result)
+        except Exception as _snap_err:
+            logger.warning("Snapshot save failed (non-fatal): %s", _snap_err)
         store_data_as_csv("agg_data", "", result)
         time.sleep(1)
 

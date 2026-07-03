@@ -21,9 +21,11 @@ def _active(scope="active_sleeve_compounding", preset=None):
 
 def test_preset_composition_unions_slots():
     """`a+b` (and `a,b`) compose into the UNION of both presets' active slots."""
+    from tuning.constants import _REL_VOLUME_SLOT
     assert _active(preset="active_exits+active_exit_floors") == {5, 6, 7, 8, 50, 51, 52, 53}
+    # peer-2: _MOMENTUM_INPUTS now includes the appended rel_volume slot.
     assert _active(preset="active_core_weights,active_factor_internals") == {
-        0, 1, 2, 3, 9, 10, 11, 12, 13, 14, 15,
+        0, 1, 2, 3, 9, 10, 11, 12, 13, 14, 15, _REL_VOLUME_SLOT,
     }
     # idempotent: composing a preset with itself == itself
     assert _active(preset="active_exits+active_exits") == _active(preset="active_exits")
@@ -39,9 +41,11 @@ def test_composition_validation():
 
 def test_interaction_cluster_presets_slots():
     """The 5 curated interaction-cluster presets unfreeze exactly their mapped slots."""
+    from tuning.constants import _REL_VOLUME_SLOT
     expected = {
         "active_buy_gate":         {0, 1, 2, 3, 5, 40, 41, 42},
-        "active_momentum_engine":  {3, 10, 11, 12, 13, 14, 15, 46, 49},
+        # peer-2: momentum engine carries the appended rel_volume slot too.
+        "active_momentum_engine":  {3, 10, 11, 12, 13, 14, 15, 46, 49, _REL_VOLUME_SLOT},
         "active_exit_ladder":      {6, 7, 8, 50, 51, 52, 53, 54, 55, 56},
         "active_breadth_turnover": {8, 40, 41, 42, 43, 44, 45, 57, 58, 59},
         "active_quality_stack":    {1, 41, 48, 52},

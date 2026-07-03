@@ -485,6 +485,25 @@ for _r in _ETF_REGIMES:
         PARAM_NAMES.append(f"etf_bw_{_r[:4]}_{_b}")
         BOUNDS.append((0.0, 1.0))
 
+# ── peer-2 scoring add-on slots ──────────────────────────────────────────────
+# Appended strictly LAST: the simulator hardcodes params[10:16] and several
+# _*_SLOT constants, so new slots must never shift existing indices. Both are
+# frozen-by-default (0.0 = off) and unfrozen only via presets.
+_REL_VOLUME_SLOT = len(PARAM_NAMES)  # 102
+PARAM_NAMES.append("mom_rel_volume")
+BOUNDS.append((0.0, 0.40))
+_CONFIG_PATH_TO_PARAM_IDX["scoring.momentum_inputs.weights.rel_volume"] = _REL_VOLUME_SLOT
+
+_VALUE_BENCH_SLOT = len(PARAM_NAMES)  # 103
+PARAM_NAMES.append("value_benchmark_blend")
+BOUNDS.append((0.0, 0.60))
+_CONFIG_PATH_TO_PARAM_IDX["scoring.factors.value.benchmark_blend"] = _VALUE_BENCH_SLOT
+
+
+def _scoring_addon_default_frozen_indices() -> set[int]:
+    """peer-2 add-on slots default to frozen — unfrozen via presets."""
+    return {_REL_VOLUME_SLOT, _VALUE_BENCH_SLOT}
+
 
 def etf_alloc_params_from_params(params) -> dict | None:
     """Build an ETF_ALLOCATION_PARAMS-shaped override from the ETF slots in *params*.
@@ -662,6 +681,8 @@ def _get_active_indices(scope: str = "overall_strategy", preset: str | None = No
     frozen |= _contribution_timing_default_frozen_indices()
     # ETF-allocation slots are frozen-by-default; an ETF preset unfreezes them.
     frozen |= _etf_alloc_default_frozen_indices()
+    # peer-2 scoring add-on slots (rel_volume / value benchmark blend) default frozen.
+    frozen |= _scoring_addon_default_frozen_indices()
     if preset is not None:
         from .presets import apply_preset_to_frozen
         frozen = apply_preset_to_frozen(frozen, preset)
@@ -817,7 +838,16 @@ def _current_params() -> np.ndarray:
         _cfg_rw = (ETF_ALLOCATION_PARAMS.get("regime_weights", {}) or {}).get(_r, {}) or {}
         for _b in _ETF_BUCKETS:
             etf_tail.append(float(_cfg_rw.get(_b, _ETF_BUCKET_DEFAULT[_b])))
+    # peer-2 scoring add-on slots — seeded from live config (0.0 = off).
+    addon_tail: list[float] = [
+        float(mi_w.get("rel_volume", 0.0)),
+        float(
+            ((SCORING_PARAMS or {}).get("factors", {}).get("value", {}) or {})
+            .get("benchmark_blend", 0.0)
+        ),
+    ]
     return np.array(
         base + arch_tail + cs_tail + ps_tail + regime_tail
         + ef_tail + oc_tail + rb_tail + arch_bool_tail + ct_tail + etf_tail
+        + addon_tail
     )

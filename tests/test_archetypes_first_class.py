@@ -196,9 +196,14 @@ class TestParamVector:
         )
         assert _CT_SLOT_OFFSET == _ARCH_BOOL_SLOT_OFFSET + len(_ARCH_KEYS) * len(_ARCH_BOOL_FIELDS)
         # The contribution-timing group is followed by the ETF-allocation group
-        # (1 enabled flag + 21 regime×bucket weight slots), which now ends the vector.
-        from tuning.constants import _etf_weight_slot_indices
-        expected = _CT_SLOT_OFFSET + len(_CT_FIELDS) + 1 + len(_etf_weight_slot_indices())
+        # (1 enabled flag + 21 regime×bucket weight slots) and the peer-2 scoring
+        # add-on slots (rel_volume + value benchmark blend), which end the vector.
+        from tuning.constants import (
+            _etf_weight_slot_indices,
+            _scoring_addon_default_frozen_indices,
+        )
+        expected = (_CT_SLOT_OFFSET + len(_CT_FIELDS) + 1 + len(_etf_weight_slot_indices())
+                    + len(_scoring_addon_default_frozen_indices()))
         assert len(PARAM_NAMES) == expected
         assert len(BOUNDS) == expected
 

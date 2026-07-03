@@ -73,13 +73,17 @@ def _perturbed_full_vector(tc):
         "sell_rules.sell_weak_value_below": 0.20,
         "sell_rules.trailing_stop_pct":    -0.20,
         "scoring.factors.value.pe_weight":  0.60,
-        # normalized momentum sub-weight group (sums to 1.0)
-        "scoring.momentum_inputs.weights.rs_3m":           0.30,
+        # normalized momentum sub-weight group (sums to 1.0 INCLUDING the appended
+        # peer-2 rel_volume slot — the writer normalizes all 7 together)
+        "scoring.momentum_inputs.weights.rs_3m":           0.25,
         "scoring.momentum_inputs.weights.rs_6m":           0.25,
-        "scoring.momentum_inputs.weights.risk_adj_3m":     0.20,
-        "scoring.momentum_inputs.weights.trend_structure": 0.15,
+        "scoring.momentum_inputs.weights.risk_adj_3m":     0.15,
+        "scoring.momentum_inputs.weights.trend_structure": 0.10,
         "scoring.momentum_inputs.weights.return_1m":       0.05,
-        "scoring.momentum_inputs.weights.return_5d":       0.05,
+        "scoring.momentum_inputs.weights.return_5d":       0.10,
+        "scoring.momentum_inputs.weights.rel_volume":      0.10,
+        # peer-2 value sector-benchmark blend (generic tail writer, 4-dec float)
+        "scoring.factors.value.benchmark_blend":           0.20,
         # candidate-filter slots 40-42
         "candidate_selection.top_percentile":     0.25,
         "candidate_selection.min_quality_score":  0.50,

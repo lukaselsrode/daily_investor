@@ -18,6 +18,7 @@ from .constants import (
     _ARCH_KEYS,
     _ARCH_SLOT_OFFSET,
     _CONFIG_PATH_TO_PARAM_IDX,
+    _REL_VOLUME_SLOT,
     PARAM_NAMES,
     _current_params,
     archetype_cfg_from_params,
@@ -102,13 +103,21 @@ def apply_config_params(params: np.ndarray) -> None:
     factors["pe_weight"] = round(float(params[9]), 4)
     factors["pb_weight"] = round(float(1.0 - params[9]), 4)
 
+    # The momentum weight group normalizes as a WHOLE — including the appended
+    # rel_volume slot when present (the simulator normalizes over all 7 together;
+    # normalizing only the first 6 here would rescale them relative to rel_volume
+    # and persist a different blend than the one the optimizer validated).
     mom_raw = np.abs(params[10:16])
-    mom_total = max(float(mom_raw.sum()), 1e-9)
+    rel_raw = (abs(float(params[_REL_VOLUME_SLOT]))
+               if len(params) > _REL_VOLUME_SLOT else None)
+    mom_total = max(float(mom_raw.sum()) + (rel_raw or 0.0), 1e-9)
     mom_norm = mom_raw / mom_total
     mom_keys = ["rs_3m", "rs_6m", "risk_adj_3m", "trend_structure", "return_1m", "return_5d"]
     mi_w = sc.setdefault("momentum_inputs", {}).setdefault("weights", {})
     for k, v in zip(mom_keys, mom_norm):
         mi_w[k] = round(float(v), 4)
+    if rel_raw is not None:
+        mi_w["rel_volume"] = round(rel_raw / mom_total, 4)
 
     # Tail slots (16+) are written GENERICALLY off the canonical slot↔config-path
     # mapping, so EVERY tuned slot a preset can unfreeze (candidate filters 40-42,
@@ -126,6 +135,8 @@ def apply_config_params(params: np.ndarray) -> None:
             continue
         if _path.startswith("etf_allocation."):
             continue  # ETF sleeve config is written ONLY by apply_etf_allocation_params
+        if _path == "scoring.momentum_inputs.weights.rel_volume":
+            continue  # written above, normalized with the 7-way momentum weight group
         _v = float(params[_idx])
         if _path in _INT_CONFIG_PATHS:
             _iv = max(0, round(_v))

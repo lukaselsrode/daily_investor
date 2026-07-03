@@ -279,13 +279,27 @@ def _dae_soft_exit_full_exit(
     return cand & full_exit
 
 
+# peer-2 rel_volume slot — PARAM_NAMES.index("mom_rel_volume"); appended LAST in
+# tuning.constants so it can be a literal here (same convention as slots 47-49,
+# which avoids a module-level tuning import cycle). Pinned by tests/test_peer2_tuning.py.
+_REL_VOLUME_SLOT = 102
+
+
+def _mom_weights_with_rel_volume(params: np.ndarray) -> np.ndarray:
+    """The 6 momentum sub-weights (slots 10-15) + the appended rel_volume weight.
+    Legacy/short vectors → rel_volume 0.0 (off)."""
+    rel_w = float(params[_REL_VOLUME_SLOT]) if len(params) > _REL_VOLUME_SLOT else 0.0
+    return np.append(np.asarray(params[10:16], dtype=float), rel_w)
+
+
 def _momentum_score_multifactor_vec(
     day: int,
     precomp: PrecomputedData,
     mom_weights_raw: np.ndarray,
 ) -> np.ndarray:
     """Vectorized cross-sectional momentum scoring — multi-factor blend of
-    rs_3m, rs_6m, risk_adj_3m, trend_structure, return_1m, return_5d."""
+    rs_3m, rs_6m, risk_adj_3m, trend_structure, return_1m, return_5d, plus the
+    optional peer-2 rel_volume confirmation input (7th weight, 0.0 = off)."""
     cfg = MOMENTUM_INPUT_PARAMS
     pen = cfg["penalties"]
     n   = precomp.prices.shape[1]
@@ -319,7 +333,9 @@ def _momentum_score_multifactor_vec(
     a200 = (precomp.above_200dma_daily[day] if precomp.above_200dma_daily is not None else zeros).astype(bool)
     trend = np.select([a50 & a200, a50 & ~a200, ~a50 & a200], [0.5, 0.1, -0.1], default=-0.5)
 
-    raw_w = np.abs(mom_weights_raw[:6])
+    raw = np.abs(np.asarray(mom_weights_raw, dtype=float))
+    raw_w = np.zeros(7)
+    raw_w[:min(7, raw.size)] = raw[:7]
     total = raw_w.sum()
     if total < 1e-9:
         total = 1.0
@@ -333,6 +349,12 @@ def _momentum_score_multifactor_vec(
         w[4] * _pct_rank_vec(ret1m)    +
         w[5] * _pct_rank_vec(ret5d)
     )
+    if w[6] > 0.0:
+        # rel_volume: NaN (no dollar-volume panel) ranks neutral 0.0, matching the
+        # live peer scorer's treatment of a missing column — the weight still
+        # normalizes, so live and sim stay aligned.
+        rel = _get(precomp.rel_volume_daily, np.nan)
+        score = score + w[6] * _pct_rank_vec(rel)
 
     score -= np.where(ret3m < pen["falling_knife_3m_threshold"],  pen["falling_knife_penalty"],  0.0)
     score -= np.where(pos52  > pen["overextension_52w_threshold"], pen["overextension_penalty"],  0.0)
@@ -576,7 +598,9 @@ def score_stocks_at_day(precomp: PrecomputedData, params: np.ndarray, day: int) 
     value_score = value_pe_w * _pe_c + (1.0 - value_pe_w) * _pb_c
 
     if precomp.ret_3m_daily is not None:
-        momentum_score = _momentum_score_multifactor_vec(day, precomp, params[10:16])
+        momentum_score = _momentum_score_multifactor_vec(
+            day, precomp, _mom_weights_with_rel_volume(params)
+        )
     else:
         momentum_score = _momentum_score_warmup_vec(
             precomp.bin_indices_daily[day],
@@ -631,7 +655,9 @@ def score_stocks_at_day(precomp: PrecomputedData, params: np.ndarray, day: int) 
 
 def _momentum_score_at_day(precomp: PrecomputedData, params: np.ndarray, day: int) -> np.ndarray:
     if precomp.ret_3m_daily is not None:
-        return _momentum_score_multifactor_vec(day, precomp, params[10:16])
+        return _momentum_score_multifactor_vec(
+            day, precomp, _mom_weights_with_rel_volume(params)
+        )
     return _momentum_score_warmup_vec(
         precomp.bin_indices_daily[day],
         precomp.has_position_52w_daily[day],

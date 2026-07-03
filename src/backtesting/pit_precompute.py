@@ -35,6 +35,7 @@ def build_pit_factor_panels(
     volume: np.ndarray | None,
     rebalance_freq: int,
     scoring_cfg: dict,
+    dollar_volume_daily: np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
     """Return {pe_comp_daily, pb_comp_daily, quality_scores_daily, income_scores_daily},
     each float64 (n_days, n_symbols). Raises RuntimeError if NO symbol has usable PIT data
@@ -121,6 +122,24 @@ def build_pit_factor_panels(
             "volume":         vol_col[idx],
             "position_52w":   pos52,
         })
+        if dollar_volume_daily is not None:
+            # peer-2 quality liquidity: trailing dollar-volume windows ending AT the
+            # rebalance day (causal), min-row guards mirroring data.volume_features.
+            from data.volume_features import _MIN_ROWS as _DVM
+            with np.errstate(invalid="ignore", divide="ignore"):
+                for col, span in (("dollar_vol_5d", 5), ("dollar_vol_21d", 21),
+                                  ("dollar_vol_63d", 63)):
+                    win = dollar_volume_daily[max(0, d - span + 1): d + 1, idx]
+                    cnt = np.isfinite(win).sum(axis=0)
+                    mean = np.nanmean(np.where(np.isfinite(win), win, np.nan), axis=0)
+                    fr[col] = np.where(cnt >= _DVM[col], mean, np.nan)
+                w63 = dollar_volume_daily[max(0, d - 62): d + 1, idx]
+                c63 = np.isfinite(w63).sum(axis=0)
+                m63 = np.nanmean(np.where(np.isfinite(w63), w63, np.nan), axis=0)
+                s63 = np.nanstd(np.where(np.isfinite(w63), w63, np.nan), axis=0)
+                fr["dollar_vol_cv_63d"] = np.where(
+                    (c63 >= _DVM["dollar_vol_63d"]) & (m63 > 0), s63 / m63, np.nan
+                )
         # Value sub-scores: peer-relative blend of PE and PB (low = better), NO ratios.yaml.
         pe_in = fr["pe_ratio"].where(fr["pe_ratio"] > 0)
         pb_in = fr["pb_ratio"].where(fr["pb_ratio"] > 0)
