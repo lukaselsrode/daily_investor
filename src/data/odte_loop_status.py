@@ -13,14 +13,21 @@ managing/exiting an open trade beats chasing a new one. Reads, never writes; pla
 
 For the cron/Telegram lane it also emits, on top of the fine-grained state:
   * ``posture``     — one coarse word for what the controller should DO this tick, drawn from
-                      {MANAGE_POSITION, SCOUT_FRESH_SETUP, WAIT_FRESH_CONFIRMATION,
-                       FLAT_NO_TRADE, STALE_DATA_BLOCKED, BROKER_DEGRADED}. ``FLAT_NO_TRADE`` is the
-                      normal idle state (flat / reviewed / no candidate / empty heartbeat) and does
-                      NOT contain the word "stale". ``STALE_DATA_BLOCKED`` is reserved for an actual
-                      stale/malformed artifact that is BLOCKING or diagnosing action (e.g. an open
-                      position whose live read went stale) — never a leftover ignored after a review.
-                      This is what stops a cron run from narrating fresh live edge, and stops a plain
-                      idle tick from being mislabelled as a stale-data problem.
+                      {MANAGE_POSITION, EXECUTION_READY, SCOUT_FRESH_SETUP, WAIT_FRESH_CONFIRMATION,
+                       FLAT_NO_TRADE, STALE_DATA_BLOCKED, BROKER_DEGRADED}. ``EXECUTION_READY`` means
+                      an execution-allowed gate is on the board: proceed to broker review/place under
+                      standing auth (via the Hermes MCP lane — this repo still places NO orders).
+                      ``SCOUT_FRESH_SETUP`` is a confirmed candidate: assemble/promote a fresh entry
+                      gate now. ``FLAT_NO_TRADE`` is the normal idle state (flat / reviewed / no
+                      candidate / empty heartbeat) and does NOT contain the word "stale".
+                      ``STALE_DATA_BLOCKED`` is reserved for an actual stale/malformed artifact that
+                      is BLOCKING or diagnosing action (an open position whose live read went stale,
+                      or a stale broker_health.json probe FILE while a live lane is needed — the fix
+                      there is the exact refresh command, not "assume the broker is down") — never a
+                      leftover ignored after a review. ``BROKER_DEGRADED`` is a CONFIRMED broker
+                      fault (down / read-only fallback / unconfirmable in live mode), not a stale
+                      probe file. This is what stops a cron run from narrating fresh live edge, and
+                      stops a plain idle tick from being mislabelled as a stale-data problem.
   * ``broker_lane`` — a normalization of a SUPPLIED/PROBED broker-health payload (Hermes feeds the
                       MCP/CLI probe result; this module never touches the broker): ok / down / stale /
                       read_only_fallback / unknown, plus whether live orders are permitted. When the
@@ -102,10 +109,16 @@ STALE_TRIGGER_MINUTES = 30
 # "transport down" while a CLI probe from minutes ago read healthy, so an aged payload is treated as
 # stale (orders blocked) rather than fresh confirmation that the place lane is up.
 BROKER_STALE_MINUTES = 5
+# The exact fix for a stale broker_health.json — surfaced verbatim so the controller never has to
+# guess whether "stale" means the broker is down (it doesn't; it means the probe FILE is outdated).
+BROKER_HEALTH_REFRESH_COMMAND = (
+    "refresh broker truth: re-probe the parent Robinhood MCP (read account/BP/positions), rewrite "
+    "data/odte/broker_health.json (schema: data/odte/broker_health.example.json), then re-run "
+    "`make odte-loop-status JSON=1`")
 
 # Coarse cron-facing posture — one word for what the controller should DO this tick. Layered on top of
 # the fine-grained loop state so a Telegram update reads as an action, not observe-only boilerplate.
-POSTURES = ("MANAGE_POSITION", "SCOUT_FRESH_SETUP", "WAIT_FRESH_CONFIRMATION",
+POSTURES = ("MANAGE_POSITION", "EXECUTION_READY", "SCOUT_FRESH_SETUP", "WAIT_FRESH_CONFIRMATION",
             "FLAT_NO_TRADE", "STALE_DATA_BLOCKED", "BROKER_DEGRADED")
 # Normalized broker-lane labels for a supplied/probed health payload (this module makes NO broker call).
 BROKER_LANES = ("ok", "read_only_fallback", "down", "stale", "unknown")
@@ -270,8 +283,16 @@ def classify_broker_lane(broker_health: dict | None, now: datetime | None = None
     read_capable = read_only or cli_connected or fallback_ok or healthy or parent_ok
 
     # A probe older than the TTL is not live truth — block orders regardless of what it claimed.
+    # BUT a stale probe is an outdated FILE, not a confirmed broker fault: keep what the last probe
+    # said (`last_known_place_allowed`) and the exact refresh command, so the controller refreshes
+    # the file instead of concluding live orders are impossible.
     if age is not None and age > BROKER_STALE_MINUTES:
-        return out("stale", False, f"broker-health probe {age:.0f}m old (> {BROKER_STALE_MINUTES}m)")
+        stale = out("stale", False,
+                    f"broker-health probe {age:.0f}m old (> {BROKER_STALE_MINUTES}m) — outdated "
+                    "probe FILE, not a confirmed broker fault; refresh it before any live order")
+        stale["last_known_place_allowed"] = bool(place_allowed)
+        stale["refresh_command"] = BROKER_HEALTH_REFRESH_COMMAND
+        return stale
     if place_allowed:
         return out("ok", True, "parent review/place lane healthy — live orders permitted")
     if read_capable:
@@ -304,8 +325,10 @@ def _next_for(state: str, *, live: bool) -> tuple[str, str]:
         return ("gate not execution-allowed — promote only if every gate passes",
                 "odte-entry-gate --promote-to-execution")
     if state == "PROMOTED":
-        return ("gate execution-allowed — manager may enter, then start the position watch",
-                "odte-position")
+        return ("ALL GATES PASSED — do the final live refresh, then broker review/place under "
+                "standing auth via the Hermes MCP lane (this repo places NO orders); after the "
+                "fill, start the position watch",
+                "broker-review-place (Hermes MCP lane) → odte-position --snapshot <live.json>")
     if state == "ENTERED":
         return ("plan open, no live decision yet — start the position watch",
                 "odte-position --snapshot <live.json>")
@@ -482,6 +505,14 @@ def _resolve_loop_state(active_trade: dict | None = None,
     close_age_h = _age_minutes(close_ts, now)
     recent_close = close_age_h is None or close_age_h <= STALE_TRADE_HOURS * 60
 
+    # GREEN-DAY PRESERVATION (post-scalp lockout): once a completed profitable trade is banked for
+    # the ET day, the fresh-entry lane is CLOSED — a later candidate/gate must not re-open it (live
+    # 2026-07-10 bug: 3x SPY 753C scalped green, then a fresh promoted gate re-entered the same
+    # contract for a scratch). Managing a live position is never affected (that lane returned above).
+    from data.odte_journal import green_day_preservation
+    preservation = green_day_preservation(events, active_trade=plan, now=now)
+    green_locked = bool(preservation.get("locked"))
+
     # Entry-gate (latest journal entry_decision). Only honored if it belongs to the CURRENT cycle —
     # a gate dated at/before the last close is the closed trade's own gate, already consumed. Even an
     # execution_allowed gate is disposable after its TTL; never resurrect stale promotion authority.
@@ -507,6 +538,13 @@ def _resolve_loop_state(active_trade: dict | None = None,
         if not reviewed:
             reasons.append(f"denied entry gate not sticky (decision={gate.get('decision')}) — "
                            "expired to fresh candidate/scan")
+    # Green-day preservation consumes ANY remaining fresh gate — even an execution-allowed one —
+    # unless the gate itself explicitly armed the re-entry override (BP-checked at gate build).
+    if green_locked and gate_fresh and gate.get("allow_reentry_after_green") is not True:
+        gate_fresh = False
+        reasons.append("green_day_preservation_lockout: ignored fresh entry gate — profitable "
+                       "trade already banked today; re-entry requires an explicit "
+                       "allow_reentry_after_green override")
     # PROMOTED requires EXPLICIT gate permission: execution_allowed is True. A bare decision=="enter"
     # with execution_allowed missing/false is a stale/partial record and stays GATED — the loop only
     # advances on explicit manager promotion / gate permission, never on the intent verb alone.
@@ -519,6 +557,10 @@ def _resolve_loop_state(active_trade: dict | None = None,
     trig_candidate = bool(candidate.get("ticker")) and not candidate.get("restricted") and trig_fresh
     if candidate.get("ticker") and not trig_fresh and trig_stale_reason:
         reasons.append(f"ignored stale scan trigger: {trig_stale_reason}")
+    if green_locked and trig_candidate:
+        trig_candidate = False
+        reasons.append("green_day_preservation_lockout: ignored fresh scan candidate — profitable "
+                       "trade already banked today")
     trig_ts = _parse_ts(trig.get("ts") or trig.get("generated_at"))
     newer_candidate_after_gate = False
     if trig_candidate and gate_fresh and not gate_exec and gate_ts is not None and trig_ts is not None:
@@ -549,7 +591,12 @@ def _resolve_loop_state(active_trade: dict | None = None,
     if watch_live and not watch_fresh and watch_stale_reason:
         reasons.append(f"ignored stale candidate watch: {watch_stale_reason}")
     inactive_watch = {"DEGRADED_NO_TRADE", "EXPIRED_NO_CONFIRMATION", ""}
-    if watch_live and watch_fresh and watch_decision not in inactive_watch:
+    watch_actionable = watch_live and watch_fresh and watch_decision not in inactive_watch
+    if green_locked and watch_actionable:
+        watch_actionable = False
+        reasons.append("green_day_preservation_lockout: ignored candidate watch — profitable "
+                       "trade already banked today")
+    if watch_actionable:
         if watch_decision == "CONFIRM_ENTRY":
             reasons.append("candidate watch confirmed setup; build a fresh entry gate")
             payload = _payload("CANDIDATE", reasons, now, live=False,
@@ -580,7 +627,17 @@ def _resolve_loop_state(active_trade: dict | None = None,
             "superseded_gate_decision": gate.get("decision")})
     if gate_fresh:
         reasons.append(f"entry gate present, not execution-allowed (decision={gate.get('decision')})")
-        return _payload("GATED", reasons, now, live=False, context=_gate_ctx(gate))
+        payload = _payload("GATED", reasons, now, live=False, context=_gate_ctx(gate))
+        # Name the exact blockers so the controller knows the trigger needed — not just "promote".
+        failing = payload["context"].get("failing_gates") or []
+        unknown = payload["context"].get("unknown_gates") or []
+        if failing or unknown:
+            bits = ([f"failing: {', '.join(failing)}"] if failing else []) + \
+                   ([f"missing input: {', '.join(unknown)}"] if unknown else [])
+            payload["next_action"] = (f"gate not execution-allowed ({'; '.join(bits)}) — refresh "
+                                      "those inputs and re-run the gate; promote only when every "
+                                      "required gate is explicitly True")
+        return payload
     if trig_candidate:
         reasons.append(f"candidate {candidate.get('ticker')} {candidate.get('direction') or ''} "
                        f"(scan_only/observe)".strip())
@@ -598,10 +655,21 @@ def _resolve_loop_state(active_trade: dict | None = None,
 
 
 def _gate_ctx(gate: dict) -> dict:
-    return {"underlying": gate.get("underlying") or gate.get("symbol"),
-            "direction": gate.get("direction"), "decision": gate.get("decision"),
-            "scan_only": bool(gate.get("scan_only", False)),
-            "execution_allowed": bool(gate.get("execution_allowed", False))}
+    """Gate context incl. the MACHINE-READABLE gate breakdown: which gates failed and which are
+    still unknown (missing input), so the controller sees the exact trigger needed to advance —
+    without re-reading/re-deriving the gate artifacts."""
+    ctx = {"underlying": gate.get("underlying") or gate.get("symbol"),
+           "direction": gate.get("direction"), "decision": gate.get("decision"),
+           "scan_only": bool(gate.get("scan_only", False)),
+           "execution_allowed": bool(gate.get("execution_allowed", False))}
+    gates = gate.get("gates") if isinstance(gate.get("gates"), dict) else {}
+    if gates:
+        ctx["gates"] = gates
+        ctx["failing_gates"] = sorted(k for k, v in gates.items() if v is False)
+        ctx["unknown_gates"] = sorted(k for k, v in gates.items() if v is None)
+    if gate.get("veto_reasons"):
+        ctx["veto_reasons"] = list(gate.get("veto_reasons") or [])
+    return ctx
 
 
 def _candidate_watch_ctx(candidate: dict, decision: dict, *, confirmed: bool) -> dict:
@@ -637,15 +705,20 @@ def _posture(payload: dict, broker: dict, *, live_mode: bool = False) -> tuple[s
 
     Precedence encodes the 0DTE rules: broker truth first, manage an open position before scanning,
     never advertise fresh live edge on stale/absent data, and never call a plain idle tick "stale".
-      1. BROKER can't back a needed live order → BROKER_DEGRADED (top-line). That means either an
-         active lane FAULT (down / stale / read-only-fallback → ``orders_ok is False``), OR — in
-         ``live_mode`` — a live position / ready setup while the parent lane is NOT a fresh confirmed
-         OK (``orders_ok`` not True: fail closed on unknown/missing broker_health). A flat tick with
-         an unknown lane is NOT degraded — there is nothing to authorize.
+      1. A CONFIRMED broker fault (down / read-only-fallback) → BROKER_DEGRADED (top-line, even on a
+         flat tick — the cron must never quietly imply the lane is fine). In ``live_mode`` an
+         UNCONFIRMED lane (unknown/missing broker_health) while a live position / ready setup needs
+         it also fails closed to BROKER_DEGRADED.
+      1b. A STALE broker_health.json while a live lane is needed → STALE_DATA_BLOCKED with the exact
+         refresh command. A stale probe is an outdated FILE, not a confirmed fault: the fix is
+         "refresh the probe", never "assume live orders are impossible". On a tick with nothing to
+         authorize a stale probe does NOT block — it falls through to the normal posture (orders
+         stay blocked via ``orders_ok`` until the file is fresh again).
       2. A live position with an authorized lane → MANAGE_POSITION (manage before scan).
       3. A live position whose live read is stale/malformed (broker fine) → STALE_DATA_BLOCKED and
          the reasons SHOUT — the controller is holding blind and must refresh the position read now.
-      4. A fresh, confirmed/promoted setup → SCOUT_FRESH_SETUP (the ONLY path to SCOUT).
+      4. An execution-allowed (PROMOTED) gate → EXECUTION_READY: move to broker review/place under
+         standing auth. A confirmed candidate watch → SCOUT_FRESH_SETUP: build/promote a fresh gate.
       5. A candidate/gate awaiting confirmation → WAIT_FRESH_CONFIRMATION.
       6. A non-live malformed/stale live artifact → STALE_DATA_BLOCKED (diagnostic).
       7. SCAN / EXITED / REVIEWED with nothing fresh (empty heartbeat, reviewed trade, ignored stale
@@ -657,14 +730,18 @@ def _posture(payload: dict, broker: dict, *, live_mode: bool = False) -> tuple[s
     ctx = payload.get("context") or {}
     lane = broker.get("lane")
     orders_ok = broker.get("orders_ok")            # True only if parent lane is a fresh confirmed OK
-    broker_faulted = lane in ("down", "stale", "read_only_fallback")
+    broker_stale = lane == "stale"                 # outdated probe FILE — refreshable, not a fault
+    broker_faulted = lane in ("down", "read_only_fallback")
     needs_live_lane = live or state == "PROMOTED" or executable or ctx.get("confirmed") is True
-    # Fail closed: an active fault always blocks; in live_mode an unconfirmed lane (unknown/missing)
+    # Fail closed: a confirmed fault always blocks; in live_mode an unconfirmed lane (unknown/missing)
     # cannot authorize a live order either. A flat tick (no live lane needed) is never blocked here.
-    broker_blocks = broker_faulted or (live_mode and needs_live_lane and orders_ok is not True)
+    # A stale probe file gets its own branch (1b) so the fix reads "refresh", not "lane is down".
+    broker_blocks = broker_faulted or (live_mode and needs_live_lane and orders_ok is not True
+                                       and not broker_stale)
     verify = "hermes mcp test robinhood  # repair parent review/place lane before any live order"
+    refresh = broker.get("refresh_command") or BROKER_HEALTH_REFRESH_COMMAND
 
-    # 1. Broker can't back a needed live order — top-line BROKER_DEGRADED.
+    # 1. Broker confirmed-faulted / unconfirmable for a needed live order — top-line BROKER_DEGRADED.
     if broker_blocks:
         if live and state in ("MANAGING", "ENTERED", "DEGRADED"):
             return ("BROKER_DEGRADED",
@@ -678,6 +755,21 @@ def _posture(payload: dict, broker: dict, *, live_mode: bool = False) -> tuple[s
                 f"broker place/review lane '{lane}' — live orders BLOCKED; verify parent MCP before acting",
                 verify)
 
+    # 1b. Stale broker_health.json while a live lane is needed: blocked until refreshed, but say so
+    # precisely — the probe FILE is old; the last probe may well have said the parent lane was OK.
+    if broker_stale and needs_live_lane:
+        last = broker.get("last_known_place_allowed")
+        last_txt = ("last probe said parent lane OK" if last is True
+                    else "last probe could not confirm the parent lane" if last is False
+                    else "last lane state unknown")
+        if live and state in ("MANAGING", "ENTERED", "DEGRADED"):
+            return ("STALE_DATA_BLOCKED",
+                    f"OPEN position but broker_health.json is STALE ({last_txt}) — refresh broker "
+                    "truth NOW; this is an outdated probe file, not a confirmed broker fault", refresh)
+        return ("STALE_DATA_BLOCKED",
+                f"setup ready but broker_health.json is STALE ({last_txt}) — refresh the probe file "
+                "first; if the parent lane reads OK, proceed to broker review/place", refresh)
+
     # 2. Live position lane: manage before scan.
     if live and state in ("MANAGING", "ENTERED"):
         return ("MANAGE_POSITION", None, None)
@@ -687,8 +779,11 @@ def _posture(payload: dict, broker: dict, *, live_mode: bool = False) -> tuple[s
                 "OPEN position but its live management read is STALE/malformed — refresh the position "
                 "decision NOW before it drifts; do not act on the old read", None)
 
-    # 4. Fresh, actionable setup ready to act on — the ONLY path to SCOUT_FRESH_SETUP.
-    if state == "PROMOTED" or ctx.get("confirmed") is True:
+    # 4. Execution-allowed gate → EXECUTION_READY (broker review/place under standing auth).
+    #    Confirmed candidate watch → SCOUT_FRESH_SETUP (build/promote a fresh gate now).
+    if state == "PROMOTED":
+        return ("EXECUTION_READY", None, None)
+    if ctx.get("confirmed") is True:
         return ("SCOUT_FRESH_SETUP", None, None)
 
     # 5. Candidate / gate on the board, awaiting confirmation (fresh but not yet actionable).
@@ -736,8 +831,9 @@ def derive_loop_state(active_trade: dict | None = None,
         payload["next_action"] = action_override
     if command_override:
         payload["next_command"] = command_override
-    # A degraded broker lane must never advertise executable live edge.
-    if posture == "BROKER_DEGRADED":
+    # A broker lane that can't back a live order must never advertise executable live edge —
+    # covers both a confirmed fault (BROKER_DEGRADED) and a stale probe file (orders_ok False).
+    if posture == "BROKER_DEGRADED" or broker.get("orders_ok") is False:
         payload["executable"] = False
     # Split the audit trail out of the user-facing "why": housekeeping breadcrumbs (ignored stale/
     # denied/consumed gates, empty scans, closed+reviewed trades) move to `notes` so a flat cron tick
@@ -755,7 +851,8 @@ def _flat_reason(posture: str) -> str:
     return {
         "FLAT_NO_TRADE": "flat — no fresh actionable setup",
         "STALE_DATA_BLOCKED": "stale/malformed artifact blocking action — refresh before acting",
-        "SCOUT_FRESH_SETUP": "fresh setup ready — re-validate live before entry",
+        "EXECUTION_READY": "all gates passed — broker review/place under standing auth, then watch",
+        "SCOUT_FRESH_SETUP": "candidate confirmed — assemble/promote a fresh entry gate now",
         "WAIT_FRESH_CONFIRMATION": "candidate on the board — awaiting confirmation",
         "MANAGE_POSITION": "live position — manage/exit before scanning",
         "BROKER_DEGRADED": "broker lane degraded — live orders blocked",
@@ -864,6 +961,8 @@ def render_markdown(payload: dict) -> str:
         orders = broker.get("orders_ok")
         flag = "live orders OK" if orders is True else "live orders BLOCKED" if orders is False else "orders unknown"
         lines.append(f"Broker lane: **{broker.get('lane')}** ({flag}) — {broker.get('note')}  ")
+        if broker.get("refresh_command"):
+            lines.append(f"Refresh: {broker.get('refresh_command')}  ")
     lines.append("")
     if p.get("reasons"):
         lines += ["## Why", *[f"- {r}" for r in p["reasons"]], ""]

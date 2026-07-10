@@ -1,7 +1,7 @@
 """tests/test_odte_position.py — 0DTE live-position decision watchdog (decision-only).
 
 No Robinhood, no network, no LLM. evaluate_position() is pure: a trade plan + a caller-supplied
-snapshot in, structured triggers out. Covers single-contract scalp take-profit (+35-50%), the +60%
+snapshot in, structured triggers out. Covers single-contract scalp take-profit (+20-25%), the +25%
 strong exit, thesis-death levels, bid-floor, time-risk, monitoring-degraded, the no-position quiet
 path, the NVDA employer-restriction refusal, and the run_position_watchdog file writer.
 """
@@ -28,10 +28,10 @@ def _types(result):
 
 # --- take-profit -----------------------------------------------------------------------------
 
-def test_scalp_take_profit_band_35_to_50():
-    # Single-contract scalp up +40% -> TAKE_PROFIT scale, action exit (a single contract can't scale).
+def test_scalp_take_profit_band_20_to_25():
+    # Single-contract scalp up +20-24% -> TAKE_PROFIT scale, action exit (a single contract can't scale).
     # time_rules={} isolates the profit axis (no wall-clock TIME_RISK interference).
-    for mark in (1.35, 1.42, 1.50):
+    for mark in (1.20, 1.22, 1.24):
         r = op.evaluate_position(_scalp_plan(time_rules={}), {"option_mark": mark})
         assert r["decision"] == "TAKE_PROFIT"
         tp = next(t for t in r["triggers"] if t["type"] == "TAKE_PROFIT")
@@ -39,29 +39,29 @@ def test_scalp_take_profit_band_35_to_50():
 
 
 def test_take_profit_below_band_holds():
-    r = op.evaluate_position(_scalp_plan(time_rules={}), {"option_mark": 1.20})   # +20% < 35%
+    r = op.evaluate_position(_scalp_plan(time_rules={}), {"option_mark": 1.19})   # +19% < 20%
     assert r["decision"] == "HOLD"
     assert "TAKE_PROFIT" not in _types(r)
 
 
-def test_strong_exit_at_60pct():
-    r = op.evaluate_position(_scalp_plan(time_rules={}), {"option_mark": 1.62})   # +62%
+def test_strong_exit_at_25pct_for_scalp():
+    r = op.evaluate_position(_scalp_plan(time_rules={}), {"option_mark": 1.26})   # +26%
     assert r["decision"] == "TAKE_PROFIT"
     tp = next(t for t in r["triggers"] if t["type"] == "TAKE_PROFIT")
     assert tp["stage"] == "strong" and tp["action"] == "exit_all"
 
 
 def test_multi_contract_scalp_scales_keeps_runner():
-    # Multi-contract scalp at +40% -> sell partial and KEEP a runner (not a full exit).
+    # Multi-contract scalp at +20% -> sell partial and KEEP a runner (not a full exit).
     plan = _scalp_plan(quantity=3, thesis={}, time_rules={})
-    r = op.evaluate_position(plan, {"option_mark": 1.40})
+    r = op.evaluate_position(plan, {"option_mark": 1.20})
     tp = next(t for t in r["triggers"] if t["type"] == "TAKE_PROFIT")
     assert tp["stage"] == "scale" and tp["action"] == "scale_keep_runner"
 
 
 def test_pnl_pct_supplied_directly_wins():
-    r = op.evaluate_position(_scalp_plan(thesis={}, time_rules={}), {"pnl_pct": 0.61})
-    assert r["decision"] == "TAKE_PROFIT" and r["pnl_pct"] == 0.61
+    r = op.evaluate_position(_scalp_plan(thesis={}, time_rules={}), {"pnl_pct": 0.26})
+    assert r["decision"] == "TAKE_PROFIT" and r["pnl_pct"] == 0.26
 
 
 # --- mode-specific profit semantics (single contract, +40%) ----------------------------------

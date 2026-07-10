@@ -44,6 +44,7 @@ except ImportError:                    # pragma: no cover - non-POSIX fallback
 
 from core.paths import ODTE_DATA_DIR, ODTE_REPORT_DIR
 from data.odte_strategy_policy import (
+    ET,
     canonical_guardrails,
     classify_strategy_window,
     window_descriptions,
@@ -213,6 +214,76 @@ def read_events(journal_path: str | None = None) -> list[dict]:
         except Exception:
             logger.debug("journal: skipping malformed line")
     return out
+
+
+# --- green-day preservation (post-scalp lockout) ---------------------------------------------
+# Once the first COMPLETED profitable trade of the ET trading day is banked, the fresh-entry lane
+# is locked: `odte_entry_gate` vetoes a later gate and `odte_loop_status` refuses to surface fresh
+# candidates / promoted gates, unless the caller EXPLICITLY overrides with
+# `allow_reentry_after_green: true` (and passes the BP floor the entry gate enforces). The new-day
+# reset is the ET calendar date — nothing carries over past the session.
+
+# Event types that mark a COMPLETED trade (may carry realized P/L). entry/management events never lock.
+_COMPLETED_EVENTS = ("order_closed", "exit_decision", "postmortem")
+_INACTIVE_PLAN_STATUS = {"closed", "exited", "flat", "done"}   # mirrors odte_position._INACTIVE_STATUS
+
+
+def _realized(container: dict) -> float | None:
+    """Realized P/L from an event/plan: canonical `realized_pnl` first, then the flat live-journal
+    and plan spellings (`realized_pnl_dollars_gross`, `gross_pnl`, `net_pnl_est`)."""
+    for key in ("realized_pnl", "realized_pnl_dollars_gross", "gross_pnl", "net_pnl_est"):
+        v = _num(_get(container, key))
+        if v is not None:
+            return v
+    return None
+
+
+def _et_date(ts) -> str | None:
+    dt = _parse_ts(ts)
+    return dt.astimezone(ET).date().isoformat() if dt else None
+
+
+def green_day_preservation(events: list[dict] | None, active_trade: dict | None = None,
+                           now: datetime | None = None) -> dict:
+    """PURE: has a COMPLETED profitable trade already been banked for the current ET trading day?
+
+    Reads only the supplied journal events + (optionally) the closed active_trade plan — no IO, no
+    broker. A trade counts as banked green when a completion event (order_closed / exit_decision /
+    postmortem) or a closed plan carries a positive realized P/L dated TODAY in ET. Returns
+    ``{locked, trade_date, banked_pnl, green_trades}`` — ``locked`` True means green-day
+    preservation is in force: NO fresh entries without an explicit ``allow_reentry_after_green``
+    override (see `odte_entry_gate` / `odte_loop_status`)."""
+    now = now or datetime.now(timezone.utc)
+    today = now.astimezone(ET).date().isoformat()
+    green: dict[str, dict] = {}
+    for i, e in enumerate(events or []):
+        if not isinstance(e, dict) or e.get("event_type") not in _COMPLETED_EVENTS:
+            continue
+        if _et_date(e.get("ts")) != today:
+            continue
+        pnl = _realized(e)
+        if pnl is None or pnl <= 0:
+            continue
+        key = str(e.get("trade_id") or f"event#{e.get('seq', i)}")
+        row = {"trade_id": e.get("trade_id"),
+               "underlying": (str(e.get("underlying") or e.get("symbol") or "").upper() or None),
+               "realized_pnl": pnl, "closed_ts": e.get("ts")}
+        prev = green.get(key)
+        if prev is None or pnl > prev["realized_pnl"]:
+            green[key] = row
+    plan = active_trade if isinstance(active_trade, dict) else {}
+    if str(plan.get("status") or "").strip().lower() in _INACTIVE_PLAN_STATUS:
+        close_ts = plan.get("closed_at") or plan.get("exit_fill_time") or plan.get("updated_at")
+        pnl = _realized(plan)
+        key = str(plan.get("trade_id") or "active_trade")
+        if pnl is not None and pnl > 0 and _et_date(close_ts) == today and key not in green:
+            green[key] = {"trade_id": plan.get("trade_id"),
+                          "underlying": (str(plan.get("underlying") or "").upper() or None),
+                          "realized_pnl": pnl, "closed_ts": close_ts}
+    rows = sorted(green.values(), key=lambda r: str(r.get("closed_ts") or ""))
+    return {"locked": bool(rows), "trade_date": today,
+            "banked_pnl": round(sum(r["realized_pnl"] for r in rows), 4),
+            "green_trades": rows}
 
 
 # --- standardized decision-journal layer ----------------------------------------------------
@@ -759,6 +830,12 @@ def event_from_entry_gate(gate_decision: dict, trade_id: str | None = None,
         "scan_only": bool(g.get("scan_only", False)),
         "execution_allowed": bool(g.get("execution_allowed", False)),
     }
+    # Green-day preservation marker: only a gate that EXPLICITLY armed the re-entry override may
+    # survive the post-scalp lockout in odte_loop_status — so the flag must ride on the event.
+    if g.get("allow_reentry_after_green") is True:
+        e["allow_reentry_after_green"] = True
+    if g.get("green_day_preservation"):
+        e["green_day_preservation"] = g.get("green_day_preservation")
     if extra:
         e.update(extra)
     return e

@@ -509,9 +509,18 @@ def _cmd_odte_entry_gate(rest: list[str]) -> None:
     # scan_only is INHERITED from the trigger/candidate by default (the watchdog lane is scan_only=true);
     # --scan-only forces it, and --promote-to-execution is the explicit opt-in to demote an inherited
     # scan_only record to the execution tier. --journal appends an entry_decision event (idempotent).
+    # Machine-readable next step: the payload carries gates + failing_gates/unknown_gates +
+    # next_action/next_command — a passed gate points at broker review/place (standing auth) then the
+    # position watch; a BP/vehicle-fit fail points at scanning the other ETF vehicles (QQQ/SPY/IWM)
+    # before declaring no-trade; a missing input names the exact command that produces it.
+    # GREEN-DAY PRESERVATION: the day's decision journal (--journal-path, default the canonical
+    # data/odte journal) is read so a completed profitable trade VETOES a later fresh gate
+    # (green_day_preservation_lockout) unless the trigger/broker snapshot explicitly carries
+    # allow_reentry_after_green=true AND buying power clears the re-entry floor.
     import json
 
     from data.odte_entry_gate import render_markdown, run_entry_gate
+    from data.odte_journal import DEFAULT_JOURNAL_PATH
     try:
         payload = run_entry_gate(
             trigger_path=_flag_value(rest, "--trigger"),
@@ -531,6 +540,7 @@ def _cmd_odte_entry_gate(rest: list[str]) -> None:
             # (inherited) scan_only record to the execution tier.
             scan_only=True if "--scan-only" in rest else None,
             promote_to_execution="--promote-to-execution" in rest,
+            journal_path=_flag_value(rest, "--journal-path") or DEFAULT_JOURNAL_PATH,
             out_dir=_flag_value(rest, "--out-dir"),
             write="--write" in rest,
         )
@@ -601,17 +611,22 @@ def _cmd_odte_loop_status(rest: list[str]) -> None:
     # PURE/OFFLINE 0DTE loop state machine — NO broker call, NO LLM, places NO orders. Summarizes the
     # canonical data/odte artifacts (active_trade / position_decision / triggers / decision_journal)
     # into the current loop state (SCAN/CANDIDATE/GATED/PROMOTED/ENTERED/MANAGING/EXITED/REVIEWED/
-    # DEGRADED) plus a coarse cron POSTURE (MANAGE_POSITION / SCOUT_FRESH_SETUP / WAIT_FRESH_CONFIRMATION
-    # / FLAT_NO_TRADE / STALE_DATA_BLOCKED / BROKER_DEGRADED) + the next command to run. FLAT_NO_TRADE is
-    # the normal idle tick (flat/reviewed/empty heartbeat) and never says "stale"; STALE_DATA_BLOCKED is
-    # only an actual stale/malformed artifact blocking action. Re-derives no gate/decision; a live
-    # position always outranks the scan/candidate/gate lane. --broker-health PATH (or the
-    # ODTE_BROKER_HEALTH env, else the durable data/odte/broker_health.json) feeds a SUPPLIED/PROBED
-    # broker-health payload Hermes wrote from an MCP/CLI probe — the module never calls the broker
-    # itself. This surface is the LIVE controller entrypoint, so it fails closed by default: an unknown/
-    # missing broker lane cannot authorize a live order (posture BROKER_DEGRADED when a position/setup
-    # needs the lane). --offline relaxes that for pure decision-support (unknown lane reported, not
-    # blocked). --json prints the compact payload; default prints Markdown. Quiet: readers log to stderr.
+    # DEGRADED) plus a coarse cron POSTURE (MANAGE_POSITION / EXECUTION_READY / SCOUT_FRESH_SETUP /
+    # WAIT_FRESH_CONFIRMATION / FLAT_NO_TRADE / STALE_DATA_BLOCKED / BROKER_DEGRADED) + the next command
+    # to run. The posture drives action: EXECUTION_READY = all gates passed, broker review/place under
+    # standing auth then the position watch; SCOUT_FRESH_SETUP = confirmed candidate, build/promote a
+    # fresh gate. FLAT_NO_TRADE is the normal idle tick (flat/reviewed/empty heartbeat) and never says
+    # "stale"; STALE_DATA_BLOCKED is an actual stale/malformed artifact blocking action — including a
+    # STALE broker_health.json while a live lane is needed, where broker_lane.refresh_command gives the
+    # exact fix (an outdated probe FILE is refreshable, NOT a confirmed broker fault). Re-derives no
+    # gate/decision; a live position always outranks the scan/candidate/gate lane. --broker-health PATH
+    # (or the ODTE_BROKER_HEALTH env, else the durable data/odte/broker_health.json) feeds a SUPPLIED/
+    # PROBED broker-health payload Hermes wrote from an MCP/CLI probe — the module never calls the
+    # broker itself. This surface is the LIVE controller entrypoint, so it fails closed by default: an
+    # unknown/missing broker lane cannot authorize a live order (posture BROKER_DEGRADED when a
+    # position/setup needs the lane; only a CONFIRMED down/read-only fault is BROKER_DEGRADED).
+    # --offline relaxes that for pure decision-support (unknown lane reported, not blocked). --json
+    # prints the compact payload; default prints Markdown. Quiet: readers log to stderr.
     import json
 
     from data.odte_loop_status import render_markdown, run_loop_status
@@ -955,21 +970,30 @@ COMMANDS
                            position_decision, triggers, decision_journal) into the current loop state
                            — SCAN / CANDIDATE / GATED / PROMOTED / ENTERED / MANAGING / EXITED /
                            REVIEWED / DEGRADED — plus a coarse cron POSTURE (MANAGE_POSITION /
-                           SCOUT_FRESH_SETUP / WAIT_FRESH_CONFIRMATION / FLAT_NO_TRADE /
-                           STALE_DATA_BLOCKED / BROKER_DEGRADED; FLAT_NO_TRADE is the normal idle tick
-                           and never says "stale", STALE_DATA_BLOCKED is a real stale/malformed block),
-                           per-artifact freshness (age/TTL), and the next command to run (odte-watchdog,
-                           odte-entry-gate, odte-position, odte-journal, …). --broker-health PATH (or
-                           ODTE_BROKER_HEALTH env, else data/odte/broker_health.json) folds a SUPPLIED/
-                           PROBED broker-health payload Hermes wrote from an MCP/CLI probe (no broker
-                           call here) so the lane reads ok/down/stale/read-only-fallback and live orders
-                           are BLOCKED when it can't be trusted. Fails closed by default (live mode):
-                           unknown/missing broker can't authorize a live order; --offline relaxes for
-                           pure decision-support. Re-derives NO gate or decision; a LIVE
-                           position always outranks the scan/candidate/gate lane; missing artifacts
-                           read as SCAN and a malformed/stale live artifact DEGRADES rather than
-                           crashing. --json prints the compact payload (clean machine contract);
-                           default prints Markdown; --state-dir DIR overrides data/odte/.
+                           EXECUTION_READY / SCOUT_FRESH_SETUP / WAIT_FRESH_CONFIRMATION /
+                           FLAT_NO_TRADE / STALE_DATA_BLOCKED / BROKER_DEGRADED), per-artifact
+                           freshness (age/TTL), and the next command to run. The posture DRIVES
+                           action: MANAGE_POSITION = quote & manage the open position now;
+                           EXECUTION_READY = every gate passed — broker review/place under standing
+                           auth, then odte-position; SCOUT_FRESH_SETUP = confirmed candidate — build/
+                           promote a fresh entry gate; WAIT_FRESH_CONFIRMATION = keep polling (the
+                           GATED context names failing_gates/unknown_gates, i.e. the exact trigger
+                           needed); FLAT_NO_TRADE is the normal idle tick and never says "stale";
+                           STALE_DATA_BLOCKED is a real stale/malformed block — including a STALE
+                           broker_health.json while a live lane is needed, where
+                           broker_lane.refresh_command gives the exact fix (outdated probe FILE ≠
+                           broker down). --broker-health PATH (or ODTE_BROKER_HEALTH env, else
+                           data/odte/broker_health.json) folds a SUPPLIED/PROBED broker-health payload
+                           Hermes wrote from an MCP/CLI probe (no broker call here) so the lane reads
+                           ok/down/stale/read-only-fallback and live orders are BLOCKED when it can't
+                           be trusted; only a CONFIRMED down/read-only fault reads BROKER_DEGRADED.
+                           Fails closed by default (live mode): unknown/missing broker can't authorize
+                           a live order; --offline relaxes for pure decision-support. Re-derives NO
+                           gate or decision; a LIVE position always outranks the scan/candidate/gate
+                           lane; missing artifacts read as SCAN and a malformed/stale live artifact
+                           DEGRADES rather than crashing. --json prints the compact payload (clean
+                           machine contract); default prints Markdown; --state-dir DIR overrides
+                           data/odte/.
 
 OPTIONS (run)
   --skip-data              Reuse existing CSV data

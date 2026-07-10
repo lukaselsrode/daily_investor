@@ -47,6 +47,75 @@ REQUIRED_CONFIRMATIONS = ("live_chain_recheck", "spread_cap_check", "budget_chec
 _BULLISH = {"call", "bullish", "long_call", "calls", "up"}
 _BEARISH = {"put", "bearish", "long_put", "puts", "down"}
 
+# Green-day preservation (post-scalp lockout). Once a completed profitable trade is banked for the
+# ET day (per journal events), a fresh entry gate is VETOED — the banked green must not be handed
+# back on a re-entry (live 2026-07-10 failure: 3x SPY 753C scalped green, then re-entered 1x for a
+# scratch). The ONLY way back in is an EXPLICIT `allow_reentry_after_green: true` on the trigger or
+# broker snapshot, and even then buying power must comfortably cover the re-entry: below the
+# contract's own estimated cost or this conservative floor, the green day is preserved no matter what.
+GREEN_LOCKOUT_VETO = "green_day_preservation_lockout"
+GREEN_REENTRY_BP_VETO = "insufficient_bp_for_green_reentry"
+GREEN_REENTRY_MIN_BP = 500.0
+
+# What produces each missing gate input — surfaced verbatim in next_action so the controller
+# refreshes the exact input instead of stalling on an "unknown" gate.
+_GATE_INPUT_COMMANDS = {
+    "day_regime": "make odte-day-score MARKET=<market.json> JSON=1",
+    "vehicle": "make odte-vehicle-score CONTRACT=<contract.json> MARKET=<market.json> BP=<bp> JSON=1",
+    "account": "supply a fresh broker snapshot (BROKER=<broker.json> from the Hermes MCP read lane)",
+    "directional_thesis": "make odte-watchdog JSON=1  # or pass CANDIDATE= with an explicit direction",
+}
+# Veto reasons that mean the CONTRACT didn't fit, not the day: before declaring no-trade on these,
+# scan the other index ETF vehicles for a BP-fit structure — one bullet a day must not die on the
+# first contract checked.
+_BP_FIT_VETOES = {"insufficient_buying_power", "vehicle_bad_bet"}
+
+
+def _next_step(intent: str, execution_allowed: bool, gates: dict, veto_reasons: list[str],
+               req: tuple[str, ...]) -> tuple[str, str]:
+    """(next_action prose, next_command) for the gate record — decision-support only, never an order.
+
+    Encodes the anti-passivity ladder: a passed gate says GO to broker review/place (standing auth);
+    a BP/vehicle-fit fail says scan QQQ/SPY/IWM for a fitting vehicle BEFORE declaring no-trade; a
+    missing input names the exact command that produces it; a hard veto stands down to the scan lane."""
+    if execution_allowed:
+        return ("ALL GATES PASSED — do the final live refresh, then broker review/place under "
+                "standing auth via the Hermes MCP lane (this repo places NO orders); after the "
+                "fill, start the position watch",
+                "broker-review-place (Hermes MCP lane) → odte-position --snapshot <live.json>")
+    if GREEN_LOCKOUT_VETO in veto_reasons or GREEN_REENTRY_BP_VETO in veto_reasons:
+        return ("green-day preservation lockout — a profitable trade is already banked today; NO "
+                "fresh entries this session. Re-entry needs BOTH an explicit "
+                "allow_reentry_after_green=true on the trigger/broker snapshot AND buying power "
+                "above the re-entry floor. Bank the green day and review.",
+                "odte-journal-report --write  # bank the green day; do not re-enter")
+    if any(v in _BP_FIT_VETOES for v in veto_reasons):
+        return ("vehicle/BP fit failed for THIS contract — before declaring no-trade on BP, scan "
+                "the other index ETF vehicles (QQQ/SPY/IWM) for a BP-fit structure; reject only if "
+                "every candidate vehicle fails",
+                "make odte-vehicle-score CONTRACT=<qqq|spy|iwm contract.json> "
+                "MARKET=<market.json> BP=<bp> JSON=1")
+    if intent == "veto":
+        return (f"hard veto ({', '.join(veto_reasons) or 'restricted'}) — stand down for this "
+                "candidate and resume the scan lane",
+                "odte-watchdog")
+    unknown = [g for g in req if gates.get(g) is None]
+    failing = [g for g in req if gates.get(g) is False]
+    if unknown:
+        cmds = "; ".join(_GATE_INPUT_COMMANDS.get(g, f"supply the {g} input") for g in unknown)
+        return (f"gate inputs missing ({', '.join(unknown)}) — produce them and re-run the gate: "
+                f"{cmds}",
+                "odte-entry-gate  # re-run with the missing inputs supplied")
+    if failing:
+        return (f"gates failing ({', '.join(failing)}) — keep the candidate HAWK loop until a "
+                "materially new read flips the failing gate or the candidate degrades; do not "
+                "re-promote on the same read",
+                "odte-candidate-watch")
+    # scan_only observe record with every gate green: promotion is the manager's explicit call.
+    return ("all required gates read True but the record is scan-only — promote explicitly to the "
+            "execution tier if the manager intends to act",
+            "odte-entry-gate --promote-to-execution")
+
 
 def _num(value: Any) -> float | None:
     if value is None or isinstance(value, bool):
@@ -93,6 +162,21 @@ def _coalesce_symbol(candidate: dict, vehicle_score: dict, trigger: dict) -> str
     return None
 
 
+def _buying_power(broker: dict) -> float | None:
+    bp = _num(broker.get("buying_power"))
+    if bp is None:
+        bp = _num(broker.get("account_buying_power") or broker.get("options_buying_power"))
+    return bp
+
+
+def _contract_cost(vehicle_score: dict) -> float | None:
+    """Estimated debit for ONE contract from the vehicle-score contract (ask, else mark), ×100."""
+    contract = _dict(vehicle_score.get("contract"))
+    premium = (_num(contract.get("ask") or contract.get("ask_price"))
+               or _num(contract.get("mark") or contract.get("mark_price")))
+    return premium * 100.0 if premium else None
+
+
 def _account_gate(broker: dict) -> tuple[bool | None, str | None]:
     """Evaluate the account/buying-power gate. (True | False | None, veto_reason | None).
 
@@ -106,9 +190,7 @@ def _account_gate(broker: dict) -> tuple[bool | None, str | None]:
     dt_left = _num(broker.get("day_trades_left"))
     if dt_left is not None and dt_left <= 0:
         return False, "no_day_trades_left"
-    bp = _num(broker.get("buying_power"))
-    if bp is None:
-        bp = _num(broker.get("account_buying_power") or broker.get("options_buying_power"))
+    bp = _buying_power(broker)
     if bp is None:
         return None, None
     if bp <= 0:
@@ -122,6 +204,7 @@ def build_entry_gate_decision(trigger: dict | None = None, candidate: dict | Non
                               required_gates: tuple[str, ...] | None = None,
                               scan_only: bool | None = None,
                               promote_to_execution: bool = False,
+                              journal_events: list[dict] | None = None,
                               now: datetime | None = None) -> dict:
     """PURE: assemble a journalable entry-gate decision record. No IO/network/broker/orders.
 
@@ -135,7 +218,13 @@ def build_entry_gate_decision(trigger: dict | None = None, candidate: dict | Non
     `scan_only` is not passed explicitly it is INHERITED from `trigger.scan_only`/`candidate.scan_only`
     (the watchdog lane is always scan_only=True). An inherited/explicit scan_only record can only be
     demoted to the execution tier when the manager EXPLICITLY sets `promote_to_execution=True` — this
-    is still recording/tooling only, it places no orders."""
+    is still recording/tooling only, it places no orders.
+
+    GREEN-DAY PRESERVATION: when `journal_events` (the day's decision journal) shows a completed
+    profitable trade for the current ET day, the gate VETOES (`green_day_preservation_lockout`) —
+    re-entry needs an explicit `allow_reentry_after_green: true` on the trigger/broker snapshot AND
+    buying power at/above max(contract cost, GREEN_REENTRY_MIN_BP), else
+    `insufficient_bp_for_green_reentry`."""
     trigger = _dict(trigger)
     dctx = _dict(trigger.get("decision_context"))
     candidate = _dict(candidate) or _dict(trigger.get("candidate"))
@@ -189,12 +278,35 @@ def build_entry_gate_decision(trigger: dict | None = None, candidate: dict | Non
         if r and r not in veto_reasons:
             veto_reasons.append(str(r))
 
+    # GREEN-DAY PRESERVATION (post-scalp lockout): once the day's journal shows a completed
+    # profitable trade, this gate VETOES — a later "valid setup" must not hand the banked green
+    # back (the live failure this guards: green scalp, then a same-day re-entry scratch). The
+    # override is only ARMED when it is explicit (`allow_reentry_after_green: true` on the trigger
+    # or broker snapshot) AND buying power comfortably covers the re-entry — the contract's
+    # estimated cost, floored at GREEN_REENTRY_MIN_BP. No journal context supplied skips the check
+    # (the caller is responsible for feeding the day's journal on the live path).
+    preservation = None
+    if journal_events is not None:
+        from data.odte_journal import green_day_preservation
+        preservation = green_day_preservation(journal_events, now=now)
+    green_locked = bool(preservation and preservation.get("locked"))
+    reentry_override = (trigger.get("allow_reentry_after_green") is True
+                        or broker.get("allow_reentry_after_green") is True)
+    bp = _buying_power(broker)
+    reentry_floor = max(GREEN_REENTRY_MIN_BP, _contract_cost(vehicle_score) or 0.0)
+    reentry_armed = bool(reentry_override and bp is not None and bp >= reentry_floor)
+    if green_locked and not reentry_armed:
+        veto_reasons.append(GREEN_REENTRY_BP_VETO if reentry_override else GREEN_LOCKOUT_VETO)
+
     reason_codes: list[str] = []
     for name in req:
         state = gates.get(name)
         reason_codes.append(f"{name}:{'ok' if state is True else 'fail' if state is False else 'unknown'}")
     if base_scan_only:
         reason_codes.append("scan_only_promoted_to_execution" if promoted else "scan_only_inherited")
+    if green_locked:
+        reason_codes.append("green_reentry_override_armed" if reentry_armed
+                            else "green_day_preservation_locked")
 
     # HARD conservative gate: execution_allowed only when nothing blocks it and ALL required gates
     # are explicitly True. Missing inputs (None) fail closed.
@@ -232,6 +344,8 @@ def build_entry_gate_decision(trigger: dict | None = None, candidate: dict | Non
                      "pin_risk": (pin.get("level") if isinstance(pin, dict) else pin),
                      "basis": "pin_risk_only_not_dealer_gex"}
 
+    next_action, next_command = _next_step(intent, execution_allowed, gates, veto_reasons, req)
+
     stamp = (now or datetime.now(timezone.utc)).isoformat(timespec="seconds")
     return {
         "schema_version": SCHEMA_VERSION,
@@ -243,6 +357,10 @@ def build_entry_gate_decision(trigger: dict | None = None, candidate: dict | Non
         "reason_codes": reason_codes,
         "required_gates": list(req),
         "gates": gates,
+        "failing_gates": [g for g in req if gates.get(g) is False],
+        "unknown_gates": [g for g in req if gates.get(g) is None],
+        "next_action": next_action,
+        "next_command": next_command,
         "veto_reasons": veto_reasons,
         "required_confirmations": list(REQUIRED_CONFIRMATIONS),
         "confirmation_needed": not execution_allowed,
@@ -254,6 +372,8 @@ def build_entry_gate_decision(trigger: dict | None = None, candidate: dict | Non
         "scan_only": scan_only,
         "promoted_to_execution": promoted,
         "execution_allowed": execution_allowed,
+        "green_day_preservation": preservation,
+        "allow_reentry_after_green": reentry_armed,
         "places_orders": False,
         "basis": ("offline entry-gate decision: day_regime + vehicle + directional_thesis + account "
                   "gates; records intent only, places NO orders"),
@@ -267,12 +387,19 @@ def run_entry_gate(trigger_json: str | None = None, trigger_path: str | None = N
                    gamma_json: str | None = None, gamma_path: str | None = None,
                    broker_json: str | None = None, broker_path: str | None = None,
                    scan_only: bool | None = None, promote_to_execution: bool = False,
+                   journal_path: str | None = None,
                    out_dir: str | None = None, write: bool = False) -> dict:
     """Load the (optional) input artifacts and build the entry-gate decision. No orders/broker/network.
 
     `scan_only=None` (the default) INHERITS scan_only from the trigger/candidate; pass True/False to
     state it explicitly. `promote_to_execution=True` is the manager's explicit opt-in to demote an
-    (inherited) scan_only record to the execution tier."""
+    (inherited) scan_only record to the execution tier. `journal_path` feeds the day's decision
+    journal into the GREEN-DAY PRESERVATION check (post-scalp lockout) — the CLI passes the
+    canonical journal by default; a missing/empty journal simply leaves the lockout disengaged."""
+    journal_events = None
+    if journal_path:
+        from data.odte_journal import read_events
+        journal_events = read_events(journal_path)
     payload = build_entry_gate_decision(
         trigger=_load_json(trigger_path, trigger_json) or None,
         candidate=_load_json(candidate_path, candidate_json) or None,
@@ -282,6 +409,7 @@ def run_entry_gate(trigger_json: str | None = None, trigger_path: str | None = N
         broker_snapshot=_load_json(broker_path, broker_json) or None,
         scan_only=scan_only,
         promote_to_execution=promote_to_execution,
+        journal_events=journal_events,
     )
     if write:
         out = Path(os.path.expanduser(out_dir or ODTE_REPORT_DIR))
@@ -303,6 +431,7 @@ def render_markdown(payload: dict) -> str:
              f"Decision: **{p.get('decision')}**  ",
              f"Execution allowed: **{p.get('execution_allowed')}**  ·  scan_only: {p.get('scan_only')}  ",
              f"Gates: {gate_line}  ",
+             f"Next: **{p.get('next_command')}** — {p.get('next_action')}  ",
              f"Basis: {p.get('basis')}", ""]
     if p.get("veto_reasons"):
         lines += ["## Veto reasons", *[f"- {r}" for r in p["veto_reasons"]], ""]

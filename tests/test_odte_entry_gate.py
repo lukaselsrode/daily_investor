@@ -11,6 +11,7 @@ Covers the conservative invariants the live execution manager relies on:
 import inspect
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -249,6 +250,167 @@ def test_entry_gate_event_journal_tags_restricted(tmp_path):
     e = res["event"]
     assert e["restricted"] is True and e["restricted_reason"] == "employer"
     assert e["execution_allowed"] is False
+
+
+# --- next_action / next_command: machine-readable "what advances this gate" ---------------------
+
+def test_passed_gate_next_step_is_broker_review_place_then_watch():
+    # An execution-allowed gate must SAY the sequence: review/place under standing auth, then the
+    # position watch — the anti-passivity contract for the live controller.
+    d = eg.build_entry_gate_decision(**_all_gates_kwargs())
+    assert d["execution_allowed"] is True
+    assert "broker-review-place" in d["next_command"]
+    assert "odte-position" in d["next_command"]
+    assert "standing auth" in d["next_action"]
+    assert d["failing_gates"] == [] and d["unknown_gates"] == []
+
+
+def test_bp_vehicle_veto_guides_multi_etf_scan_before_no_trade():
+    # One bullet a day must not die on the first contract checked: a BP/vehicle-fit veto points at
+    # scanning the other index ETF vehicles before declaring no-trade.
+    for kw_over in ({"broker_snapshot": {"buying_power": 0.0, "day_trades_left": 3}},
+                    {"vehicle_score": {"verdict": "BAD_BET", "score": -3, "direction": "bullish"}}):
+        kw = _all_gates_kwargs()
+        kw.update(kw_over)
+        d = eg.build_entry_gate_decision(**kw)
+        assert d["execution_allowed"] is False
+        assert "QQQ/SPY/IWM" in d["next_action"]
+        assert "odte-vehicle-score" in d["next_command"]
+
+
+def test_missing_gate_inputs_name_the_producing_commands():
+    d = eg.build_entry_gate_decision(candidate=dict(_CANDIDATE))
+    assert d["decision"] == "observe"
+    assert set(d["unknown_gates"]) == {"day_regime", "vehicle", "account"}
+    for expected in ("odte-day-score", "odte-vehicle-score", "broker snapshot"):
+        assert expected in d["next_action"], f"missing-input guidance should mention {expected}"
+
+
+def test_hard_veto_next_step_stands_down_to_scan():
+    kw = _all_gates_kwargs()
+    kw["day_score"] = {"verdict": "AVOID", "score": -4}
+    d = eg.build_entry_gate_decision(**kw)
+    assert d["decision"] == "veto"
+    assert d["next_command"] == "odte-watchdog"
+
+
+def test_scan_only_all_green_next_step_is_explicit_promotion():
+    d = eg.build_entry_gate_decision(scan_only=True, **_all_gates_kwargs())
+    assert d["decision"] == "observe" and d["execution_allowed"] is False
+    assert d["next_command"] == "odte-entry-gate --promote-to-execution"
+
+
+# --- green-day preservation: no re-entry after a banked green scalp -----------------------------
+
+_LOCK_NOW = datetime(2026, 7, 10, 18, 0, tzinfo=timezone.utc)   # 14:00 ET, mid-session
+
+
+def _green_scalp_events(now=_LOCK_NOW, hours_ago=2.0, realized_pnl=21.0):
+    """Today's exact live sequence (2026-07-10): 3x SPY 753C filled @0.98, all 3 closed @1.05."""
+    base = {"trade_id": "SPY-753C-1", "underlying": "SPY", "option_type": "call", "strike": 753}
+    return [
+        {**base, "event_type": "order_filled", "seq": 1, "quantity": 3, "entry_price": 0.98,
+         "ts": (now - timedelta(hours=hours_ago + 0.5)).isoformat()},
+        {**base, "event_type": "order_closed", "seq": 2, "quantity": 3, "exit_price": 1.05,
+         "ts": (now - timedelta(hours=hours_ago)).isoformat(),
+         "outcome": {"realized_pnl": realized_pnl}},
+    ]
+
+
+def _spy_gates_kwargs():
+    kw = _all_gates_kwargs()
+    kw["candidate"] = {"ticker": "SPY", "direction": "bullish"}
+    return kw
+
+
+def test_green_scalp_locks_out_same_day_reentry():
+    # REGRESSION (live 2026-07-10): after the green 3x SPY 753C scalp, a later gate for the same
+    # contract re-entered @1.27 for a scratch. With the day's journal supplied, that later gate must
+    # VETO with green_day_preservation_lockout even though every ordinary gate reads True.
+    d = eg.build_entry_gate_decision(journal_events=_green_scalp_events(), now=_LOCK_NOW,
+                                     **_spy_gates_kwargs())
+    assert d["execution_allowed"] is False
+    assert d["decision"] == "veto"
+    assert eg.GREEN_LOCKOUT_VETO in d["veto_reasons"]
+    assert d["green_day_preservation"]["locked"] is True
+    assert d["green_day_preservation"]["banked_pnl"] == 21.0
+    assert "green-day preservation" in d["next_action"]
+
+
+def test_reentry_override_with_ample_bp_is_allowed():
+    # The explicit escape hatch: allow_reentry_after_green on the trigger + BP above the floor.
+    kw = _spy_gates_kwargs()
+    kw["trigger"] = {"allow_reentry_after_green": True}
+    kw["broker_snapshot"] = {"buying_power": eg.GREEN_REENTRY_MIN_BP + 100.0, "day_trades_left": 3}
+    d = eg.build_entry_gate_decision(journal_events=_green_scalp_events(), now=_LOCK_NOW, **kw)
+    assert d["execution_allowed"] is True
+    assert d["allow_reentry_after_green"] is True
+    assert eg.GREEN_LOCKOUT_VETO not in d["veto_reasons"]
+    assert "green_reentry_override_armed" in d["reason_codes"]
+
+
+def test_reentry_override_below_bp_floor_stays_locked():
+    # BP-aware guard: the override alone is NOT enough — below the conservative floor the green day
+    # is preserved no matter what (the live re-entry burned most of the remaining BP on 1x @1.27).
+    kw = _spy_gates_kwargs()
+    kw["broker_snapshot"] = {"buying_power": eg.GREEN_REENTRY_MIN_BP - 1.0, "day_trades_left": 3,
+                             "allow_reentry_after_green": True}
+    d = eg.build_entry_gate_decision(journal_events=_green_scalp_events(), now=_LOCK_NOW, **kw)
+    assert d["execution_allowed"] is False
+    assert eg.GREEN_REENTRY_BP_VETO in d["veto_reasons"]
+    assert d["allow_reentry_after_green"] is False
+
+
+def test_reentry_override_needs_bp_above_contract_cost():
+    # Even above the flat floor, BP must cover the actual contract: ask 7.00 => $700 for one.
+    kw = _spy_gates_kwargs()
+    kw["vehicle_score"] = {**_GOOD_VEHICLE,
+                           "contract": {**_GOOD_VEHICLE["contract"], "ask": 7.0}}
+    kw["broker_snapshot"] = {"buying_power": eg.GREEN_REENTRY_MIN_BP + 100.0, "day_trades_left": 3,
+                             "allow_reentry_after_green": True}
+    d = eg.build_entry_gate_decision(journal_events=_green_scalp_events(), now=_LOCK_NOW, **kw)
+    assert d["execution_allowed"] is False
+    assert eg.GREEN_REENTRY_BP_VETO in d["veto_reasons"]
+
+
+def test_prior_day_green_scalp_does_not_lock():
+    # New-day reset: yesterday's banked green must not lock today's first entry.
+    events = _green_scalp_events(now=_LOCK_NOW - timedelta(days=1))
+    d = eg.build_entry_gate_decision(journal_events=events, now=_LOCK_NOW, **_spy_gates_kwargs())
+    assert d["green_day_preservation"]["locked"] is False
+    assert d["execution_allowed"] is True
+
+
+def test_red_close_does_not_lock():
+    # Falsification: a completed LOSING trade is post-loss-cooldown territory, not green-day lockout.
+    events = _green_scalp_events(realized_pnl=-30.0)
+    d = eg.build_entry_gate_decision(journal_events=events, now=_LOCK_NOW, **_spy_gates_kwargs())
+    assert d["green_day_preservation"]["locked"] is False
+    assert d["execution_allowed"] is True
+
+
+def test_run_entry_gate_reads_journal_for_lockout(tmp_path):
+    # The CLI path feeds the day's journal file; a banked green scalp in it must veto the fresh gate.
+    import json
+    now = datetime.now(timezone.utc)
+    jp = _journal(tmp_path)
+    with open(jp, "w") as f:
+        for e in _green_scalp_events(now=now, hours_ago=0.0):
+            f.write(json.dumps(e) + "\n")
+    d = eg.run_entry_gate(candidate_json=json.dumps({"ticker": "SPY", "direction": "bullish"}),
+                          day_score_json=json.dumps(_GOOD_DAY),
+                          vehicle_score_json=json.dumps(_GOOD_VEHICLE),
+                          broker_json=json.dumps(_GOOD_BROKER),
+                          journal_path=jp)
+    assert d["execution_allowed"] is False
+    assert eg.GREEN_LOCKOUT_VETO in d["veto_reasons"]
+    # ...and a missing journal file leaves the lockout disengaged.
+    d2 = eg.run_entry_gate(candidate_json=json.dumps({"ticker": "SPY", "direction": "bullish"}),
+                           day_score_json=json.dumps(_GOOD_DAY),
+                           vehicle_score_json=json.dumps(_GOOD_VEHICLE),
+                           broker_json=json.dumps(_GOOD_BROKER),
+                           journal_path=str(tmp_path / "missing.jsonl"))
+    assert d2["execution_allowed"] is True
 
 
 # --- guardrail: no broker / network / LLM -------------------------------------------------------

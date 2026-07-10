@@ -147,11 +147,15 @@ def test_pending_enter_gate_still_gated():
 
 
 def test_entry_gate_executable_is_promoted():
+    # PROMOTED must drive the actual sequence: broker review/place under standing auth FIRST, then
+    # the position watch — not point straight at odte-position as if the entry already happened.
     r = ls.derive_loop_state(journal_events=[_entry_decision(decision="enter",
                                                              execution_allowed=True)], now=NOW)
     assert r["state"] == "PROMOTED"
     assert r["executable"] is True
-    assert r["next_command"] == "odte-position"
+    assert "broker-review-place" in r["next_command"]
+    assert "odte-position" in r["next_command"]
+    assert "standing auth" in r["next_action"]
 
 
 def test_no_trade_decision_consumes_matching_non_executable_gate():
@@ -447,11 +451,13 @@ def test_posture_confirmed_candidate_watch_scouts_fresh_setup():
     assert r["next_command"] == "odte-entry-gate"
 
 
-def test_posture_promoted_gate_scouts_fresh_setup():
+def test_posture_promoted_gate_is_execution_ready():
+    # An execution-allowed gate is NOT "go scouting" — it is EXECUTION_READY: move to broker
+    # review/place under standing auth. This label split is what stops the nudge-required stall.
     r = ls.derive_loop_state(journal_events=[_entry_decision(decision="enter", execution_allowed=True)],
                              now=NOW)
     assert r["state"] == "PROMOTED"
-    assert r["posture"] == "SCOUT_FRESH_SETUP"
+    assert r["posture"] == "EXECUTION_READY"
 
 
 def test_posture_empty_scan_is_no_trade_not_scout():
@@ -551,10 +557,10 @@ def test_live_position_with_dead_broker_is_broker_degraded():
     assert r["executable"] is False
 
 
-def test_healthy_broker_promoted_gate_scouts_and_executes():
+def test_healthy_broker_promoted_gate_is_execution_ready_and_executes():
     r = ls.derive_loop_state(journal_events=[_entry_decision(decision="enter", execution_allowed=True)],
                              broker_health=_broker(lane="ok"), now=NOW)
-    assert r["posture"] == "SCOUT_FRESH_SETUP"
+    assert r["posture"] == "EXECUTION_READY"
     assert r["executable"] is True
 
 
@@ -774,11 +780,11 @@ def test_live_mode_promoted_gate_with_unknown_broker_fails_closed():
     assert r["executable"] is False
 
 
-def test_offline_mode_promoted_gate_with_unknown_broker_is_scout():
+def test_offline_mode_promoted_gate_with_unknown_broker_is_execution_ready():
     # Pure decision-support (offline) is lenient: unknown broker is reported, not blocked.
     r = ls.derive_loop_state(journal_events=[_entry_decision(decision="enter", execution_allowed=True)],
                              live_mode=False, now=NOW)
-    assert r["posture"] == "SCOUT_FRESH_SETUP"
+    assert r["posture"] == "EXECUTION_READY"
     assert r["executable"] is True
 
 
@@ -805,10 +811,166 @@ def test_live_mode_open_position_with_fresh_ok_broker_manages():
     assert r["posture"] == "MANAGE_POSITION"
 
 
+# --- stale broker_health.json: an outdated probe FILE is refreshable, not a broker fault --------
+
+def test_stale_broker_probe_on_flat_tick_is_flat_not_broker_degraded():
+    # REGRESSION (the babysit bug, seen live 2026-07-06): a flat/reviewed tick + a broker_health.json
+    # hours past its TTL read BROKER_DEGRADED with "repair the parent lane" — pure stale-file panic.
+    # Nothing needs the live lane on a flat tick, so the posture must stay FLAT_NO_TRADE; the stale
+    # lane (orders blocked) plus its refresh command stay visible in broker_lane.
+    r = ls.derive_loop_state(broker_health=_handoff(as_of=_ts(minutes_ago=300)),
+                             live_mode=True, now=NOW)
+    assert r["posture"] == "FLAT_NO_TRADE"
+    assert r["broker_lane"]["lane"] == "stale"
+    assert r["broker_lane"]["orders_ok"] is False
+    assert "broker_health.json" in r["broker_lane"]["refresh_command"]
+
+
+def test_stale_broker_probe_reviewed_trade_is_flat_not_broker_degraded():
+    plan = _closed_plan(closed_at=_ts(minutes_ago=60), exit_fill_time=_ts(minutes_ago=60))
+    pm = {"event_type": "postmortem", "trade_id": "SPY-T1", "seq": 9, "ts": _ts(minutes_ago=50)}
+    r = ls.derive_loop_state(active_trade=plan, journal_events=[pm],
+                             broker_health=_handoff(as_of=_ts(minutes_ago=120)),
+                             live_mode=True, now=NOW)
+    assert r["state"] == "REVIEWED"
+    assert r["posture"] == "FLAT_NO_TRADE"
+
+
+def test_stale_broker_probe_with_ready_setup_says_refresh_not_lane_down():
+    # A ready (promoted) setup behind a stale probe file must be blocked BUT the message/next_command
+    # must be the exact refresh — never "assume live orders are impossible" / "repair the lane".
+    r = ls.derive_loop_state(journal_events=[_entry_decision(decision="enter", execution_allowed=True)],
+                             broker_health=_handoff(as_of=_ts(minutes_ago=30)),
+                             live_mode=True, now=NOW)
+    assert r["state"] == "PROMOTED"
+    assert r["posture"] == "STALE_DATA_BLOCKED"
+    assert r["executable"] is False
+    assert "broker_health.json" in r["next_command"]
+    assert "last probe said parent lane OK" in r["next_action"]
+
+
+def test_stale_broker_probe_with_live_position_shouts_refresh():
+    r = ls.derive_loop_state(active_trade=_open_plan(),
+                             position_decision={"decision": "HOLD", "underlying": "SPY",
+                                                "ts": _ts(minutes_ago=0)},
+                             broker_health=_handoff(as_of=_ts(minutes_ago=30)),
+                             live_mode=True, now=NOW)
+    assert r["posture"] == "STALE_DATA_BLOCKED"
+    assert "refresh broker truth" in r["next_action"].lower() or \
+           "broker_health.json" in r["next_command"]
+
+
+def test_classify_stale_lane_keeps_last_known_place_permission():
+    stale_ok = ls.classify_broker_lane(_handoff(as_of=_ts(minutes_ago=30)), now=NOW)
+    assert stale_ok["lane"] == "stale"
+    assert stale_ok["orders_ok"] is False               # stale can never authorize
+    assert stale_ok["last_known_place_allowed"] is True  # ...but the last probe said the lane was OK
+    stale_down = ls.classify_broker_lane(
+        _handoff(parent_robinhood_mcp="DOWN", live_review_place_allowed=False,
+                 as_of=_ts(minutes_ago=30)), now=NOW)
+    assert stale_down["last_known_place_allowed"] is False
+
+
+def test_confirmed_broker_down_on_flat_tick_still_broker_degraded():
+    # The flat-tick leniency is ONLY for a stale probe file. A CONFIRMED down lane stays top-line.
+    r = ls.derive_loop_state(broker_health=_broker(lane="down"), live_mode=True, now=NOW)
+    assert r["posture"] == "BROKER_DEGRADED"
+
+
+# --- GATED: the gate breakdown is machine-readable at the loop surface -------------------------
+
+def test_gated_context_names_failing_and_unknown_gates():
+    gate = _entry_decision(decision="enter", execution_allowed=False,
+                           gates={"day_regime": True, "vehicle": False,
+                                  "directional_thesis": True, "account": None},
+                           veto_reasons=[])
+    r = ls.derive_loop_state(journal_events=[gate], now=NOW)
+    assert r["state"] == "GATED"
+    assert r["context"]["failing_gates"] == ["vehicle"]
+    assert r["context"]["unknown_gates"] == ["account"]
+    assert "vehicle" in r["next_action"]
+    assert "account" in r["next_action"]
+
+
 def test_run_loop_status_live_mode_flag_fails_closed_on_missing_broker(tmp_path):
     (tmp_path / "decision_journal.jsonl").write_text(json.dumps(
         _entry_decision(decision="enter", execution_allowed=True)) + "\n")
     live = ls.run_loop_status(state_dir=str(tmp_path), live_mode=True, now=NOW)
     assert live["posture"] == "BROKER_DEGRADED"
     offline = ls.run_loop_status(state_dir=str(tmp_path), live_mode=False, now=NOW)
-    assert offline["posture"] == "SCOUT_FRESH_SETUP"
+    assert offline["posture"] == "EXECUTION_READY"
+
+
+# --- green-day preservation: no fresh entries after a banked green scalp -----------------------
+
+def _green_scalp_journal():
+    """Today's exact live sequence (2026-07-10): 3x SPY 753C in @0.98, all 3 out @1.05 — banked green."""
+    base = {"trade_id": "SPY-753C-1", "underlying": "SPY", "option_type": "call", "strike": 753}
+    return [
+        {**base, "event_type": "order_filled", "seq": 1, "ts": _ts(hours_ago=3),
+         "quantity": 3, "entry_price": 0.98},
+        {**base, "event_type": "order_closed", "seq": 2, "ts": _ts(hours_ago=2),
+         "quantity": 3, "exit_price": 1.05, "realized_pnl": 21.0},
+    ]
+
+
+def test_promoted_gate_after_green_scalp_is_locked_out():
+    # REGRESSION (live 2026-07-10): after the green scalp closed, a later execution-allowed gate for
+    # the SAME contract re-entered @1.27 for a scratch. A fresh promoted gate after a banked green
+    # close must be CONSUMED: never PROMOTED/EXECUTION_READY, posture FLAT_NO_TRADE, loud reason.
+    gate = _entry_decision(decision="enter", execution_allowed=True, seq=6, ts=_ts(minutes_ago=5))
+    r = ls.derive_loop_state(journal_events=[*_green_scalp_journal(), gate], now=NOW)
+    assert r["state"] != "PROMOTED"
+    assert r["posture"] == "FLAT_NO_TRADE"
+    assert r["executable"] is False
+    assert any("green_day_preservation_lockout" in s for s in r["reasons"])
+
+
+def test_reentry_override_gate_survives_green_lockout():
+    # The explicit escape hatch: a gate the entry gate ARMED (allow_reentry_after_green, BP-checked
+    # there) still promotes — the lockout is a default, not a cage.
+    gate = _entry_decision(decision="enter", execution_allowed=True, seq=6, ts=_ts(minutes_ago=5),
+                           allow_reentry_after_green=True)
+    r = ls.derive_loop_state(journal_events=[*_green_scalp_journal(), gate], now=NOW)
+    assert r["state"] == "PROMOTED"
+    assert r["posture"] == "EXECUTION_READY"
+
+
+def test_fresh_candidate_after_green_scalp_stays_flat():
+    # The monitors kept producing valid-looking setups after the green close — a fresh scan candidate
+    # must NOT re-open the entry lane (no CANDIDATE, no WAIT_FRESH_CONFIRMATION).
+    r = ls.derive_loop_state(triggers=_candidate_triggers(ts=_ts(minutes_ago=1), alert=True),
+                             journal_events=_green_scalp_journal(), now=NOW)
+    assert r["state"] != "CANDIDATE"
+    assert r["posture"] == "FLAT_NO_TRADE"
+    assert any("green_day_preservation_lockout" in s for s in r["reasons"])
+
+
+def test_confirmed_candidate_watch_after_green_scalp_stays_flat():
+    cdec = {"decision": "CONFIRM_ENTRY", "candidate": {"ticker": "SPY", "direction": "bullish"},
+            "ts": _ts(minutes_ago=1)}
+    r = ls.derive_loop_state(candidate_decision=cdec, journal_events=_green_scalp_journal(), now=NOW)
+    assert r["posture"] == "FLAT_NO_TRADE"
+    assert r["posture"] != "SCOUT_FRESH_SETUP"
+    assert any("green_day_preservation_lockout" in s for s in r["reasons"])
+
+
+def test_green_closed_plan_alone_locks_fresh_promoted_gate():
+    # The lockout also derives from the closed active_trade plan (gross_pnl > 0, closed today) —
+    # journal exit events are not required for the guard to hold.
+    pm = {"event_type": "postmortem", "trade_id": "SPY-T1", "seq": 9, "ts": _ts(minutes_ago=25)}
+    gate = _entry_decision(decision="enter", execution_allowed=True, seq=11, ts=_ts(minutes_ago=5))
+    r = ls.derive_loop_state(active_trade=_closed_plan(), journal_events=[pm, gate], now=NOW)
+    assert r["state"] == "REVIEWED"
+    assert r["posture"] == "FLAT_NO_TRADE"
+    assert r["executable"] is False
+
+
+def test_red_close_does_not_lock_fresh_promoted_gate():
+    # Falsification: a LOSING close is not green-day preservation — a fresh gate still promotes.
+    journal = _green_scalp_journal()
+    journal[1] = {**journal[1], "realized_pnl": -30.0}
+    gate = _entry_decision(decision="enter", execution_allowed=True, seq=6, ts=_ts(minutes_ago=5))
+    r = ls.derive_loop_state(journal_events=[*journal, gate], now=NOW)
+    assert r["state"] == "PROMOTED"
+    assert r["posture"] == "EXECUTION_READY"
