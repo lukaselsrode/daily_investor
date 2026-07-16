@@ -33,6 +33,14 @@ For the cron/Telegram lane it also emits, on top of the fine-grained state:
                       read_only_fallback / unknown, plus whether live orders are permitted. When the
                       place lane is down but a local read-only probe is fresh, the loop says
                       read_only_fallback and BLOCKS live orders until the MCP place/review lane is back.
+                      When the probe carries POSITION/ORDER/BP counts (``truth``), BROKER TRUTH WINS
+                      over lagging local artifacts (2026-07-16 artifact miss): a fresh probe with ≥1
+                      open option position while the local artifacts read flat/candidate reconciles
+                      to MANAGING; a fresh flat probe (0 positions AND 0 open orders) while the local
+                      plan still reads live reconciles to EXITED (the trade already closed at the
+                      broker — a net-green low-BP stop is CLEAN, never a fault). The reconciled
+                      ``next_action`` names the exact files to rewrite; this module itself stays
+                      read-only and never invents fills.
   * ``artifact_ages`` — as-of timestamp, age, TTL and fresh flag for triggers / candidate / gate /
                       position_decision / active_trade, so staleness is visible, not guessed.
 
@@ -206,6 +214,44 @@ def _fresh_after_close(payload: dict, *, now: datetime | None, close_dt: datetim
     return True, None
 
 
+def _count(v: Any) -> float | None:
+    if v is None or isinstance(v, bool):
+        return None
+    try:
+        out = float(v)
+    except (TypeError, ValueError):
+        return None
+    return out if out == out else None   # NaN guard
+
+
+def _broker_truth(b: dict) -> dict | None:
+    """Position/order/BP counts a broker probe may carry (flat, or under an ``account`` block).
+
+    These are the BROKER-TRUTH reconciliation inputs — extracted verbatim from what the probe
+    reported, never inferred. Returns None when the payload carries no such counts (a bare lane
+    probe), so reconciliation simply stays off."""
+    acct = b.get("account") if isinstance(b.get("account"), dict) else {}
+
+    def pick(*keys: str) -> float | None:
+        for container in (b, acct):
+            for k in keys:
+                v = _count(container.get(k))
+                if v is not None:
+                    return v
+        return None
+
+    truth = {
+        "open_option_positions": pick("nonzero_option_positions_count",
+                                      "open_option_positions_count", "positions_count",
+                                      "open_positions_count"),
+        "open_option_orders": pick("open_option_orders_count", "open_orders_count"),
+        "today_option_orders": pick("today_option_orders_count"),
+        "buying_power": pick("buying_power", "options_buying_power", "account_buying_power"),
+        "cash": pick("cash"),
+    }
+    return truth if any(v is not None for v in truth.values()) else None
+
+
 def classify_broker_lane(broker_health: dict | None, now: datetime | None = None) -> dict:
     """Normalize a SUPPLIED/PROBED broker-health payload into a lane label + live-order permission.
 
@@ -235,11 +281,15 @@ def classify_broker_lane(broker_health: dict | None, now: datetime | None = None
     as_of = b.get("as_of") or b.get("ts") or b.get("checked_at")
     age = _age_minutes(as_of, now)
     source = b.get("source")
+    truth = _broker_truth(b)
 
     def out(lane: str, orders_ok: bool | None, note: str) -> dict:
-        return {"lane": lane, "orders_ok": orders_ok, "as_of": as_of,
-                "age_minutes": round(age, 1) if age is not None else None,
-                "source": source, "note": note}
+        result = {"lane": lane, "orders_ok": orders_ok, "as_of": as_of,
+                  "age_minutes": round(age, 1) if age is not None else None,
+                  "source": source, "note": note}
+        if truth is not None:
+            result["truth"] = truth
+        return result
 
     if not b:
         return out("unknown", None, "no broker-health payload supplied")
@@ -801,6 +851,76 @@ def _posture(payload: dict, broker: dict, *, live_mode: bool = False) -> tuple[s
     return ("FLAT_NO_TRADE", None, None)
 
 
+# Lanes whose position/order counts are trustworthy: a fresh parent-OK probe, or a fresh read-only
+# probe (the read lane exists precisely to verify flatness/positions). stale/down/unknown never are.
+_TRUTH_LANES = ("ok", "read_only_fallback")
+
+
+def _reconcile_broker_truth(payload: dict, broker: dict, plan: dict,
+                            now: datetime | None) -> dict:
+    """BROKER TRUTH WINS: reconcile the resolved loop state against a FRESH probe's position/order
+    counts, so a check-in never narrates flat/candidate while the broker holds a live option
+    position, and never narrates a live/blind position after the broker went flat (the 2026-07-16
+    artifact miss: two agentic scalps opened+closed at the broker while every local artifact —
+    active_trade/active_state/broker_health/journal — kept the prior day's state).
+
+    Case A — probe shows ≥1 open option position but the local artifacts resolved to a NON-live
+    state: the controller is holding a trade the local files lag. Surface MANAGING (manage before
+    scan) + the exact reconcile instruction. The probe carries counts, not contracts, so the
+    context names no symbol — the position watch identifies it from the live snapshot.
+    Case B — probe shows FLAT (0 open option positions AND 0 open option orders, both explicitly
+    reported) while the local plan/decision still reads live: the trade already closed at the
+    broker (e.g. an agentic harvest). Surface EXITED — journal the close + postmortem — instead of
+    ENTERED / DEGRADED "holding blind". A net-green day that ends with low BP is a CLEAN stop,
+    never a fault.
+    A stale, undated, down, or unknown probe NEVER reconciles: outdated counts are not live truth.
+    Pure + read-only — this fixes the REPORTED state and instructions only; the controller owns the
+    artifact files and this module never invents fills or places orders."""
+    truth = broker.get("truth") or {}
+    age = broker.get("age_minutes")
+    if (not truth or broker.get("lane") not in _TRUTH_LANES
+            or age is None or age > BROKER_STALE_MINUTES):
+        return payload
+    positions = truth.get("open_option_positions")
+    orders = truth.get("open_option_orders")
+    prior = payload.get("state")
+
+    # Case A: live at the broker, flat/candidate/gate locally.
+    if positions is not None and positions > 0 and not payload.get("live"):
+        out = _payload("MANAGING", [
+            f"BROKER TRUTH: {positions:.0f} open option position(s) at the broker but local "
+            f"artifacts resolved {prior} — active_trade.json/position_decision.json lag reality",
+            *(payload.get("reasons") or []),
+        ], now, live=True, context={
+            "broker_open_option_positions": positions,
+            "reconciled_from_state": prior})
+        out["next_action"] = ("RECONCILE NOW: rewrite data/odte/active_trade.json from broker truth "
+                              "(the open position + orders), then run the position watch with a "
+                              "fresh live snapshot — manage the live trade before any scan")
+        out["next_command"] = ("odte-position --snapshot <live.json>  "
+                               "# after rewriting active_trade.json from broker truth")
+        out["reconciliation"] = "broker_open_position_overrides_flat_artifacts"
+        return out
+
+    # Case B: flat at the broker, live locally.
+    if (payload.get("live") and positions is not None and positions <= 0
+            and orders is not None and orders <= 0):
+        out = _payload("EXITED", [
+            "BROKER TRUTH: flat (0 open option positions, 0 open option orders) but the local "
+            f"plan/decision still read live ({prior}) — the trade already closed at the broker",
+            *(payload.get("reasons") or []),
+        ], now, live=False, context={
+            "trade_id": plan.get("trade_id"), "underlying": plan.get("underlying"),
+            "plan_status": (str(plan.get("status") or "") or None),
+            "reconciled_from_state": prior})
+        out["next_action"] = ("RECONCILE NOW: mark data/odte/active_trade.json closed with the real "
+                              "exit fills, journal the close + postmortem, then stand down — a "
+                              "closed net-green day with low BP is a clean stop, not a fault")
+        out["reconciliation"] = "broker_flat_overrides_live_artifacts"
+        return out
+    return payload
+
+
 def derive_loop_state(active_trade: dict | None = None,
                       position_decision: dict | None = None,
                       active_candidate: dict | None = None,
@@ -824,6 +944,10 @@ def derive_loop_state(active_trade: dict | None = None,
                                   triggers=triggers, journal_events=journal_events, errors=errors,
                                   now=now, stale_decision_minutes=stale_decision_minutes)
     broker = classify_broker_lane(broker_health, now)
+    # BROKER TRUTH WINS: a fresh probe's position/order counts reconcile a lagging local resolution
+    # (open position ⇒ MANAGING; confirmed flat while local reads live ⇒ EXITED) BEFORE the posture
+    # is derived, so the check-in narrates reality, not the stale artifacts.
+    payload = _reconcile_broker_truth(payload, broker, _dict(active_trade), now)
     posture, action_override, command_override = _posture(payload, broker, live_mode=live_mode)
     payload["posture"] = posture
     payload["broker_lane"] = broker
@@ -961,6 +1085,10 @@ def render_markdown(payload: dict) -> str:
         orders = broker.get("orders_ok")
         flag = "live orders OK" if orders is True else "live orders BLOCKED" if orders is False else "orders unknown"
         lines.append(f"Broker lane: **{broker.get('lane')}** ({flag}) — {broker.get('note')}  ")
+        truth = broker.get("truth") or {}
+        truth_bits = [f"{k.replace('_', ' ')}: {v:g}" for k, v in truth.items() if v is not None]
+        if truth_bits:
+            lines.append(f"Broker truth: {' · '.join(truth_bits)}  ")
         if broker.get("refresh_command"):
             lines.append(f"Refresh: {broker.get('refresh_command')}  ")
     lines.append("")

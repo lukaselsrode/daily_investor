@@ -974,3 +974,162 @@ def test_red_close_does_not_lock_fresh_promoted_gate():
     r = ls.derive_loop_state(journal_events=[*journal, gate], now=NOW)
     assert r["state"] == "PROMOTED"
     assert r["posture"] == "EXECUTION_READY"
+
+
+# --- BROKER TRUTH WINS: fresh probe position/order counts reconcile lagging local artifacts ----
+# REGRESSION (2026-07-16 artifact miss): two agentic 1DTE scalps (SPY 753P +21%, IWM 297C +20%)
+# opened AND closed at the broker while every local artifact kept the prior day's state — check-ins
+# read flat/stale/candidate during a live hold and could read live/blind after the flat close.
+
+_1DTE_EXPIRY = (NOW + timedelta(days=1)).date().isoformat()
+
+
+def _todays_two_scalp_journal():
+    """The 2026-07-16 net-green day: SPY 753P 1DTE put +21%, then IWM 297C 1DTE call +20%."""
+    def trade(tid, sym, otype, strike, entry, exit_p, pnl, seq0, mins_ago):
+        base = {"trade_id": tid, "underlying": sym, "option_type": otype, "strike": strike,
+                "expiration_date": _1DTE_EXPIRY}       # 1DTE vehicle — selected by BP/quality, OK
+        return [
+            {**base, "event_type": "order_filled", "seq": seq0, "ts": _ts(minutes_ago=mins_ago),
+             "quantity": 1, "entry_price": entry},
+            {**base, "event_type": "order_closed", "seq": seq0 + 1,
+             "ts": _ts(minutes_ago=mins_ago - 10), "quantity": 1, "exit_price": exit_p,
+             "realized_pnl": pnl},
+        ]
+    return [*trade("SPY-753P-1DTE", "SPY", "put", 753, 0.98, 1.19, 21.0, 1, 120),
+            *trade("IWM-297C-1DTE", "IWM", "call", 297, 0.50, 0.60, 20.0, 3, 60)]
+
+
+def test_classify_broker_lane_extracts_position_order_bp_truth():
+    lane = ls.classify_broker_lane(_handoff(nonzero_option_positions_count=2,
+                                            open_option_orders_count=1,
+                                            today_option_orders_count=4,
+                                            buying_power=7.6, cash=407.34), now=NOW)
+    assert lane["truth"] == {"open_option_positions": 2.0, "open_option_orders": 1.0,
+                             "today_option_orders": 4.0, "buying_power": 7.6, "cash": 407.34}
+    # nested account block (active_state.json-style probes) also works
+    lane2 = ls.classify_broker_lane({"parent_robinhood_mcp": "OK",
+                                     "live_review_place_allowed": True,
+                                     "as_of": _ts(minutes_ago=0),
+                                     "account": {"positions_count": 1, "open_orders_count": 0,
+                                                 "buying_power": 12.5}}, now=NOW)
+    assert lane2["truth"]["open_option_positions"] == 1.0
+    assert lane2["truth"]["open_option_orders"] == 0.0
+    assert lane2["truth"]["buying_power"] == 12.5
+    # a bare lane probe (no counts) carries no truth block — reconciliation stays off
+    assert "truth" not in ls.classify_broker_lane(_handoff(), now=NOW)
+
+
+def test_broker_open_position_overrides_flat_local_artifacts():
+    # DURING the live hold: local artifacts are yesterday's flat state, broker shows a position.
+    # The check-in must say MANAGING / MANAGE_POSITION and name the reconcile, never flat/stale.
+    bh = _handoff(nonzero_option_positions_count=1, open_option_orders_count=0, buying_power=12.0)
+    r = ls.derive_loop_state(broker_health=bh, live_mode=True, now=NOW)
+    assert r["state"] == "MANAGING"
+    assert r["posture"] == "MANAGE_POSITION"
+    assert r["live"] is True
+    assert r["reconciliation"] == "broker_open_position_overrides_flat_artifacts"
+    assert any("BROKER TRUTH" in s for s in r["reasons"])
+    assert "active_trade.json" in r["next_action"]
+    assert "odte-position" in r["next_command"]
+
+
+def test_broker_open_position_outranks_fresh_local_candidate():
+    # Local artifacts say "candidate on the board" while the broker holds a live position:
+    # manage before scan — broker truth outranks every pre-entry artifact.
+    r = ls.derive_loop_state(triggers=_candidate_triggers(ts=_ts(minutes_ago=1), alert=True),
+                             broker_health=_handoff(nonzero_option_positions_count=1),
+                             live_mode=True, now=NOW)
+    assert r["state"] == "MANAGING"
+    assert r["posture"] == "MANAGE_POSITION"
+    assert r["context"]["reconciled_from_state"] == "CANDIDATE"
+
+
+def test_broker_open_position_with_read_only_lane_still_surfaces_live():
+    # Read-only probe verifies the position but the place lane can't back an exit: the live trade
+    # must still surface (MANAGING) with the broker block on top — never a flat/candidate tick.
+    bh = _handoff(parent_robinhood_mcp="DOWN", live_review_place_allowed=False,
+                  nonzero_option_positions_count=1)
+    r = ls.derive_loop_state(broker_health=bh, live_mode=True, now=NOW)
+    assert r["state"] == "MANAGING"
+    assert r["posture"] == "BROKER_DEGRADED"
+    assert r["executable"] is False
+
+
+def test_broker_flat_close_overrides_open_local_plan():
+    # AFTER the agentic close: broker is flat (0 positions / 0 open orders) but active_trade.json
+    # still says open. That is a completed trade, not ENTERED/DEGRADED "holding blind".
+    plan = _open_plan(underlying="SPY", option_type="put", strike_price=753,
+                      expiration_date=_1DTE_EXPIRY, trade_id="SPY-753P-1DTE", entry_price=0.98)
+    bh = _handoff(nonzero_option_positions_count=0, open_option_orders_count=0,
+                  today_option_orders_count=4, buying_power=7.6)
+    r = ls.derive_loop_state(active_trade=plan, journal_events=_todays_two_scalp_journal(),
+                             broker_health=bh, live_mode=True, now=NOW)
+    assert r["state"] == "EXITED"
+    assert r["posture"] == "FLAT_NO_TRADE"
+    assert r["executable"] is False
+    assert r["reconciliation"] == "broker_flat_overrides_live_artifacts"
+    assert r["context"]["trade_id"] == "SPY-753P-1DTE"
+    assert "clean stop" in r["next_action"]
+    assert "postmortem" in r["next_command"] or "journal" in r["next_command"]
+
+
+def test_broker_flat_close_overrides_stale_live_read():
+    # Previously this read STALE_DATA_BLOCKED / "holding blind" — with the broker confirming flat,
+    # the stale local position read is a lagging artifact, not a live risk.
+    r = ls.derive_loop_state(active_trade=_open_plan(),
+                             position_decision={"decision": "HOLD", "underlying": "SPY",
+                                                "ts": _ts(minutes_ago=45)},
+                             broker_health=_handoff(nonzero_option_positions_count=0,
+                                                    open_option_orders_count=0),
+                             live_mode=True, now=NOW)
+    assert r["state"] == "EXITED"
+    assert r["posture"] == "FLAT_NO_TRADE"
+    assert r["posture"] != "STALE_DATA_BLOCKED"
+
+
+def test_todays_net_green_low_bp_day_ends_clean_flat_no_new_entry():
+    # The full acceptance scenario: two 1DTE scalps banked net green, broker flat, BP down to $7.60,
+    # and a fresh candidate still on the board. The day must end FLAT_NO_TRADE with the green-day
+    # lockout blocking re-entry — low BP and the 1DTE vehicle are neither errors nor violations.
+    bh = _handoff(nonzero_option_positions_count=0, open_option_orders_count=0,
+                  today_option_orders_count=4, buying_power=7.6, cash=407.34)
+    r = ls.derive_loop_state(triggers=_candidate_triggers(ts=_ts(minutes_ago=1), alert=True),
+                             journal_events=_todays_two_scalp_journal(),
+                             broker_health=bh, live_mode=True, now=NOW)
+    assert r["posture"] == "FLAT_NO_TRADE"
+    assert "STALE" not in r["posture"] and r["posture"] != "BROKER_DEGRADED"
+    assert r["executable"] is False
+    assert any("green_day_preservation_lockout" in s for s in r["reasons"])
+    assert r["broker_lane"]["truth"]["buying_power"] == 7.6
+    joined = " ".join(r["reasons"] + r.get("notes", [])).lower()
+    assert "violation" not in joined and "error" not in joined
+
+
+def test_1dte_live_plan_is_managing_not_a_violation():
+    # A 1DTE contract selected by the BP/quality gates is a legitimate vehicle: a live 1DTE plan
+    # with a fresh decision manages normally — no violation, no degrade, no vehicle complaint.
+    plan = _open_plan(expiration_date=_1DTE_EXPIRY)
+    r = ls.derive_loop_state(active_trade=plan,
+                             position_decision={"decision": "HOLD", "underlying": "SPY",
+                                                "ts": _ts(minutes_ago=0)},
+                             broker_health=_handoff(nonzero_option_positions_count=1),
+                             live_mode=True, now=NOW)
+    assert r["state"] == "MANAGING"
+    assert r["posture"] == "MANAGE_POSITION"
+    joined = " ".join(r["reasons"]).lower()
+    assert "violation" not in joined and "1dte" not in joined
+
+
+def test_stale_or_undated_broker_truth_never_reconciles():
+    # A 30m-old probe claiming an open position must NOT resurrect a live trade (outdated counts
+    # are not live truth) — and an undated probe can't reconcile either.
+    stale = ls.derive_loop_state(broker_health=_handoff(nonzero_option_positions_count=1,
+                                                        as_of=_ts(minutes_ago=30)),
+                                 live_mode=True, now=NOW)
+    assert stale["state"] == "SCAN"
+    assert stale["posture"] == "FLAT_NO_TRADE"
+    undated = ls.derive_loop_state(broker_health=_handoff(nonzero_option_positions_count=1,
+                                                          as_of=None),
+                                   live_mode=True, now=NOW)
+    assert undated["state"] == "SCAN"
