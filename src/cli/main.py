@@ -506,9 +506,12 @@ def _cmd_odte_entry_gate(rest: list[str]) -> None:
     # upstream artifacts (watchdog trigger, candidate, day/vehicle score, gamma map, broker snapshot).
     # Records intent ONLY — places NO orders, makes NO broker/network/LLM calls. execution_allowed is
     # True only when every required gate is explicitly true and the record is not scan_only/restricted.
-    # scan_only is INHERITED from the trigger/candidate by default (the watchdog lane is scan_only=true);
-    # --scan-only forces it, and --promote-to-execution is the explicit opt-in to demote an inherited
-    # scan_only record to the execution tier. --journal appends an entry_decision event (idempotent).
+    # scan_only is INHERITED from the trigger/candidate by default (the watchdog lane is scan_only=true).
+    # A fresh identity-matched --candidate-decision whose decision is CONFIRM_ENTRY may cross that
+    # boundary in the same controller tick; --scan-only remains a final veto. --promote-to-execution
+    # is DEPRECATED and FAIL-CLOSED (2026-07-23 incident): it can no longer make the record executable.
+    # --confirmations supplies the three explicit final live booleans consumed again by the lease tier.
+    # --journal appends an entry_decision event (idempotent).
     # Machine-readable next step: the payload carries gates + failing_gates/unknown_gates +
     # next_action/next_command — a passed gate points at broker review/place (standing auth) then the
     # position watch; a BP/vehicle-fit fail points at scanning the other ETF vehicles (QQQ/SPY/IWM)
@@ -521,12 +524,22 @@ def _cmd_odte_entry_gate(rest: list[str]) -> None:
 
     from data.odte_entry_gate import render_markdown, run_entry_gate
     from data.odte_journal import DEFAULT_JOURNAL_PATH
+    if "--help" in rest or "-h" in rest:
+        print("Usage: odte-entry-gate [--trigger PATH] [--candidate PATH] "
+              "[--candidate-decision PATH] [--day-score PATH] [--vehicle-score PATH] "
+              "[--gamma PATH] [--broker PATH] [--confirmations PATH] "
+              "[--scan-only] [--journal] [--json] [--write]\n"
+              "A fresh identity-matched CONFIRM_ENTRY candidate decision may cross the scan→gate "
+              "boundary; stale/mismatched decisions and bare promotion fail closed. Places NO orders.")
+        return
     try:
         payload = run_entry_gate(
             trigger_path=_flag_value(rest, "--trigger"),
             trigger_json=_flag_value(rest, "--trigger-json"),
             candidate_path=_flag_value(rest, "--candidate"),
             candidate_json=_flag_value(rest, "--candidate-json"),
+            candidate_decision_path=_flag_value(rest, "--candidate-decision"),
+            candidate_decision_json=_flag_value(rest, "--candidate-decision-json"),
             day_score_path=_flag_value(rest, "--day-score"),
             day_score_json=_flag_value(rest, "--day-score-json"),
             vehicle_score_path=_flag_value(rest, "--vehicle-score"),
@@ -535,9 +548,11 @@ def _cmd_odte_entry_gate(rest: list[str]) -> None:
             gamma_json=_flag_value(rest, "--gamma-json"),
             broker_path=_flag_value(rest, "--broker"),
             broker_json=_flag_value(rest, "--broker-json"),
-            # Default None => INHERIT scan_only from the trigger/candidate (watchdog is scan_only=True);
-            # --scan-only forces it True. --promote-to-execution is the explicit opt-in to demote an
-            # (inherited) scan_only record to the execution tier.
+            confirmations_path=_flag_value(rest, "--confirmations"),
+            confirmations_json=_flag_value(rest, "--confirmations-json"),
+            # Default None => inherit scan_only, then allow only the fresh identity-matched
+            # candidate-decision transition. --scan-only forces a final veto. The deprecated
+            # promotion flag remains fail-closed and cannot substitute for CONFIRM_ENTRY + lease.
             scan_only=True if "--scan-only" in rest else None,
             promote_to_execution="--promote-to-execution" in rest,
             journal_path=_flag_value(rest, "--journal-path") or DEFAULT_JOURNAL_PATH,
@@ -550,11 +565,126 @@ def _cmd_odte_entry_gate(rest: list[str]) -> None:
     if "--journal" in rest:
         from data.odte_journal import append_decision_journal, event_from_entry_gate
         ev = event_from_entry_gate(payload)
-        append_decision_journal(ev, source="entry_gate", event_type="entry_decision",
+        journal_result = append_decision_journal(
+            ev,
+            source="entry_gate",
+            event_type="entry_decision",
+            journal_path=_flag_value(rest, "--journal-path"),
+        )
+        payload["journal_append"] = {
+            "status": journal_result.get("status"),
+            "event_id": journal_result.get("event_id"),
+        }
+        if journal_result.get("status") == "error":
+            print("odte-entry-gate: journal append failed; execution gate withheld", file=sys.stderr)
+            sys.exit(2)
+    print(json.dumps(payload, separators=(",", ":"), default=str) if "--json" in rest
+          else render_markdown(payload))
+
+
+
+def _cmd_odte_execution_authorize(rest: list[str]) -> None:
+    # PURE/OFFLINE execution-lease authorization — the ONE tier that mints execution authority, as
+    # a SINGLE-USE short-lived lease (default 30s TTL, hard cap 60s) bound to one exact contract/
+    # direction/quantity/price. Consumes the entry gate, candidate decision, vehicle score, broker
+    # snapshot, and market snapshot; every input must be fresh (per-input TTLs) and identity must
+    # agree EXACTLY, else it fails closed with named reason codes. Default policy is PARTIAL_ACCOUNT
+    # (1 contract, debit <= 50% BP); FULL_ACCOUNT_A_PLUS requires an explicit --policy with the
+    # complete management plan (trigger/invalidation/target/scratch rail/cadence/max premium loss).
+    # Places NO orders, makes NO broker/network/LLM calls. --write stores the payload at
+    # data/odte/execution_lease.json; --journal appends an execution_lease_issued event.
+    import json
+
+    from data.odte_execution_policy import render_markdown, run_execution_authorize
+    if "--help" in rest or "-h" in rest:
+        print("Usage: odte-execution-authorize --gate PATH|--gate-json '{...}' "
+              "--candidate-decision PATH|--candidate-decision-json '{...}' "
+              "--vehicle-score PATH|--vehicle-score-json '{...}' --broker PATH|--broker-json "
+              "'{...}' --market PATH|--market-json '{...}' [--policy PATH|--policy-json '{...}'] "
+              "[--state-dir DIR] [--json] [--write] [--journal] [--journal-path PATH]\n"
+              "Mints (or refuses, fail-closed) a SINGLE-USE short-lived execution lease. "
+              "Places NO orders.")
+        return
+    try:
+        payload = run_execution_authorize(
+            gate_path=_flag_value(rest, "--gate"),
+            gate_json=_flag_value(rest, "--gate-json"),
+            candidate_decision_path=_flag_value(rest, "--candidate-decision"),
+            candidate_decision_json=_flag_value(rest, "--candidate-decision-json"),
+            vehicle_score_path=_flag_value(rest, "--vehicle-score"),
+            vehicle_score_json=_flag_value(rest, "--vehicle-score-json"),
+            broker_path=_flag_value(rest, "--broker"),
+            broker_json=_flag_value(rest, "--broker-json"),
+            market_path=_flag_value(rest, "--market"),
+            market_json=_flag_value(rest, "--market-json"),
+            policy_path=_flag_value(rest, "--policy"),
+            policy_json=_flag_value(rest, "--policy-json"),
+            state_dir=_flag_value(rest, "--state-dir"),
+            write="--write" in rest,
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"odte-execution-authorize: could not read/parse input: {exc}")
+        sys.exit(2)
+    if "--journal" in rest:
+        from data.odte_journal import append_decision_journal, event_from_execution_lease
+        ev = event_from_execution_lease(payload)
+        append_decision_journal(ev, source="execution_authorize",
+                                event_type="execution_lease_issued",
                                 journal_path=_flag_value(rest, "--journal-path"))
     print(json.dumps(payload, separators=(",", ":"), default=str) if "--json" in rest
           else render_markdown(payload))
 
+
+def _cmd_odte_order_guard(rest: list[str]) -> None:
+    # PURE/OFFLINE pending-order cancel-first state machine. Consumes fresh broker ORDER truth
+    # (--order PATH / --order-json, caller-supplied — this repo never calls the broker), the
+    # execution lease (--lease, default data/odte/execution_lease.json), and the current market
+    # snapshot, and classifies NO_ORDER / PENDING_FRESH / CANCEL_STALE_ENTRY / CANCEL_THESIS_INVALID
+    # / FILLED_FRESH / FILLED_WITHOUT_VALID_LEASE / BROKER_MISMATCH_BLOCKED. An unfilled order past
+    # its lease is CANCEL_STALE_ENTRY immediately; a fill outside a valid lease is an execution
+    # safety incident (new entries prohibited). A submitted order burns its lease in
+    # data/odte/consumed_leases.json (single use). --write stores order_guard_decision.json;
+    # --journal appends the matching journal event(s). Places NO orders.
+    import json
+
+    from data.odte_order_guard import render_markdown, run_order_guard
+    if "--help" in rest or "-h" in rest:
+        print("Usage: odte-order-guard --order PATH|--order-json '{...}' "
+              "[--lease PATH|--lease-json '{...}'] [--market PATH|--market-json '{...}'] "
+              "[--state-dir DIR] [--json] [--write] [--journal] [--journal-path PATH]\n"
+              "Cancel-first pending-order state machine over caller-supplied broker order truth. "
+              "Places NO orders.")
+        return
+    try:
+        payload = run_order_guard(
+            order_path=_flag_value(rest, "--order"),
+            order_json=_flag_value(rest, "--order-json"),
+            lease_path=_flag_value(rest, "--lease"),
+            lease_json=_flag_value(rest, "--lease-json"),
+            market_path=_flag_value(rest, "--market"),
+            market_json=_flag_value(rest, "--market-json"),
+            state_dir=_flag_value(rest, "--state-dir"),
+            write="--write" in rest,
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"odte-order-guard: could not read/parse input: {exc}")
+        sys.exit(2)
+    if "--journal" in rest:
+        from data.odte_journal import append_decision_journal, event_from_order_guard
+        jp = _flag_value(rest, "--journal-path")
+        if payload.get("lease_consumed_now"):
+            append_decision_journal({"event_type": "execution_lease_consumed",
+                                     "lease_id": payload.get("lease_id"),
+                                     "underlying": payload.get("underlying"),
+                                     "guard_state": payload.get("state")},
+                                    source="order_guard",
+                                    event_type="execution_lease_consumed", journal_path=jp)
+        ev = event_from_order_guard(payload)
+        if ev is not None:
+            append_decision_journal(ev, source="order_guard", event_type=ev["event_type"],
+                                    journal_path=jp)
+    print(json.dumps(payload, separators=(",", ":"), default=str) if "--json" in rest
+          else render_markdown(payload))
 
 
 def _cmd_odte_candidate_watch(rest: list[str]) -> None:
@@ -809,6 +939,8 @@ _COMMANDS: dict[str, Callable[[list[str]], None]] = {
     "odte-vehicle-score": _cmd_odte_vehicle_score,
     "odte-day-score": _cmd_odte_day_score,
     "odte-entry-gate": _cmd_odte_entry_gate,
+    "odte-execution-authorize": _cmd_odte_execution_authorize,
+    "odte-order-guard": _cmd_odte_order_guard,
     "odte-candidate-watch": _cmd_odte_candidate_watch,
     "odte-fmp-context": _cmd_odte_fmp_context,
     "odte-loop-status": _cmd_odte_loop_status,
@@ -945,10 +1077,36 @@ COMMANDS
                            (day_regime + vehicle + directional_thesis + account) is explicitly true and
                            the record is not scan_only / restricted; missing inputs fail closed.
                            scan_only is INHERITED from the trigger/candidate by default (the watchdog
-                           lane is scan_only=true); --scan-only forces it, and --promote-to-execution
-                           is the explicit opt-in to demote an inherited scan_only record to the
-                           execution tier. Records intent ONLY — no orders/broker/network. --journal
-                           appends an entry_decision event to the decision journal; --json/--write.
+                           lane is scan_only=true); --scan-only forces it. --promote-to-execution is
+                           DEPRECATED and fail-closed: it answers with execution_lease_required —
+                           execution authority is minted ONLY by odte-execution-authorize (a
+                           short-lived exact-identity lease). Records intent ONLY — no orders/
+                           broker/network. --journal appends an entry_decision event; --json/--write.
+  odte-execution-authorize PURE/OFFLINE execution-lease authorization — the ONE tier that mints
+                           execution authority, as a SINGLE-USE short-lived lease (default 30s TTL,
+                           hard cap 60s) bound to one exact symbol/direction/contract/quantity/price
+                           ceiling. Inputs: --gate, --candidate-decision, --vehicle-score, --broker,
+                           --market (each PATH or *-json '{...}'), --policy for risk mode/TTL/
+                           quantity. Every input must be fresh within its own TTL and identity must
+                           agree EXACTLY, else fail closed with named reason codes. Default policy is
+                           PARTIAL_ACCOUNT (1 contract, debit <= 50% of BP); FULL_ACCOUNT_A_PLUS
+                           needs an explicit policy with the complete management plan (trigger,
+                           invalidation, target, scratch rail, cadence, max premium loss) — an A+
+                           label alone never sets size. Places NO orders. --write stores
+                           data/odte/execution_lease.json; --journal appends execution_lease_issued.
+  odte-order-guard         PURE/OFFLINE pending-order cancel-first state machine. Consumes fresh
+                           broker ORDER truth (--order / --order-json, caller-supplied), the
+                           execution lease (--lease, default data/odte/execution_lease.json), and
+                           the market snapshot; classifies NO_ORDER / PENDING_FRESH /
+                           CANCEL_STALE_ENTRY / CANCEL_THESIS_INVALID / FILLED_FRESH /
+                           FILLED_WITHOUT_VALID_LEASE / BROKER_MISMATCH_BLOCKED. An unfilled order
+                           past its lease TTL must be cancelled IMMEDIATELY (never extended); a fill
+                           outside a valid lease is an execution safety incident (new entries
+                           prohibited). A submitted order burns its lease (single use,
+                           data/odte/consumed_leases.json). Places NO orders. --write stores
+                           data/odte/order_guard_decision.json; --journal appends the matching
+                           entry_order_pending / entry_order_cancelled_stale /
+                           execution_safety_incident / execution_lease_consumed events.
   odte-candidate-watch     PURE/OFFLINE pre-entry candidate HAWK lane — watches a potential ETF/index
                            setup until CONFIRM_ENTRY / KEEP_WATCHING / DEGRADED_NO_TRADE /
                            EXPIRED_NO_CONFIRMATION / BROKER_BLOCKED. Supports SPY/QQQ/XSP/IWM tape-only

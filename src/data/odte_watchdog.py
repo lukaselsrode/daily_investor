@@ -65,6 +65,44 @@ def _candidate_key(candidate: dict | None) -> str | None:
     return f"{str(tk).upper()}:{direction}"
 
 
+def _scorecard_market_candidate(report: dict) -> dict | None:
+    """Synthesize a scan-only SPY market candidate when the broad scorecard is directional.
+
+    The social report can produce a real market read (``CALL-leaning`` / ``PUT-leaning``) without a
+    single-name chatter candidate. That used to collapse the watchdog to ``candidate=null`` and the
+    live loop to ``FLAT_NO_TRADE`` even while SPY/QQQ/VIXY were giving a directional setup — exactly
+    the kind of "wait for fresh confirmation" / no-nudge stall the controller is supposed to avoid.
+
+    This synthetic candidate is still scan-only and non-executable; it simply keeps the state machine
+    in CANDIDATE / WAIT_FRESH_CONFIRMATION so the controller runs opening HAWK checks, contract scan,
+    and entry gate instead of going idle.
+    """
+    raw_scorecard = report.get("scorecard")
+    scorecard: dict = raw_scorecard if isinstance(raw_scorecard, dict) else {}
+    verdict = str(scorecard.get("verdict") or "").strip()
+    direction = {"CALL-leaning": "bullish", "PUT-leaning": "bearish"}.get(verdict)
+    if not direction:
+        return None
+    raw_trend = report.get("spy_trend")
+    raw_social = report.get("social_intent")
+    trend: dict = raw_trend if isinstance(raw_trend, dict) else {}
+    social: dict = raw_social if isinstance(raw_social, dict) else {}
+    return {
+        "ticker": "SPY",
+        "direction": direction,
+        "mentions": social.get("n_docs") or 0,
+        "sentiment": social.get("intent"),
+        "source": "market_scorecard",
+        "market_verdict": verdict,
+        "scorecard_confidence": scorecard.get("confidence"),
+        "scorecard_reasons": list(scorecard.get("reasons") or [])[:4],
+        "observed_market_context": {
+            "pct_vs_prev_close": trend.get("pct_vs_prev_close"),
+            "above_vwap": trend.get("above_vwap"),
+        },
+    }
+
+
 # Confirmations a watchdog candidate ALWAYS requires before it could ever be acted on. The watchdog
 # is a decision-support/trigger lane, never an execution lane — so these are non-negotiable.
 _REQUIRED_CONFIRMATIONS = ("human_review", "live_chain_recheck", "spread_cap_check", "budget_check")
@@ -152,7 +190,7 @@ def run_watchdog(state_dir: str = DEFAULT_STATE_DIR, policy_path: str | None = N
 
     scorecard = report.get("scorecard") or {}
     spy_verdict = scorecard.get("verdict", "OBSERVE")
-    candidate = report.get("candidate")
+    candidate = report.get("candidate") or _scorecard_market_candidate(report)
     candidate_key = _candidate_key(candidate)
     restricted_chatter = sorted({
         str(c.get("ticker")).upper()

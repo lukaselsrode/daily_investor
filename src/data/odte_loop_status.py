@@ -55,8 +55,10 @@ Inputs (all read by ``run_loop_status``; ``derive_loop_state`` is the pure core,
 States
   SCAN       nothing actionable — keep scanning (``odte-watchdog``)
   CANDIDATE  a non-restricted candidate is on the board, scan_only/observe — assemble the gate
-  GATED      an entry-gate record exists but is NOT execution-allowed — promote only if gates pass
-  PROMOTED   an entry-gate record is execution-allowed — the manager may enter, then watch
+  GATED      an entry-gate record exists but is NOT execution-allowed — refresh inputs, then lease
+  PROMOTED   an entry-gate record is execution-allowed — mint a lease, then broker review, then watch
+  PENDING_ORDER  an ENTRY order is live at the broker (or must be cancelled) — the order-guard lane
+             outranks scan/candidate/gate work entirely; cancel-first on TTL/thesis/incident
   ENTERED    a plan is open but no live decision computed yet — start the position watch
   MANAGING   a live position with a current decision (HOLD or an actionable exit trigger)
   EXITED     the last trade closed and has no postmortem yet — record the review
@@ -66,7 +68,7 @@ States
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -85,9 +87,16 @@ JOURNAL_FILENAME = "decision_journal.jsonl"
 # (canonical schema in classify_broker_lane / broker_health.example.json). loop-status auto-folds it
 # so the lane truth rides in a file, not ad-hoc chat prose. A stale file fails closed (orders blocked).
 BROKER_HEALTH_FILENAME = "broker_health.json"
+# Execution-safety artifacts (2026-07-23 delayed-fill remediation): the single-use lease that
+# `odte-execution-authorize` minted, and the latest `odte-order-guard` decision. A live/cancel-
+# required pending ENTRY order OUTRANKS scanning and new-entry work — cancel first, then cycle.
+EXECUTION_LEASE_FILENAME = "execution_lease.json"
+ORDER_GUARD_FILENAME = "order_guard_decision.json"
 
-# Ordered loop states (scan → review), plus the DEGRADED fault state.
-LOOP_STATES = ("SCAN", "CANDIDATE", "GATED", "PROMOTED", "ENTERED", "MANAGING",
+# Ordered loop states (scan → review), plus the DEGRADED fault state. PENDING_ORDER is the
+# order-guard lane: an entry order is live at the broker (or needs cancelling) — it outranks the
+# whole scan/candidate/gate funnel.
+LOOP_STATES = ("SCAN", "CANDIDATE", "GATED", "PROMOTED", "PENDING_ORDER", "ENTERED", "MANAGING",
                "EXITED", "REVIEWED", "DEGRADED")
 
 # A plan whose status is one of these is NOT a live position (mirrors odte_position._INACTIVE_STATUS).
@@ -113,10 +122,22 @@ SUPERSEDE_GATE_MINUTES = 15
 STALE_ENTRY_GATE_MINUTES = 15
 STALE_CANDIDATE_MINUTES = 10
 STALE_TRIGGER_MINUTES = 30
+# CONFIRMED-CANDIDATE SAME-TICK SLA: an identity-bound CONFIRM_ENTRY must be converted (final live
+# refresh + odte-entry-gate) within this window. loop-status surfaces the countdown so the
+# controller sees a deadline, not a suggestion; the aged/unaccounted case fails closed as
+# EXECUTION_CONVERSION_FAILURE.
+CONFIRM_CONVERSION_SLA_SECONDS = 60
 # A broker-health probe older than this can't be called live truth: the chat-lane MCP can report
 # "transport down" while a CLI probe from minutes ago read healthy, so an aged payload is treated as
 # stale (orders blocked) rather than fresh confirmation that the place lane is up.
 BROKER_STALE_MINUTES = 5
+# An order-guard decision older than this is not current work: pending 0DTE entry orders live on a
+# seconds scale, so an aged guard artifact is ignored (with a note) rather than resurrected.
+ORDER_GUARD_STALE_MINUTES = 5
+# Guard states that make the order lane CURRENT work (NO_ORDER / FILLED_FRESH fall through: nothing
+# pending, or the fill is the position lane's job).
+_ACTIVE_GUARD_STATES = ("PENDING_FRESH", "CANCEL_STALE_ENTRY", "CANCEL_THESIS_INVALID",
+                        "FILLED_WITHOUT_VALID_LEASE", "BROKER_MISMATCH_BLOCKED")
 # The exact fix for a stale broker_health.json — surfaced verbatim so the controller never has to
 # guess whether "stale" means the broker is down (it doesn't; it means the probe FILE is outdated).
 BROKER_HEALTH_REFRESH_COMMAND = (
@@ -126,8 +147,12 @@ BROKER_HEALTH_REFRESH_COMMAND = (
 
 # Coarse cron-facing posture — one word for what the controller should DO this tick. Layered on top of
 # the fine-grained loop state so a Telegram update reads as an action, not observe-only boilerplate.
+# CANCEL_PENDING_ORDER = a pending entry order must be cancelled NOW (stale lease / dead thesis /
+# safety incident); PENDING_ORDER_GUARD = an order is pending inside its lease — poll the guard.
 POSTURES = ("MANAGE_POSITION", "EXECUTION_READY", "SCOUT_FRESH_SETUP", "WAIT_FRESH_CONFIRMATION",
-            "FLAT_NO_TRADE", "STALE_DATA_BLOCKED", "BROKER_DEGRADED")
+            "FLAT_NO_TRADE", "STALE_DATA_BLOCKED", "BROKER_DEGRADED",
+            "PENDING_ORDER_GUARD", "CANCEL_PENDING_ORDER", "EXECUTION_CONVERSION_FAILURE",
+            "CONVERT_CANDIDATE_NOW")
 # Normalized broker-lane labels for a supplied/probed health payload (this module makes NO broker call).
 BROKER_LANES = ("ok", "read_only_fallback", "down", "stale", "unknown")
 
@@ -152,6 +177,7 @@ _STAGE = {
     "CANDIDATE": ("thesis", False),
     "GATED": ("entry", False),
     "PROMOTED": ("entry", True),
+    "PENDING_ORDER": ("order_guard", False),
     "ENTERED": ("watch", True),
     "MANAGING": ("watch", True),
     "EXITED": ("exit", False),
@@ -372,13 +398,22 @@ def _next_for(state: str, *, live: bool) -> tuple[str, str]:
     if state == "CANDIDATE":
         return ("assemble the thesis→entry gate for the candidate", "odte-entry-gate")
     if state == "GATED":
-        return ("gate not execution-allowed — promote only if every gate passes",
-                "odte-entry-gate --promote-to-execution")
+        return ("gate not execution-allowed — refresh the failing/missing inputs and re-run the "
+                "gate; execution authority then needs a FRESH lease (odte-execution-authorize), "
+                "never a bare promotion",
+                "odte-entry-gate → odte-execution-authorize")
     if state == "PROMOTED":
-        return ("ALL GATES PASSED — do the final live refresh, then broker review/place under "
-                "standing auth via the Hermes MCP lane (this repo places NO orders); after the "
-                "fill, start the position watch",
-                "broker-review-place (Hermes MCP lane) → odte-position --snapshot <live.json>")
+        return ("ALL GATES PASSED — mint a fresh execution lease (odte-execution-authorize), do "
+                "the final live refresh, then broker review/place under standing auth via the "
+                "Hermes MCP lane (this repo places NO orders); run the pending-order guard until "
+                "the fill, then start the position watch",
+                "odte-execution-authorize → broker-review-place (Hermes MCP lane) → "
+                "odte-order-guard → odte-position --snapshot <live.json>")
+    if state == "PENDING_ORDER":
+        return ("a pending ENTRY order is under guard — poll fresh broker order truth and re-run "
+                "the order guard every tick; cancel IMMEDIATELY on TTL expiry or thesis "
+                "invalidation (a stale order is never extended)",
+                "odte-order-guard --order <fresh broker order.json>")
     if state == "ENTERED":
         return ("plan open, no live decision yet — start the position watch",
                 "odte-position --snapshot <live.json>")
@@ -465,13 +500,18 @@ def _trigger_is_inactive(trigger: dict) -> bool:
 
 
 def _gate_consumed_by_no_trade(gate: dict, events: list[dict]) -> bool:
-    """Return True when a same-symbol no-trade event has already acknowledged a non-executable gate.
+    """Return True when a later no-trade event terminally closes the same gate cycle.
 
-    Entry gates are disposable pre-entry artifacts. The journal keeps the audit trail, but loop-status
-    should not keep surfacing the same scan-only/denied gate every cron tick after the controller has
-    already journaled the matching no-trade decision.
+    Non-executable gates are disposable by same-symbol no-trade events. An execution-allowed gate is
+    stronger authority, so it is consumed only by a no-trade event carrying the exact same non-empty
+    candidate fingerprint. This lets authorization/refusal or thesis-invalidation vetoes close a
+    promoted cycle without allowing an unrelated same-symbol no-trade event to cancel live authority.
     """
-    if not gate or gate.get("execution_allowed") is True:
+    if not gate:
+        return False
+    executable = gate.get("execution_allowed") is True
+    gate_fingerprint = str(gate.get("candidate_fingerprint") or "").strip()
+    if executable and not gate_fingerprint:
         return False
     gate_ts = _parse_ts(gate.get("ts"))
     gate_seq = gate.get("seq") if isinstance(gate.get("seq"), (int, float)) else None
@@ -479,6 +519,8 @@ def _gate_consumed_by_no_trade(gate: dict, events: list[dict]) -> bool:
         if not isinstance(ev, dict) or ev.get("event_type") != "no_trade_decision":
             continue
         if not _same_underlying(gate, ev):
+            continue
+        if executable and str(ev.get("candidate_fingerprint") or "").strip() != gate_fingerprint:
             continue
         ev_ts = _parse_ts(ev.get("ts") or ev.get("timestamp") or ev.get("generated_at"))
         if gate_ts is not None and ev_ts is not None:
@@ -491,6 +533,50 @@ def _gate_consumed_by_no_trade(gate: dict, events: list[dict]) -> bool:
     return False
 
 
+# Journal event types that can terminally account for a confirmed candidate identity: the entry
+# converted (gate/order lane picked it up) or was terminally refused. Deliberately ONLY identity-
+# matchable conversion/refusal events — postmortem/execution_safety_incident are day/cycle-scoped
+# (handled by the closed-trade and lockout checks), so they must never resolve a specific contract.
+_CONFIRM_TERMINAL_EVENTS = ("entry_decision", "no_trade_decision", "order_submitted", "order_filled")
+
+
+def _confirm_identity(watched: dict) -> tuple[str, str]:
+    """(option_id, candidate_fingerprint) of a watched candidate, normalized ('' when absent)."""
+    return (str(watched.get("option_id") or "").strip(),
+            str(watched.get("candidate_fingerprint") or "").strip())
+
+
+def _confirm_conversion_evidence(watched: dict, watch_payload: dict, events: list[dict]) -> str | None:
+    """Terminal evidence that accounts for an aged CONFIRM_ENTRY candidate identity.
+
+    An IDENTITY-BOUND confirm (``option_id`` or non-empty ``candidate_fingerprint``) resolves ONLY
+    on an exact identity match: the event's ``option_id`` equals the watched one, or both sides
+    carry the SAME non-empty fingerprint. A same-underlying event without matching identity never
+    resolves it — an unrelated IWM no-trade must not absolve the specific 292P obligation. The
+    same-underlying fallback exists only for a watched candidate with NEITHER identity field.
+    Returns the matching event_type, or None when NOTHING in the journal converted or terminally
+    refused the confirmed entry (the fail-closed case)."""
+    option_id, fingerprint = _confirm_identity(watched)
+    confirm_ts = _event_ts(_dict(watch_payload))
+    for ev in reversed(events or []):
+        if not isinstance(ev, dict) or ev.get("event_type") not in _CONFIRM_TERMINAL_EVENTS:
+            continue
+        ev_ts = _parse_ts(ev.get("ts") or ev.get("timestamp") or ev.get("generated_at"))
+        if confirm_ts is not None and ev_ts is not None and ev_ts < confirm_ts:
+            continue
+        ev_option = str(ev.get("option_id") or _dict(ev.get("candidate")).get("option_id") or "").strip()
+        ev_fp = str(ev.get("candidate_fingerprint") or "").strip()
+        if option_id or fingerprint:
+            if option_id and ev_option and ev_option == option_id:
+                return str(ev.get("event_type"))
+            if fingerprint and ev_fp and ev_fp == fingerprint:
+                return str(ev.get("event_type"))
+            continue
+        if _same_underlying(watched, ev):
+            return str(ev.get("event_type"))
+    return None
+
+
 def _resolve_loop_state(active_trade: dict | None = None,
                         position_decision: dict | None = None,
                         active_candidate: dict | None = None,
@@ -498,12 +584,15 @@ def _resolve_loop_state(active_trade: dict | None = None,
                         triggers: dict | None = None,
                         journal_events: list[dict] | None = None,
                         *, errors: set[str] | None = None,
+                        order_guard: dict | None = None,
                         now: datetime | None = None,
                         stale_decision_minutes: int = STALE_DECISION_MINUTES) -> dict:
     """Pure loop-state resolver. Summarizes the artifacts; re-derives no gate/decision. Never raises.
 
     `errors` names artifacts that were present-but-malformed (so a broken live artifact degrades
-    rather than silently reads as missing). `now` (optional) enables staleness/recency checks."""
+    rather than silently reads as missing). `now` (optional) enables staleness/recency checks.
+    `order_guard` (optional) is the latest `odte-order-guard` decision: a fresh active guard state
+    (pending / cancel-required / safety incident) OUTRANKS every other lane — cancel first."""
     errors = set(errors or [])
     events = journal_events or []
     plan = _dict(active_trade)
@@ -512,6 +601,45 @@ def _resolve_loop_state(active_trade: dict | None = None,
     cdec = _dict(candidate_decision)
     trig = _dict(triggers)
     reasons: list[str] = []
+
+    # --- ORDER-GUARD lane (2026-07-23 remediation): a live/cancel-required pending ENTRY order
+    # outranks EVERYTHING — an unfilled order past its lease must be cancelled before any scan,
+    # candidate, gate, or new-entry work; a fill/mismatch outside a valid lease is a top-line
+    # safety incident. NO_ORDER / FILLED_FRESH / stale guard artifacts fall through.
+    guard = _dict(order_guard)
+    guard_state = str(guard.get("state") or "").upper()
+    guard_age = _age_minutes(_event_ts(guard), now) if guard else None
+    if guard and guard_state in _ACTIVE_GUARD_STATES:
+        if guard_age is not None and guard_age > ORDER_GUARD_STALE_MINUTES:
+            reasons.append(f"ignored stale order-guard decision "
+                           f"({guard_age:.0f}m > {ORDER_GUARD_STALE_MINUTES}m)")
+        else:
+            order = _dict(guard.get("order"))
+            cancel_required = (guard.get("cancel_required") is True
+                               or guard_state in ("CANCEL_STALE_ENTRY", "CANCEL_THESIS_INVALID"))
+            incident = (guard.get("safety_incident") is True
+                        or guard_state in ("FILLED_WITHOUT_VALID_LEASE", "BROKER_MISMATCH_BLOCKED"))
+            reasons.append(f"order guard: {guard_state} "
+                           f"({guard.get('underlying') or order.get('symbol') or '?'})")
+            for r in (guard.get("reasons") or [])[:3]:
+                reasons.append(str(r))
+            out = _payload("PENDING_ORDER", reasons, now,
+                           live=guard_state == "FILLED_WITHOUT_VALID_LEASE",
+                           context={
+                               "underlying": guard.get("underlying") or order.get("symbol"),
+                               "order_state": guard_state,
+                               "cancel_required": cancel_required,
+                               "safety_incident": incident,
+                               "prohibit_new_entries": (guard.get("prohibit_new_entries") is True
+                                                        or incident),
+                               "pending_order_age_seconds": guard.get("pending_order_age_seconds"),
+                               "lease_seconds_remaining": guard.get("lease_seconds_remaining"),
+                               "lease_id": guard.get("lease_id"),
+                           })
+            if guard.get("next_action") and guard.get("next_command"):
+                out["next_action"] = guard["next_action"]
+                out["next_command"] = guard["next_command"]
+            return out
 
     status = str(plan.get("status") or ("open" if _plan_present(plan) else "")).strip().lower()
     plan_present = _plan_present(plan)
@@ -559,9 +687,14 @@ def _resolve_loop_state(active_trade: dict | None = None,
     # the ET day, the fresh-entry lane is CLOSED — a later candidate/gate must not re-open it (live
     # 2026-07-10 bug: 3x SPY 753C scalped green, then a fresh promoted gate re-entered the same
     # contract for a scratch). Managing a live position is never affected (that lane returned above).
-    from data.odte_journal import green_day_preservation
+    from data.odte_journal import execution_safety_lockout, green_day_preservation
     preservation = green_day_preservation(events, active_trade=plan, now=now)
     green_locked = bool(preservation.get("locked"))
+    # EXECUTION-SAFETY LOCKOUT (2026-07-23 remediation): once an execution_safety_incident is
+    # journaled for the ET day, the fresh-entry lane is CLOSED — no gate, candidate, or scan
+    # trigger may surface as actionable. There is deliberately NO override flag.
+    safety = execution_safety_lockout(events, now=now)
+    safety_locked = bool(safety.get("locked"))
 
     # Entry-gate (latest journal entry_decision). Only honored if it belongs to the CURRENT cycle —
     # a gate dated at/before the last close is the closed trade's own gate, already consumed. Even an
@@ -595,10 +728,28 @@ def _resolve_loop_state(active_trade: dict | None = None,
         reasons.append("green_day_preservation_lockout: ignored fresh entry gate — profitable "
                        "trade already banked today; re-entry requires an explicit "
                        "allow_reentry_after_green override")
-    # PROMOTED requires EXPLICIT gate permission: execution_allowed is True. A bare decision=="enter"
-    # with execution_allowed missing/false is a stale/partial record and stays GATED — the loop only
-    # advances on explicit manager promotion / gate permission, never on the intent verb alone.
-    gate_exec = gate_fresh and gate.get("execution_allowed") is True
+    # Execution-safety lockout consumes ANY fresh gate unconditionally — no override exists.
+    if safety_locked and gate_fresh:
+        gate_fresh = False
+        reasons.append("execution_safety_lockout: ignored fresh entry gate — an "
+                       "execution_safety_incident is journaled today; NO new entries this session")
+    # PROMOTED requires EXPLICIT gate permission plus every required final live confirmation. This
+    # is an independent fail-closed backstop: even a malformed/legacy journal event carrying
+    # execution_allowed=true cannot surface EXECUTION_READY while confirmation_needed is true.
+    canonical_confirmations = ("live_chain_recheck", "spread_cap_check", "budget_check")
+    raw_required_confirmations = gate.get("required_confirmations")
+    declared_confirmations = (tuple(raw_required_confirmations)
+                              if isinstance(raw_required_confirmations, (list, tuple)) else ())
+    gate_confirmations = _dict(gate.get("confirmations"))
+    gate_confirmations_ok = (
+        set(canonical_confirmations).issubset(set(declared_confirmations))
+        and all(gate_confirmations.get(name) is True for name in canonical_confirmations)
+    )
+    gate_exec = (gate_fresh and gate.get("execution_allowed") is True
+                 and gate.get("confirmation_needed") is not True
+                 and gate_confirmations_ok)
+    if gate_fresh and gate.get("execution_allowed") is True and not gate_confirmations_ok:
+        reasons.append("ignored execution-allowed gate: final confirmations missing/failed")
 
     candidate = _dict(trig.get("candidate"))
     trig_fresh, trig_stale_reason = _fresh_after_close(
@@ -611,6 +762,10 @@ def _resolve_loop_state(active_trade: dict | None = None,
         trig_candidate = False
         reasons.append("green_day_preservation_lockout: ignored fresh scan candidate — profitable "
                        "trade already banked today")
+    if safety_locked and trig_candidate:
+        trig_candidate = False
+        reasons.append("execution_safety_lockout: ignored fresh scan candidate — an "
+                       "execution_safety_incident is journaled today; NO new entries this session")
     trig_ts = _parse_ts(trig.get("ts") or trig.get("generated_at"))
     newer_candidate_after_gate = False
     if trig_candidate and gate_fresh and not gate_exec and gate_ts is not None and trig_ts is not None:
@@ -639,18 +794,86 @@ def _resolve_loop_state(active_trade: dict | None = None,
         watch_payload, now=now, close_dt=close_dt if closed_trade else None,
         ttl_minutes=STALE_CANDIDATE_MINUTES)
     if watch_live and not watch_fresh and watch_stale_reason:
-        reasons.append(f"ignored stale candidate watch: {watch_stale_reason}")
+        # CONVERSION ACCOUNTABILITY (2026-07-27 IWM 292P regression): an identity-bound
+        # CONFIRM_ENTRY is a conversion obligation. It may expire quietly ONLY when something
+        # terminal accounts for it — a matching gate/order/no-trade verdict in the journal, the
+        # trade cycle closing, or a day lockout. Aging out with NO such evidence means the loop
+        # dropped a confirmed entry on the floor (an unaccounted order may even exist at the
+        # broker), so it fails CLOSED instead of dissolving into a flat no-trade tick.
+        # Only an IDENTITY-BOUND confirm (option_id or non-empty fingerprint) carries the
+        # obligation — a generic confirm without a locked contract keeps the prior quiet-ignore
+        # behavior rather than manufacturing false incidents.
+        watch_identity = any(_confirm_identity(watched))
+        unaccounted_confirm = (watch_decision == "CONFIRM_ENTRY" and watch_identity
+                               and watch_stale_reason != "older than closed trade"
+                               and not closed_trade and not green_locked and not safety_locked)
+        evidence = (_confirm_conversion_evidence(watched, watch_payload, events)
+                    if unaccounted_confirm else None)
+        if unaccounted_confirm and evidence is None:
+            option_id = watched.get("option_id")
+            underlying = (watched.get("ticker") or watched.get("underlying")
+                          or watched.get("symbol"))
+            reasons.append(
+                f"EXECUTION CONVERSION FAILURE: CONFIRM_ENTRY {underlying or '?'} "
+                f"(option_id={option_id or '?'}) aged out ({watch_stale_reason}) with NO matching "
+                "entry gate, lease, order, or no-trade verdict in the journal — the confirmed "
+                "entry was never converted or terminally refused; failing closed")
+            payload = _payload("DEGRADED", reasons, now, live=False, context={
+                **_candidate_watch_ctx(watched, cdec, confirmed=False),
+                "option_id": option_id,
+                "execution_conversion_failure": True})
+            payload["next_action"] = (
+                "verify at the broker that NO order/position exists for the confirmed contract, "
+                "then journal the terminal no_trade_decision (same identity) — or the incident — "
+                "before any new entry work")
+            payload["next_command"] = "odte-journal (no_trade_decision) → odte-loop-status"
+            return payload
+        if evidence is not None:
+            reasons.append(f"ignored stale candidate watch: CONFIRM_ENTRY resolved by journal "
+                           f"{evidence} ({watch_stale_reason})")
+        else:
+            reasons.append(f"ignored stale candidate watch: {watch_stale_reason}")
     inactive_watch = {"DEGRADED_NO_TRADE", "EXPIRED_NO_CONFIRMATION", ""}
     watch_actionable = watch_live and watch_fresh and watch_decision not in inactive_watch
     if green_locked and watch_actionable:
         watch_actionable = False
         reasons.append("green_day_preservation_lockout: ignored candidate watch — profitable "
                        "trade already banked today")
+    if safety_locked and watch_actionable:
+        watch_actionable = False
+        reasons.append("execution_safety_lockout: ignored candidate watch — an "
+                       "execution_safety_incident is journaled today; NO new entries this session")
     if watch_actionable:
         if watch_decision == "CONFIRM_ENTRY":
+            option_id, fingerprint = _confirm_identity(watched)
+            ctx = _candidate_watch_ctx(watched, cdec, confirmed=True)
+            if option_id or fingerprint:
+                # IDENTITY-BOUND confirm: conversion is the SOLE pre-position priority this tick
+                # (same-tick SLA) — surface the exact contract + deadline, not a scouting hint.
+                confirmed_dt = _event_ts(_dict(watch_payload))
+                ctx.update({"option_id": option_id or None,
+                            "candidate_fingerprint": fingerprint or None,
+                            "conversion_due": True,
+                            "conversion_sla_seconds": CONFIRM_CONVERSION_SLA_SECONDS})
+                if confirmed_dt is not None:
+                    due = confirmed_dt + timedelta(seconds=CONFIRM_CONVERSION_SLA_SECONDS)
+                    ctx["confirmed_at"] = confirmed_dt.isoformat(timespec="seconds")
+                    ctx["conversion_due_by"] = due.isoformat(timespec="seconds")
+                    if now is not None:
+                        ctx["candidate_age_seconds"] = round((now - confirmed_dt).total_seconds(), 1)
+                        ctx["conversion_sla_seconds_remaining"] = round((due - now).total_seconds(), 1)
+                reasons.append(f"identity-bound CONFIRM_ENTRY "
+                               f"({ctx.get('underlying') or '?'} option_id={option_id or '—'}) — "
+                               "convert to an entry gate THIS TICK")
+                payload = _payload("CANDIDATE", reasons, now, live=False, context=ctx)
+                payload["next_command"] = "odte-entry-gate"
+                payload["next_action"] = (
+                    "CONVERT NOW: run the final live refresh and odte-entry-gate for THIS exact "
+                    "confirmed contract before anything else — do not scan another idea, do not "
+                    "end the tick; the confirm expires against the same-tick SLA")
+                return payload
             reasons.append("candidate watch confirmed setup; build a fresh entry gate")
-            payload = _payload("CANDIDATE", reasons, now, live=False,
-                               context=_candidate_watch_ctx(watched, cdec, confirmed=True))
+            payload = _payload("CANDIDATE", reasons, now, live=False, context=ctx)
             payload["next_command"] = "odte-entry-gate"
             payload["next_action"] = "candidate confirmed — assemble/promote a fresh entry gate"
             return payload
@@ -782,7 +1005,8 @@ def _posture(payload: dict, broker: dict, *, live_mode: bool = False) -> tuple[s
     orders_ok = broker.get("orders_ok")            # True only if parent lane is a fresh confirmed OK
     broker_stale = lane == "stale"                 # outdated probe FILE — refreshable, not a fault
     broker_faulted = lane in ("down", "read_only_fallback")
-    needs_live_lane = live or state == "PROMOTED" or executable or ctx.get("confirmed") is True
+    needs_live_lane = (live or state in ("PROMOTED", "PENDING_ORDER") or executable
+                       or ctx.get("confirmed") is True)
     # Fail closed: a confirmed fault always blocks; in live_mode an unconfirmed lane (unknown/missing)
     # cannot authorize a live order either. A flat tick (no live lane needed) is never blocked here.
     # A stale probe file gets its own branch (1b) so the fix reads "refresh", not "lane is down".
@@ -793,6 +1017,11 @@ def _posture(payload: dict, broker: dict, *, live_mode: bool = False) -> tuple[s
 
     # 1. Broker confirmed-faulted / unconfirmable for a needed live order — top-line BROKER_DEGRADED.
     if broker_blocks:
+        if state == "PENDING_ORDER":
+            return ("BROKER_DEGRADED",
+                    "PENDING entry order but the broker lane can't confirm cancel/fill — verify "
+                    "via the read lane and cancel when possible; NEVER assume the order is "
+                    "unfilled", verify)
         if live and state in ("MANAGING", "ENTERED", "DEGRADED"):
             return ("BROKER_DEGRADED",
                     "OPEN position but broker place/review lane can't back an exit — reconcile via "
@@ -820,6 +1049,27 @@ def _posture(payload: dict, broker: dict, *, live_mode: bool = False) -> tuple[s
                 f"setup ready but broker_health.json is STALE ({last_txt}) — refresh the probe file "
                 "first; if the parent lane reads OK, proceed to broker review/place", refresh)
 
+    # 1c. Order-guard lane: cancel-first beats every scan/new-entry posture. A safety incident or
+    # cancel-required guard is the loudest actionable tick there is.
+    if state == "PENDING_ORDER":
+        if ctx.get("safety_incident") is True:
+            return ("CANCEL_PENDING_ORDER",
+                    "EXECUTION SAFETY INCIDENT — fill/mismatch outside a valid lease: flatten or "
+                    "alert per the reviewed emergency policy, journal execution_safety_incident, "
+                    "and PROHIBIT new entries for the session", None)
+        if ctx.get("cancel_required") is True:
+            return ("CANCEL_PENDING_ORDER",
+                    "CANCEL FIRST: the pending entry order is stale/thesis-dead — cancel at the "
+                    "broker NOW, verify with fresh order truth, and require a full fresh "
+                    "candidate/gate/lease cycle before any new order", None)
+        return ("PENDING_ORDER_GUARD", None, None)
+
+    # 1d. Unconverted CONFIRM_ENTRY (fail-closed): a confirmed identity aged out with no matching
+    # gate/lease/order/no-trade verdict. Not idle, not a stale-file diagnostic — the loop dropped a
+    # conversion obligation and must reconcile it (broker verify + terminal journal entry) first.
+    if ctx.get("execution_conversion_failure") is True:
+        return ("EXECUTION_CONVERSION_FAILURE", None, None)
+
     # 2. Live position lane: manage before scan.
     if live and state in ("MANAGING", "ENTERED"):
         return ("MANAGE_POSITION", None, None)
@@ -833,6 +1083,11 @@ def _posture(payload: dict, broker: dict, *, live_mode: bool = False) -> tuple[s
     #    Confirmed candidate watch → SCOUT_FRESH_SETUP (build/promote a fresh gate now).
     if state == "PROMOTED":
         return ("EXECUTION_READY", None, None)
+    # An identity-bound confirm is a same-tick conversion DEADLINE, not a scouting hint: the sole
+    # pre-position priority is the final refresh + exact entry gate for the confirmed contract.
+    # EXECUTION_READY stays reserved for an execution-allowed gate; this posture never places.
+    if ctx.get("conversion_due") is True:
+        return ("CONVERT_CANDIDATE_NOW", None, None)
     if ctx.get("confirmed") is True:
         return ("SCOUT_FRESH_SETUP", None, None)
 
@@ -880,6 +1135,10 @@ def _reconcile_broker_truth(payload: dict, broker: dict, plan: dict,
     age = broker.get("age_minutes")
     if (not truth or broker.get("lane") not in _TRUTH_LANES
             or age is None or age > BROKER_STALE_MINUTES):
+        return payload
+    # The order-guard lane already consumed broker ORDER truth directly — reconciling it away
+    # would erase a cancel-first/incident instruction. Leave it top-line.
+    if payload.get("state") == "PENDING_ORDER":
         return payload
     positions = truth.get("open_option_positions")
     orders = truth.get("open_option_orders")
@@ -929,6 +1188,7 @@ def derive_loop_state(active_trade: dict | None = None,
                       journal_events: list[dict] | None = None,
                       *, errors: set[str] | None = None,
                       broker_health: dict | None = None,
+                      order_guard: dict | None = None,
                       live_mode: bool = False,
                       now: datetime | None = None,
                       stale_decision_minutes: int = STALE_DECISION_MINUTES) -> dict:
@@ -938,10 +1198,13 @@ def derive_loop_state(active_trade: dict | None = None,
     broker-health payload (no broker call) and reduce state+broker to one ``posture`` word, forcing
     ``executable`` off whenever the broker lane can't back a live order. ``live_mode`` (the cron/live
     controller) fails closed: a live position / ready setup with an unknown or missing broker_health
-    reads BROKER_DEGRADED, so no live order is ever authorized without a fresh confirmed parent lane."""
+    reads BROKER_DEGRADED, so no live order is ever authorized without a fresh confirmed parent lane.
+    ``order_guard`` (the latest `odte-order-guard` decision) makes pending-order cancellation the
+    TOP-priority lane — above scanning and every new-entry posture."""
     payload = _resolve_loop_state(active_trade=active_trade, position_decision=position_decision,
                                   active_candidate=active_candidate, candidate_decision=candidate_decision,
                                   triggers=triggers, journal_events=journal_events, errors=errors,
+                                  order_guard=order_guard,
                                   now=now, stale_decision_minutes=stale_decision_minutes)
     broker = classify_broker_lane(broker_health, now)
     # BROKER TRUTH WINS: a fresh probe's position/order counts reconcile a lagging local resolution
@@ -980,6 +1243,12 @@ def _flat_reason(posture: str) -> str:
         "WAIT_FRESH_CONFIRMATION": "candidate on the board — awaiting confirmation",
         "MANAGE_POSITION": "live position — manage/exit before scanning",
         "BROKER_DEGRADED": "broker lane degraded — live orders blocked",
+        "PENDING_ORDER_GUARD": "entry order pending inside its lease — poll the order guard",
+        "CANCEL_PENDING_ORDER": "pending entry order stale/invalid — cancel at the broker NOW",
+        "EXECUTION_CONVERSION_FAILURE": ("confirmed entry aged out unconverted — verify at the "
+                                         "broker and journal the terminal no-trade verdict"),
+        "CONVERT_CANDIDATE_NOW": ("identity-bound confirm on the board — convert it to an entry "
+                                  "gate THIS TICK; conversion is the sole pre-position priority"),
     }.get(posture, "no fresh actionable setup")
 
 
@@ -1015,6 +1284,8 @@ def run_loop_status(state_dir: str | None = None, *, broker_health: dict | None 
     acand, acand_status = _read_json(base / ACTIVE_CANDIDATE_FILENAME)
     cdec, cdec_status = _read_json(base / CANDIDATE_DECISION_FILENAME)
     trig, trig_status = _read_json(base / TRIGGERS_FILENAME)
+    guard, guard_status = _read_json(base / ORDER_GUARD_FILENAME)
+    lease_doc, lease_status = _read_json(base / EXECUTION_LEASE_FILENAME)
     journal = base / JOURNAL_FILENAME
     events = read_events(str(journal)) if journal.exists() else []
 
@@ -1035,16 +1306,30 @@ def run_loop_status(state_dir: str | None = None, *, broker_health: dict | None 
     payload = derive_loop_state(active_trade=plan, position_decision=pdec,
                                 active_candidate=acand, candidate_decision=cdec, triggers=trig,
                                 journal_events=events, errors=errors,
-                                broker_health=broker_health, live_mode=live_mode, now=now)
+                                broker_health=broker_health, order_guard=guard,
+                                live_mode=live_mode, now=now)
     payload["artifacts"] = {
         "active_trade": plan_status,
         "position_decision": pdec_status,
         "active_candidate": acand_status,
         "candidate_decision": cdec_status,
         "triggers": trig_status,
+        "order_guard": guard_status,
+        "execution_lease": lease_status,
         "broker_health": broker_health_status,
         "journal_events": len(events),
     }
+    # Execution-lease visibility: lease time remaining is first-class status, never guessed.
+    lease = _dict(_dict(lease_doc).get("lease")) or _dict(lease_doc)
+    if lease.get("lease_id"):
+        exp = _parse_ts(lease.get("expires_at"))
+        remaining = round((exp - now).total_seconds(), 1) if exp is not None else None
+        payload["execution_lease"] = {
+            "lease_id": lease.get("lease_id"), "symbol": lease.get("symbol"),
+            "risk_mode": lease.get("risk_mode"), "expires_at": lease.get("expires_at"),
+            "seconds_remaining": remaining,
+            "expired": bool(remaining is not None and remaining <= 0),
+        }
     gate = _latest_event(events, "entry_decision") or {}
     trig_d, pdec_d, plan_d = _dict(trig), _dict(pdec), _dict(plan)
     watch = _dict(cdec) or _dict(acand)
@@ -1056,6 +1341,10 @@ def run_loop_status(state_dir: str | None = None, *, broker_health: dict | None 
     trigger_display_ts = None if _trigger_is_inactive(trig_d) else (trig_d.get("ts") or trig_d.get("generated_at"))
     watch_display_ts = None if _watch_is_inactive(watch) else _event_ts(watch)
     pdec_display_ts = None if str(pdec_d.get("decision") or "").strip().upper() in _NO_POSITION_DECISIONS else pdec_d.get("ts")
+    guard_d = _dict(guard)
+    guard_display_ts = (guard_d.get("generated_at") or guard_d.get("ts")) \
+        if str(guard_d.get("state") or "").upper() in _ACTIVE_GUARD_STATES else None
+    lease_display_ts = lease.get("issued_at") if lease.get("lease_id") else None
     payload["artifact_ages"] = {
         "triggers": _age_entry(trigger_display_ts, now, STALE_TRIGGER_MINUTES),
         "candidate": _age_entry(watch_display_ts, now, STALE_CANDIDATE_MINUTES),
@@ -1064,6 +1353,10 @@ def run_loop_status(state_dir: str | None = None, *, broker_health: dict | None 
         "active_trade": _age_entry(
             plan_d.get("updated_at") or plan_d.get("closed_at") or plan_d.get("exit_fill_time")
             or plan_d.get("entry_fill_time"), now, STALE_TRADE_HOURS * 60),
+        "order_guard": _age_entry(guard_display_ts, now, ORDER_GUARD_STALE_MINUTES),
+        # Lease TTL is seconds-scale (≤60s), so freshness is judged on a 1-minute window here;
+        # the authoritative countdown is payload["execution_lease"]["seconds_remaining"].
+        "execution_lease": _age_entry(lease_display_ts, now, 1),
     }
     return payload
 

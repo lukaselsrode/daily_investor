@@ -12,6 +12,12 @@ the underlying must not be employer-restricted (NVDA). Any missing input fails C
 input is absent is `None`, which is not True, so execution stays disallowed). Restricted underlyings
 are always non-executable.
 
+An execution-allowed GATE is still not order authority (2026-07-23 delayed-fill remediation): the
+manager must additionally mint a fresh, short-lived, exact-identity execution LEASE via
+`odte-execution-authorize` (data.odte_execution_policy) before broker review/place, and run the
+pending-order guard (`odte-order-guard`) until filled-fresh or cancelled. The deprecated bare
+`promote_to_execution` boolean fails CLOSED with reason `execution_lease_required`.
+
 Inputs (all optional dicts, supplied by the caller from artifacts already collected upstream):
   trigger          a watchdog trigger payload (carries decision_context: thesis/confidence/
                    veto_reasons/observed_market_context/social_context/gamma_context)
@@ -57,6 +63,19 @@ GREEN_LOCKOUT_VETO = "green_day_preservation_lockout"
 GREEN_REENTRY_BP_VETO = "insufficient_bp_for_green_reentry"
 GREEN_REENTRY_MIN_BP = 500.0
 
+# FAIL-CLOSED promotion (2026-07-23 delayed-fill incident): `promote_to_execution=True` is a
+# DEPRECATED input. A bare boolean can no longer demote a scan-tier record to the execution tier —
+# execution authority is minted ONLY by a fresh, exact-identity, short-lived execution lease
+# (`odte-execution-authorize` / data.odte_execution_policy.authorize_entry). A promotion attempt is
+# recorded and answered with this reason code so the controller runs the lease path instead.
+EXECUTION_LEASE_REQUIRED = "execution_lease_required"
+
+# A confirmed candidate may cross the scan→gate boundary only through a fresh, identity-matched
+# candidate-watch decision. The lease tier enforces the same 60s ceiling again: the transition must
+# happen in the SAME live-controller tick, not on the next two-minute cron run.
+CONFIRMED_CANDIDATE_MAX_AGE_SECONDS = 60.0
+CONFIRMED_CANDIDATE_MAX_FUTURE_SKEW_SECONDS = 2.0
+
 # What produces each missing gate input — surfaced verbatim in next_action so the controller
 # refreshes the exact input instead of stalling on an "unknown" gate.
 _GATE_INPUT_COMMANDS = {
@@ -79,10 +98,12 @@ def _next_step(intent: str, execution_allowed: bool, gates: dict, veto_reasons: 
     a BP/vehicle-fit fail says scan QQQ/SPY/IWM for a fitting vehicle BEFORE declaring no-trade; a
     missing input names the exact command that produces it; a hard veto stands down to the scan lane."""
     if execution_allowed:
-        return ("ALL GATES PASSED — do the final live refresh, then broker review/place under "
-                "standing auth via the Hermes MCP lane (this repo places NO orders); after the "
-                "fill, start the position watch",
-                "broker-review-place (Hermes MCP lane) → odte-position --snapshot <live.json>")
+        return ("ALL GATES PASSED — mint a fresh execution lease (odte-execution-authorize), do "
+                "the final live refresh, then broker review/place under standing auth via the "
+                "Hermes MCP lane (this repo places NO orders); run the pending-order guard every "
+                "tick until filled-fresh or cancelled, then start the position watch",
+                "odte-execution-authorize → broker-review-place (Hermes MCP lane) → "
+                "odte-order-guard → odte-position --snapshot <live.json>")
     if GREEN_LOCKOUT_VETO in veto_reasons or GREEN_REENTRY_BP_VETO in veto_reasons:
         return ("green-day preservation lockout — a profitable trade is already banked today; NO "
                 "fresh entries this session. Re-entry needs BOTH an explicit "
@@ -111,10 +132,12 @@ def _next_step(intent: str, execution_allowed: bool, gates: dict, veto_reasons: 
                 "materially new read flips the failing gate or the candidate degrades; do not "
                 "re-promote on the same read",
                 "odte-candidate-watch")
-    # scan_only observe record with every gate green: promotion is the manager's explicit call.
-    return ("all required gates read True but the record is scan-only — promote explicitly to the "
-            "execution tier if the manager intends to act",
-            "odte-entry-gate --promote-to-execution")
+    # scan_only observe record with every gate green: bare promotion is DEAD (2026-07-23 incident).
+    # Execution authority is minted only by a fresh execution lease bound to one exact contract.
+    return ("all required gates read True but the record is scan-tier — bare promotion is "
+            "disabled; execution authority is minted ONLY by a fresh execution lease "
+            "(exact contract/direction/quantity/price, ~30s TTL) via odte-execution-authorize",
+            "odte-execution-authorize")
 
 
 def _num(value: Any) -> float | None:
@@ -152,6 +175,103 @@ def _norm_direction(value: Any) -> str | None:
     return None
 
 
+def _parse_ts(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _norm_symbol(value: Any) -> str | None:
+    return str(value).strip().upper() if value else None
+
+
+def _confirmed_candidate_transition(candidate_decision: dict, candidate: dict,
+                                    now: datetime) -> tuple[bool, list[str]]:
+    """Validate the only safe scan→gate transition.
+
+    A bare boolean still cannot promote anything. The caller must supply a fresh candidate-watch
+    payload whose decision is CONFIRM_ENTRY and whose locked candidate fingerprint, symbol,
+    direction, and selected vehicle match the candidate passed to the entry gate.
+    """
+    if not candidate_decision:
+        return False, []
+    reasons: list[str] = []
+    if str(candidate_decision.get("decision") or "").upper() != "CONFIRM_ENTRY":
+        reasons.append("candidate_decision_not_confirmed")
+    generated_at = _parse_ts(candidate_decision.get("generated_at") or candidate_decision.get("ts"))
+    if generated_at is None:
+        reasons.append("candidate_decision_timestamp_missing")
+    else:
+        age_seconds = (now - generated_at).total_seconds()
+        if age_seconds < -CONFIRMED_CANDIDATE_MAX_FUTURE_SKEW_SECONDS:
+            reasons.append("candidate_decision_from_future")
+        elif age_seconds > CONFIRMED_CANDIDATE_MAX_AGE_SECONDS:
+            reasons.append("candidate_decision_stale_for_transition")
+
+    locked = _dict(candidate_decision.get("candidate"))
+    if not locked:
+        reasons.append("candidate_decision_candidate_missing")
+        return False, reasons
+
+    from data.odte_execution_policy import candidate_fingerprint
+
+    # Never trust a caller-supplied fingerprint as proof of the fields around it: recompute both
+    # sides, validate any embedded fingerprints, then compare the recomputed identities.
+    locked_fp = candidate_fingerprint(locked)
+    candidate_fp = candidate_fingerprint(candidate)
+    supplied_locked_fp = locked.get("candidate_fingerprint")
+    supplied_candidate_fp = candidate.get("candidate_fingerprint")
+    if supplied_locked_fp and supplied_locked_fp != locked_fp:
+        reasons.append("candidate_decision_fingerprint_invalid")
+    if supplied_candidate_fp and supplied_candidate_fp != candidate_fp:
+        reasons.append("candidate_artifact_fingerprint_invalid")
+    if locked_fp != candidate_fp:
+        reasons.append("candidate_fingerprint_mismatch")
+
+    locked_symbol = _norm_symbol(locked.get("ticker") or locked.get("underlying")
+                                 or locked.get("symbol"))
+    candidate_symbol = _norm_symbol(candidate.get("ticker") or candidate.get("underlying")
+                                    or candidate.get("symbol"))
+    if not locked_symbol or not candidate_symbol or locked_symbol != candidate_symbol:
+        reasons.append("candidate_symbol_mismatch")
+
+    locked_direction = _norm_direction(locked.get("direction") or locked.get("option_type"))
+    candidate_direction = _norm_direction(candidate.get("direction") or candidate.get("option_type"))
+    if not locked_direction or not candidate_direction or locked_direction != candidate_direction:
+        reasons.append("candidate_direction_mismatch")
+
+    locked_vehicle = _norm_symbol(locked.get("selected_vehicle") or locked_symbol)
+    candidate_vehicle = _norm_symbol(candidate.get("selected_vehicle") or candidate_symbol)
+    if not locked_vehicle or not candidate_vehicle or locked_vehicle != candidate_vehicle:
+        reasons.append("candidate_vehicle_mismatch")
+
+    locked_selected_at = (locked.get("selection_timestamp") or locked.get("created_at")
+                          or locked.get("ts") or locked.get("generated_at"))
+    candidate_selected_at = (candidate.get("selection_timestamp") or candidate.get("created_at")
+                             or candidate.get("ts") or candidate.get("generated_at"))
+    if not locked_selected_at or not candidate_selected_at:
+        reasons.append("candidate_cycle_timestamp_missing")
+
+    exact_fields = {
+        "option_id": lambda c: c.get("option_id") or c.get("id") or c.get("occ_symbol"),
+        "expiration_date": lambda c: c.get("expiration_date") or c.get("expiration"),
+        "strike_price": lambda c: _num(c.get("strike_price") or c.get("strike")),
+        "option_type": lambda c: str(c.get("option_type") or c.get("type") or "").lower() or None,
+    }
+    for field, getter in exact_fields.items():
+        locked_value = getter(locked)
+        candidate_value = getter(candidate)
+        if locked_value is None or candidate_value is None:
+            reasons.append(f"candidate_contract_{field}_missing")
+        elif locked_value != candidate_value:
+            reasons.append(f"candidate_contract_{field}_mismatch")
+    return not reasons, reasons
+
+
 def _coalesce_symbol(candidate: dict, vehicle_score: dict, trigger: dict) -> str | None:
     for src in (candidate, vehicle_score.get("contract") if isinstance(vehicle_score.get("contract"), dict) else {},
                 vehicle_score, trigger):
@@ -169,6 +289,16 @@ def _buying_power(broker: dict) -> float | None:
     return bp
 
 
+def _broker_count(broker: dict, *keys: str) -> float | None:
+    account: dict = _dict(broker.get("account"))
+    for container in (broker, account):
+        for key in keys:
+            value = _num(container.get(key))
+            if value is not None:
+                return value
+    return None
+
+
 def _contract_cost(vehicle_score: dict) -> float | None:
     """Estimated debit for ONE contract from the vehicle-score contract (ask, else mark), ×100."""
     contract = _dict(vehicle_score.get("contract"))
@@ -180,27 +310,46 @@ def _contract_cost(vehicle_score: dict) -> float | None:
 def _account_gate(broker: dict) -> tuple[bool | None, str | None]:
     """Evaluate the account/buying-power gate. (True | False | None, veto_reason | None).
 
-    True only when buying power is positive, the account is not blocked, and at least one day-trade
-    remains. False (hard veto) on insufficient funds / blocked / no day-trades. None when no broker
-    snapshot was supplied (fail closed — we will not authorize execution without confirmed funds)."""
+    True only when buying power is positive, the account is not blocked/locked, and broker truth
+    explicitly reports flat option positions, no open option orders, today's order count, and at
+    least one day-trade when that field is supplied. Missing broker prerequisites fail closed so the
+    gate can never advertise EXECUTION_READY when the lease tier must refuse."""
     if not broker:
-        return None, None
+        return None, "broker_snapshot_missing"
     if broker.get("blocked") is True or broker.get("trading_blocked") is True:
         return False, "account_blocked"
+    if broker.get("controller_locked") is True:
+        return False, "controller_locked"
     dt_left = _num(broker.get("day_trades_left"))
     if dt_left is not None and dt_left <= 0:
         return False, "no_day_trades_left"
     bp = _buying_power(broker)
     if bp is None:
-        return None, None
+        return None, "buying_power_missing"
     if bp <= 0:
         return False, "insufficient_buying_power"
+    positions = _broker_count(broker, "nonzero_option_positions_count",
+                              "open_option_positions_count", "positions_count",
+                              "open_positions_count")
+    if positions is None:
+        return None, "broker_positions_count_missing"
+    if positions > 0:
+        return False, "position_already_open"
+    open_orders = _broker_count(broker, "open_option_orders_count", "open_orders_count")
+    if open_orders is None:
+        return None, "broker_open_orders_count_missing"
+    if open_orders > 0:
+        return False, "open_order_outstanding"
+    if _broker_count(broker, "today_option_orders_count", "today_orders_count") is None:
+        return None, "broker_today_orders_count_missing"
     return True, None
 
 
 def build_entry_gate_decision(trigger: dict | None = None, candidate: dict | None = None, *,
+                              candidate_decision: dict | None = None,
                               day_score: dict | None = None, vehicle_score: dict | None = None,
                               gamma_map: dict | None = None, broker_snapshot: dict | None = None,
+                              confirmations: dict | None = None,
                               required_gates: tuple[str, ...] | None = None,
                               scan_only: bool | None = None,
                               promote_to_execution: bool = False,
@@ -216,9 +365,13 @@ def build_entry_gate_decision(trigger: dict | None = None, candidate: dict | Non
 
     TIER BOUNDARY: a scan_only candidate must NOT silently become an execution candidate. When
     `scan_only` is not passed explicitly it is INHERITED from `trigger.scan_only`/`candidate.scan_only`
-    (the watchdog lane is always scan_only=True). An inherited/explicit scan_only record can only be
-    demoted to the execution tier when the manager EXPLICITLY sets `promote_to_execution=True` — this
-    is still recording/tooling only, it places no orders.
+    (the watchdog lane is always scan_only=True). The only safe transition is a fresh, identity-matched
+    `candidate_decision.decision == CONFIRM_ENTRY` from candidate-watch in the same controller tick.
+    FAIL-CLOSED (2026-07-23 delayed-fill incident): `promote_to_execution=True` is a DEPRECATED input —
+    it no longer demotes a scan-tier record to the execution tier. The attempt is recorded
+    (`promotion_requested`) and answered with the `execution_lease_required` reason code; execution
+    authority is minted ONLY by a fresh short-lived exact-identity lease
+    (`odte-execution-authorize`).
 
     GREEN-DAY PRESERVATION: when `journal_events` (the day's decision journal) shows a completed
     profitable trade for the current ET day, the gate VETOES (`green_day_preservation_lockout`) —
@@ -228,11 +381,20 @@ def build_entry_gate_decision(trigger: dict | None = None, candidate: dict | Non
     trigger = _dict(trigger)
     dctx = _dict(trigger.get("decision_context"))
     candidate = _dict(candidate) or _dict(trigger.get("candidate"))
+    candidate_decision = _dict(candidate_decision)
+    if not candidate and candidate_decision:
+        candidate = _dict(candidate_decision.get("candidate"))
     day_score = _dict(day_score)
     vehicle_score = _dict(vehicle_score)
     gamma_map = _dict(gamma_map)
     broker = _dict(broker_snapshot)
+    confirmations = _dict(confirmations)
     req = tuple(required_gates) if required_gates else DEFAULT_REQUIRED_GATES
+    current_now = now or datetime.now(timezone.utc)
+    if current_now.tzinfo is None:
+        current_now = current_now.replace(tzinfo=timezone.utc)
+    from data.odte_execution_policy import candidate_fingerprint
+    computed_candidate_fingerprint = candidate_fingerprint(candidate) if candidate else None
 
     sym = _coalesce_symbol(candidate, vehicle_score, trigger)
     # Direction precedence: explicit candidate → vehicle_score → trigger thesis.
@@ -243,15 +405,20 @@ def build_entry_gate_decision(trigger: dict | None = None, candidate: dict | Non
     from data.social_sentiment import is_restricted_underlying
     restricted = bool(sym and is_restricted_underlying(sym))
 
-    # TIER BOUNDARY (see docstring): inherit scan_only from the upstream trigger/candidate unless the
-    # caller states it explicitly; a scan_only record only drops to the execution tier on an EXPLICIT
-    # promote_to_execution. This keeps a watchlist/scan name from silently becoming executable.
+    # TIER BOUNDARY (see docstring): inherit scan_only from the upstream trigger/candidate unless
+    # the caller states it explicitly. A fresh, identity-matched CONFIRM_ENTRY decision may cross
+    # that boundary in the same controller tick. The deprecated bare promotion flag still cannot.
+    transition_reasons: list[str] = []
+    confirmed_candidate_transition = False
     if scan_only is not None:
         base_scan_only = bool(scan_only)
     else:
         base_scan_only = bool(trigger.get("scan_only")) or bool(candidate.get("scan_only"))
-    promoted = bool(base_scan_only and promote_to_execution)
-    scan_only = False if promoted else base_scan_only
+        if base_scan_only:
+            confirmed_candidate_transition, transition_reasons = _confirmed_candidate_transition(
+                candidate_decision, candidate, current_now)
+    promotion_requested = bool(base_scan_only and promote_to_execution)
+    scan_only = bool(base_scan_only and not confirmed_candidate_transition)
 
     day_verdict = str(day_score.get("verdict") or "").upper()
     veh_verdict = str(vehicle_score.get("verdict") or "").upper()
@@ -271,7 +438,7 @@ def build_entry_gate_decision(trigger: dict | None = None, candidate: dict | Non
         veto_reasons.append("day_regime_avoid")
     if veh_verdict == "BAD_BET":
         veto_reasons.append("vehicle_bad_bet")
-    if acct_veto:
+    if acct_veto and acct_ok is False:
         veto_reasons.append(acct_veto)
     # Carry forward any veto reasons the upstream trigger already recorded (deduped, order-preserving).
     for r in (dctx.get("veto_reasons") or []):
@@ -288,7 +455,7 @@ def build_entry_gate_decision(trigger: dict | None = None, candidate: dict | Non
     preservation = None
     if journal_events is not None:
         from data.odte_journal import green_day_preservation
-        preservation = green_day_preservation(journal_events, now=now)
+        preservation = green_day_preservation(journal_events, now=current_now)
     green_locked = bool(preservation and preservation.get("locked"))
     reentry_override = (trigger.get("allow_reentry_after_green") is True
                         or broker.get("allow_reentry_after_green") is True)
@@ -298,12 +465,37 @@ def build_entry_gate_decision(trigger: dict | None = None, candidate: dict | Non
     if green_locked and not reentry_armed:
         veto_reasons.append(GREEN_REENTRY_BP_VETO if reentry_override else GREEN_LOCKOUT_VETO)
 
+    confirmation_states = {name: confirmations.get(name) for name in REQUIRED_CONFIRMATIONS}
+    confirmations_ok = all(confirmation_states[name] is True for name in REQUIRED_CONFIRMATIONS)
+    core_gates_ready = (not scan_only and not restricted and not veto_reasons
+                        and all(gates.get(g) is True for g in req))
+    # Final live chain/spread/budget confirmation is part of EVERY otherwise-executable gate—not a
+    # later advisory note. Incomplete upstream gates remain observe/deny rather than being mislabeled
+    # as a final-confirmation veto.
+    if core_gates_ready and not confirmations_ok:
+        for name, state in confirmation_states.items():
+            if state is not True:
+                suffix = "failed" if state is False else "missing"
+                veto_reasons.append(f"final_confirmation_{name}_{suffix}")
+
     reason_codes: list[str] = []
     for name in req:
         state = gates.get(name)
         reason_codes.append(f"{name}:{'ok' if state is True else 'fail' if state is False else 'unknown'}")
-    if base_scan_only:
-        reason_codes.append("scan_only_promoted_to_execution" if promoted else "scan_only_inherited")
+    if acct_veto and acct_ok is None:
+        reason_codes.append(acct_veto)
+    for name, state in confirmation_states.items():
+        reason_codes.append(
+            f"{name}:{'ok' if state is True else 'fail' if state is False else 'unknown'}"
+        )
+    if confirmed_candidate_transition:
+        reason_codes.append("confirmed_candidate_transition")
+    elif base_scan_only:
+        reason_codes.append("scan_only_inherited")
+        if promotion_requested:
+            # Deprecated bare promotion: refused, and the fail-closed reason names the fix.
+            reason_codes.append(EXECUTION_LEASE_REQUIRED)
+    reason_codes.extend(transition_reasons)
     if green_locked:
         reason_codes.append("green_reentry_override_armed" if reentry_armed
                             else "green_day_preservation_locked")
@@ -311,6 +503,7 @@ def build_entry_gate_decision(trigger: dict | None = None, candidate: dict | Non
     # HARD conservative gate: execution_allowed only when nothing blocks it and ALL required gates
     # are explicitly True. Missing inputs (None) fail closed.
     execution_allowed = (not scan_only and not restricted and not veto_reasons
+                         and confirmations_ok
                          and all(gates.get(g) is True for g in req))
 
     if restricted or veto_reasons:
@@ -346,12 +539,17 @@ def build_entry_gate_decision(trigger: dict | None = None, candidate: dict | Non
 
     next_action, next_command = _next_step(intent, execution_allowed, gates, veto_reasons, req)
 
-    stamp = (now or datetime.now(timezone.utc)).isoformat(timespec="seconds")
+    stamp = current_now.isoformat(timespec="seconds")
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": stamp,
         "symbol": sym,
         "direction": direction,
+        "candidate_fingerprint": computed_candidate_fingerprint,
+        "option_id": candidate.get("option_id") or candidate.get("id") or candidate.get("occ_symbol"),
+        "expiration_date": candidate.get("expiration_date") or candidate.get("expiration"),
+        "strike_price": _num(candidate.get("strike_price") or candidate.get("strike")),
+        "option_type": str(candidate.get("option_type") or candidate.get("type") or "").lower() or None,
         "decision": intent,
         "intent": intent,
         "reason_codes": reason_codes,
@@ -363,14 +561,19 @@ def build_entry_gate_decision(trigger: dict | None = None, candidate: dict | Non
         "next_command": next_command,
         "veto_reasons": veto_reasons,
         "required_confirmations": list(REQUIRED_CONFIRMATIONS),
-        "confirmation_needed": not execution_allowed,
+        "confirmations": confirmation_states,
+        "confirmation_needed": not confirmations_ok,
         "thesis": thesis_block,
         "confidence": confidence,
         "observed_market_context": dctx.get("observed_market_context"),
         "social_context": dctx.get("social_context"),
         "gamma_context": gamma_ctx,
         "scan_only": scan_only,
-        "promoted_to_execution": promoted,
+        # Bare promotion is dead: this key is kept for downstream compatibility but is ALWAYS
+        # False now — a scan-tier record can only become executable through an execution lease.
+        "promoted_to_execution": False,
+        "promotion_requested": promotion_requested,
+        "confirmed_candidate_transition": confirmed_candidate_transition,
         "execution_allowed": execution_allowed,
         "green_day_preservation": preservation,
         "allow_reentry_after_green": reentry_armed,
@@ -382,18 +585,24 @@ def build_entry_gate_decision(trigger: dict | None = None, candidate: dict | Non
 
 def run_entry_gate(trigger_json: str | None = None, trigger_path: str | None = None,
                    candidate_json: str | None = None, candidate_path: str | None = None,
+                   candidate_decision_json: str | None = None,
+                   candidate_decision_path: str | None = None,
                    day_score_json: str | None = None, day_score_path: str | None = None,
                    vehicle_score_json: str | None = None, vehicle_score_path: str | None = None,
                    gamma_json: str | None = None, gamma_path: str | None = None,
                    broker_json: str | None = None, broker_path: str | None = None,
+                   confirmations_json: str | None = None,
+                   confirmations_path: str | None = None,
                    scan_only: bool | None = None, promote_to_execution: bool = False,
                    journal_path: str | None = None,
-                   out_dir: str | None = None, write: bool = False) -> dict:
+                   out_dir: str | None = None, write: bool = False,
+                   now: datetime | None = None) -> dict:
     """Load the (optional) input artifacts and build the entry-gate decision. No orders/broker/network.
 
     `scan_only=None` (the default) INHERITS scan_only from the trigger/candidate; pass True/False to
-    state it explicitly. `promote_to_execution=True` is the manager's explicit opt-in to demote an
-    (inherited) scan_only record to the execution tier. `journal_path` feeds the day's decision
+    state it explicitly. `promote_to_execution=True` is DEPRECATED and fail-closed: it can no longer
+    make the record executable — the response carries the `execution_lease_required` reason code and
+    points at `odte-execution-authorize`. `journal_path` feeds the day's decision
     journal into the GREEN-DAY PRESERVATION check (post-scalp lockout) — the CLI passes the
     canonical journal by default; a missing/empty journal simply leaves the lockout disengaged."""
     journal_events = None
@@ -403,13 +612,16 @@ def run_entry_gate(trigger_json: str | None = None, trigger_path: str | None = N
     payload = build_entry_gate_decision(
         trigger=_load_json(trigger_path, trigger_json) or None,
         candidate=_load_json(candidate_path, candidate_json) or None,
+        candidate_decision=_load_json(candidate_decision_path, candidate_decision_json) or None,
         day_score=_load_json(day_score_path, day_score_json) or None,
         vehicle_score=_load_json(vehicle_score_path, vehicle_score_json) or None,
         gamma_map=_load_json(gamma_path, gamma_json) or None,
         broker_snapshot=_load_json(broker_path, broker_json) or None,
+        confirmations=_load_json(confirmations_path, confirmations_json) or None,
         scan_only=scan_only,
         promote_to_execution=promote_to_execution,
         journal_events=journal_events,
+        now=now,
     )
     if write:
         out = Path(os.path.expanduser(out_dir or ODTE_REPORT_DIR))

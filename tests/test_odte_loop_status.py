@@ -46,9 +46,13 @@ def _candidate_triggers(**over):
 
 
 def _entry_decision(**over):
+    required_confirmations = ["live_chain_recheck", "spread_cap_check", "budget_check"]
     e = {"event_type": "entry_decision", "seq": 5, "ts": _ts(minutes_ago=5),
          "underlying": "SPY", "direction": "call", "decision": "deny",
-         "scan_only": False, "execution_allowed": False}
+         "scan_only": False, "execution_allowed": False,
+         "required_confirmations": required_confirmations,
+         "confirmations": {name: True for name in required_confirmations},
+         "confirmation_needed": False}
     e.update(over)
     return e
 
@@ -138,12 +142,53 @@ def test_denied_gate_falls_through_to_fresh_candidate():
 
 def test_pending_enter_gate_still_gated():
     # An affirmative gate ("enter") without execution permission is a legitimate PENDING gate — it
-    # still maps to GATED (awaiting promotion), unlike a denied verdict.
+    # still maps to GATED (awaiting a fresh execution lease), unlike a denied verdict. Bare
+    # promotion is dead (2026-07-23): the next command points at the lease tier instead.
     r = ls.derive_loop_state(journal_events=[_entry_decision(decision="enter",
                                                              execution_allowed=False)], now=NOW)
     assert r["state"] == "GATED"
     assert r["executable"] is False
-    assert r["next_command"].endswith("--promote-to-execution")
+    assert "odte-execution-authorize" in r["next_command"]
+    assert "--promote-to-execution" not in r["next_command"]
+
+
+def test_execution_allowed_flag_cannot_spoof_missing_final_confirmations() -> None:
+    gate = _entry_decision(
+        decision="enter",
+        execution_allowed=True,
+        confirmations={},
+        confirmation_needed=True,
+    )
+    result = ls.derive_loop_state(journal_events=[gate], now=NOW)
+    assert result["state"] == "GATED"
+    assert result["posture"] == "WAIT_FRESH_CONFIRMATION"
+    assert result["executable"] is False
+
+
+def test_legacy_gate_without_confirmation_schema_cannot_promote() -> None:
+    gate = _entry_decision(
+        decision="enter",
+        execution_allowed=True,
+        required_confirmations=[],
+        confirmations={},
+        confirmation_needed=False,
+    )
+    result = ls.derive_loop_state(journal_events=[gate], now=NOW)
+    assert result["state"] == "GATED"
+    assert result["executable"] is False
+
+
+def test_declared_confirmation_subset_cannot_promote() -> None:
+    gate = _entry_decision(
+        decision="enter",
+        execution_allowed=True,
+        required_confirmations=["budget_check"],
+        confirmations={"budget_check": True},
+        confirmation_needed=False,
+    )
+    result = ls.derive_loop_state(journal_events=[gate], now=NOW)
+    assert result["state"] == "GATED"
+    assert result["executable"] is False
 
 
 def test_entry_gate_executable_is_promoted():
@@ -168,6 +213,30 @@ def test_no_trade_decision_consumes_matching_non_executable_gate():
     r = ls.derive_loop_state(journal_events=[gate, no_trade], now=NOW)
     assert r["state"] == "SCAN"
     assert any("ignored consumed entry gate" in s for s in r["notes"])
+
+
+def test_no_trade_decision_consumes_matching_executable_gate_cycle():
+    # A granted gate must stop being execution-ready after the controller records a terminal veto for
+    # that exact candidate cycle (for example, execution-authorize refused stale broker/market inputs).
+    gate = _entry_decision(decision="enter", execution_allowed=True,
+                           candidate_fingerprint="candidate-cycle-1")
+    no_trade = {"event_type": "no_trade_decision", "underlying": "SPY", "symbol": "SPY",
+                "candidate_fingerprint": "candidate-cycle-1", "execution_allowed": False,
+                "ts": _ts(minutes_ago=4), "seq": 6}
+    r = ls.derive_loop_state(journal_events=[gate, no_trade], now=NOW)
+    assert r["state"] == "SCAN"
+    assert any("ignored consumed entry gate" in s for s in r["notes"])
+
+
+def test_unrelated_no_trade_cannot_consume_executable_gate_cycle():
+    gate = _entry_decision(decision="enter", execution_allowed=True,
+                           candidate_fingerprint="candidate-cycle-1")
+    no_trade = {"event_type": "no_trade_decision", "underlying": "SPY", "symbol": "SPY",
+                "candidate_fingerprint": "candidate-cycle-2", "execution_allowed": False,
+                "ts": _ts(minutes_ago=4), "seq": 6}
+    r = ls.derive_loop_state(journal_events=[gate, no_trade], now=NOW)
+    assert r["state"] == "PROMOTED"
+    assert r["executable"] is True
 
 
 def test_enter_verb_without_execution_allowed_is_gated_not_promoted():
@@ -304,15 +373,20 @@ def test_closed_reviewed_trade_suppresses_denied_gate_debug_noise():
 
 
 def test_stale_candidate_watch_is_ignored_but_live_position_still_wins():
-    stale_cdec = {"decision": "CONFIRM_ENTRY", "candidate": {"ticker": "QQQ"},
+    # A stale non-obligating watch (KEEP_WATCHING) is disposable cruft — quietly ignored. (An aged
+    # CONFIRM_ENTRY is NOT: see the EXECUTION_CONVERSION_FAILURE regression tests below.)
+    stale_cdec = {"decision": "KEEP_WATCHING", "candidate": {"ticker": "QQQ"},
                   "ts": _ts(minutes_ago=20)}
     r = ls.derive_loop_state(candidate_decision=stale_cdec, now=NOW)
     assert r["state"] == "SCAN"
     assert any("ignored stale candidate watch" in s for s in r["notes"])
 
+    # And a live position always outranks the candidate lane — even a stale CONFIRM_ENTRY.
+    stale_confirm = {"decision": "CONFIRM_ENTRY", "candidate": {"ticker": "QQQ"},
+                     "ts": _ts(minutes_ago=20)}
     live = ls.derive_loop_state(active_trade=_open_plan(), position_decision={
         "decision": "HOLD", "underlying": "SPY", "ts": _ts(minutes_ago=1)},
-        candidate_decision=stale_cdec, now=NOW)
+        candidate_decision=stale_confirm, now=NOW)
     assert live["state"] == "MANAGING"
 
 
@@ -480,9 +554,158 @@ def test_posture_stale_only_candidate_is_flat_no_trade():
     assert r["posture"] == "FLAT_NO_TRADE"
 
 
-def test_posture_stale_candidate_watch_is_flat_no_trade():
-    stale_cdec = {"decision": "CONFIRM_ENTRY", "candidate": {"ticker": "QQQ"}, "ts": _ts(minutes_ago=20)}
-    r = ls.derive_loop_state(candidate_decision=stale_cdec, now=NOW)
+# --- EXECUTION-CONVERSION accountability (2026-07-27 IWM 292P regression) ---------------------
+# An identity-bound CONFIRM_ENTRY is a conversion obligation, not disposable scan cruft. It may
+# resolve ONLY via matching terminal evidence in the journal (entry gate / order / no-trade
+# verdict for the same identity). Aging out with NO such evidence is a fail-closed
+# EXECUTION_CONVERSION_FAILURE — never a quiet FLAT_NO_TRADE.
+
+IWM_OPTION_ID = "e9b7a460-cf60-4480-a81f-0818a0b0aeec"
+
+
+def _confirmed_iwm_watch(minutes_ago=1):
+    return {"decision": "CONFIRM_ENTRY", "ts": _ts(minutes_ago=minutes_ago),
+            "candidate": {"ticker": "IWM", "direction": "bearish", "option_type": "put",
+                          "strike_price": 292.0, "expiration_date": "2026-07-27",
+                          "option_id": IWM_OPTION_ID}}
+
+
+def test_fresh_confirmed_entry_is_conversion_due_not_flat():
+    # (1) A FRESH identity-bound CONFIRM_ENTRY is conversion-due: convert THIS TICK — a distinct
+    # imperative posture, never soft "scouting" and never FLAT_NO_TRADE.
+    r = ls.derive_loop_state(candidate_decision=_confirmed_iwm_watch(minutes_ago=1), now=NOW)
+    assert r["state"] == "CANDIDATE"
+    assert r["posture"] == "CONVERT_CANDIDATE_NOW"
+    assert r["posture"] != "FLAT_NO_TRADE"
+    assert r["next_command"] == "odte-entry-gate"
+
+
+def test_convert_candidate_now_posture_separation():
+    # Identity-bound confirm -> CONVERT_CANDIDATE_NOW. Generic (no identity) confirm keeps the
+    # softer SCOUT_FRESH_SETUP. EXECUTION_READY stays reserved for an execution-allowed GATE.
+    bound = ls.derive_loop_state(candidate_decision=_confirmed_iwm_watch(minutes_ago=1), now=NOW)
+    assert bound["posture"] == "CONVERT_CANDIDATE_NOW"
+    generic = ls.derive_loop_state(candidate_decision={
+        "decision": "CONFIRM_ENTRY", "candidate": {"ticker": "QQQ", "direction": "bullish"},
+        "ts": _ts(minutes_ago=1)}, now=NOW)
+    assert generic["posture"] == "SCOUT_FRESH_SETUP"
+    gate = ls.derive_loop_state(journal_events=[_entry_decision(decision="enter",
+                                                               execution_allowed=True)], now=NOW)
+    assert gate["posture"] == "EXECUTION_READY"
+    assert bound["posture"] != "EXECUTION_READY"
+
+
+def test_convert_candidate_now_exposes_identity_and_sla_deadline():
+    confirmed_ts = (NOW - timedelta(seconds=30)).isoformat()
+    watch = _confirmed_iwm_watch()
+    watch["ts"] = confirmed_ts
+    r = ls.derive_loop_state(candidate_decision=watch, now=NOW)
+    ctx = r["context"]
+    assert ctx.get("option_id") == IWM_OPTION_ID
+    assert ctx.get("conversion_due") is True
+    assert ctx.get("confirmed_at") == (NOW - timedelta(seconds=30)).isoformat(timespec="seconds")
+    assert ctx.get("candidate_age_seconds") == 30.0
+    assert ctx.get("conversion_due_by") == (NOW + timedelta(seconds=30)).isoformat(timespec="seconds")
+    assert ctx.get("conversion_sla_seconds_remaining") == 30.0
+    assert ctx.get("conversion_sla_seconds") == ls.CONFIRM_CONVERSION_SLA_SECONDS
+
+
+def test_convert_candidate_now_is_not_executable_and_imperative():
+    # The new posture gains NO execution authority — it commands an exact gate build, not an order.
+    r = ls.derive_loop_state(candidate_decision=_confirmed_iwm_watch(minutes_ago=1), now=NOW)
+    assert r["executable"] is False
+    assert r["next_command"] == "odte-entry-gate"
+    assert "CONVERT NOW" in r["next_action"]
+    assert "do not scan" in r["next_action"]
+
+
+def test_convert_candidate_now_outranks_fresh_unrelated_scan_trigger():
+    # A fresh unrelated scan candidate must not distract from a conversion-due confirm.
+    fresh_trig = _candidate_triggers(ts=_ts(minutes_ago=1), alert=True,
+                                     candidate={"ticker": "SPY", "direction": "bullish"})
+    r = ls.derive_loop_state(candidate_decision=_confirmed_iwm_watch(minutes_ago=1),
+                             triggers=fresh_trig, now=NOW)
+    assert r["posture"] == "CONVERT_CANDIDATE_NOW"
+    assert r["context"].get("underlying") == "IWM"
+
+
+def test_conversion_failure_outranks_fresh_unrelated_scan_trigger():
+    # The aged fail-closed state blocks NEW scanning until broker reconciliation + a terminal
+    # disposition for the orphaned identity — a fresh unrelated trigger must not override it.
+    fresh_trig = _candidate_triggers(ts=_ts(minutes_ago=1), alert=True,
+                                     candidate={"ticker": "SPY", "direction": "bullish"})
+    r = ls.derive_loop_state(candidate_decision=_confirmed_iwm_watch(minutes_ago=25),
+                             triggers=fresh_trig, journal_events=[], now=NOW)
+    assert r["posture"] == "EXECUTION_CONVERSION_FAILURE"
+    assert r["executable"] is False
+
+
+def test_aged_confirmed_entry_without_terminal_evidence_is_conversion_failure():
+    # (2) REGRESSION (2026-07-27 IWM 292P): the confirmed identity aged past the candidate TTL with
+    # NO matching gate/lease/order/no-trade verdict in the journal. That means the loop dropped a
+    # confirmed entry on the floor (or an unaccounted order may exist at the broker) — it must fail
+    # CLOSED as EXECUTION_CONVERSION_FAILURE, never quietly become FLAT_NO_TRADE.
+    r = ls.derive_loop_state(candidate_decision=_confirmed_iwm_watch(minutes_ago=25),
+                             journal_events=[], now=NOW)
+    assert r["posture"] == "EXECUTION_CONVERSION_FAILURE"
+    assert r["executable"] is False
+    assert r["state"] != "SCAN"
+    assert r["context"].get("option_id") == IWM_OPTION_ID
+    assert any(IWM_OPTION_ID in s for s in r["reasons"])
+
+
+def test_aged_confirmed_entry_with_matching_no_trade_verdict_resolves_flat():
+    # (3) A matching terminal no_trade_decision for the SAME identity accounts for the confirmed
+    # entry: the cycle is reviewed/closed and the tick is a normal flat no-trade.
+    no_trade = {"event_type": "no_trade_decision", "seq": 9, "ts": _ts(minutes_ago=20),
+                "underlying": "IWM", "option_id": IWM_OPTION_ID,
+                "decision": "NO_TRADE_CONFIRMATION_EXPIRED"}
+    r = ls.derive_loop_state(candidate_decision=_confirmed_iwm_watch(minutes_ago=25),
+                             journal_events=[no_trade], now=NOW)
+    assert r["posture"] == "FLAT_NO_TRADE"
+    assert r["state"] == "SCAN"
+    assert r["executable"] is False
+
+
+def test_unrelated_no_trade_with_different_option_id_does_not_resolve_orphan():
+    # (a) An IWM no-trade verdict for a DIFFERENT contract must not absolve the 292P obligation.
+    other = {"event_type": "no_trade_decision", "seq": 9, "ts": _ts(minutes_ago=20),
+             "underlying": "IWM", "option_id": "00000000-0000-0000-0000-000000000000",
+             "decision": "NO_TRADE_SPREAD_TOO_WIDE"}
+    r = ls.derive_loop_state(candidate_decision=_confirmed_iwm_watch(minutes_ago=25),
+                             journal_events=[other], now=NOW)
+    assert r["posture"] == "EXECUTION_CONVERSION_FAILURE"
+    assert r["executable"] is False
+
+
+def test_same_underlying_no_trade_without_identity_does_not_resolve_identity_bound_orphan():
+    # (b) A same-underlying no-trade event carrying NO identity fields cannot resolve an
+    # identity-bound confirm — only an exact option_id/fingerprint match may.
+    bare = {"event_type": "no_trade_decision", "seq": 9, "ts": _ts(minutes_ago=20),
+            "underlying": "IWM", "decision": "NO_TRADE_TAPE_FADED"}
+    r = ls.derive_loop_state(candidate_decision=_confirmed_iwm_watch(minutes_ago=25),
+                             journal_events=[bare], now=NOW)
+    assert r["posture"] == "EXECUTION_CONVERSION_FAILURE"
+    assert r["executable"] is False
+
+
+def test_generic_stale_confirm_without_identity_keeps_prior_flat_behavior():
+    # (c) A CONFIRM_ENTRY that never locked a contract (no option_id, no fingerprint) carries no
+    # conversion obligation — it keeps the prior quiet-ignore behavior, no false incident.
+    generic = {"decision": "CONFIRM_ENTRY", "candidate": {"ticker": "QQQ"}, "ts": _ts(minutes_ago=20)}
+    r = ls.derive_loop_state(candidate_decision=generic, now=NOW)
+    assert r["state"] == "SCAN"
+    assert r["posture"] == "FLAT_NO_TRADE"
+    assert any("ignored stale candidate watch" in s for s in r["notes"])
+
+
+def test_stale_scan_only_trigger_still_flat_no_trade():
+    # (4) A stale SCAN-ONLY trigger carries no conversion obligation — even with a contract identity
+    # attached it is disposable observe-lane cruft and stays a plain FLAT_NO_TRADE.
+    stale_trig = _candidate_triggers(ts=_ts(minutes_ago=45), alert=True,
+                                     candidate={"ticker": "IWM", "direction": "bearish",
+                                                "option_id": IWM_OPTION_ID})
+    r = ls.derive_loop_state(triggers=stale_trig, now=NOW)
     assert r["state"] == "SCAN"
     assert r["posture"] == "FLAT_NO_TRADE"
 
@@ -1133,3 +1356,153 @@ def test_stale_or_undated_broker_truth_never_reconciles():
                                                           as_of=None),
                                    live_mode=True, now=NOW)
     assert undated["state"] == "SCAN"
+
+
+# --- ORDER-GUARD lane (2026-07-23 remediation): pending-order cancellation outranks everything ---
+
+import data.odte_order_guard as og  # noqa: E402  (module-level import kept near its test section)
+
+
+def _guard(state, minutes_ago=1, **over):
+    g = {"schema_version": 1, "generated_at": _ts(minutes_ago=minutes_ago), "state": state,
+         "underlying": "SPY", "lease_id": "lease123",
+         "order": {"status": "pending", "symbol": "SPY", "option_id": "SPY260723P00737000",
+                   "quantity": 2, "limit_price": 1.68},
+         "cancel_required": state in (og.CANCEL_STALE_ENTRY, og.CANCEL_THESIS_INVALID),
+         "safety_incident": state in og.INCIDENT_STATES,
+         "prohibit_new_entries": state in og.INCIDENT_STATES,
+         "pending_order_age_seconds": 95.0, "lease_seconds_remaining": -65.0,
+         "next_action": "CANCEL NOW: stale entry order",
+         "next_command": "broker-cancel (Hermes MCP lane) → odte-order-guard"}
+    g.update(over)
+    return g
+
+
+def test_cancel_stale_order_outranks_fresh_candidate_and_gate():
+    # A cancel-required pending order beats a fresh scan candidate AND a fresh promoted gate:
+    # cancel first, never chase new entries while an unfilled stale order is live at the broker.
+    gate = _entry_decision(decision="enter", execution_allowed=True, ts=_ts(minutes_ago=2))
+    r = ls.derive_loop_state(triggers=_candidate_triggers(ts=_ts(minutes_ago=1), alert=True),
+                             journal_events=[gate],
+                             order_guard=_guard(og.CANCEL_STALE_ENTRY), now=NOW)
+    assert r["state"] == "PENDING_ORDER"
+    assert r["posture"] == "CANCEL_PENDING_ORDER"
+    assert r["context"]["cancel_required"] is True
+    assert r["executable"] is False
+    assert "cancel" in r["next_action"].lower() or "CANCEL" in r["next_action"]
+
+
+def test_pending_fresh_order_exposes_age_and_lease_remaining():
+    g = _guard(og.PENDING_FRESH, cancel_required=False, safety_incident=False,
+               prohibit_new_entries=False, pending_order_age_seconds=7.0,
+               lease_seconds_remaining=20.0,
+               next_action="order pending inside the lease", next_command="odte-order-guard")
+    r = ls.derive_loop_state(order_guard=g, now=NOW)
+    assert r["state"] == "PENDING_ORDER"
+    assert r["posture"] == "PENDING_ORDER_GUARD"
+    assert r["context"]["pending_order_age_seconds"] == 7.0
+    assert r["context"]["lease_seconds_remaining"] == 20.0
+
+
+def test_fill_without_valid_lease_is_top_line_safety_incident():
+    r = ls.derive_loop_state(order_guard=_guard(og.FILLED_WITHOUT_VALID_LEASE,
+                                                order={"status": "filled", "symbol": "SPY"}),
+                             now=NOW)
+    assert r["state"] == "PENDING_ORDER"
+    assert r["posture"] == "CANCEL_PENDING_ORDER"
+    assert r["context"]["safety_incident"] is True
+    assert r["context"]["prohibit_new_entries"] is True
+    assert r["executable"] is False
+    assert "SAFETY INCIDENT" in r["next_action"] or "incident" in r["next_action"].lower()
+
+
+def test_stale_order_guard_artifact_is_ignored():
+    stale = _guard(og.CANCEL_STALE_ENTRY, minutes_ago=ls.ORDER_GUARD_STALE_MINUTES + 5)
+    r = ls.derive_loop_state(order_guard=stale, now=NOW)
+    assert r["state"] == "SCAN"
+    assert any("ignored stale order-guard decision" in s for s in r["notes"])
+
+
+def test_no_order_guard_state_falls_through():
+    r = ls.derive_loop_state(order_guard={"state": "NO_ORDER", "generated_at": _ts(minutes_ago=1)},
+                             now=NOW)
+    assert r["state"] == "SCAN"
+
+
+def test_pending_order_with_broker_down_is_broker_degraded():
+    r = ls.derive_loop_state(order_guard=_guard(og.CANCEL_STALE_ENTRY),
+                             broker_health=_broker(lane="down"), now=NOW)
+    assert r["state"] == "PENDING_ORDER"
+    assert r["posture"] == "BROKER_DEGRADED"
+    assert "cancel" in r["next_action"].lower()
+
+
+def test_broker_truth_does_not_reconcile_away_pending_order_lane():
+    # A fresh probe showing an open position must NOT erase a cancel-first instruction.
+    bh = _handoff(nonzero_option_positions_count=1, open_option_orders_count=1)
+    r = ls.derive_loop_state(order_guard=_guard(og.CANCEL_STALE_ENTRY),
+                             broker_health=bh, live_mode=True, now=NOW)
+    assert r["state"] == "PENDING_ORDER"
+
+
+# --- execution-safety lockout: an incident closes the fresh-entry lane for the session ----------
+
+def _incident_event(minutes_ago=10):
+    return {"event_type": "execution_safety_incident", "seq": 40, "ts": _ts(minutes_ago=minutes_ago),
+            "underlying": "SPY", "guard_state": "FILLED_WITHOUT_VALID_LEASE"}
+
+
+def test_safety_incident_consumes_fresh_promoted_gate():
+    gate = _entry_decision(decision="enter", execution_allowed=True, seq=41, ts=_ts(minutes_ago=2))
+    r = ls.derive_loop_state(journal_events=[_incident_event(), gate], now=NOW)
+    assert r["state"] != "PROMOTED"
+    assert r["executable"] is False
+    assert any("execution_safety_lockout" in s for s in r["reasons"])
+
+
+def test_safety_incident_consumes_fresh_candidate_and_watch():
+    r = ls.derive_loop_state(triggers=_candidate_triggers(ts=_ts(minutes_ago=1), alert=True),
+                             journal_events=[_incident_event()], now=NOW)
+    assert r["state"] != "CANDIDATE"
+    assert any("execution_safety_lockout" in s for s in r["reasons"])
+    cdec = {"decision": "CONFIRM_ENTRY", "candidate": {"ticker": "SPY", "direction": "bearish"},
+            "ts": _ts(minutes_ago=1)}
+    r2 = ls.derive_loop_state(candidate_decision=cdec, journal_events=[_incident_event()], now=NOW)
+    assert r2["posture"] != "SCOUT_FRESH_SETUP"
+    assert any("execution_safety_lockout" in s for s in r2["reasons"])
+
+
+def test_prior_day_incident_does_not_lock_today():
+    old = _incident_event(minutes_ago=60 * 30)     # ~30h ago -> a prior ET day
+    gate = _entry_decision(decision="enter", execution_allowed=True, seq=41, ts=_ts(minutes_ago=2))
+    r = ls.derive_loop_state(journal_events=[old, gate], now=NOW)
+    assert r["state"] == "PROMOTED"
+
+
+# --- run_loop_status: new execution-safety artifacts surface with ages + lease countdown --------
+
+def test_run_loop_status_reads_order_guard_and_lease_files(tmp_path):
+    guard = _guard(og.CANCEL_STALE_ENTRY)
+    (tmp_path / ls.ORDER_GUARD_FILENAME).write_text(json.dumps(guard))
+    lease = {"authorized": True,
+             "lease": {"lease_id": "lease123", "symbol": "SPY", "risk_mode": "PARTIAL_ACCOUNT",
+                       "issued_at": _ts(minutes_ago=2), "expires_at": _ts(minutes_ago=1)}}
+    (tmp_path / ls.EXECUTION_LEASE_FILENAME).write_text(json.dumps(lease))
+    p = ls.run_loop_status(state_dir=str(tmp_path), now=NOW)
+    assert p["state"] == "PENDING_ORDER"
+    assert p["artifacts"]["order_guard"] == "ok"
+    assert p["artifacts"]["execution_lease"] == "ok"
+    assert p["execution_lease"]["lease_id"] == "lease123"
+    assert p["execution_lease"]["expired"] is True
+    assert p["execution_lease"]["seconds_remaining"] == -60.0
+    assert p["artifact_ages"]["order_guard"]["age_minutes"] == 1.0
+    assert p["artifact_ages"]["execution_lease"]["as_of"] is not None
+    json.dumps(p)   # stdout contract stays JSON-serializable
+
+
+def test_run_loop_status_missing_guard_and_lease_files_read_missing(tmp_path):
+    p = ls.run_loop_status(state_dir=str(tmp_path), now=NOW)
+    assert p["artifacts"]["order_guard"] == "missing"
+    assert p["artifacts"]["execution_lease"] == "missing"
+    assert "execution_lease" not in p          # no lease block invented when no lease exists
+    assert p["artifact_ages"]["order_guard"]["as_of"] is None

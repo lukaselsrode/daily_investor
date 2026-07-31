@@ -128,6 +128,48 @@ CANONICAL_GUARDRAILS: tuple[StrategyGuardrail, ...] = (
             "If remaining BP only fits far-OTM low-delta contracts without a real volatility/path setup, stay flat."
         ),
     ),
+    # Execution-safety guardrails (2026-07-23 delayed-fill remediation) — the structural rules that
+    # make a repeat of the stale-fill loss impossible. Enforced in code by odte_entry_gate /
+    # odte_execution_policy / odte_order_guard; surfaced here for prompts, reports, and postmortems.
+    StrategyGuardrail(
+        key="execution_lease_only",
+        title="Execution authority is a short-lived lease",
+        rule=(
+            "No scan/watchdog artifact, model prompt, or bare promotion flag can authorize an order. Entry "
+            "requires a fresh execution lease (default 30s TTL, never above 60s) bound to one exact symbol, "
+            "direction, contract, quantity, and price ceiling, minted only when every deterministic gate passes. "
+            "A lease is single-use; expired or consumed leases fail closed."
+        ),
+    ),
+    StrategyGuardrail(
+        key="pending_order_ttl_cancel_first",
+        title="Pending entry orders die with their lease",
+        rule=(
+            "An unfilled entry order past its lease TTL — or whose thesis rails fired — is cancelled immediately, "
+            "never extended and never reclassified after a late fill. A fill outside a valid lease is an "
+            "execution_safety_incident: journal it, prohibit new entries, flatten or alert per the reviewed "
+            "emergency policy."
+        ),
+    ),
+    StrategyGuardrail(
+        key="vehicle_thesis_lock",
+        title="Vehicle locked to the confirmed thesis",
+        rule=(
+            "A contract for another underlying is a hard mismatch, never an equivalent substitute. Switching "
+            "vehicle (QQQ→SPY, SPY→IWM, ...) invalidates the candidate and requires a fresh watch/score/gate/lease "
+            "cycle; broad-market disagreement is confidence context, not a silent vehicle change."
+        ),
+    ),
+    StrategyGuardrail(
+        key="full_account_a_plus_proof",
+        title="Full-account size demands full proof",
+        rule=(
+            "Full-account deployment is allowed only under an explicit FULL_ACCOUNT_A_PLUS lease recording the "
+            "maximum premium loss, exact trigger, named invalidation, live bid/ask and spread, quantity, target, "
+            "scratch rail, and active-management cadence. A model-generated A+ label alone never sets size; if any "
+            "management input is missing, fail closed or reduce size."
+        ),
+    ),
 )
 
 

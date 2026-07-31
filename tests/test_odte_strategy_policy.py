@@ -33,3 +33,16 @@ def test_window_descriptions_capture_high_action_observation():
     desc = window_descriptions()["high_action_0930_1300"]
     assert "09:30" in desc["description"]
     assert "not permission" in desc["posture"]
+
+
+def test_execution_safety_guardrails_are_canonical():
+    # 2026-07-23 delayed-fill remediation: the execution-safety rules ride in the canonical
+    # guardrails so every report/prompt names them.
+    rails = {g["key"]: g["rule"] for g in canonical_guardrails()}
+    for key in ("execution_lease_only", "pending_order_ttl_cancel_first",
+                "vehicle_thesis_lock", "full_account_a_plus_proof"):
+        assert key in rails, key
+    assert "lease" in rails["execution_lease_only"].lower()
+    assert "cancel" in rails["pending_order_ttl_cancel_first"].lower()
+    assert "hard mismatch" in rails["vehicle_thesis_lock"].lower()
+    assert "a+ label alone never sets size" in rails["full_account_a_plus_proof"].lower()

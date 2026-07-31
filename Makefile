@@ -230,11 +230,33 @@ odte-day-score:              ## 0DTE non-sentiment day score — NO broker (MARK
 # PURE/OFFLINE thesis->entry gate. Assembles a journalable entry-gate decision (enter/deny/veto/
 # observe) from the upstream artifacts. Records intent ONLY — places NO orders, NO broker/network/LLM.
 # execution_allowed is True only when every required gate is explicitly true and not scan_only/restricted.
+# Machine-readable output: gates + failing_gates/unknown_gates + next_action/next_command — a passed
+# gate says "mint an execution lease, then broker review/place, then the order guard"; a BP/vehicle-fit
+# fail says scan the other ETF vehicles (QQQ/SPY/IWM) before declaring no-trade; a missing input names
+# the exact command that produces it. PROMOTE=1 (--promote-to-execution) is DEPRECATED + fail-closed
+# (2026-07-23 incident): it answers with execution_lease_required — use odte-execution-authorize.
 #   make odte-entry-gate TRIGGER=data/odte/triggers.json DAY_SCORE=data/odte/reports/odte_day_score.json VEHICLE=data/odte/reports/odte_vehicle_score_qqq.json BROKER=data/odte/broker.json JSON=1
+#   make odte-entry-gate CANDIDATE=data/odte/active_candidate.json CANDIDATE_DECISION=data/odte/candidate_decision.json DAY_SCORE=<fresh> VEHICLE=<fresh> BROKER=<fresh> CONFIRMATIONS=<fresh-live-confirmations.json> JSON=1 WRITE=1 JOURNAL=1
 #   make odte-entry-gate TRIGGER=data/odte/triggers.json ... JOURNAL=1   # also append an entry_decision event
 .PHONY: odte-entry-gate
-odte-entry-gate:             ## 0DTE thesis->entry gate — NO orders/broker (TRIGGER=; DAY_SCORE=; VEHICLE=; GAMMA=; BROKER=; SCAN_ONLY=1; PROMOTE=1; JOURNAL=1; JSON=1)
-	@$(DI) odte-entry-gate $(if $(TRIGGER),--trigger $(TRIGGER),) $(if $(CANDIDATE),--candidate $(CANDIDATE),) $(if $(DAY_SCORE),--day-score $(DAY_SCORE),) $(if $(VEHICLE),--vehicle-score $(VEHICLE),) $(if $(GAMMA),--gamma $(GAMMA),) $(if $(BROKER),--broker $(BROKER),) $(if $(SCAN_ONLY),--scan-only,) $(if $(PROMOTE),--promote-to-execution,) $(if $(JOURNAL),--journal,) $(if $(JSON),--json,) $(if $(WRITE),--write,) $(if $(OUT_DIR),--out-dir $(OUT_DIR),)
+odte-entry-gate:             ## 0DTE thesis->entry gate — NO orders/broker (TRIGGER=; CANDIDATE=; CANDIDATE_DECISION=; DAY_SCORE=; VEHICLE=; GAMMA=; BROKER=; CONFIRMATIONS=; SCAN_ONLY=1; JOURNAL=1; JSON=1; PROMOTE=1 deprecated/fail-closed)
+	@$(DI) odte-entry-gate $(if $(TRIGGER),--trigger $(TRIGGER),) $(if $(CANDIDATE),--candidate $(CANDIDATE),) $(if $(CANDIDATE_DECISION),--candidate-decision $(CANDIDATE_DECISION),) $(if $(DAY_SCORE),--day-score $(DAY_SCORE),) $(if $(VEHICLE),--vehicle-score $(VEHICLE),) $(if $(GAMMA),--gamma $(GAMMA),) $(if $(BROKER),--broker $(BROKER),) $(if $(CONFIRMATIONS),--confirmations $(CONFIRMATIONS),) $(if $(SCAN_ONLY),--scan-only,) $(if $(PROMOTE),--promote-to-execution,) $(if $(JOURNAL),--journal,) $(if $(JSON),--json,) $(if $(WRITE),--write,) $(if $(OUT_DIR),--out-dir $(OUT_DIR),)
+
+# 0DTE execution-safety layer (2026-07-23 delayed-fill remediation). The ONE tier that mints
+# execution authority — as a SINGLE-USE, short-lived lease (default 30s TTL, hard cap 60s) bound to
+# one exact symbol/direction/contract/quantity/price ceiling — plus the pending-order cancel-first
+# guard. Decision/record tooling only: places NO orders; the Hermes MCP lane owns broker review/
+# place/cancel. Runtime ladder: SCAN_ONLY → CANDIDATE_CONFIRMED → EXECUTION_LEASE_READY →
+# BROKER_REVIEW → PENDING_ORDER_GUARD → FILLED_POSITION_MANAGEMENT → EXIT/FLAT.
+#   make odte-execution-authorize GATE=data/odte/reports/odte_entry_gate_spy.json CANDIDATE_DECISION=data/odte/candidate_decision.json VEHICLE=data/odte/reports/odte_vehicle_score_spy.json BROKER=data/odte/broker.json MARKET=data/odte/market.json JSON=1 WRITE=1
+#   make odte-order-guard ORDER=data/odte/order_truth.json MARKET=data/odte/market.json JSON=1 WRITE=1 JOURNAL=1
+.PHONY: odte-execution-authorize
+odte-execution-authorize:    ## Mint/refuse a single-use 0DTE execution lease — NO orders (GATE=; CANDIDATE_DECISION=; VEHICLE=; BROKER=; MARKET=; POLICY=; JSON=1; WRITE=1; JOURNAL=1)
+	@$(DI) odte-execution-authorize $(if $(GATE),--gate $(GATE),) $(if $(CANDIDATE_DECISION),--candidate-decision $(CANDIDATE_DECISION),) $(if $(VEHICLE),--vehicle-score $(VEHICLE),) $(if $(BROKER),--broker $(BROKER),) $(if $(MARKET),--market $(MARKET),) $(if $(POLICY),--policy $(POLICY),) $(if $(STATE_DIR),--state-dir $(STATE_DIR),) $(if $(JSON),--json,) $(if $(WRITE),--write,) $(if $(JOURNAL),--journal,)
+
+.PHONY: odte-order-guard
+odte-order-guard:            ## 0DTE pending-order cancel-first guard — NO orders (ORDER=; LEASE=; MARKET=; JSON=1; WRITE=1; JOURNAL=1)
+	@$(DI) odte-order-guard $(if $(ORDER),--order $(ORDER),) $(if $(LEASE),--lease $(LEASE),) $(if $(MARKET),--market $(MARKET),) $(if $(STATE_DIR),--state-dir $(STATE_DIR),) $(if $(JSON),--json,) $(if $(WRITE),--write,) $(if $(JOURNAL),--journal,)
 
 .PHONY: odte-candidate-watch
 odte-candidate-watch:        ## 0DTE pre-entry candidate HAWK — NO orders/broker (CANDIDATE=; MARKET=; DAY_SCORE=; VEHICLE=; GAMMA=; BROKER_HEALTH=; WRITE=1; JSON=1)
@@ -251,11 +273,18 @@ odte-fmp-context:            ## FMP meme/squeeze sanity context — NO orders/op
 
 # One read-only surface for the live loop: summarizes data/odte artifacts (active_trade /
 # position_decision / triggers / decision_journal) into the current state + coarse cron POSTURE
-# (MANAGE_POSITION / SCOUT_FRESH_SETUP / WAIT_FRESH_CONFIRMATION / FLAT_NO_TRADE / STALE_DATA_BLOCKED /
-# BROKER_DEGRADED; FLAT_NO_TRADE = normal idle tick, never "stale") + per-artifact freshness + next
-# command. PURE/OFFLINE — makes NO broker call. BROKER_HEALTH=path (else data/odte/broker_health.json)
-# folds a SUPPLIED/PROBED broker-health JSON (Hermes writes it from an MCP/CLI probe) so the lane reads
-# ok/down/stale/read-only-fallback. Fails closed by default (live mode): unknown/missing broker can't
+# (MANAGE_POSITION / EXECUTION_READY / SCOUT_FRESH_SETUP / WAIT_FRESH_CONFIRMATION / FLAT_NO_TRADE /
+# STALE_DATA_BLOCKED / BROKER_DEGRADED) + per-artifact freshness + next command. The posture ladder
+# drives action, not nudges: MANAGE_POSITION = quote & manage the open position NOW; EXECUTION_READY =
+# every gate passed — broker review/place under standing auth, then odte-position; SCOUT_FRESH_SETUP =
+# candidate confirmed — build/promote a fresh entry gate; WAIT_FRESH_CONFIRMATION = keep polling, the
+# payload names the exact trigger needed; FLAT_NO_TRADE = normal idle tick, never "stale".
+# PURE/OFFLINE — makes NO broker call. BROKER_HEALTH=path (else data/odte/broker_health.json) folds a
+# SUPPLIED/PROBED broker-health JSON (Hermes writes it from an MCP/CLI probe) so the lane reads
+# ok/down/stale/read-only-fallback. BROKER TRUTH FIRST: a STALE broker_health.json is an outdated probe
+# FILE, not a confirmed fault — the payload carries broker_lane.refresh_command (re-probe parent MCP,
+# rewrite the file) instead of pretending live orders are impossible; only a confirmed down/read-only
+# lane reads BROKER_DEGRADED. Fails closed by default (live mode): unknown/missing broker can't
 # authorize a live order. OFFLINE=1 relaxes to pure decision-support.
 #   make odte-loop-status            # Markdown: posture + where in the loop + what runs next
 #   make odte-loop-status JSON=1     # compact machine payload

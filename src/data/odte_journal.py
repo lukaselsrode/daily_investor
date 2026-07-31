@@ -57,7 +57,16 @@ DEFAULT_JOURNAL_PATH = os.path.join(DEFAULT_DIR, "decision_journal.jsonl")
 DEFAULT_REPORT_DIR = ODTE_REPORT_DIR
 
 EVENT_TYPES = ("pre_trade_thesis", "entry_decision", "order_filled", "management_check",
-               "exit_decision", "order_closed", "postmortem", "experiment", "note")
+               "exit_decision", "order_closed", "postmortem", "experiment", "note",
+               # execution-safety layer (2026-07-23 delayed-fill remediation):
+               "execution_lease_issued", "execution_lease_consumed", "entry_order_pending",
+               "entry_order_cancelled_stale", "execution_safety_incident")
+
+# The execution-safety event family — every lease issuance/consumption and every pending-order
+# submit/cancel/fill transition must have a matching journal event (shadow-rollout gate).
+EXECUTION_SAFETY_EVENT_TYPES = ("execution_lease_issued", "execution_lease_consumed",
+                                "entry_order_pending", "entry_order_cancelled_stale",
+                                "execution_safety_incident")
 
 _ENTRY_EVENTS = {"entry_decision", "order_filled"}
 _EXIT_EVENTS = {"exit_decision", "order_closed"}
@@ -255,35 +264,66 @@ def green_day_preservation(events: list[dict] | None, active_trade: dict | None 
     override (see `odte_entry_gate` / `odte_loop_status`)."""
     now = now or datetime.now(timezone.utc)
     today = now.astimezone(ET).date().isoformat()
-    green: dict[str, dict] = {}
+    # Track one realized P/L per completed trade for the ET day.  Green-day preservation is a
+    # *net-day* discipline lockout, not a "last trade was green" lockout: if an earlier loss keeps
+    # the session net red, fresh entries remain allowed but still require the stricter post-loss
+    # quality gates.  Keep the positive rows for reporting, but gate ``locked`` on net realized P/L.
+    realized_by_trade: dict[str, dict] = {}
     for i, e in enumerate(events or []):
         if not isinstance(e, dict) or e.get("event_type") not in _COMPLETED_EVENTS:
             continue
         if _et_date(e.get("ts")) != today:
             continue
         pnl = _realized(e)
-        if pnl is None or pnl <= 0:
+        if pnl is None:
             continue
         key = str(e.get("trade_id") or f"event#{e.get('seq', i)}")
         row = {"trade_id": e.get("trade_id"),
                "underlying": (str(e.get("underlying") or e.get("symbol") or "").upper() or None),
                "realized_pnl": pnl, "closed_ts": e.get("ts")}
-        prev = green.get(key)
-        if prev is None or pnl > prev["realized_pnl"]:
-            green[key] = row
+        prev = realized_by_trade.get(key)
+        # Prefer the latest same-trade completion record; duplicate journal entries usually carry
+        # the same P/L, while postmortems/corrections may refine it later in the day.
+        if prev is None or str(row.get("closed_ts") or "") >= str(prev.get("closed_ts") or ""):
+            realized_by_trade[key] = row
     plan = active_trade if isinstance(active_trade, dict) else {}
     if str(plan.get("status") or "").strip().lower() in _INACTIVE_PLAN_STATUS:
         close_ts = plan.get("closed_at") or plan.get("exit_fill_time") or plan.get("updated_at")
         pnl = _realized(plan)
         key = str(plan.get("trade_id") or "active_trade")
-        if pnl is not None and pnl > 0 and _et_date(close_ts) == today and key not in green:
-            green[key] = {"trade_id": plan.get("trade_id"),
-                          "underlying": (str(plan.get("underlying") or "").upper() or None),
-                          "realized_pnl": pnl, "closed_ts": close_ts}
-    rows = sorted(green.values(), key=lambda r: str(r.get("closed_ts") or ""))
-    return {"locked": bool(rows), "trade_date": today,
+        if pnl is not None and _et_date(close_ts) == today and key not in realized_by_trade:
+            realized_by_trade[key] = {"trade_id": plan.get("trade_id"),
+                                      "underlying": (str(plan.get("underlying") or "").upper() or None),
+                                      "realized_pnl": pnl, "closed_ts": close_ts}
+    all_rows = sorted(realized_by_trade.values(), key=lambda r: str(r.get("closed_ts") or ""))
+    rows = [r for r in all_rows if r["realized_pnl"] > 0]
+    net_day_pnl = round(sum(r["realized_pnl"] for r in all_rows), 4)
+    return {"locked": bool(rows) and net_day_pnl > 0, "trade_date": today,
             "banked_pnl": round(sum(r["realized_pnl"] for r in rows), 4),
-            "green_trades": rows}
+            "net_day_pnl": net_day_pnl, "green_trades": rows,
+            "completed_trades": all_rows}
+
+
+def execution_safety_lockout(events: list[dict] | None, now: datetime | None = None) -> dict:
+    """PURE: has an `execution_safety_incident` been journaled for the current ET day?
+
+    2026-07-23 delayed-fill remediation: a fill outside a valid execution lease (or a broker/lease
+    mismatch) is a SAFETY INCIDENT — once one is journaled, NO new entries are permitted for the
+    session (`odte_loop_status` consumes fresh gates/candidates/triggers). There is deliberately no
+    override flag: the lockout clears only with the ET calendar day. Reads only the supplied
+    events — no IO, no broker."""
+    now = now or datetime.now(timezone.utc)
+    today = now.astimezone(ET).date().isoformat()
+    incidents = [
+        {"seq": e.get("seq"), "ts": e.get("ts"),
+         "underlying": (str(e.get("underlying") or e.get("symbol") or "").upper() or None),
+         "reason_codes": list(e.get("reason_codes") or []),
+         "guard_state": e.get("guard_state") or e.get("state")}
+        for e in (events or [])
+        if isinstance(e, dict) and e.get("event_type") == "execution_safety_incident"
+        and _et_date(e.get("ts")) == today
+    ]
+    return {"locked": bool(incidents), "trade_date": today, "incidents": incidents}
 
 
 # --- standardized decision-journal layer ----------------------------------------------------
@@ -410,8 +450,9 @@ def build_decision_event(event: dict | None, *, source: str, event_type: str,
     base["scan_only"] = scan_only
     exec_allowed = bool(base.get("execution_allowed", False))
     # HARD GUARD: scan-tier events can never be execution-allowed, and a restricted (NVDA) underlying
-    # is never execution-allowed regardless of caller input.
-    if scan_only or base.get("restricted"):
+    # is never execution-allowed regardless of caller input. Execution-safety events (lease/order
+    # guard) are RECORDS of the safety layer, never authority — always non-executable on store.
+    if scan_only or base.get("restricted") or base["event_type"] in EXECUTION_SAFETY_EVENT_TYPES:
         exec_allowed = False
     base["execution_allowed"] = exec_allowed
     base["event_id"] = _compute_event_id(base)
@@ -825,7 +866,13 @@ def event_from_entry_gate(gate_decision: dict, trade_id: str | None = None,
         "reason_codes": list(g.get("reason_codes") or []),
         "veto_reasons": list(g.get("veto_reasons") or []),
         "required_confirmations": list(g.get("required_confirmations") or []),
+        "confirmations": dict(g.get("confirmations") or {}),
         "confirmation_needed": g.get("confirmation_needed"),
+        "candidate_fingerprint": g.get("candidate_fingerprint"),
+        "option_id": g.get("option_id"),
+        "expiration_date": g.get("expiration_date"),
+        "strike_price": g.get("strike_price"),
+        "option_type": g.get("option_type"),
         "gates": g.get("gates"),
         "scan_only": bool(g.get("scan_only", False)),
         "execution_allowed": bool(g.get("execution_allowed", False)),
@@ -860,6 +907,106 @@ def event_from_vehicle_score(score_payload: dict, trade_id: str | None = None,
                      "reasons": list(p.get("reasons") or [])},
         "vehicle_score": {"verdict": p.get("verdict"), "score": p.get("score"),
                           "components": p.get("components"), "direction": p.get("direction")},
+    }
+    if extra:
+        e.update(extra)
+    return e
+
+
+# --- execution-safety event converters (lease + order guard) ---------------------------------
+# Parallel to event_from_entry_gate/event_from_position_decision: PURE converters that build (but
+# do not append) journal events from the execution-safety payloads. The journal is a RECORD, never
+# authority — `execution_allowed` stays False on these events by construction.
+
+def event_from_execution_lease(auth_payload: dict, trade_id: str | None = None,
+                               extra: dict | None = None) -> dict:
+    """Convert an `odte-execution-authorize` payload into an `execution_lease_issued` journal
+    event (authorized) or a deny record (refused). The policy values and accepted maximum loss are
+    serialized into the event, per the execution-safety contract. Does NOT auto-append."""
+    p = auth_payload or {}
+    lease = p.get("lease") if isinstance(p.get("lease"), dict) else {}
+    e = {
+        "event_type": "execution_lease_issued",
+        "trade_id": trade_id,
+        "underlying": lease.get("symbol") or p.get("symbol"),
+        "direction": lease.get("direction") or p.get("direction"),
+        "option_id": lease.get("option_id"),
+        "option_type": lease.get("option_type"),
+        "strike": lease.get("strike_price"),
+        "expiration": lease.get("expiration_date"),
+        "quantity": lease.get("quantity") or p.get("quantity"),
+        "lease_id": lease.get("lease_id"),
+        "issued_at": lease.get("issued_at"),
+        "expires_at": lease.get("expires_at"),
+        "max_limit_price": lease.get("max_limit_price"),
+        "max_debit": lease.get("max_debit") or p.get("debit"),
+        "risk_mode": lease.get("risk_mode") or p.get("risk_mode"),
+        "max_premium_loss": lease.get("max_premium_loss"),
+        "candidate_fingerprint": lease.get("candidate_fingerprint"),
+        "market_fingerprint": lease.get("market_fingerprint"),
+        "policy": p.get("policy"),
+        "authorized": bool(p.get("authorized")),
+        "decision": {"action": "allow" if p.get("authorized") else "deny",
+                     "reasons": list(p.get("reason_codes") or [])},
+        "reason_codes": list(p.get("reason_codes") or []),
+        # A journal record of the lease is never itself execution authority.
+        "scan_only": False,
+        "execution_allowed": False,
+    }
+    if extra:
+        e.update(extra)
+    return e
+
+
+# odte_order_guard state → journal event type. FILLED_FRESH reuses the existing `order_filled`
+# type; both cancel flavors journal as `entry_order_cancelled_stale` (the reason names which rail
+# fired); every incident state journals as `execution_safety_incident`. NO_ORDER journals nothing.
+_GUARD_EVENT_TYPES = {
+    "PENDING_FRESH": "entry_order_pending",
+    "CANCEL_STALE_ENTRY": "entry_order_cancelled_stale",
+    "CANCEL_THESIS_INVALID": "entry_order_cancelled_stale",
+    "FILLED_FRESH": "order_filled",
+    "FILLED_WITHOUT_VALID_LEASE": "execution_safety_incident",
+    "BROKER_MISMATCH_BLOCKED": "execution_safety_incident",
+}
+
+
+def event_from_order_guard(guard_payload: dict, trade_id: str | None = None,
+                           extra: dict | None = None) -> dict | None:
+    """Convert an `odte-order-guard` decision into its journal event (see _GUARD_EVENT_TYPES).
+    Returns None for NO_ORDER (nothing to record). Does NOT auto-append."""
+    p = guard_payload or {}
+    state = str(p.get("state") or "").upper()
+    event_type = _GUARD_EVENT_TYPES.get(state)
+    if event_type is None:
+        return None
+    order = p.get("order") if isinstance(p.get("order"), dict) else {}
+    e = {
+        "event_type": event_type,
+        "trade_id": trade_id,
+        "underlying": p.get("underlying") or order.get("symbol"),
+        "option_id": order.get("option_id"),
+        "option_type": order.get("option_type"),
+        "strike": order.get("strike_price"),
+        "expiration": order.get("expiration_date"),
+        "quantity": order.get("quantity"),
+        "guard_state": state,
+        "lease_id": p.get("lease_id"),
+        "order_status": order.get("status"),
+        "limit_price": order.get("limit_price"),
+        "submitted_at": order.get("submitted_at"),
+        "filled_at": order.get("filled_at"),
+        "cancel_required": bool(p.get("cancel_required")),
+        "safety_incident": bool(p.get("safety_incident")),
+        "prohibit_new_entries": bool(p.get("prohibit_new_entries")),
+        "pending_order_age_seconds": p.get("pending_order_age_seconds"),
+        "lease_seconds_remaining": p.get("lease_seconds_remaining"),
+        "decision": {"action": ("veto" if p.get("safety_incident")
+                                else "exit" if p.get("cancel_required") else "hold"),
+                     "reasons": list(p.get("reasons") or [])},
+        "reason_codes": list(p.get("reasons") or []),
+        "scan_only": False,
+        "execution_allowed": False,
     }
     if extra:
         e.update(extra)

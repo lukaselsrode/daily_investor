@@ -714,3 +714,84 @@ def test_day_packet_generates_postmortem_sections_without_overwriting_human_note
     generated = tmp_path / "odte" / "days" / td / "postmortem.generated.md"
     assert s2["files"]["postmortem.generated.md"] == 1
     assert "Harvested target zone" in generated.read_text()
+
+
+# --- execution-safety events (2026-07-23 delayed-fill remediation) ------------------------------
+
+def test_execution_safety_event_types_are_canonical():
+    for et in oj.EXECUTION_SAFETY_EVENT_TYPES:
+        assert et in oj.EVENT_TYPES, et
+    assert set(oj.EXECUTION_SAFETY_EVENT_TYPES) == {
+        "execution_lease_issued", "execution_lease_consumed", "entry_order_pending",
+        "entry_order_cancelled_stale", "execution_safety_incident"}
+
+
+def test_event_from_execution_lease_serializes_policy_and_maximums(tmp_path):
+    auth = {"authorized": True, "risk_mode": "PARTIAL_ACCOUNT",
+            "policy": {"risk_mode": "PARTIAL_ACCOUNT", "ttl_seconds": 30.0,
+                       "max_contracts": 1, "max_debit_fraction": 0.5, "max_premium_loss": None},
+            "reason_codes": [],
+            "lease": {"lease_id": "abc123", "symbol": "SPY", "direction": "bearish",
+                      "option_id": "SPY260723P00737000", "option_type": "put",
+                      "strike_price": 737.0, "expiration_date": "2026-07-23", "quantity": 1,
+                      "issued_at": "2026-07-23T15:11:17+00:00",
+                      "expires_at": "2026-07-23T15:11:47+00:00",
+                      "max_limit_price": 1.68, "max_debit": 168.0,
+                      "risk_mode": "PARTIAL_ACCOUNT", "max_premium_loss": None,
+                      "candidate_fingerprint": "fp1", "market_fingerprint": "fp2"}}
+    ev = oj.event_from_execution_lease(auth, trade_id="t1")
+    assert ev["event_type"] == "execution_lease_issued" and ev["trade_id"] == "t1"
+    assert ev["lease_id"] == "abc123" and ev["underlying"] == "SPY"
+    assert ev["max_debit"] == 168.0 and ev["max_limit_price"] == 1.68
+    assert ev["policy"]["ttl_seconds"] == 30.0
+    assert ev["decision"]["action"] == "allow"
+    # The journal RECORD of a lease is never itself execution authority — even adversarially:
+    # build_decision_event forces execution_allowed=False for the whole safety-event family.
+    ev["execution_allowed"] = True
+    jp = str(tmp_path / "decision_journal.jsonl")
+    res = oj.append_decision_journal(ev, source="execution_authorize",
+                                     event_type="execution_lease_issued", journal_path=jp)
+    assert res["status"] == "appended"
+    assert res["event"]["execution_allowed"] is False
+    ev2 = oj.event_from_execution_lease(auth)
+    assert ev2["execution_allowed"] is False
+
+
+def test_event_from_execution_lease_denied_records_reasons():
+    auth = {"authorized": False, "risk_mode": "PARTIAL_ACCOUNT", "lease": None,
+            "reason_codes": ["quantity_exceeds_policy", "debit_exceeds_policy"]}
+    ev = oj.event_from_execution_lease(auth)
+    assert ev["decision"]["action"] == "deny"
+    assert "quantity_exceeds_policy" in ev["reason_codes"]
+    assert ev["authorized"] is False
+
+
+def test_execution_safety_lockout_locks_today_only(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    now = datetime(2026, 7, 23, 18, 0, tzinfo=timezone.utc)
+    today_incident = {"event_type": "execution_safety_incident", "seq": 1,
+                      "ts": (now - timedelta(hours=1)).isoformat(),
+                      "underlying": "SPY", "guard_state": "FILLED_WITHOUT_VALID_LEASE"}
+    out = oj.execution_safety_lockout([today_incident], now=now)
+    assert out["locked"] is True
+    assert out["incidents"][0]["underlying"] == "SPY"
+    # A prior-day incident does not lock today (ET calendar-day reset).
+    old = {**today_incident, "ts": (now - timedelta(days=2)).isoformat()}
+    assert oj.execution_safety_lockout([old], now=now)["locked"] is False
+    # Non-incident events never lock.
+    assert oj.execution_safety_lockout(
+        [{"event_type": "entry_order_pending", "ts": now.isoformat()}], now=now)["locked"] is False
+    assert oj.execution_safety_lockout([], now=now)["locked"] is False
+
+
+def test_new_event_types_roundtrip_through_journal(tmp_path):
+    jp = str(tmp_path / "decision_journal.jsonl")
+    for et in oj.EXECUTION_SAFETY_EVENT_TYPES:
+        res = oj.append_decision_journal({"event_type": et, "underlying": "SPY",
+                                          "lease_id": f"lease-{et}"},
+                                         source="test", event_type=et, journal_path=jp)
+        assert res["status"] == "appended", et
+    stored = oj.read_events(jp)
+    assert [e["event_type"] for e in stored] == list(oj.EXECUTION_SAFETY_EVENT_TYPES)
+    # Every stored record stays non-authoritative.
+    assert all(e["execution_allowed"] is False for e in stored)

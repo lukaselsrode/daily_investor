@@ -1,0 +1,82 @@
+{
+  "incident": "2026-07-23 delayed-fill loss — scan_only SPY-bearish watchdog signal promoted via --promote-to-execution; 2-contract SPY 737P limit sat pending past the momentum window, filled after the extension stalled, closed for a loss",
+  "sanitized": true,
+  "notes": "Sanitized deterministic replay fixture: NO account numbers, NO broker order UUIDs. The option_id is the public OCC contract symbol, not a broker identifier. Timestamps are exact (ET recorded, stored as UTC; ET = UTC-4 on 2026-07-23).",
+  "timeline": {
+    "trigger_at": "2026-07-23T15:10:42+00:00",
+    "promotion_at": "2026-07-23T15:11:17+00:00",
+    "order_submitted_at": "2026-07-23T15:13:11+00:00",
+    "order_filled_at": "2026-07-23T15:15:35+00:00",
+    "position_closed_at": "2026-07-23T15:20:59+00:00"
+  },
+  "candidate": {
+    "ticker": "SPY",
+    "direction": "bearish",
+    "scan_only": true,
+    "source": "watchdog_market_scorecard",
+    "created_at": "2026-07-23T15:10:42+00:00",
+    "confidence": "low"
+  },
+  "contract": {
+    "underlying": "SPY",
+    "option_type": "put",
+    "strike_price": 737.0,
+    "expiration_date": "2026-07-23",
+    "option_id": "SPY260723P00737000",
+    "bid": 1.62,
+    "ask": 1.68,
+    "mark": 1.65
+  },
+  "order": {
+    "status": "pending",
+    "symbol": "SPY",
+    "option_id": "SPY260723P00737000",
+    "option_type": "put",
+    "strike_price": 737.0,
+    "expiration_date": "2026-07-23",
+    "quantity": 2,
+    "limit_price": 1.68,
+    "debit": 336.0,
+    "submitted_at": "2026-07-23T15:13:11+00:00",
+    "filled_at": null
+  },
+  "broker_snapshot": {
+    "as_of": "2026-07-23T15:11:10+00:00",
+    "buying_power": 400.34,
+    "day_trades_left": 3,
+    "nonzero_option_positions_count": 0,
+    "open_option_orders_count": 0,
+    "today_option_orders_count": 0,
+    "controller_locked": false
+  },
+  "account": {
+    "buying_power": 400.34,
+    "order_debit": 336.0,
+    "debit_fraction_of_buying_power": 0.839
+  },
+  "invalidation": {
+    "description": "SPY reclaims VWAP and holds above 737.20",
+    "level": 737.2
+  },
+  "tape": {
+    "at_trigger": {
+      "as_of": "2026-07-23T15:10:42+00:00",
+      "SPY": {"last": 736.41, "above_vwap": false, "orb_state": "below"},
+      "QQQ": {"last": 718.6, "above_vwap": false, "orb_state": "below"},
+      "VIXY": {"above_vwap": true, "change_pct": 1.4}
+    },
+    "at_fill": {
+      "as_of": "2026-07-23T15:15:35+00:00",
+      "SPY": {"last": 736.98, "above_vwap": true, "orb_state": "below"},
+      "QQQ": {"last": 719.4, "above_vwap": true, "orb_state": "below"},
+      "VIXY": {"above_vwap": false, "change_pct": -0.3}
+    }
+  },
+  "outcome": {
+    "entry_price": 1.68,
+    "exit_price": 1.42,
+    "realized_pnl": -52.16,
+    "closed_at": "2026-07-23T15:20:59+00:00",
+    "loss_note": "estimated net including fees; momentum extension had stalled before the fill"
+  }
+}

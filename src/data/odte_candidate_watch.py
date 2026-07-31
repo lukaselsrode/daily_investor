@@ -5,6 +5,15 @@ the board, it can be watched with faster cadence until it either confirms entry 
 intentionally decision-only: NO broker calls, NO network, NO LLM, and ``execution_allowed`` is always
 False. The live manager must still build/promote an entry gate and perform broker review before any
 order.
+
+VEHICLE LOCK (2026-07-23 delayed-fill remediation): the watched candidate carries an explicit
+``selected_vehicle`` + ``selection_reason`` + ``relative_strength_rank`` + ``selection_timestamp``
+and a ``candidate_fingerprint`` (persisted into ``active_candidate.json``). A vehicle-score
+contract for ANOTHER underlying is a HARD mismatch (``DEGRADED_NO_TRADE``), never an equivalent
+substitute — switching QQQ→SPY (or any cross-underlying swap) invalidates the current candidate and
+requires a fresh watch/score/gate/lease cycle; the new cycle mints a NEW fingerprint, which
+invalidates any lease bound to the old one. Broad-market disagreement stays confidence/risk context
+(dissenters in ``checks``); it can never silently select a different vehicle.
 """
 from __future__ import annotations
 
@@ -244,6 +253,77 @@ def _accepted_wall(candidate: dict, market: dict, wall: float, direction: str) -
     return spot <= wall - buffer
 
 
+def _relative_strength_rank(market: dict, direction: str, symbol: str) -> int | None:
+    """1-based tape-alignment rank of `symbol` among the ETF universe for `direction` (VWAP side +
+    ORB side, deterministic, ties broken by universe order). Descriptive selection context only —
+    never execution authority."""
+    scores: list[tuple[str, int]] = []
+    for etf in ETF_UNIVERSE:
+        block = _symbol_block(market, etf)
+        if not block:
+            continue
+        above = _bool_field(block, "above_vwap")
+        orb = _orb_state(block)
+        if direction == "bullish":
+            score = int(above is True) + int(orb == "above")
+        else:
+            score = int(above is False) + int(orb == "below")
+        scores.append((etf, score))
+    names = [name for name, _ in scores]
+    if symbol not in names:
+        return None
+    ranked = sorted(scores, key=lambda t: (-t[1], ETF_UNIVERSE.index(t[0])))
+    return 1 + [name for name, _ in ranked].index(symbol)
+
+
+def _lock_vehicle(cand: dict, symbol: str, direction: str, market: dict, now: datetime,
+                  contract: dict | None = None) -> dict:
+    """Stamp the exact VEHICLE/CONTRACT LOCK onto the candidate.
+
+    The candidate fingerprint binds one selected underlying AND one exact option id/expiry/strike/type.
+    A contract switch requires a new candidate cycle and fingerprint; affordability never permits an
+    unjournaled strike substitution after confirmation.
+    """
+    out = dict(cand)
+    out["ticker"] = symbol
+    out["direction"] = direction
+    out["selected_vehicle"] = symbol
+    contract = _dict(contract)
+    exact_fields = {
+        "option_id": contract.get("option_id") or contract.get("id") or contract.get("occ_symbol"),
+        "expiration_date": contract.get("expiration_date") or contract.get("expiration"),
+        "strike_price": contract.get("strike_price") or contract.get("strike"),
+        "option_type": contract.get("option_type") or contract.get("type"),
+    }
+    prior_identity = (
+        out.get("option_id") or out.get("id") or out.get("occ_symbol"),
+        out.get("expiration_date") or out.get("expiration"),
+        out.get("strike_price") or out.get("strike"),
+        str(out.get("option_type") or out.get("type") or "").lower() or None,
+    )
+    next_identity = (
+        exact_fields["option_id"], exact_fields["expiration_date"], exact_fields["strike_price"],
+        str(exact_fields["option_type"] or "").lower() or None,
+    )
+    if (all(value is not None for value in next_identity)
+            and any(value is not None for value in prior_identity)
+            and prior_identity != next_identity):
+        out["selection_timestamp"] = now.isoformat()
+        out["selection_reason"] = "exact_contract_switch_new_candidate_cycle"
+    for name, value in exact_fields.items():
+        if value is not None and value != "":
+            out[name] = value
+    out.setdefault("selection_reason",
+                   str(out.get("source") or "explicit_candidate"))
+    out["relative_strength_rank"] = _relative_strength_rank(market, direction, symbol)
+    out.setdefault("selection_timestamp",
+                   str(out.get("created_at") or out.get("ts") or out.get("generated_at")
+                       or now.isoformat(timespec="seconds")))
+    from data.odte_execution_policy import candidate_fingerprint
+    out["candidate_fingerprint"] = candidate_fingerprint(out)
+    return out
+
+
 def evaluate_candidate_watch(candidate: dict | None = None, *, market: dict | None = None,
                              day_score: dict | None = None, vehicle_score: dict | None = None,
                              gamma_map: dict | None = None, broker_health: dict | None = None,
@@ -273,6 +353,26 @@ def evaluate_candidate_watch(candidate: dict | None = None, *, market: dict | No
     if not direction:
         reasons.append("candidate direction missing")
         return _payload(KEEP_WATCHING, cand, reasons, checks, now)
+
+    # VEHICLE LOCK: pin the selected vehicle + fingerprint on the candidate the moment identity is
+    # known, so every downstream artifact (active_candidate.json, gate, lease) binds to ONE vehicle.
+    cand = _lock_vehicle(cand, sym, direction, market, now,
+                         contract=_dict(vehicle_score.get("contract")))
+    checks["selected_vehicle"] = sym
+    checks["candidate_fingerprint"] = cand.get("candidate_fingerprint")
+
+    # HARD MISMATCH: a vehicle-score contract for another underlying is never an equivalent
+    # substitute (the QQQ-thesis→SPY-contract failure). Degrade — a switch requires a FRESH
+    # watch/score/gate/lease cycle for the new underlying.
+    contract = _dict(vehicle_score.get("contract"))
+    contract_underlying = _norm_symbol(contract.get("underlying") or contract.get("symbol")
+                                       or contract.get("chain_symbol"))
+    if contract_underlying and contract_underlying != sym:
+        checks["vehicle_underlying"] = contract_underlying
+        reasons.append(f"vehicle underlying mismatch: contract {contract_underlying} != candidate "
+                       f"{sym} — hard mismatch; a vehicle switch requires a fresh "
+                       "watch/score/gate/lease cycle")
+        return _payload(DEGRADED_NO_TRADE, cand, reasons, checks, now)
 
     age = _candidate_age_minutes(cand, now)
     if age is not None and age > max_watch_minutes:

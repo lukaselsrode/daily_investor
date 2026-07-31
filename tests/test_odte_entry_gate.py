@@ -26,15 +26,23 @@ def _journal(tmp_path):
 # All gates explicitly positive — the only shape that may authorize execution.
 _GOOD_DAY = {"verdict": "GOOD_DAY", "score": 5}
 _GOOD_VEHICLE = {"verdict": "GOOD_BET", "score": 6, "direction": "bullish",
-                 "contract": {"underlying": "QQQ", "option_type": "call", "strike": 718},
+                 "contract": {"underlying": "QQQ", "option_type": "call",
+                              "option_id": "QQQ260727C00718000", "expiration_date": "2026-07-27",
+                              "strike_price": 718.0},
                  "reasons": ["market: VWAP confirms calls on SPY,QQQ", "gamma: low pin risk"]}
-_GOOD_BROKER = {"buying_power": 250.0, "day_trades_left": 3}
-_CANDIDATE = {"ticker": "QQQ", "direction": "bullish"}
+_GOOD_BROKER = {"buying_power": 250.0, "day_trades_left": 3,
+                "nonzero_option_positions_count": 0, "open_option_orders_count": 0,
+                "today_option_orders_count": 0}
+_CANDIDATE = {"ticker": "QQQ", "direction": "bullish", "option_type": "call",
+              "option_id": "QQQ260727C00718000", "expiration_date": "2026-07-27",
+              "strike_price": 718.0, "selection_timestamp": "2026-07-27T14:00:00+00:00"}
+_CONFIRMATIONS = {name: True for name in eg.REQUIRED_CONFIRMATIONS}
 
 
 def _all_gates_kwargs():
     return dict(candidate=dict(_CANDIDATE), day_score=dict(_GOOD_DAY),
-                vehicle_score=dict(_GOOD_VEHICLE), broker_snapshot=dict(_GOOD_BROKER))
+                vehicle_score=dict(_GOOD_VEHICLE), broker_snapshot=dict(_GOOD_BROKER),
+                confirmations=dict(_CONFIRMATIONS))
 
 
 # --- happy path: every explicit gate true, not scan_only -> enter + execution allowed -------------
@@ -74,17 +82,24 @@ def test_scan_only_trigger_is_inherited_and_stays_observe_by_default():
     assert "scan_only_inherited" in d["reason_codes"]
 
 
-def test_promote_to_execution_allows_inherited_scan_only_trigger_to_enter():
-    # The manager EXPLICITLY promotes the same scan_only trigger; with all gates good it may enter.
+def test_promote_to_execution_is_deprecated_and_fails_closed():
+    # REGRESSION (2026-07-23 delayed-fill incident): a bare promote_to_execution=True on a
+    # scan_only trigger must NOT make the record executable anymore. The attempt is recorded and
+    # answered with execution_lease_required — the lease tier (odte-execution-authorize) is the
+    # only mint for execution authority.
     trigger = {"scan_only": True, "execution_allowed": False,
                "candidate": dict(_CANDIDATE)}
     d = eg.build_entry_gate_decision(trigger=trigger, day_score=dict(_GOOD_DAY),
                                      vehicle_score=dict(_GOOD_VEHICLE),
                                      broker_snapshot=dict(_GOOD_BROKER),
                                      promote_to_execution=True)
-    assert d["scan_only"] is False and d["promoted_to_execution"] is True
-    assert d["execution_allowed"] is True and d["decision"] == "enter"
-    assert "scan_only_promoted_to_execution" in d["reason_codes"]
+    assert d["scan_only"] is True, "bare promotion can no longer demote the scan tier"
+    assert d["promoted_to_execution"] is False
+    assert d["promotion_requested"] is True
+    assert d["execution_allowed"] is False and d["decision"] == "observe"
+    assert eg.EXECUTION_LEASE_REQUIRED in d["reason_codes"]
+    assert "scan_only_inherited" in d["reason_codes"]
+    assert d["next_command"] == "odte-execution-authorize"
 
 
 def test_candidate_scan_only_is_also_inherited():
@@ -113,13 +128,14 @@ def test_run_entry_gate_inherits_scan_only_from_trigger_json():
         vehicle_score_json=json.dumps(_GOOD_VEHICLE),
         broker_json=json.dumps(_GOOD_BROKER))
     assert d["scan_only"] is True and d["execution_allowed"] is False
-    # ...and the explicit promote opt-in flips it.
+    # ...and the deprecated promote flag STAYS fail-closed on the CLI path too (2026-07-23).
     d2 = eg.run_entry_gate(
         trigger_json=json.dumps({"scan_only": True, "candidate": _CANDIDATE}),
         day_score_json=json.dumps(_GOOD_DAY),
         vehicle_score_json=json.dumps(_GOOD_VEHICLE),
         broker_json=json.dumps(_GOOD_BROKER), promote_to_execution=True)
-    assert d2["scan_only"] is False and d2["execution_allowed"] is True
+    assert d2["scan_only"] is True and d2["execution_allowed"] is False
+    assert eg.EXECUTION_LEASE_REQUIRED in d2["reason_codes"]
 
 
 # --- fail-closed: missing inputs ----------------------------------------------------------------
@@ -223,6 +239,9 @@ def test_event_from_entry_gate_shape_has_reason_veto_thesis_fields():
     assert ev["decision"]["action"] == "enter"
     assert "reason_codes" in ev and "veto_reasons" in ev and "thesis" in ev
     assert ev["required_confirmations"] and "gates" in ev
+    assert ev["confirmations"] == _CONFIRMATIONS
+    assert ev["candidate_fingerprint"] == d["candidate_fingerprint"]
+    assert ev["option_id"] == d["option_id"]
 
 
 def test_entry_gate_event_round_trips_and_journal_enforces_scan_only(tmp_path):
@@ -254,12 +273,14 @@ def test_entry_gate_event_journal_tags_restricted(tmp_path):
 
 # --- next_action / next_command: machine-readable "what advances this gate" ---------------------
 
-def test_passed_gate_next_step_is_broker_review_place_then_watch():
-    # An execution-allowed gate must SAY the sequence: review/place under standing auth, then the
-    # position watch — the anti-passivity contract for the live controller.
+def test_passed_gate_next_step_is_lease_then_broker_review_place_then_watch():
+    # An execution-allowed gate must SAY the full sequence: mint the execution lease FIRST, then
+    # review/place under standing auth, then the order guard, then the position watch.
     d = eg.build_entry_gate_decision(**_all_gates_kwargs())
     assert d["execution_allowed"] is True
+    assert d["next_command"].startswith("odte-execution-authorize")
     assert "broker-review-place" in d["next_command"]
+    assert "odte-order-guard" in d["next_command"]
     assert "odte-position" in d["next_command"]
     assert "standing auth" in d["next_action"]
     assert d["failing_gates"] == [] and d["unknown_gates"] == []
@@ -294,10 +315,13 @@ def test_hard_veto_next_step_stands_down_to_scan():
     assert d["next_command"] == "odte-watchdog"
 
 
-def test_scan_only_all_green_next_step_is_explicit_promotion():
+def test_scan_only_all_green_next_step_is_execution_lease():
+    # Bare promotion is dead: an all-green scan-tier record points at the lease mint, never at
+    # the deprecated --promote-to-execution flag.
     d = eg.build_entry_gate_decision(scan_only=True, **_all_gates_kwargs())
     assert d["decision"] == "observe" and d["execution_allowed"] is False
-    assert d["next_command"] == "odte-entry-gate --promote-to-execution"
+    assert d["next_command"] == "odte-execution-authorize"
+    assert "--promote-to-execution" not in d["next_command"]
 
 
 # --- green-day preservation: no re-entry after a banked green scalp -----------------------------
@@ -319,7 +343,11 @@ def _green_scalp_events(now=_LOCK_NOW, hours_ago=2.0, realized_pnl=21.0):
 
 def _spy_gates_kwargs():
     kw = _all_gates_kwargs()
-    kw["candidate"] = {"ticker": "SPY", "direction": "bullish"}
+    kw["candidate"] = {**_CANDIDATE, "ticker": "SPY", "selected_vehicle": "SPY",
+                       "option_id": "SPY260727C00753000", "strike_price": 753.0}
+    kw["vehicle_score"] = {**_GOOD_VEHICLE,
+                           "contract": {**_GOOD_VEHICLE["contract"], "underlying": "SPY",
+                                        "option_id": "SPY260727C00753000", "strike_price": 753.0}}
     return kw
 
 
@@ -341,7 +369,8 @@ def test_reentry_override_with_ample_bp_is_allowed():
     # The explicit escape hatch: allow_reentry_after_green on the trigger + BP above the floor.
     kw = _spy_gates_kwargs()
     kw["trigger"] = {"allow_reentry_after_green": True}
-    kw["broker_snapshot"] = {"buying_power": eg.GREEN_REENTRY_MIN_BP + 100.0, "day_trades_left": 3}
+    kw["broker_snapshot"] = {**_GOOD_BROKER,
+                             "buying_power": eg.GREEN_REENTRY_MIN_BP + 100.0}
     d = eg.build_entry_gate_decision(journal_events=_green_scalp_events(), now=_LOCK_NOW, **kw)
     assert d["execution_allowed"] is True
     assert d["allow_reentry_after_green"] is True
@@ -353,7 +382,8 @@ def test_reentry_override_below_bp_floor_stays_locked():
     # BP-aware guard: the override alone is NOT enough — below the conservative floor the green day
     # is preserved no matter what (the live re-entry burned most of the remaining BP on 1x @1.27).
     kw = _spy_gates_kwargs()
-    kw["broker_snapshot"] = {"buying_power": eg.GREEN_REENTRY_MIN_BP - 1.0, "day_trades_left": 3,
+    kw["broker_snapshot"] = {**_GOOD_BROKER,
+                             "buying_power": eg.GREEN_REENTRY_MIN_BP - 1.0,
                              "allow_reentry_after_green": True}
     d = eg.build_entry_gate_decision(journal_events=_green_scalp_events(), now=_LOCK_NOW, **kw)
     assert d["execution_allowed"] is False
@@ -366,7 +396,8 @@ def test_reentry_override_needs_bp_above_contract_cost():
     kw = _spy_gates_kwargs()
     kw["vehicle_score"] = {**_GOOD_VEHICLE,
                            "contract": {**_GOOD_VEHICLE["contract"], "ask": 7.0}}
-    kw["broker_snapshot"] = {"buying_power": eg.GREEN_REENTRY_MIN_BP + 100.0, "day_trades_left": 3,
+    kw["broker_snapshot"] = {**_GOOD_BROKER,
+                             "buying_power": eg.GREEN_REENTRY_MIN_BP + 100.0,
                              "allow_reentry_after_green": True}
     d = eg.build_entry_gate_decision(journal_events=_green_scalp_events(), now=_LOCK_NOW, **kw)
     assert d["execution_allowed"] is False
@@ -397,18 +428,21 @@ def test_run_entry_gate_reads_journal_for_lockout(tmp_path):
     with open(jp, "w") as f:
         for e in _green_scalp_events(now=now, hours_ago=0.0):
             f.write(json.dumps(e) + "\n")
-    d = eg.run_entry_gate(candidate_json=json.dumps({"ticker": "SPY", "direction": "bullish"}),
+    spy = _spy_gates_kwargs()
+    d = eg.run_entry_gate(candidate_json=json.dumps(spy["candidate"]),
                           day_score_json=json.dumps(_GOOD_DAY),
-                          vehicle_score_json=json.dumps(_GOOD_VEHICLE),
+                          vehicle_score_json=json.dumps(spy["vehicle_score"]),
                           broker_json=json.dumps(_GOOD_BROKER),
+                          confirmations_json=json.dumps(_CONFIRMATIONS),
                           journal_path=jp)
     assert d["execution_allowed"] is False
     assert eg.GREEN_LOCKOUT_VETO in d["veto_reasons"]
     # ...and a missing journal file leaves the lockout disengaged.
-    d2 = eg.run_entry_gate(candidate_json=json.dumps({"ticker": "SPY", "direction": "bullish"}),
+    d2 = eg.run_entry_gate(candidate_json=json.dumps(spy["candidate"]),
                            day_score_json=json.dumps(_GOOD_DAY),
-                           vehicle_score_json=json.dumps(_GOOD_VEHICLE),
+                           vehicle_score_json=json.dumps(spy["vehicle_score"]),
                            broker_json=json.dumps(_GOOD_BROKER),
+                           confirmations_json=json.dumps(_CONFIRMATIONS),
                            journal_path=str(tmp_path / "missing.jsonl"))
     assert d2["execution_allowed"] is True
 
