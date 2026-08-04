@@ -181,3 +181,46 @@ def test_convert_places_no_orders_and_module_is_offline():
     for forbidden in ("robin_stocks", "requests", "place_order", "submit_order", "urllib",
                       "httpx", "socket"):
         assert forbidden not in src, f"odte_convert must not reference {forbidden!r}"
+
+
+# --- post-green auto-arm end-to-end (2026-08-03) ------------------------------------------------
+
+def _seed_green_journal(tmp_path, now):
+    events = [
+        {"event_type": "execution_lease_issued", "trade_id": "t1", "underlying": "SPY",
+         "option_id": "spy-756c", "tier": "full", "authorized": True,
+         "ts": (now - timedelta(hours=2)).isoformat()},
+        {"event_type": "order_filled", "trade_id": "t1", "underlying": "SPY",
+         "option_id": "spy-756c", "ts": (now - timedelta(hours=2)).isoformat()},
+        {"event_type": "order_closed", "trade_id": "t1", "underlying": "SPY",
+         "option_id": "spy-756c", "realized_pnl": 9.0,
+         "ts": (now - timedelta(hours=1)).isoformat()},
+    ]
+    jp = tmp_path / "decision_journal.jsonl"
+    with open(jp, "w") as f:
+        for e in events:
+            f.write(json.dumps(e) + "\n")
+    return str(jp)
+
+
+def test_post_green_second_trade_auto_arms_and_converts(tmp_path):
+    # The 2026-08-03 failure: after the +$9 green close, trade #2 was structurally impossible.
+    # Now an a_plus tape (>= the winning "full" tier) with a budget slot, cooldown clear, and BP
+    # covering the multiple converts straight through — no manual flag anywhere.
+    jp = _seed_green_journal(tmp_path, NOW)
+    payload = _convert(tmp_path, journal_path=jp)
+    assert payload["converted"] is True, payload["reason_codes"]
+    gate = payload["entry_gate"]
+    assert "green_reentry_auto_armed_tier" in gate["reason_codes"]
+    assert gate["green_reentry"]["auto_armed"] is True
+    assert gate["green_reentry"]["winning_tier_today"] == "full"
+
+
+def test_post_green_kill_switch_off_refuses_at_gate(tmp_path, monkeypatch):
+    import data.odte_entry_gate as eg
+    monkeypatch.setattr(eg, "GREEN_REENTRY_AUTO_ARM", False)
+    jp = _seed_green_journal(tmp_path, NOW)
+    payload = _convert(tmp_path, journal_path=jp)
+    assert payload["converted"] is False
+    assert payload["stage"] == "entry_gate"
+    assert any("green_day_preservation_lockout" in str(r) for r in payload["reason_codes"])

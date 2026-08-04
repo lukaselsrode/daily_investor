@@ -326,6 +326,88 @@ def execution_safety_lockout(events: list[dict] | None, now: datetime | None = N
     return {"locked": bool(incidents), "trade_date": today, "incidents": incidents}
 
 
+# Confirmation-tier ranking (2026-08-03 green re-entry auto-arm). The tape-computed tiers order as
+# a_plus > full > b_plus: an A+ read (>=3 confirmers, zero dissenters) outranks a standard GOOD_DAY
+# confirm, which outranks the CHOP half-size B+ tier. Unknown/absent ranks 0 (never auto-arms).
+TIER_RANK = {"b_plus": 1, "full": 2, "a_plus": 3}
+
+
+def tier_rank(tier) -> int:
+    return TIER_RANK.get(str(tier or "").strip().lower(), 0)
+
+
+def green_day_winning_tier(events: list[dict] | None, active_trade: dict | None = None,
+                           now: datetime | None = None) -> dict:
+    """PURE: the confirmation tier(s) behind today's banked green trade(s).
+
+    2026-08-03 auto-arm rule: a post-green re-entry must be a same-or-better setup than the trade
+    that banked the green, judged by the tape-computed tier. Joins each green trade row (from
+    `green_day_preservation`) to today's tier-bearing entry-side events — `entry_decision`,
+    `execution_lease_issued`, `order_filled` — by trade_id, else option_id, else same underlying
+    same ET day. A trade whose entry events carry no tier (pre-retune journals) counts as "full"
+    (`tier_source: "default_full"`): the standard GOOD_DAY bar, neither free (b_plus) nor
+    prohibitive (a_plus). Reads only the supplied events — no IO, no broker. Returns
+    {trade_date, winning_tier, winning_rank, trades}."""
+    now = now or datetime.now(timezone.utc)
+    today = now.astimezone(ET).date().isoformat()
+    preservation = green_day_preservation(events, active_trade=active_trade, now=now)
+    entry_events = [
+        e for e in (events or [])
+        if isinstance(e, dict)
+        and e.get("event_type") in ("entry_decision", "execution_lease_issued", "order_filled")
+        and _et_date(e.get("ts")) == today
+    ]
+
+    def _event_tier(e: dict):
+        return e.get("tier") or _dict_get(e, "candidate", "tier")
+
+    def _tier_for(row: dict) -> tuple[str, str]:
+        trade_id = str(row.get("trade_id") or "")
+        underlying = str(row.get("underlying") or "").upper()
+        # The preservation row itself carries no option_id — derive it from the trade's own
+        # entry-side events (order_filled carries both trade_id and option_id).
+        row_opt = str(row.get("option_id") or "")
+        if not row_opt and trade_id:
+            for e in entry_events:
+                if str(e.get("trade_id") or "") == trade_id and e.get("option_id"):
+                    row_opt = str(e.get("option_id"))
+                    break
+        for join in ("trade_id", "option_id", "underlying"):
+            for e in reversed(entry_events):
+                t = _event_tier(e)
+                if not t:
+                    continue
+                if join == "trade_id":
+                    if trade_id and str(e.get("trade_id") or "") == trade_id:
+                        return str(t).lower(), join
+                elif join == "option_id":
+                    if row_opt and str(e.get("option_id") or "") == row_opt:
+                        return str(t).lower(), join
+                else:
+                    ev_sym = str(e.get("underlying") or e.get("symbol") or "").upper()
+                    if underlying and ev_sym == underlying:
+                        return str(t).lower(), join
+        return "full", "default_full"
+
+    trades = []
+    for row in preservation.get("green_trades") or []:
+        tier, source = _tier_for(row)
+        trades.append({"trade_id": row.get("trade_id"), "underlying": row.get("underlying"),
+                       "tier": tier, "tier_source": source})
+    winning = max(trades, key=lambda t: tier_rank(t["tier"]), default=None)
+    return {
+        "trade_date": today,
+        "winning_tier": winning["tier"] if winning else None,
+        "winning_rank": tier_rank(winning["tier"]) if winning else 0,
+        "trades": trades,
+    }
+
+
+def _dict_get(e: dict, key: str, sub: str):
+    v = e.get(key)
+    return v.get(sub) if isinstance(v, dict) else None
+
+
 def daily_trade_budget(events: list[dict] | None, now: datetime | None = None) -> dict:
     """PURE: today's ET-day entry count vs the daily trade budget, plus the post-close cooldown.
 
@@ -978,6 +1060,8 @@ def event_from_entry_gate(gate_decision: dict, trade_id: str | None = None,
         "strike_price": g.get("strike_price"),
         "option_type": g.get("option_type"),
         "gates": g.get("gates"),
+        "tier": g.get("tier"),
+        "sizing_tier": g.get("sizing_tier"),
         "scan_only": bool(g.get("scan_only", False)),
         "execution_allowed": bool(g.get("execution_allowed", False)),
     }
@@ -1046,6 +1130,8 @@ def event_from_execution_lease(auth_payload: dict, trade_id: str | None = None,
         "max_debit": lease.get("max_debit") or p.get("debit"),
         "risk_mode": lease.get("risk_mode") or p.get("risk_mode"),
         "max_premium_loss": lease.get("max_premium_loss"),
+        "tier": lease.get("tier"),
+        "anchor_quote": lease.get("anchor_quote"),
         "candidate_fingerprint": lease.get("candidate_fingerprint"),
         "market_fingerprint": lease.get("market_fingerprint"),
         "policy": p.get("policy"),

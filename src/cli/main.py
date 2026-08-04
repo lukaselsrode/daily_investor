@@ -507,9 +507,10 @@ def _cmd_odte_entry_gate(rest: list[str]) -> None:
     # Records intent ONLY — places NO orders, makes NO broker/network/LLM calls. execution_allowed is
     # True only when every required gate is explicitly true and the record is not scan_only/restricted.
     # scan_only is INHERITED from the trigger/candidate by default (the watchdog lane is scan_only=true).
-    # A fresh identity-matched --candidate-decision whose decision is CONFIRM_ENTRY may cross that
-    # boundary in the same controller tick; --scan-only remains a final veto. --promote-to-execution
-    # is DEPRECATED and FAIL-CLOSED (2026-07-23 incident): it can no longer make the record executable.
+    # LEGACY PATH HARD BLOCK (2026-08-03): a CONFIRM_ENTRY --candidate-decision is REFUSED here with
+    # `use_odte_convert` (exit 2, nothing journaled) — conversion happens ONLY via odte-convert,
+    # which re-confirms in-process and mints the lease in the same call. --scan-only remains a final
+    # veto. --promote-to-execution is DEPRECATED and FAIL-CLOSED (2026-07-23 incident).
     # --confirmations supplies the three explicit final live booleans consumed again by the lease tier.
     # --journal appends an entry_decision event (idempotent).
     # Machine-readable next step: the payload carries gates + failing_gates/unknown_gates +
@@ -529,8 +530,9 @@ def _cmd_odte_entry_gate(rest: list[str]) -> None:
               "[--candidate-decision PATH] [--day-score PATH] [--vehicle-score PATH] "
               "[--gamma PATH] [--broker PATH] [--confirmations PATH] "
               "[--scan-only] [--journal] [--json] [--write]\n"
-              "A fresh identity-matched CONFIRM_ENTRY candidate decision may cross the scan→gate "
-              "boundary; stale/mismatched decisions and bare promotion fail closed. Places NO orders.")
+              "A CONFIRM_ENTRY candidate decision is REFUSED here (use_odte_convert, exit 2) — "
+              "conversion happens ONLY via odte-convert. Non-confirm inputs evaluate normally; "
+              "bare promotion stays fail-closed. Places NO orders.")
         return
     try:
         payload = run_entry_gate(
@@ -561,6 +563,15 @@ def _cmd_odte_entry_gate(rest: list[str]) -> None:
         )
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"odte-entry-gate: could not read/parse input: {exc}")
+        sys.exit(2)
+    # LEGACY PATH HARD BLOCK (2026-08-03): a CONFIRM_ENTRY candidate decision must convert via
+    # odte-convert. Refuse BEFORE journaling — a journaled refusal would count as terminal
+    # conversion evidence and absolve the confirm it redirects.
+    if payload.get("legacy_path_blocked"):
+        print(json.dumps(payload, separators=(",", ":"), default=str) if "--json" in rest
+              else render_markdown(payload))
+        print("odte-entry-gate: legacy CONFIRM_ENTRY path blocked; run odte-convert",
+              file=sys.stderr)
         sys.exit(2)
     if "--journal" in rest:
         from data.odte_journal import append_decision_journal, event_from_entry_gate
@@ -1131,7 +1142,7 @@ COMMANDS
                            scan_only is INHERITED from the trigger/candidate by default (the watchdog
                            lane is scan_only=true); --scan-only forces it. --promote-to-execution is
                            DEPRECATED and fail-closed: it answers with execution_lease_required —
-                           execution authority is minted ONLY by odte-execution-authorize (a
+                           execution authority is minted ONLY by the single-use lease (odte-convert mints it in-process; a
                            short-lived exact-identity lease). Records intent ONLY — no orders/
                            broker/network. --journal appends an entry_decision event; --json/--write.
   odte-execution-authorize PURE/OFFLINE execution-lease authorization — the ONE tier that mints

@@ -94,7 +94,7 @@ def test_scan_only_trigger_is_candidate_observe():
     assert r["state"] == "CANDIDATE"
     assert r["executable"] is False
     assert r["context"]["scan_only"] is True
-    assert r["next_command"] == "odte-entry-gate"
+    assert "odte-convert" in r["next_command"]
 
 
 def test_restricted_candidate_does_not_promote_to_candidate():
@@ -148,7 +148,7 @@ def test_pending_enter_gate_still_gated():
                                                              execution_allowed=False)], now=NOW)
     assert r["state"] == "GATED"
     assert r["executable"] is False
-    assert "odte-execution-authorize" in r["next_command"]
+    assert "odte-convert" in r["next_command"]
     assert "--promote-to-execution" not in r["next_command"]
 
 
@@ -1161,9 +1161,20 @@ def test_reentry_override_gate_survives_green_lockout():
     assert r["posture"] == "EXECUTION_READY"
 
 
-def test_fresh_candidate_after_green_scalp_stays_flat():
-    # The monitors kept producing valid-looking setups after the green close — a fresh scan candidate
-    # must NOT re-open the entry lane (no CANDIDATE, no WAIT_FRESH_CONFIRMATION).
+def test_fresh_candidate_after_green_scalp_surfaces_with_budget_slot():
+    # 2026-08-03 auto-arm: with a budget slot open and the cooldown clear, a post-green scan
+    # candidate SURFACES (tier/BP enforced at the gate inside odte-convert) instead of being
+    # consumed — on 2026-08-03 the old consumption made trade #2 structurally impossible.
+    r = ls.derive_loop_state(triggers=_candidate_triggers(ts=_ts(minutes_ago=1), alert=True),
+                             journal_events=_green_scalp_journal(), now=NOW)
+    assert r["state"] == "CANDIDATE"
+    assert r["executable"] is False                     # surfacing is never execution authority
+    assert any("green_reentry_auto_arm" in s for s in r["reasons"])
+
+
+def test_fresh_candidate_after_green_scalp_consumed_when_auto_arm_off(monkeypatch):
+    import data.odte_config as oc
+    monkeypatch.setattr(oc, "GREEN_REENTRY_AUTO_ARM", False)
     r = ls.derive_loop_state(triggers=_candidate_triggers(ts=_ts(minutes_ago=1), alert=True),
                              journal_events=_green_scalp_journal(), now=NOW)
     assert r["state"] != "CANDIDATE"
@@ -1171,13 +1182,43 @@ def test_fresh_candidate_after_green_scalp_stays_flat():
     assert any("green_day_preservation_lockout" in s for s in r["reasons"])
 
 
-def test_confirmed_candidate_watch_after_green_scalp_stays_flat():
+def test_fresh_candidate_after_green_scalp_consumed_when_budget_exhausted():
+    import data.odte_config as oc
+    journal = _green_scalp_journal()
+    for i in range(2, oc.DAILY_TRADE_BUDGET + 1):
+        base = {"trade_id": f"SPY-753C-{i}", "underlying": "SPY"}
+        journal += [
+            {**base, "event_type": "order_filled", "seq": 10 + i, "ts": _ts(hours_ago=1.5)},
+            {**base, "event_type": "order_closed", "seq": 20 + i, "ts": _ts(hours_ago=1.0),
+             "realized_pnl": 4.0},
+        ]
+    r = ls.derive_loop_state(triggers=_candidate_triggers(ts=_ts(minutes_ago=1), alert=True),
+                             journal_events=journal, now=NOW)
+    assert r["state"] != "CANDIDATE"
+    assert r["posture"] == "FLAT_NO_TRADE"
+    assert any("budget" in s for s in r["reasons"])
+
+
+def test_confirmed_candidate_watch_after_green_scalp_surfaces():
     cdec = {"decision": "CONFIRM_ENTRY", "candidate": {"ticker": "SPY", "direction": "bullish"},
             "ts": _ts(minutes_ago=1)}
     r = ls.derive_loop_state(candidate_decision=cdec, journal_events=_green_scalp_journal(), now=NOW)
+    assert r["posture"] in ("SCOUT_FRESH_SETUP", "CONVERT_CANDIDATE_NOW")
+    assert r["executable"] is False
+    assert any("green_reentry_auto_arm" in s for s in r["reasons"])
+
+
+def test_below_winner_tier_watch_after_green_scalp_is_consumed():
+    # The green trade's tier defaults to "full" (legacy journal, no tier events): a B+ watch ranks
+    # below it and is consumed early — same-or-better tier only.
+    import data.odte_journal as oj
+    assert oj.tier_rank("b_plus") < oj.tier_rank("full")
+    cdec = {"decision": "CONFIRM_ENTRY",
+            "candidate": {"ticker": "SPY", "direction": "bullish", "tier": "b_plus"},
+            "ts": _ts(minutes_ago=1)}
+    r = ls.derive_loop_state(candidate_decision=cdec, journal_events=_green_scalp_journal(), now=NOW)
     assert r["posture"] == "FLAT_NO_TRADE"
-    assert r["posture"] != "SCOUT_FRESH_SETUP"
-    assert any("green_day_preservation_lockout" in s for s in r["reasons"])
+    assert any("below today's winning tier" in s for s in r["reasons"])
 
 
 def test_green_closed_plan_alone_locks_fresh_promoted_gate():
@@ -1517,3 +1558,44 @@ def test_run_loop_status_attaches_weekly_telemetry(tmp_path):
     assert wk is not None
     assert "trades_this_week" in wk and "tripwire" in wk
     assert ls.render_markdown(r)          # renders without raising
+
+
+# --- live_rails (2026-08-03: the agent reads live numbers, never remembered policy) -------------
+
+def test_live_rails_rides_every_payload_with_live_constants():
+    import data.odte_config as oc
+    import data.odte_execution_policy as xp
+    r = ls.derive_loop_state(now=NOW)
+    rails = r["live_rails"]
+    assert rails["conversion_sla_seconds"] == ls.CONFIRM_CONVERSION_SLA_SECONDS
+    assert rails["snapshot_ttl_seconds"] == oc.SNAPSHOT_TTL_SECONDS
+    assert rails["lease"]["default_ttl_seconds"] == xp.DEFAULT_LEASE_TTL_SECONDS
+    assert rails["lease"]["hard_cap_seconds"] == xp.MAX_LEASE_TTL_SECONDS
+    assert rails["chase_band_fraction"] == oc.CHASE_BAND_FRACTION
+    assert rails["max_debit_fraction"] == {"full": oc.MAX_DEBIT_FRACTION,
+                                           "b_plus": oc.B_PLUS_DEBIT_FRACTION}
+    assert rails["executable_universe"] == list(oc.EXECUTABLE_UNIVERSE)
+    assert rails["daily_trade_budget"]["budget"] == oc.DAILY_TRADE_BUDGET
+    # no fresh BP probe -> dollars are NULL, never guessed (the 754C dead-rail fix)
+    assert rails["max_debit_dollars"] is None
+    assert ls.render_markdown(r)
+
+
+def test_live_rails_computes_dollars_from_fresh_broker_truth():
+    import data.odte_config as oc
+    health = {"parent_robinhood_mcp": "OK", "live_review_place_allowed": True,
+              "as_of": NOW.isoformat(), "buying_power": 348.16}
+    r = ls.derive_loop_state(broker_health=health, now=NOW)
+    rails = r["live_rails"]
+    assert rails["buying_power"] == 348.16
+    assert rails["max_debit_dollars"]["full"] == round(oc.MAX_DEBIT_FRACTION * 348.16, 2)
+    assert rails["max_debit_dollars"]["b_plus"] == round(oc.B_PLUS_DEBIT_FRACTION * 348.16, 2)
+
+
+def test_live_rails_green_reentry_state_reflects_journal():
+    r = ls.derive_loop_state(journal_events=_green_scalp_journal(), now=NOW)
+    gr = r["live_rails"]["green_reentry"]
+    assert gr["locked"] is True
+    assert gr["structurally_armable"] is True          # budget slot open, cooldown clear
+    assert gr["winning_tier_today"] == "full"          # legacy journal -> default tier
+    assert gr["manual_override_key"] == "allow_reentry_after_green"

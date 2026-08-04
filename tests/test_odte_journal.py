@@ -882,3 +882,72 @@ def test_weekly_telemetry_tripwire_quiet_early_week_or_with_trades():
     wk2 = oj.weekly_telemetry(traded, now=friday)
     assert wk2["trades_this_week"] == 1
     assert wk2["tripwire"]["fired"] is False
+
+
+# --- winning-tier helper (2026-08-03 green re-entry auto-arm) -----------------------------------
+
+def _green_day(now, tier="a_plus", trade_id="t1", with_tier_event=True):
+    from datetime import timedelta
+    events = []
+    if with_tier_event:
+        events.append({"event_type": "execution_lease_issued", "trade_id": trade_id,
+                       "underlying": "SPY", "option_id": "spy-756c", "tier": tier,
+                       "authorized": True, "ts": (now - timedelta(hours=2)).isoformat()})
+    events.append({"event_type": "order_filled", "trade_id": trade_id, "underlying": "SPY",
+                   "option_id": "spy-756c", "ts": (now - timedelta(hours=2)).isoformat()})
+    events.append({"event_type": "order_closed", "trade_id": trade_id, "underlying": "SPY",
+                   "option_id": "spy-756c", "realized_pnl": 9.0,
+                   "ts": (now - timedelta(hours=1)).isoformat()})
+    return events
+
+
+def test_green_day_winning_tier_joins_by_trade_id():
+    from datetime import datetime, timezone
+    now = datetime(2026, 8, 3, 18, 0, tzinfo=timezone.utc)
+    wt = oj.green_day_winning_tier(_green_day(now, tier="a_plus"), now=now)
+    assert wt["winning_tier"] == "a_plus"
+    assert wt["winning_rank"] == oj.TIER_RANK["a_plus"]
+    assert wt["trades"][0]["tier_source"] == "trade_id"
+
+
+def test_green_day_winning_tier_option_id_and_underlying_fallbacks():
+    from datetime import datetime, timedelta, timezone
+    now = datetime(2026, 8, 3, 18, 0, tzinfo=timezone.utc)
+    # tier event has no trade_id -> joins on option_id
+    ev = _green_day(now, with_tier_event=False)
+    ev.insert(0, {"event_type": "entry_decision", "option_id": "spy-756c", "tier": "b_plus",
+                  "ts": (now - timedelta(hours=2)).isoformat()})
+    wt = oj.green_day_winning_tier(ev, now=now)
+    assert wt["winning_tier"] == "b_plus" and wt["trades"][0]["tier_source"] == "option_id"
+    # no id match at all -> same-underlying fallback
+    ev2 = _green_day(now, with_tier_event=False)
+    ev2.insert(0, {"event_type": "entry_decision", "underlying": "SPY", "tier": "full",
+                   "ts": (now - timedelta(hours=2)).isoformat()})
+    wt2 = oj.green_day_winning_tier(ev2, now=now)
+    assert wt2["winning_tier"] == "full" and wt2["trades"][0]["tier_source"] == "underlying"
+
+
+def test_green_day_winning_tier_defaults_full_for_legacy_journals():
+    from datetime import datetime, timezone
+    now = datetime(2026, 8, 3, 18, 0, tzinfo=timezone.utc)
+    wt = oj.green_day_winning_tier(_green_day(now, with_tier_event=False), now=now)
+    assert wt["winning_tier"] == "full"
+    assert wt["winning_rank"] == oj.TIER_RANK["full"]
+    assert wt["trades"][0]["tier_source"] == "default_full"
+
+
+def test_green_day_winning_tier_none_without_green_trades():
+    from datetime import datetime, timezone
+    now = datetime(2026, 8, 3, 18, 0, tzinfo=timezone.utc)
+    assert oj.green_day_winning_tier([], now=now)["winning_tier"] is None
+    assert oj.tier_rank(None) == 0 and oj.tier_rank("bogus") == 0
+
+
+def test_entry_gate_and_lease_events_carry_tier():
+    gate = {"symbol": "SPY", "decision": "enter", "tier": "b_plus", "sizing_tier": "half"}
+    e = oj.event_from_entry_gate(gate)
+    assert e["tier"] == "b_plus" and e["sizing_tier"] == "half"
+    auth = {"authorized": True, "lease": {"symbol": "SPY", "lease_id": "x", "tier": "a_plus",
+                                          "anchor_quote": 0.63}}
+    le = oj.event_from_execution_lease(auth)
+    assert le["tier"] == "a_plus" and le["anchor_quote"] == 0.63

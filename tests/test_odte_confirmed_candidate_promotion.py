@@ -287,7 +287,10 @@ def test_explicit_scan_only_remains_a_final_veto_even_with_confirmation() -> Non
     assert gate["execution_allowed"] is False
 
 
-def test_run_entry_gate_json_wrapper_wires_confirmed_transition_inputs() -> None:
+def test_run_entry_gate_blocks_legacy_confirm_path() -> None:
+    # LEGACY PATH HARD BLOCK (2026-08-03): a CONFIRM_ENTRY candidate decision fed to the wrapper
+    # refuses with use_odte_convert — WITHOUT evaluating the gate. odte-convert (which calls the
+    # pure build_entry_gate_decision directly) is the only conversion path.
     gate = eg.run_entry_gate(
         candidate_json=json.dumps(_candidate()),
         candidate_decision_json=json.dumps(_candidate_decision()),
@@ -297,12 +300,67 @@ def test_run_entry_gate_json_wrapper_wires_confirmed_transition_inputs() -> None
         confirmations_json=json.dumps(_confirmations()),
         now=NOW,
     )
-    assert gate["confirmed_candidate_transition"] is True
-    assert gate["scan_only"] is False
-    assert gate["execution_allowed"] is True
+    assert gate["legacy_path_blocked"] is True
+    assert eg.USE_ODTE_CONVERT in gate["reason_codes"]
+    assert gate["execution_allowed"] is False
+    assert gate["decision"] == "veto"
+    assert gate["next_command"] == "odte-convert"
+    assert "NOT terminal" in gate["next_action"]
+    # identity surfaced for debuggability
+    assert gate["symbol"] == "IWM" and gate["option_id"] == "iwm-20260727-292p"
 
 
-def test_cli_journaled_gate_is_visible_to_loop_status(tmp_path, capsys) -> None:
+def test_run_entry_gate_still_evaluates_non_confirm_decisions() -> None:
+    # A KEEP_WATCHING candidate decision is not a conversion attempt — normal evaluation.
+    watching = _candidate_decision()
+    watching["decision"] = "KEEP_WATCHING"
+    gate = eg.run_entry_gate(
+        candidate_json=json.dumps(_candidate()),
+        candidate_decision_json=json.dumps(watching),
+        day_score_json=json.dumps({"verdict": "GOOD_DAY"}),
+        vehicle_score_json=json.dumps(_vehicle()),
+        broker_json=json.dumps(_broker()),
+        confirmations_json=json.dumps(_confirmations()),
+        now=NOW,
+    )
+    assert "legacy_path_blocked" not in gate
+    assert gate["scan_only"] is True                       # no confirmed transition
+    assert gate["execution_allowed"] is False
+
+
+def test_cli_blocks_legacy_confirm_and_journals_nothing(tmp_path, capsys) -> None:
+    # The CLI refuses with exit 2 BEFORE the --journal block: a journaled refusal would count as
+    # terminal conversion evidence and absolve the confirm it redirects.
+    current = datetime.now(timezone.utc).replace(microsecond=0)
+    candidate = _candidate()
+    candidate["selection_timestamp"] = current.isoformat()
+    candidate["candidate_fingerprint"] = xp.candidate_fingerprint(candidate)
+    decision = _candidate_decision(generated_at=current, candidate=candidate)
+    journal_path = tmp_path / "decision_journal.jsonl"
+
+    import pytest
+    with pytest.raises(SystemExit) as exc:
+        _cmd_odte_entry_gate([
+            "--candidate-json", json.dumps(candidate),
+            "--candidate-decision-json", json.dumps(decision),
+            "--day-score-json", json.dumps({"verdict": "GOOD_DAY"}),
+            "--vehicle-score-json", json.dumps(_vehicle()),
+            "--broker-json", json.dumps(_broker()),
+            "--confirmations-json", json.dumps(_confirmations()),
+            "--journal", "--journal-path", str(journal_path), "--json",
+        ])
+    assert exc.value.code == 2
+    out = capsys.readouterr()
+    payload = json.loads(out.out.strip().splitlines()[0])
+    assert payload["legacy_path_blocked"] is True
+    assert payload["next_command"] == "odte-convert"
+    assert "odte-convert" in out.err
+    assert not journal_path.exists(), "the refusal must journal NOTHING"
+
+
+def test_convert_path_gate_is_visible_to_loop_status(tmp_path) -> None:
+    # The PROMOTED-visibility contract the old CLI test pinned, now via the convert path: a
+    # journaled execution-allowed gate (as odte-convert journals it) reads PROMOTED/EXECUTION_READY.
     current = datetime.now(timezone.utc).replace(microsecond=0)
     candidate = _candidate()
     candidate["selection_timestamp"] = current.isoformat()
@@ -312,21 +370,18 @@ def test_cli_journaled_gate_is_visible_to_loop_status(tmp_path, capsys) -> None:
     vehicle["generated_at"] = current.isoformat()
     broker = _broker()
     broker["generated_at"] = current.isoformat()
+    gate = eg.build_entry_gate_decision(
+        candidate=candidate, candidate_decision=decision,
+        day_score={"verdict": "GOOD_DAY"}, vehicle_score=vehicle,
+        broker_snapshot=broker, confirmations=_confirmations(), now=current,
+    )
+    assert gate["execution_allowed"] is True
     journal_path = tmp_path / "decision_journal.jsonl"
-
-    _cmd_odte_entry_gate([
-        "--candidate-json", json.dumps(candidate),
-        "--candidate-decision-json", json.dumps(decision),
-        "--day-score-json", json.dumps({"verdict": "GOOD_DAY"}),
-        "--vehicle-score-json", json.dumps(vehicle),
-        "--broker-json", json.dumps(broker),
-        "--confirmations-json", json.dumps(_confirmations()),
-        "--journal", "--journal-path", str(journal_path), "--json",
-    ])
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["execution_allowed"] is True
-    assert payload["journal_append"]["status"] == "appended"
-
+    result = oj.append_decision_journal(
+        oj.event_from_entry_gate(gate), source="odte_convert",
+        event_type="entry_decision", journal_path=str(journal_path), now=current,
+    )
+    assert result["status"] == "appended"
     events = oj.read_events(str(journal_path))
     loop = ls.derive_loop_state(journal_events=events, now=current)
     assert loop["state"] == "PROMOTED"

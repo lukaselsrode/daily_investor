@@ -632,9 +632,9 @@ def authorize_entry(*, gate: dict, candidate_decision: dict, vehicle_score: dict
     if reason_codes:
         return {**base, "authorized": False, "reason_codes": reason_codes, "lease": None,
                 "next_action": ("authorization REFUSED (fail closed) — fix/refresh the named "
-                                "inputs and re-run the FULL cycle; never widen the policy to fit "
-                                "the order"),
-                "next_command": "odte-execution-authorize  # after refreshing the failing inputs"}
+                                "inputs and re-run the FULL cycle via odte-convert; never widen "
+                                "the policy to fit the order"),
+                "next_command": "odte-convert  # after refreshing the failing inputs"}
 
     issued_at = now
     expires_at = now + timedelta(seconds=ttl_seconds)

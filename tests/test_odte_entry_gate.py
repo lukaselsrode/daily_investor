@@ -85,8 +85,7 @@ def test_scan_only_trigger_is_inherited_and_stays_observe_by_default():
 def test_promote_to_execution_is_deprecated_and_fails_closed():
     # REGRESSION (2026-07-23 delayed-fill incident): a bare promote_to_execution=True on a
     # scan_only trigger must NOT make the record executable anymore. The attempt is recorded and
-    # answered with execution_lease_required — the lease tier (odte-execution-authorize) is the
-    # only mint for execution authority.
+    # answered with execution_lease_required — the lease is minted only via odte-convert.
     trigger = {"scan_only": True, "execution_allowed": False,
                "candidate": dict(_CANDIDATE)}
     d = eg.build_entry_gate_decision(trigger=trigger, day_score=dict(_GOOD_DAY),
@@ -99,7 +98,7 @@ def test_promote_to_execution_is_deprecated_and_fails_closed():
     assert d["execution_allowed"] is False and d["decision"] == "observe"
     assert eg.EXECUTION_LEASE_REQUIRED in d["reason_codes"]
     assert "scan_only_inherited" in d["reason_codes"]
-    assert d["next_command"] == "odte-execution-authorize"
+    assert d["next_command"] == "odte-convert"
 
 
 def test_candidate_scan_only_is_also_inherited():
@@ -273,12 +272,12 @@ def test_entry_gate_event_journal_tags_restricted(tmp_path):
 
 # --- next_action / next_command: machine-readable "what advances this gate" ---------------------
 
-def test_passed_gate_next_step_is_lease_then_broker_review_place_then_watch():
-    # An execution-allowed gate must SAY the full sequence: mint the execution lease FIRST, then
-    # review/place under standing auth, then the order guard, then the position watch.
+def test_passed_gate_next_step_is_broker_review_place_then_watch():
+    # An execution-allowed gate must SAY the full sequence: the lease was already minted in-process
+    # by odte-convert, so consume it at review/place, then the order guard, then the position watch.
     d = eg.build_entry_gate_decision(**_all_gates_kwargs())
     assert d["execution_allowed"] is True
-    assert d["next_command"].startswith("odte-execution-authorize")
+    assert "odte-execution-authorize" not in d["next_command"]
     assert "broker-review-place" in d["next_command"]
     assert "odte-order-guard" in d["next_command"]
     assert "odte-position" in d["next_command"]
@@ -315,12 +314,12 @@ def test_hard_veto_next_step_stands_down_to_scan():
     assert d["next_command"] == "odte-watchdog"
 
 
-def test_scan_only_all_green_next_step_is_execution_lease():
-    # Bare promotion is dead: an all-green scan-tier record points at the lease mint, never at
-    # the deprecated --promote-to-execution flag.
+def test_scan_only_all_green_next_step_is_atomic_conversion():
+    # Bare promotion is dead: an all-green scan-tier record points at the atomic conversion
+    # (which mints the lease in-process), never at the deprecated --promote-to-execution flag.
     d = eg.build_entry_gate_decision(scan_only=True, **_all_gates_kwargs())
     assert d["decision"] == "observe" and d["execution_allowed"] is False
-    assert d["next_command"] == "odte-execution-authorize"
+    assert d["next_command"] == "odte-convert"
     assert "--promote-to-execution" not in d["next_command"]
 
 
@@ -556,3 +555,118 @@ def test_budget_allows_second_entry_after_cooldown():
     assert eg.COOLDOWN_VETO not in d["veto_reasons"]
     assert d["execution_allowed"] is True
     assert d["daily_trade_budget"]["remaining"] >= 1
+
+
+# --- green re-entry AUTO-ARM (2026-08-03: same-or-better tier + budget + cooldown + BP) ---------
+
+def _auto_arm_kwargs(tier="full", ask=1.2):
+    kw = _spy_gates_kwargs()
+    kw["candidate"]["tier"] = tier
+    kw["vehicle_score"] = {**kw["vehicle_score"],
+                           "contract": {**kw["vehicle_score"]["contract"], "ask": ask}}
+    return kw
+
+
+def test_green_reentry_auto_arms_on_same_or_better_tier():
+    # Winning trade carries no tier (legacy journal) -> ranks "full"; a "full" candidate with a
+    # budget slot, cooldown clear, and BP >= 1.5x cost auto-arms WITHOUT any manual flag.
+    d = eg.build_entry_gate_decision(journal_events=_green_scalp_events(), now=_LOCK_NOW,
+                                     **_auto_arm_kwargs(tier="full"))
+    assert d["execution_allowed"] is True
+    assert "green_reentry_auto_armed_tier" in d["reason_codes"]
+    assert d["green_reentry"]["auto_armed"] is True
+    assert d["green_reentry"]["manual_override"] is False
+    assert d["green_reentry"]["winning_tier_today"] == "full"
+    assert d["allow_reentry_after_green"] is True
+    # ...and the journal event carries the survival marker + tier.
+    ev = oj.event_from_entry_gate(d)
+    assert ev["allow_reentry_after_green"] is True and ev["tier"] == "full"
+
+
+def test_green_reentry_below_winner_tier_stays_locked():
+    d = eg.build_entry_gate_decision(journal_events=_green_scalp_events(), now=_LOCK_NOW,
+                                     **_auto_arm_kwargs(tier="b_plus"))
+    assert d["execution_allowed"] is False
+    assert eg.GREEN_LOCKOUT_VETO in d["veto_reasons"]
+    assert "green_reentry_tier_below_winner" in d["reason_codes"]
+
+
+def test_green_reentry_auto_arm_kill_switch(monkeypatch):
+    monkeypatch.setattr(eg, "GREEN_REENTRY_AUTO_ARM", False)
+    d = eg.build_entry_gate_decision(journal_events=_green_scalp_events(), now=_LOCK_NOW,
+                                     **_auto_arm_kwargs(tier="a_plus"))
+    assert d["execution_allowed"] is False
+    assert eg.GREEN_LOCKOUT_VETO in d["veto_reasons"]
+    assert d["green_reentry"]["auto_arm_enabled"] is False
+
+
+def test_green_reentry_auto_arm_blocked_by_budget_and_cooldown():
+    import data.odte_config as oc
+    # Budget exhausted: seed DAILY_TRADE_BUDGET completed green trades.
+    events = []
+    for i in range(oc.DAILY_TRADE_BUDGET):
+        base = {"trade_id": f"t{i}", "underlying": "SPY"}
+        events += [{**base, "event_type": "order_filled", "ts": _ts_hours_ago(3.0 - i * 0.1)},
+                   {**base, "event_type": "order_closed", "realized_pnl": 5.0,
+                    "ts": _ts_hours_ago(2.0 - i * 0.1)}]
+    d = eg.build_entry_gate_decision(journal_events=events, now=_LOCK_NOW,
+                                     **_auto_arm_kwargs(tier="a_plus"))
+    assert d["execution_allowed"] is False
+    assert eg.DAILY_BUDGET_VETO in d["veto_reasons"]
+    assert d["green_reentry"]["auto_armed"] is False
+    # Cooldown active: close 1 minute ago.
+    hot = _green_scalp_events(hours_ago=1 / 60)
+    d2 = eg.build_entry_gate_decision(journal_events=hot, now=_LOCK_NOW,
+                                      **_auto_arm_kwargs(tier="a_plus"))
+    assert d2["execution_allowed"] is False
+    assert eg.COOLDOWN_VETO in d2["veto_reasons"]
+
+
+def test_green_reentry_auto_arm_bp_short_names_bp_veto():
+    # Everything qualifies except BP (ask 7.0 -> needs 1.5x$700=$1050 vs $250): the honest blocker.
+    d = eg.build_entry_gate_decision(journal_events=_green_scalp_events(), now=_LOCK_NOW,
+                                     **_auto_arm_kwargs(tier="a_plus", ask=7.0))
+    assert d["execution_allowed"] is False
+    assert eg.GREEN_REENTRY_BP_VETO in d["veto_reasons"]
+
+
+def _ts_hours_ago(hours):
+    return (_LOCK_NOW - timedelta(hours=hours)).isoformat()
+
+
+def test_no_next_command_points_at_retired_authorize_ladder():
+    # 2026-08-03 sweep: no gate outcome may steer the agent at the retired multi-command ladder.
+    scenarios = [
+        eg.build_entry_gate_decision(**_all_gates_kwargs()),                       # enter
+        eg.build_entry_gate_decision(scan_only=True, **_all_gates_kwargs()),       # scan-tier green
+        eg.build_entry_gate_decision(candidate={"ticker": "QQQ", "direction": "bullish"}),  # missing
+        eg.build_entry_gate_decision(journal_events=_green_scalp_events(), now=_LOCK_NOW,
+                                     **_spy_gates_kwargs()),                       # green veto
+        eg.build_entry_gate_decision(trigger={"scan_only": True, "candidate": dict(_CANDIDATE)},
+                                     day_score=dict(_GOOD_DAY), vehicle_score=dict(_GOOD_VEHICLE),
+                                     broker_snapshot=dict(_GOOD_BROKER),
+                                     promote_to_execution=True),                   # deprecated flag
+    ]
+    for d in scenarios:
+        assert "odte-execution-authorize" not in (d.get("next_command") or ""), d.get("next_command")
+
+
+def test_stale_confirm_transition_steers_to_odte_convert():
+    # Cycle-3 regression (2026-08-03): a stale CONFIRM transition produced next_command
+    # odte-execution-authorize and the agent narrated the confirm as terminal. It must now say
+    # odte-convert and NOT-terminal. (Pure-function path — the CLI wrapper refuses outright.)
+    scan_candidate = {**_CANDIDATE, "scan_only": True}
+    stale_cd = {"decision": "CONFIRM_ENTRY",
+                "generated_at": (datetime(2026, 7, 27, 15, 34, 38, tzinfo=timezone.utc)
+                                 - timedelta(seconds=eg.CONFIRMED_CANDIDATE_MAX_AGE_SECONDS + 16)
+                                 ).isoformat(),
+                "candidate": dict(scan_candidate)}
+    d = eg.build_entry_gate_decision(
+        candidate=dict(scan_candidate), candidate_decision=stale_cd,
+        day_score=dict(_GOOD_DAY), vehicle_score=dict(_GOOD_VEHICLE),
+        broker_snapshot=dict(_GOOD_BROKER), confirmations=dict(_CONFIRMATIONS),
+        now=datetime(2026, 7, 27, 15, 34, 38, tzinfo=timezone.utc))
+    assert "candidate_decision_stale_for_transition" in d["reason_codes"]
+    assert d["execution_allowed"] is False
+    assert d["next_command"] == "odte-convert"
+    assert "NOT terminal" in d["next_action"]

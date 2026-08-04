@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-02",
+  "title": "Hermes 0DTE risk-on retune — agent-side changes (repo side already shipped)",
+  "context": "Week of 2026-07-27..31: zero trades despite qualified setups daily. Repo now ships odte-convert (atomic confirm->gate->lease), chase band (anchor*1.15), BP-proportional tiered sizing (0.60 full / 0.30 B+), snapshot TTL 120s, conversion SLA 180s, 2-trades/day budget, weekly telemetry + zero-trade tripwire. These agent-side changes make Hermes actually use them.",
+  "changes": [
+    {
+      "id": "robinhood-oauth-refresh",
+      "area": "mcp-auth",
+      "severity": "BLOCKING",
+      "deadline": "2026-08-03T09:00:00-04:00",
+      "action": "Refresh ~/.hermes/mcp-tokens/robinhood.json BEFORE Monday's open — it expires 2026-08-03 17:54 ET (mid-session). Add a pre-open preflight that checks expires_at and refreshes when <48h remain.",
+      "verify": "Token expires_at > 2026-08-10; controller open check-in reads parent_robinhood_mcp: OK."
+    },
+    {
+      "id": "controller-cadence-and-fast-path",
+      "area": "cron",
+      "severity": "HIGH",
+      "action": "Job 344e4c3333a7 (0dte-live-controller): change schedule */2 -> */5 9-15 * * 1-5 (ticks take 5-10 min; */2 just overlap-suppresses to ~25% completion). Controller prompt: when odte-loop-status posture is CONVERT_CANDIDATE_NOW or SCOUT_FRESH_SETUP, run the FAST PATH: (1) one batched MCP read -> write market_snapshot + broker snapshot + locked-contract quote JSONs with fresh generated_at/as_of; (2) make odte-convert MARKET=... BROKER=... CONTRACT=... JSON=1; (3) on converted:true, IMMEDIATELY review+place consuming the lease (it expires in 60s); (4) poll make odte-order-guard every ~10s until FILLED_FRESH or cancelled.",
+      "verify": "Cron transcripts show odte-convert wall time <5s and zero *_stale lease refusals."
+    },
+    {
+      "id": "snapshot-ordering",
+      "area": "controller-prompt",
+      "severity": "HIGH",
+      "action": "Never reuse tick-opening snapshots for conversion. Snapshots feeding odte-convert must be fetched immediately before the call (<120s old at authorize). The old failure: gate passed, lease refused 11s later on snapshots built earlier in the same tick.",
+      "verify": "Journal execution_lease_issued events show no market_snapshot_stale/broker_snapshot_stale reason codes."
+    },
+    {
+      "id": "policy-v5-sizing",
+      "area": "~/0dte/controller_policy.json + pre-order hook",
+      "severity": "HIGH",
+      "action": "Cut policy v5: DELETE the flat sizing rails (b:$35 / a:$70 / a_plus:$120) and the hook's ABSOLUTE_MAX_DEBIT=120. The hook must instead validate order.limit_price <= lease.max_limit_price and order debit <= lease.max_debit from data/odte/execution_lease.json (repo computes the ceilings: chase band + tier fraction of live BP). Policy may MIRROR max_debit_fraction 0.60 / b_plus 0.30 for display, never enforce its own dollar caps. Also delete the 'CHOP = A+ only' entry rule (repo tier system: CHOP allows B+ at half size) and the no-chase zero-tolerance wording (chase band = anchor*1.15 at CONFIRM_ENTRY, enforced in the lease).",
+      "verify": "SPY 741C-at-$121-class setups no longer die on a flat dollar rail; hook blocks only lease-ceiling violations."
+    },
+    {
+      "id": "social-file-rot",
+      "area": "~/0dte inputs",
+      "severity": "MEDIUM",
+      "action": "Retire the entry_rules.use_raw_social_files requirement (x_text.txt / reddit_text.txt do not exist; .reddit_token.json expired 2026-07-24). Missing social files must NEVER veto an ETF tape candidate — tape is the primary signal. Optionally regenerate the Reddit token and daily_thread_id refresh job if social context is still wanted.",
+      "verify": "no_directional_edge veto count drops; no candidate blocked on missing social files."
+    },
+    {
+      "id": "gamma-map-freshness",
+      "area": "cron",
+      "severity": "MEDIUM",
+      "action": "Add a 09:35 ET + hourly job: export the Robinhood chain -> make odte-rh-rows -> make odte-gamma-map WRITE=1. Wall/pin vetoes may only fire against a SAME-DAY gamma map; with no fresh map, gamma context is 'unavailable', not a veto.",
+      "verify": "Every trading day has a same-day gamma_map artifact; no 'gamma_map_stale_for_promotion' vetoes."
+    },
+    {
+      "id": "cleanup-exclusions",
+      "area": "cron",
+      "severity": "HIGH",
+      "action": "The cleanup_stale_artifacts job must EXCLUDE data/odte/triggers.json, watchdog_state.json, active_candidate.json, candidate_decision.json, execution_lease.json, broker_health.json and decision_journal.jsonl. It archived triggers.json, which made odte-loop-status read trigger:missing -> FLAT_NO_TRADE regardless of signal.",
+      "verify": "triggers.json persists across cleanup runs; loop-status never reports triggers: missing while the watchdog is running."
+    },
+    {
+      "id": "tripwire-journaling",
+      "area": "controller-prompt",
+      "severity": "LOW",
+      "action": "When odte-loop-status weekly_telemetry.tripwire.fired is true, journal ONE advisory note per day (make odte-journal) and surface it in the EOD recap: the week is dying and the funnel counts say where.",
+      "verify": "A zero-trade Wednesday produces the advisory in the journal and recap."
+    },
+    {
+      "id": "mcp-timeout-hardening",
+      "area": "mcp-config",
+      "severity": "MEDIUM",
+      "action": "Robinhood MCP init timed out 58-69x/day (Jul 27, 30, 31). Raise the connection timeout, add one automatic reconnect before declaring the lane degraded, and batch snapshot reads into fewer calls.",
+      "verify": "errors.log MCP timeout count near zero on a trading day; no BROKER_BLOCKED candidate-watch results while the lane is actually up."
+    },
+    {
+      "id": "single-execution-lane",
+      "area": "cron",
+      "severity": "STANDING",
+      "action": "Unchanged invariant: 0dte-live-controller stays the ONLY broker-capable job; watchdog-pulse/check-in/recap stay read-only. The lease + pre-order hook remain the only order gates.",
+      "verify": "cron manifest shows exactly one job with broker tools."
+    },
+    {
+      "id": "swarm-conviction-advisory",
+      "area": "controller-prompt",
+      "severity": "LOW",
+      "effective": "2026-08-04",
+      "action": "A local SwarmClaw research swarm (no broker access, no Hermes access) writes advisory artifacts under data/odte/swarm/. From Tuesday 2026-08-04, when working a candidate, the controller MAY read data/odte/swarm/conviction.json as ADVISORY color iff it exists, generated_at is <10 min old, and candidate_key matches the candidate in hand. Use it SOLELY to enrich decision-journal narrative and Telegram commentary (note agreement/dissent). It is NEVER a gate or decision input: absence, staleness, schema errors, or 'low' conviction MUST NOT delay, veto, resize, retier, or reorder anything the deterministic tools authorize; 'high' conviction MUST NOT soften or bypass any veto, gate, lease term, or sizing rule. Read once, proceed regardless — never wait for this file. Never write under data/odte/swarm/; the cleanup job (item cleanup-exclusions) must also exclude the entire data/odte/swarm/ directory. Monday 2026-08-03 the file may appear but MUST be ignored (latency shadow). Invariant single-execution-lane is unchanged: leases + pre-order hook remain the only order gates; the swarm has no broker-capable lane.",
+      "verify": "Journal narratives may cite swarm conviction; no decision, size, tier, or timing ever differs based on the artifact's presence or content."
+    }
+  ],
+  "rollout": {
+    "sunday": "Apply manifest items; refresh OAuth; dry-run odte-convert against Friday fixtures.",
+    "monday": "LIVE SHADOW: run the fast path with real MCP snapshots but DO NOT place. Assert per attempt: convert <5s, snapshot age <120s at authorize, zero *_stale refusals, refusals (if any) are tape-honest. Review EOD.",
+    "tuesday": "Arm placement (capped live, 2/day budget) if Monday's shadow is clean.",
+    "target": "3-4 trades/week; the zero-trade tripwire fires Wednesday if the week is dying."
+  }
+}

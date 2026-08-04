@@ -1111,6 +1111,8 @@ odte:
   daily_trade_budget: 2           # hard cap on entries per ET day
   reentry_cooldown_minutes: 20    # min gap between a close and the next entry
   green_reentry_min_bp_multiple: 1.5  # re-entry after green armed when BP >= mult*cost
+  green_reentry_auto_arm: true    # post-green re-entry auto-arms on same-or-better tier
+                                  # (budget slot + cooldown + BP multiple still gate)
   lease_ttl_seconds: 60           # default lease TTL (hard cap 60s stays in code)
   snapshot_ttl_seconds: 120       # market+broker snapshot freshness at authorize
   confirm_conversion_sla_seconds: 180  # CONFIRM_ENTRY -> disposition accountability SLA

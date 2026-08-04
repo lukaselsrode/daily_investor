@@ -348,6 +348,8 @@ def run_convert(candidate_json: str | None = None, candidate_path: str | None = 
             "decision": "issue" if auth.get("authorized") else "deny",
             "authorized": bool(auth.get("authorized")),
             "lease_id": lease.get("lease_id"),
+            "tier": lease.get("tier") or locked.get("tier"),
+            "anchor_quote": lease.get("anchor_quote"),
             "reason_codes": list(auth.get("reason_codes") or []),
             "ts": now.isoformat(timespec="seconds"),
             **_identity(locked),

@@ -399,19 +399,21 @@ def _next_for(state: str, *, live: bool) -> tuple[str, str]:
     if state == "SCAN":
         return ("keep scanning for a non-restricted candidate", "odte-watchdog")
     if state == "CANDIDATE":
-        return ("assemble the thesis→entry gate for the candidate", "odte-entry-gate")
+        return ("run the candidate HAWK loop; on CONFIRM_ENTRY fetch fresh snapshots and run the "
+                "atomic conversion",
+                "odte-candidate-watch → odte-convert (on CONFIRM_ENTRY)")
     if state == "GATED":
         return ("gate not execution-allowed — refresh the failing/missing inputs and re-run the "
-                "gate; execution authority then needs a FRESH lease (odte-execution-authorize), "
+                "atomic conversion (it re-confirms + re-gates + mints the lease under one clock); "
                 "never a bare promotion",
-                "odte-entry-gate → odte-execution-authorize")
+                "odte-convert  # after refreshing the failing inputs")
     if state == "PROMOTED":
-        return ("ALL GATES PASSED — mint a fresh execution lease (odte-execution-authorize), do "
-                "the final live refresh, then broker review/place under standing auth via the "
-                "Hermes MCP lane (this repo places NO orders); run the pending-order guard until "
-                "the fill, then start the position watch",
-                "odte-execution-authorize → broker-review-place (Hermes MCP lane) → "
-                "odte-order-guard → odte-position --snapshot <live.json>")
+        return ("ALL GATES PASSED — consume the odte-convert lease IMMEDIATELY at broker "
+                "review/place under standing auth via the Hermes MCP lane (this repo places NO "
+                "orders); if the lease expired, re-run odte-convert; run the pending-order guard "
+                "until the fill, then start the position watch",
+                "broker-review-place (Hermes MCP lane) → odte-order-guard → "
+                "odte-position --snapshot <live.json>")
     if state == "PENDING_ORDER":
         return ("a pending ENTRY order is under guard — poll fresh broker order truth and re-run "
                 "the order guard every tick; cancel IMMEDIATELY on TTL expiry or thesis "
@@ -541,6 +543,98 @@ def _gate_consumed_by_no_trade(gate: dict, events: list[dict]) -> bool:
 # matchable conversion/refusal events — postmortem/execution_safety_incident are day/cycle-scoped
 # (handled by the closed-trade and lockout checks), so they must never resolve a specific contract.
 _CONFIRM_TERMINAL_EVENTS = ("entry_decision", "no_trade_decision", "order_submitted", "order_filled")
+
+
+def _live_rails(events: list[dict] | None, broker: dict, now: datetime) -> dict:
+    """PURE: the authoritative LIVE rails, attached to every status payload.
+
+    2026-08-03: the controller vetoed a compliant $125 debit against a retired $1.20 flat rail and
+    killed a confirm against a hand-remembered 60s SLA while the live SLA was 180s — remembered
+    policy, not live policy. This block puts the current numbers in every tick so the agent reads
+    them instead of remembering them. Dollar ceilings are computed ONLY from fresh broker-truth
+    buying power (never guessed): a stale/absent probe reads null."""
+    from data.odte_config import (
+        B_PLUS_DEBIT_FRACTION,
+        CHASE_BAND_FRACTION,
+        EXECUTABLE_UNIVERSE,
+        GREEN_REENTRY_AUTO_ARM,
+        GREEN_REENTRY_MIN_BP_MULTIPLE,
+        MAX_DEBIT_FRACTION,
+        SNAPSHOT_TTL_SECONDS,
+    )
+    from data.odte_execution_policy import DEFAULT_LEASE_TTL_SECONDS, MAX_LEASE_TTL_SECONDS
+    from data.odte_journal import (
+        daily_trade_budget,
+        green_day_preservation,
+        green_day_winning_tier,
+    )
+    broker = _dict(broker)
+    truth = _dict(broker.get("truth"))
+    lane = broker.get("lane")
+    age = broker.get("age_minutes")
+    bp = (truth.get("buying_power")
+          if lane in _TRUTH_LANES and age is not None and age <= BROKER_STALE_MINUTES else None)
+    budget = daily_trade_budget(events, now=now)
+    preservation = green_day_preservation(events, now=now)
+    locked = bool(preservation.get("locked"))
+    winning_tier = green_day_winning_tier(events, now=now).get("winning_tier") if locked else None
+    return {
+        "conversion_sla_seconds": CONFIRM_CONVERSION_SLA_SECONDS,
+        "snapshot_ttl_seconds": SNAPSHOT_TTL_SECONDS,
+        "lease": {"default_ttl_seconds": DEFAULT_LEASE_TTL_SECONDS,
+                  "hard_cap_seconds": MAX_LEASE_TTL_SECONDS},
+        "chase_band_fraction": CHASE_BAND_FRACTION,
+        "max_debit_fraction": {"full": MAX_DEBIT_FRACTION, "b_plus": B_PLUS_DEBIT_FRACTION},
+        "buying_power": bp,
+        "buying_power_lane": lane,
+        "max_debit_dollars": ({"full": round(MAX_DEBIT_FRACTION * bp, 2),
+                               "b_plus": round(B_PLUS_DEBIT_FRACTION * bp, 2)}
+                              if bp is not None else None),
+        "daily_trade_budget": budget,
+        "executable_universe": list(EXECUTABLE_UNIVERSE),
+        "green_reentry": {
+            "locked": locked,
+            "auto_arm_enabled": GREEN_REENTRY_AUTO_ARM,
+            "min_bp_multiple": GREEN_REENTRY_MIN_BP_MULTIPLE,
+            "winning_tier_today": winning_tier,
+            "budget_remaining": budget.get("remaining"),
+            "cooldown_active": budget.get("cooldown_active"),
+            "cooldown_until": budget.get("cooldown_until"),
+            "structurally_armable": bool(GREEN_REENTRY_AUTO_ARM
+                                         and budget.get("remaining", 0) >= 1
+                                         and not budget.get("cooldown_active")),
+            "manual_override_key": "allow_reentry_after_green",
+        },
+        "basis": ("authoritative live rails — read these numbers every tick; never act on "
+                  "remembered policy"),
+    }
+
+
+def _green_reentry_scan_allowed(events: list[dict] | None, now: datetime | None,
+                                tier) -> tuple[bool, str]:
+    """PURE: may the post-green scan/watch lane stay alive for this candidate?
+
+    2026-08-03 auto-arm: nothing at loop-status can place an order, so the scan lane stays open
+    when the cheap deterministic checks pass — auto-arm enabled, a daily-budget slot open, the
+    post-close cooldown clear, and (when the candidate already carries a tape tier) that tier
+    ranking >= the winning trade's tier. A raw candidate with no tier yet passes through: the
+    tier/BP enforcement point is the deterministic gate inside odte-convert. Returns
+    (allowed, blocking_reason)."""
+    from data.odte_config import GREEN_REENTRY_AUTO_ARM
+    from data.odte_journal import daily_trade_budget, green_day_winning_tier, tier_rank
+    if not GREEN_REENTRY_AUTO_ARM:
+        return False, "profitable trade already banked today (auto-arm disabled)"
+    budget = daily_trade_budget(events, now=now)
+    if budget.get("remaining", 0) < 1:
+        return False, "daily trade budget exhausted"
+    if budget.get("cooldown_active"):
+        return False, f"post-trade cooldown active until {budget.get('cooldown_until')}"
+    if tier is not None:
+        winning = green_day_winning_tier(events, now=now)
+        if tier_rank(tier) < winning.get("winning_rank", 0):
+            return False, (f"candidate tier {tier} below today's winning tier "
+                           f"{winning.get('winning_tier')}")
+    return True, ""
 
 
 def _confirm_identity(watched: dict) -> tuple[str, str]:
@@ -762,9 +856,15 @@ def _resolve_loop_state(active_trade: dict | None = None,
     if candidate.get("ticker") and not trig_fresh and trig_stale_reason:
         reasons.append(f"ignored stale scan trigger: {trig_stale_reason}")
     if green_locked and trig_candidate:
-        trig_candidate = False
-        reasons.append("green_day_preservation_lockout: ignored fresh scan candidate — profitable "
-                       "trade already banked today")
+        allowed, block_reason = _green_reentry_scan_allowed(events, now, candidate.get("tier"))
+        if allowed:
+            reasons.append("green_reentry_auto_arm: post-green scan candidate surfaced (budget "
+                           "slot open, cooldown clear) — tier/BP enforced at the gate via "
+                           "odte-convert")
+        else:
+            trig_candidate = False
+            reasons.append(f"green_day_preservation_lockout: ignored fresh scan candidate — "
+                           f"{block_reason}")
     if safety_locked and trig_candidate:
         trig_candidate = False
         reasons.append("execution_safety_lockout: ignored fresh scan candidate — an "
@@ -839,9 +939,15 @@ def _resolve_loop_state(active_trade: dict | None = None,
     inactive_watch = {"DEGRADED_NO_TRADE", "EXPIRED_NO_CONFIRMATION", ""}
     watch_actionable = watch_live and watch_fresh and watch_decision not in inactive_watch
     if green_locked and watch_actionable:
-        watch_actionable = False
-        reasons.append("green_day_preservation_lockout: ignored candidate watch — profitable "
-                       "trade already banked today")
+        allowed, block_reason = _green_reentry_scan_allowed(events, now, watched.get("tier"))
+        if allowed:
+            reasons.append("green_reentry_auto_arm: post-green candidate watch surfaced (budget "
+                           "slot open, cooldown clear) — tier/BP enforced at the gate via "
+                           "odte-convert")
+        else:
+            watch_actionable = False
+            reasons.append(f"green_day_preservation_lockout: ignored candidate watch — "
+                           f"{block_reason}")
     if safety_locked and watch_actionable:
         watch_actionable = False
         reasons.append("execution_safety_lockout: ignored candidate watch — an "
@@ -1235,6 +1341,10 @@ def derive_loop_state(active_trade: dict | None = None,
     payload["notes"] = [r for r in full if _is_reason_noise(r)]
     if not payload["reasons"]:
         payload["reasons"] = [_flat_reason(posture)]
+    # LIVE RAILS (2026-08-03): the authoritative current numbers ride EVERY payload so the
+    # controller reads live policy instead of enforcing remembered (possibly retired) rails.
+    payload["live_rails"] = _live_rails(journal_events, broker,
+                                        now or datetime.now(timezone.utc))
     return payload
 
 
@@ -1394,6 +1504,25 @@ def render_markdown(payload: dict) -> str:
             lines.append(f"Broker truth: {' · '.join(truth_bits)}  ")
         if broker.get("refresh_command"):
             lines.append(f"Refresh: {broker.get('refresh_command')}  ")
+    rails = p.get("live_rails") or {}
+    if rails:
+        frac = rails.get("max_debit_fraction") or {}
+        dollars = rails.get("max_debit_dollars")
+        dollar_txt = (f" (${dollars['full']:g} / ${dollars['b_plus']:g} at BP "
+                      f"${rails.get('buying_power'):g})" if dollars else " ($? — no fresh BP probe)")
+        gr = rails.get("green_reentry") or {}
+        gr_txt = ("locked" if gr.get("locked") else "open")
+        if gr.get("locked"):
+            gr_txt += (f", re-entry {'ARMABLE' if gr.get('structurally_armable') else 'blocked'}"
+                       f" (winning tier {gr.get('winning_tier_today')})")
+        lease = rails.get("lease") or {}
+        lines.append(
+            f"Live rails: convert SLA {rails.get('conversion_sla_seconds'):g}s · snapshots "
+            f"{rails.get('snapshot_ttl_seconds'):g}s · lease {lease.get('default_ttl_seconds'):g}s "
+            f"(cap {lease.get('hard_cap_seconds'):g}s) · chase band "
+            f"{rails.get('chase_band_fraction'):.0%} · max debit {frac.get('full'):.0%}/"
+            f"{frac.get('b_plus'):.0%} of BP{dollar_txt} · green day {gr_txt} — read these, never "
+            f"remembered policy  ")
     wk = p.get("weekly_telemetry") or {}
     if wk:
         target = wk.get("weekly_target") or ["?", "?"]

@@ -13,10 +13,12 @@ input is absent is `None`, which is not True, so execution stays disallowed). Re
 are always non-executable.
 
 An execution-allowed GATE is still not order authority (2026-07-23 delayed-fill remediation): the
-manager must additionally mint a fresh, short-lived, exact-identity execution LEASE via
-`odte-execution-authorize` (data.odte_execution_policy) before broker review/place, and run the
+lease is a fresh, short-lived, exact-identity authorization minted IN-PROCESS by `odte-convert`
+(via data.odte_execution_policy.authorize_entry) before broker review/place, followed by the
 pending-order guard (`odte-order-guard`) until filled-fresh or cancelled. The deprecated bare
-`promote_to_execution` boolean fails CLOSED with reason `execution_lease_required`.
+`promote_to_execution` boolean fails CLOSED with reason `execution_lease_required`, and a
+CONFIRM_ENTRY candidate decision fed to the CLI wrapper fails closed with `use_odte_convert`
+(2026-08-03 legacy-path hard block).
 
 Inputs (all optional dicts, supplied by the caller from artifacts already collected upstream):
   trigger          a watchdog trigger payload (carries decision_context: thesis/confidence/
@@ -39,7 +41,11 @@ from pathlib import Path
 from typing import Any
 
 from core.paths import ODTE_REPORT_DIR
-from data.odte_config import B_PLUS_MIN_VEHICLE_SCORE, GREEN_REENTRY_MIN_BP_MULTIPLE
+from data.odte_config import (
+    B_PLUS_MIN_VEHICLE_SCORE,
+    GREEN_REENTRY_AUTO_ARM,
+    GREEN_REENTRY_MIN_BP_MULTIPLE,
+)
 
 SCHEMA_VERSION = 1
 
@@ -55,13 +61,16 @@ _BULLISH = {"call", "bullish", "long_call", "calls", "up"}
 _BEARISH = {"put", "bearish", "long_put", "puts", "down"}
 
 # Green-day preservation (post-scalp lockout). Once a completed profitable trade is banked for the
-# ET day (per journal events), a fresh entry gate is VETOED — the banked green must not be handed
-# back on a re-entry (live 2026-07-10 failure: 3x SPY 753C scalped green, then re-entered 1x for a
-# scratch). The ONLY way back in is an EXPLICIT `allow_reentry_after_green: true` on the trigger or
-# broker snapshot, and even then buying power must comfortably cover the re-entry at a multiple of
-# the contract's own estimated cost (BP-SCALED, 2026-08-02 retune: the old flat $500 floor sat above
-# the whole account's buying power, so the override could never arm and any green trade permanently
-# ended the day — incompatible with the 2-trades/day budget). Unknown contract cost stays locked.
+# ET day (per journal events), a fresh entry gate is VETOED unless re-entry is ARMED — the banked
+# green must not be handed back on a whim (live 2026-07-10 failure: 3x SPY 753C scalped green, then
+# re-entered 1x for a scratch). Arming paths (2026-08-03 retune — manual-only made a 2nd trade
+# structurally impossible on 2026-08-03 while budget/cooldown/BP were all clear):
+#   MANUAL: explicit `allow_reentry_after_green: true` on the trigger or broker snapshot.
+#   AUTO:   GREEN_REENTRY_AUTO_ARM + budget slot + cooldown passed + candidate tape tier >= the
+#           winning trade's tier (same-or-better setup — quality replaces the flag).
+# Both paths require BP >= GREEN_REENTRY_MIN_BP_MULTIPLE × the contract's own estimated cost
+# (BP-SCALED, 2026-08-02: the old flat $500 floor sat above the whole account's buying power).
+# Unknown contract cost stays locked.
 GREEN_LOCKOUT_VETO = "green_day_preservation_lockout"
 GREEN_REENTRY_BP_VETO = "insufficient_bp_for_green_reentry"
 
@@ -73,9 +82,44 @@ COOLDOWN_VETO = "post_trade_cooldown_active"
 # FAIL-CLOSED promotion (2026-07-23 delayed-fill incident): `promote_to_execution=True` is a
 # DEPRECATED input. A bare boolean can no longer demote a scan-tier record to the execution tier —
 # execution authority is minted ONLY by a fresh, exact-identity, short-lived execution lease
-# (`odte-execution-authorize` / data.odte_execution_policy.authorize_entry). A promotion attempt is
-# recorded and answered with this reason code so the controller runs the lease path instead.
+# (data.odte_execution_policy.authorize_entry, minted in-process by odte-convert). A promotion
+# attempt is recorded and answered with this reason code so the controller runs the convert path.
 EXECUTION_LEASE_REQUIRED = "execution_lease_required"
+
+# LEGACY CONVERSION PATH HARD BLOCK (2026-08-03): the multi-command CONFIRM_ENTRY→gate→authorize
+# orchestration is retired. Hand-assembled artifacts + per-command latency killed two qualified
+# 755C cycles (76s and 130s confirm-to-disposition) on the same day the single odte-convert run
+# converted in 0s. run_entry_gate refuses CONFIRM_ENTRY candidate decisions with this reason.
+USE_ODTE_CONVERT = "use_odte_convert"
+
+
+def _legacy_confirm_refusal(candidate_decision: dict) -> dict:
+    """Contract-shaped refusal for a CONFIRM_ENTRY fed to the legacy wrapper. Deliberately
+    journals nothing and evaluates nothing — see run_entry_gate."""
+    locked = _dict(candidate_decision.get("candidate"))
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "symbol": _norm_symbol(locked.get("ticker") or locked.get("underlying")
+                               or locked.get("symbol")),
+        "option_id": locked.get("option_id") or locked.get("id") or locked.get("occ_symbol"),
+        "decision": "veto",
+        "intent": "veto",
+        "legacy_path_blocked": True,
+        "reason_codes": [USE_ODTE_CONVERT, "legacy_conversion_path_blocked"],
+        "veto_reasons": [USE_ODTE_CONVERT],
+        "scan_only": True,
+        "execution_allowed": False,
+        "promoted_to_execution": False,
+        "places_orders": False,
+        "next_command": "odte-convert",
+        "next_action": ("the multi-command CONFIRM_ENTRY→gate path is retired — a stale confirm "
+                        "is NOT terminal; run odte-convert (it re-confirms in-process under one "
+                        "clock and mints the lease in the same call)"),
+        "basis": ("legacy conversion path hard block (2026-08-03): conversion happens ONLY via "
+                  "odte-convert; this refusal is not journaled so it can never stand in as the "
+                  "terminal disposition of the confirm it redirects"),
+    }
 
 # A confirmed candidate may cross the scan→gate boundary only through a fresh, identity-matched
 # candidate-watch decision. The lease tier enforces the same 60s ceiling again: the transition must
@@ -98,25 +142,28 @@ _BP_FIT_VETOES = {"insufficient_buying_power", "vehicle_bad_bet"}
 
 
 def _next_step(intent: str, execution_allowed: bool, gates: dict, veto_reasons: list[str],
-               req: tuple[str, ...]) -> tuple[str, str]:
+               req: tuple[str, ...], transition_reasons: list[str] | None = None) -> tuple[str, str]:
     """(next_action prose, next_command) for the gate record — decision-support only, never an order.
 
     Encodes the anti-passivity ladder: a passed gate says GO to broker review/place (standing auth);
-    a BP/vehicle-fit fail says scan QQQ/SPY/IWM for a fitting vehicle BEFORE declaring no-trade; a
-    missing input names the exact command that produces it; a hard veto stands down to the scan lane."""
+    a stale confirm says re-run odte-convert (NOT terminal); a BP/vehicle-fit fail says scan
+    QQQ/SPY/IWM for a fitting vehicle BEFORE declaring no-trade; a missing input names the exact
+    command that produces it; a hard veto stands down to the scan lane. 2026-08-03: every
+    conversion-shaped step points at odte-convert — the multi-command ladder is retired."""
     if execution_allowed:
-        return ("ALL GATES PASSED — mint a fresh execution lease (odte-execution-authorize), do "
-                "the final live refresh, then broker review/place under standing auth via the "
-                "Hermes MCP lane (this repo places NO orders); run the pending-order guard every "
-                "tick until filled-fresh or cancelled, then start the position watch",
-                "odte-execution-authorize → broker-review-place (Hermes MCP lane) → "
-                "odte-order-guard → odte-position --snapshot <live.json>")
+        return ("ALL GATES PASSED — the execution lease is minted in-process by odte-convert; "
+                "consume it IMMEDIATELY at broker review/place under standing auth via the Hermes "
+                "MCP lane (this repo places NO orders); run the pending-order guard every tick "
+                "until filled-fresh or cancelled, then start the position watch",
+                "broker-review-place (Hermes MCP lane) → odte-order-guard → "
+                "odte-position --snapshot <live.json>")
     if GREEN_LOCKOUT_VETO in veto_reasons or GREEN_REENTRY_BP_VETO in veto_reasons:
-        return ("green-day preservation lockout — a profitable trade is already banked today; NO "
-                "fresh entries this session. Re-entry needs BOTH an explicit "
-                "allow_reentry_after_green=true on the trigger/broker snapshot AND buying power "
-                "above the re-entry floor. Bank the green day and review.",
-                "odte-journal-report --write  # bank the green day; do not re-enter")
+        return ("green-day preservation lockout — a profitable trade is already banked today. "
+                "Re-entry AUTO-ARMS for a same-or-better-tier setup when the daily budget has a "
+                "slot, the cooldown passed, and BP covers the multiple of contract cost; the "
+                "explicit allow_reentry_after_green override remains the manual path. Below that "
+                "bar, bank the green day.",
+                "odte-convert  # only a same-or-better-tier setup can re-enter; else bank the day")
     if any(v in _BP_FIT_VETOES for v in veto_reasons):
         return ("vehicle/BP fit failed for THIS contract — before declaring no-trade on BP, scan "
                 "the other index ETF vehicles (QQQ/SPY/IWM) for a BP-fit structure; reject only if "
@@ -127,24 +174,34 @@ def _next_step(intent: str, execution_allowed: bool, gates: dict, veto_reasons: 
         return (f"hard veto ({', '.join(veto_reasons) or 'restricted'}) — stand down for this "
                 "candidate and resume the scan lane",
                 "odte-watchdog")
+    # STALE CONFIRM IS NOT TERMINAL (2026-08-03: cycle-3 died here and was narrated as final).
+    # odte-convert re-runs candidate-watch in-process at `now`, so a stale/failed transition is
+    # simply a signal to run the atomic conversion — never a reason to abandon the identity.
+    stale_transition = any(str(r).startswith("candidate_decision_") for r in (transition_reasons or []))
+    if stale_transition:
+        return ("a stale confirm is NOT terminal — run odte-convert with freshly fetched "
+                "market/broker/contract snapshots; it re-confirms this identity in-process under "
+                "one clock and mints the lease in the same call",
+                "odte-convert")
     unknown = [g for g in req if gates.get(g) is None]
     failing = [g for g in req if gates.get(g) is False]
     if unknown:
         cmds = "; ".join(_GATE_INPUT_COMMANDS.get(g, f"supply the {g} input") for g in unknown)
-        return (f"gate inputs missing ({', '.join(unknown)}) — produce them and re-run the gate: "
-                f"{cmds}",
-                "odte-entry-gate  # re-run with the missing inputs supplied")
+        return (f"gate inputs missing ({', '.join(unknown)}) — produce them and re-run the "
+                f"conversion: {cmds}",
+                "odte-convert  # after refreshing the missing inputs")
     if failing:
         return (f"gates failing ({', '.join(failing)}) — keep the candidate HAWK loop until a "
                 "materially new read flips the failing gate or the candidate degrades; do not "
                 "re-promote on the same read",
                 "odte-candidate-watch")
     # scan_only observe record with every gate green: bare promotion is DEAD (2026-07-23 incident).
-    # Execution authority is minted only by a fresh execution lease bound to one exact contract.
+    # Execution authority is minted only by the single-use lease, and the lease is minted via the
+    # atomic conversion.
     return ("all required gates read True but the record is scan-tier — bare promotion is "
-            "disabled; execution authority is minted ONLY by a fresh execution lease "
-            "(exact contract/direction/quantity/price, ~30s TTL) via odte-execution-authorize",
-            "odte-execution-authorize")
+            "disabled; execution authority is minted ONLY by the single-use lease, and the lease "
+            "is minted via the atomic conversion (odte-convert)",
+            "odte-convert")
 
 
 def _num(value: Any) -> float | None:
@@ -378,7 +435,7 @@ def build_entry_gate_decision(trigger: dict | None = None, candidate: dict | Non
     it no longer demotes a scan-tier record to the execution tier. The attempt is recorded
     (`promotion_requested`) and answered with the `execution_lease_required` reason code; execution
     authority is minted ONLY by a fresh short-lived exact-identity lease
-    (`odte-execution-authorize`).
+    (minted in-process by odte-convert).
 
     GREEN-DAY PRESERVATION: when `journal_events` (the day's decision journal) shows a completed
     profitable trade for the current ET day, the gate VETOES (`green_day_preservation_lockout`) —
@@ -482,34 +539,56 @@ def build_entry_gate_decision(trigger: dict | None = None, candidate: dict | Non
             veto_reasons.append(str(r))
 
     # GREEN-DAY PRESERVATION (post-scalp lockout): once the day's journal shows a completed
-    # profitable trade, this gate VETOES — a later "valid setup" must not hand the banked green
-    # back (the live failure this guards: green scalp, then a same-day re-entry scratch). The
-    # override is only ARMED when it is explicit (`allow_reentry_after_green: true` on the trigger
-    # or broker snapshot) AND buying power comfortably covers the re-entry — the contract's
-    # estimated cost, floored at GREEN_REENTRY_MIN_BP. No journal context supplied skips the check
+    # profitable trade, this gate VETOES a lesser re-entry — the banked green must not be handed
+    # back on a whim (the live failure this guards: green scalp, then a same-day re-entry scratch).
+    # TWO arming paths (2026-08-03 retune — the manual-only rule made a 2nd trade structurally
+    # impossible on 2026-08-03 while budget/cooldown/BP were all clear):
+    #   MANUAL: explicit `allow_reentry_after_green: true` on the trigger or broker snapshot.
+    #   AUTO  (GREEN_REENTRY_AUTO_ARM): the daily budget has a slot, the post-close cooldown
+    #          passed, and the new candidate's tape-computed tier ranks >= the tier of the trade
+    #          that banked the green (same-or-better setup only — quality replaces the flag).
+    # BOTH paths additionally require buying power at GREEN_REENTRY_MIN_BP_MULTIPLE × the
+    # contract's OWN estimated cost; unknown cost fails closed. No journal context skips the check
     # (the caller is responsible for feeding the day's journal on the live path).
     preservation = None
+    budget = None
     if journal_events is not None:
-        from data.odte_journal import green_day_preservation
+        from data.odte_journal import daily_trade_budget, green_day_preservation
         preservation = green_day_preservation(journal_events, now=current_now)
+        budget = daily_trade_budget(journal_events, now=current_now)
     green_locked = bool(preservation and preservation.get("locked"))
     reentry_override = (trigger.get("allow_reentry_after_green") is True
                         or broker.get("allow_reentry_after_green") is True)
     bp = _buying_power(broker)
-    # BP-scaled arming: the override needs buying power at a multiple of the contract's OWN cost.
-    # Unknown cost fails closed — a re-entry whose size cannot be estimated stays locked.
     reentry_cost = _contract_cost(vehicle_score)
-    reentry_armed = bool(reentry_override and bp is not None and reentry_cost is not None
-                         and bp >= GREEN_REENTRY_MIN_BP_MULTIPLE * reentry_cost)
+    bp_ok = bool(bp is not None and reentry_cost is not None
+                 and bp >= GREEN_REENTRY_MIN_BP_MULTIPLE * reentry_cost)
+    manual_armed = bool(reentry_override and bp_ok)
+    auto_armed = False
+    tier_below_winner = False
+    winning_tier_today = None
+    auto_ready_except_bp = False
+    if green_locked and GREEN_REENTRY_AUTO_ARM:
+        from data.odte_journal import green_day_winning_tier, tier_rank
+        winning = green_day_winning_tier(journal_events, now=current_now)
+        winning_tier_today = winning.get("winning_tier")
+        winning_rank = winning.get("winning_rank", 0)
+        cadence_clear = bool(budget and budget.get("remaining", 0) >= 1
+                             and not budget.get("cooldown_active"))
+        tier_qualifies = tier_rank(tier) >= 1 and tier_rank(tier) >= winning_rank
+        tier_below_winner = bool(tier is not None and tier_rank(tier) < winning_rank)
+        auto_armed = cadence_clear and tier_qualifies and bp_ok
+        auto_ready_except_bp = cadence_clear and tier_qualifies and not bp_ok
+    reentry_armed = manual_armed or auto_armed
     if green_locked and not reentry_armed:
-        veto_reasons.append(GREEN_REENTRY_BP_VETO if reentry_override else GREEN_LOCKOUT_VETO)
+        # Name the honest blocker: BP when an arming path failed ONLY on buying power; the plain
+        # lockout otherwise (tier-below-winner gets its own diagnostic reason code downstream).
+        veto_reasons.append(GREEN_REENTRY_BP_VETO if (reentry_override or auto_ready_except_bp)
+                            else GREEN_LOCKOUT_VETO)
 
     # DAILY TRADE BUDGET + COOLDOWN (2026-08-02 retune): a hard per-ET-day entry cap and a minimum
     # gap after every completed trade. Deterministic from the same journal the green lockout reads.
-    budget = None
-    if journal_events is not None:
-        from data.odte_journal import daily_trade_budget
-        budget = daily_trade_budget(journal_events, now=current_now)
+    if budget is not None:
         if budget.get("exhausted"):
             veto_reasons.append(DAILY_BUDGET_VETO)
         elif budget.get("cooldown_active"):
@@ -547,8 +626,14 @@ def build_entry_gate_decision(trigger: dict | None = None, candidate: dict | Non
             reason_codes.append(EXECUTION_LEASE_REQUIRED)
     reason_codes.extend(transition_reasons)
     if green_locked:
-        reason_codes.append("green_reentry_override_armed" if reentry_armed
-                            else "green_day_preservation_locked")
+        if auto_armed:
+            reason_codes.append("green_reentry_auto_armed_tier")
+        elif manual_armed:
+            reason_codes.append("green_reentry_override_armed")
+        else:
+            reason_codes.append("green_day_preservation_locked")
+            if tier_below_winner:
+                reason_codes.append("green_reentry_tier_below_winner")
 
     # HARD conservative gate: execution_allowed only when nothing blocks it and ALL required gates
     # are explicitly True. Missing inputs (None) fail closed.
@@ -587,7 +672,8 @@ def build_entry_gate_decision(trigger: dict | None = None, candidate: dict | Non
                      "pin_risk": (pin.get("level") if isinstance(pin, dict) else pin),
                      "basis": "pin_risk_only_not_dealer_gex"}
 
-    next_action, next_command = _next_step(intent, execution_allowed, gates, veto_reasons, req)
+    next_action, next_command = _next_step(intent, execution_allowed, gates, veto_reasons, req,
+                                           transition_reasons)
 
     stamp = current_now.isoformat(timespec="seconds")
     return {
@@ -627,6 +713,13 @@ def build_entry_gate_decision(trigger: dict | None = None, candidate: dict | Non
         "execution_allowed": execution_allowed,
         "green_day_preservation": preservation,
         "allow_reentry_after_green": reentry_armed,
+        "green_reentry": {
+            "auto_arm_enabled": GREEN_REENTRY_AUTO_ARM,
+            "auto_armed": auto_armed,
+            "manual_override": manual_armed,
+            "candidate_tier": tier,
+            "winning_tier_today": winning_tier_today,
+        },
         "tier": tier,
         "sizing_tier": ("half" if tier == "b_plus" else "full"),
         "daily_trade_budget": budget,
@@ -654,10 +747,21 @@ def run_entry_gate(trigger_json: str | None = None, trigger_path: str | None = N
 
     `scan_only=None` (the default) INHERITS scan_only from the trigger/candidate; pass True/False to
     state it explicitly. `promote_to_execution=True` is DEPRECATED and fail-closed: it can no longer
-    make the record executable — the response carries the `execution_lease_required` reason code and
-    points at `odte-execution-authorize`. `journal_path` feeds the day's decision
-    journal into the GREEN-DAY PRESERVATION check (post-scalp lockout) — the CLI passes the
-    canonical journal by default; a missing/empty journal simply leaves the lockout disengaged."""
+    make the record executable — the response carries the `execution_lease_required` reason code.
+    `journal_path` feeds the day's decision journal into the GREEN-DAY PRESERVATION check
+    (post-scalp lockout) — the CLI passes the canonical journal by default; a missing/empty journal
+    simply leaves the lockout disengaged.
+
+    LEGACY PATH HARD BLOCK (2026-08-03): a CONFIRM_ENTRY candidate decision may no longer enter
+    through this multi-command wrapper — on 2026-08-03 two fully qualified 755C cycles died to
+    hand-orchestration latency on exactly this path while the one `odte-convert` run converted in
+    0s and won. The wrapper refuses with `use_odte_convert` WITHOUT evaluating, writing, or
+    journaling (a journaled refusal would count as terminal conversion evidence and absolve the
+    very confirm it redirects). The pure `build_entry_gate_decision` is unchanged — `odte-convert`
+    calls it directly and remains the ONLY conversion path."""
+    cd = _load_json(candidate_decision_path, candidate_decision_json)
+    if str(cd.get("decision") or "").upper() == "CONFIRM_ENTRY":
+        return _legacy_confirm_refusal(cd)
     journal_events = None
     if journal_path:
         from data.odte_journal import read_events
@@ -665,7 +769,7 @@ def run_entry_gate(trigger_json: str | None = None, trigger_path: str | None = N
     payload = build_entry_gate_decision(
         trigger=_load_json(trigger_path, trigger_json) or None,
         candidate=_load_json(candidate_path, candidate_json) or None,
-        candidate_decision=_load_json(candidate_decision_path, candidate_decision_json) or None,
+        candidate_decision=cd or None,
         day_score=_load_json(day_score_path, day_score_json) or None,
         vehicle_score=_load_json(vehicle_score_path, vehicle_score_json) or None,
         gamma_map=_load_json(gamma_path, gamma_json) or None,

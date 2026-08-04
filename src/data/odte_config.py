@@ -33,6 +33,11 @@ def _int(key: str, default: int) -> int:
     return int(_num(key, float(default)))
 
 
+def _bool(key: str, default: bool) -> bool:
+    val = _CFG.get(key)
+    return val if isinstance(val, bool) else default
+
+
 def _symbols(key: str, default: tuple[str, ...]) -> tuple[str, ...]:
     val = _CFG.get(key)
     if not isinstance(val, (list, tuple)) or not val:
@@ -69,6 +74,11 @@ GOOD_DAY_MIN_SCORE: int = _int("good_day_min_score", 4)
 DAILY_TRADE_BUDGET: int = _int("daily_trade_budget", 2)
 REENTRY_COOLDOWN_MINUTES: int = _int("reentry_cooldown_minutes", 20)
 GREEN_REENTRY_MIN_BP_MULTIPLE: float = _num("green_reentry_min_bp_multiple", 1.5)
+# 2026-08-03: after a banked green, re-entry auto-arms when the daily budget has a slot, the
+# cooldown passed, the new candidate's tape tier ranks >= the winning trade's tier, and BP covers
+# the multiple above. On 2026-08-03 the manual-override-only rule made trade #2 structurally
+# impossible while SPY ran 2.6 points. False restores the manual-override-only behavior.
+GREEN_REENTRY_AUTO_ARM: bool = _bool("green_reentry_auto_arm", True)
 
 # ── Freshness ──────────────────────────────────────────────────────────────────
 # Lease default TTL (still clamped by the un-tunable 60s hard cap in

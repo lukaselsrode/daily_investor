@@ -234,7 +234,8 @@ odte-day-score:              ## 0DTE non-sentiment day score — NO broker (MARK
 # gate says "mint an execution lease, then broker review/place, then the order guard"; a BP/vehicle-fit
 # fail says scan the other ETF vehicles (QQQ/SPY/IWM) before declaring no-trade; a missing input names
 # the exact command that produces it. PROMOTE=1 (--promote-to-execution) is DEPRECATED + fail-closed
-# (2026-07-23 incident): it answers with execution_lease_required — use odte-execution-authorize.
+# (2026-07-23 incident): it answers with execution_lease_required — and a CONFIRM_ENTRY
+# candidate decision is refused outright (use_odte_convert): conversion runs ONLY via odte-convert.
 #   make odte-entry-gate TRIGGER=data/odte/triggers.json DAY_SCORE=data/odte/reports/odte_day_score.json VEHICLE=data/odte/reports/odte_vehicle_score_qqq.json BROKER=data/odte/broker.json JSON=1
 #   make odte-entry-gate CANDIDATE=data/odte/active_candidate.json CANDIDATE_DECISION=data/odte/candidate_decision.json DAY_SCORE=<fresh> VEHICLE=<fresh> BROKER=<fresh> CONFIRMATIONS=<fresh-live-confirmations.json> JSON=1 WRITE=1 JOURNAL=1
 #   make odte-entry-gate TRIGGER=data/odte/triggers.json ... JOURNAL=1   # also append an entry_decision event
