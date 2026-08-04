@@ -34,7 +34,7 @@ import logging
 import os
 import re
 from collections import Counter, defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 try:                                   # POSIX advisory file lock (mac/linux). Best-effort.
@@ -324,6 +324,110 @@ def execution_safety_lockout(events: list[dict] | None, now: datetime | None = N
         and _et_date(e.get("ts")) == today
     ]
     return {"locked": bool(incidents), "trade_date": today, "incidents": incidents}
+
+
+def daily_trade_budget(events: list[dict] | None, now: datetime | None = None) -> dict:
+    """PURE: today's ET-day entry count vs the daily trade budget, plus the post-close cooldown.
+
+    2026-08-02 retune: the trade-cadence rail is a hard per-day budget (odte_config
+    DAILY_TRADE_BUDGET, default 2) instead of the un-armable flat-BP green lockout being the only
+    second-trade gate. An entry is a today's-ET `order_filled` event (deduped by trade_id/option_id
+    so entry+exit fills of one trade count once); the cooldown window opens at the latest completed
+    trade (order_closed / exit_decision) and lasts REENTRY_COOLDOWN_MINUTES. Reads only the supplied
+    events — no IO, no broker. Returns {trades_today, budget, remaining, exhausted, last_close_ts,
+    cooldown_until, cooldown_active, trade_date}."""
+    from data.odte_config import DAILY_TRADE_BUDGET, REENTRY_COOLDOWN_MINUTES
+    now = now or datetime.now(timezone.utc)
+    today = now.astimezone(ET).date().isoformat()
+    entry_keys: set[str] = set()
+    last_close: datetime | None = None
+    for i, e in enumerate(events or []):
+        if not isinstance(e, dict) or _et_date(e.get("ts")) != today:
+            continue
+        et = e.get("event_type")
+        if et == "order_filled":
+            entry_keys.add(str(e.get("trade_id") or e.get("option_id")
+                               or f"event#{e.get('seq', i)}"))
+        elif et in _EXIT_EVENTS:
+            ts = _parse_ts(e.get("ts"))
+            if ts is not None and (last_close is None or ts > last_close):
+                last_close = ts
+    cooldown_until = (last_close + timedelta(minutes=REENTRY_COOLDOWN_MINUTES)
+                      if last_close is not None else None)
+    trades_today = len(entry_keys)
+    return {
+        "trades_today": trades_today,
+        "budget": DAILY_TRADE_BUDGET,
+        "remaining": max(0, DAILY_TRADE_BUDGET - trades_today),
+        "exhausted": trades_today >= DAILY_TRADE_BUDGET,
+        "last_close_ts": last_close.isoformat(timespec="seconds") if last_close else None,
+        "cooldown_until": cooldown_until.isoformat(timespec="seconds") if cooldown_until else None,
+        "cooldown_active": bool(cooldown_until is not None and now < cooldown_until),
+        "trade_date": today,
+    }
+
+
+def weekly_telemetry(events: list[dict] | None, now: datetime | None = None) -> dict:
+    """PURE: ISO-week (ET) conversion-funnel counts + the zero-trade tripwire.
+
+    2026-08-02 retune: the weekly target is 3-4 trades and a zero-trade week must be VISIBLE while
+    it is still fixable, not discovered in a Friday postmortem. Counts this ET ISO-week's journal
+    events — trades (deduped order_filled), gates passed, leases issued/refused with the top
+    refusal reasons — and arms a tripwire once the week reaches the configured weekday (default
+    Wednesday) with zero trades. Reads only the supplied events — no IO, no broker. The tripwire is
+    ADVISORY telemetry: it never loosens a gate by itself."""
+    from data.odte_config import (
+        WEEKLY_TRADE_TARGET_MAX,
+        WEEKLY_TRADE_TARGET_MIN,
+        ZERO_TRADE_TRIPWIRE_WEEKDAY,
+    )
+    now = now or datetime.now(timezone.utc)
+    year, week, iso_weekday = now.astimezone(ET).isocalendar()
+    counts: Counter = Counter()
+    refusals: Counter = Counter()
+    trade_keys: set[str] = set()
+    for i, e in enumerate(events or []):
+        if not isinstance(e, dict):
+            continue
+        dt = _parse_ts(e.get("ts"))
+        if dt is None or dt.astimezone(ET).isocalendar()[:2] != (year, week):
+            continue
+        et = e.get("event_type")
+        if et == "order_filled":
+            trade_keys.add(str(e.get("trade_id") or e.get("option_id")
+                               or f"event#{e.get('seq', i)}"))
+        elif et == "entry_decision":
+            counts["entry_decisions"] += 1
+            if e.get("execution_allowed") is True or e.get("decision") == "enter":
+                counts["gates_passed"] += 1
+        elif et == "execution_lease_issued":
+            if e.get("authorized") is True or e.get("decision") == "issue":
+                counts["leases_issued"] += 1
+            else:
+                counts["lease_refusals"] += 1
+                for r in (e.get("reason_codes") or []):
+                    refusals[str(r)] += 1
+        elif et == "no_trade_decision":
+            counts["no_trade_decisions"] += 1
+    trades = len(trade_keys)
+    budget = daily_trade_budget(events, now=now)
+    armed = (iso_weekday - 1) >= ZERO_TRADE_TRIPWIRE_WEEKDAY   # isocalendar: 1=Mon
+    return {
+        "iso_week": f"{year}-W{week:02d}",
+        "trades_this_week": trades,
+        "weekly_target": [WEEKLY_TRADE_TARGET_MIN, WEEKLY_TRADE_TARGET_MAX],
+        "on_pace": trades >= WEEKLY_TRADE_TARGET_MIN or not armed,
+        "entry_decisions": counts["entry_decisions"],
+        "gates_passed": counts["gates_passed"],
+        "leases_issued": counts["leases_issued"],
+        "lease_refusals": counts["lease_refusals"],
+        "no_trade_decisions": counts["no_trade_decisions"],
+        "top_refusal_reasons": refusals.most_common(5),
+        "trades_today": budget["trades_today"],
+        "budget_remaining_today": budget["remaining"],
+        "tripwire": {"armed": armed, "fired": bool(armed and trades == 0),
+                     "weekday_et": iso_weekday - 1},
+    }
 
 
 # --- standardized decision-journal layer ----------------------------------------------------

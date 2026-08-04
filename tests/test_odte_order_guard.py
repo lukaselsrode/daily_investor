@@ -51,6 +51,8 @@ def _package(now: datetime) -> dict:
         "expiration_date": contract.get("expiration_date"),
         "strike_price": contract.get("strike_price"),
         "option_type": contract.get("option_type"),
+        # Chase-band anchor, stamped by candidate-watch at CONFIRM_ENTRY (2026-08-02 retune).
+        "anchor_quote": contract.get("ask") or contract.get("mark"),
     }
     candidate["candidate_fingerprint"] = xp.candidate_fingerprint(candidate)
     gate = {"generated_at": _iso(now), "symbol": "SPY", "direction": "bearish",
@@ -313,3 +315,25 @@ def test_module_makes_no_broker_or_network_calls():
     for forbidden in ("robin_stocks", "requests", "openai", "anthropic",
                       "submit_order", "urllib", "httpx", "socket"):
         assert forbidden not in src, f"odte_order_guard must not reference {forbidden!r}"
+
+
+# --- 2026-08-02 retune: chase-band lease ceiling composes with the (unchanged) guard ---------------
+
+def test_order_limit_above_chase_band_ceiling_is_blocked():
+    # A PARTIAL_ACCOUNT lease's max_limit_price is now anchor*(1+CHASE_BAND_FRACTION). The guard
+    # itself is unchanged — this proves an order one cent above that ceiling is still a hard block.
+    res = xp.authorize_entry(**_package(PROMOTION_AT), now=PROMOTION_AT, policy={})
+    assert res["authorized"] is True, res["reason_codes"]
+    lease = res["lease"]
+    assert lease["max_limit_price"] == round(
+        lease["anchor_quote"] * (1 + xp.CHASE_BAND_FRACTION), 2)
+    order = {**_pending_order(lease, PROMOTION_AT + timedelta(seconds=2)),
+             "quantity": lease["quantity"],
+             "limit_price": round(lease["max_limit_price"] + 0.01, 2)}
+    r = og.evaluate_order_guard(order, lease=lease, now=PROMOTION_AT + timedelta(seconds=5))
+    assert r["state"] == og.BROKER_MISMATCH_BLOCKED
+    inside = {**_pending_order(lease, PROMOTION_AT + timedelta(seconds=2)),
+              "quantity": lease["quantity"], "limit_price": lease["max_limit_price"],
+              "debit": round(lease["quantity"] * lease["max_limit_price"] * 100.0, 2)}
+    r2 = og.evaluate_order_guard(inside, lease=lease, now=PROMOTION_AT + timedelta(seconds=5))
+    assert r2["state"] == og.PENDING_FRESH

@@ -8,8 +8,15 @@ model call in this path). The controller policy it checks is a SECRET and is rea
 (see ``DEFAULT_POLICY_PATH``), kept out of the app's data tree.
 
 Conservative triggers only:
-  * a NEW or CHANGED actionable, NON-restricted candidate appears, or
+  * a NEW or CHANGED actionable, NON-restricted candidate appears,
+  * an unchanged actionable candidate PERSISTS past the re-alert window (2026-08-02 retune —
+    change-only alerting let a parked candidate go silent forever), or
   * the controller policy is missing / invalid / unreadable.
+
+Candidates are filtered to the EXECUTABLE universe (SPY/QQQ/IWM): a single-name chatter read can
+never park as the candidate key (it demotes to ``single_name_context``), because the downstream
+candidate-watch lane hard-rejects non-ETF symbols and a parked unconvertible candidate suppresses
+every alert.
 
 Employer/compliance-restricted symbols (e.g. NVDA) are NEVER actionable — they surface in the
 state's ``restricted_chatter`` as read-only context. This module never touches Robinhood and never
@@ -25,6 +32,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from core.paths import ODTE_DATA_DIR, ODTE_SECRETS_DIR, atomic_write_text
+from data.odte_config import EXECUTABLE_UNIVERSE, WATCHDOG_REALERT_MINUTES
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +45,16 @@ POLICY_FILENAME = "controller_policy.json"
 DEFAULT_POLICY_PATH = os.path.join(ODTE_SECRETS_DIR, POLICY_FILENAME)
 
 STATE_VERSION = 1
+
+
+def _parse_ts(value) -> datetime | None:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 def _read_json(path: Path) -> tuple[dict | None, str]:
@@ -191,6 +209,16 @@ def run_watchdog(state_dir: str = DEFAULT_STATE_DIR, policy_path: str | None = N
     scorecard = report.get("scorecard") or {}
     spy_verdict = scorecard.get("verdict", "OBSERVE")
     candidate = report.get("candidate") or _scorecard_market_candidate(report)
+    # EXECUTABLE-UNIVERSE FILTER (2026-08-02 retune): the candidate-watch lane can only convert
+    # SPY/QQQ/IWM, so a single-name chatter candidate (AAPL/TSLA/...) must never PARK as the
+    # watchdog's candidate key — last week it sat on AAPL:bearish for days, suppressing every
+    # alert while being structurally unconvertible. Demote it to observability context and fall
+    # back to the market-scorecard candidate.
+    single_name_context: dict | None = None
+    cand_ticker = str((candidate or {}).get("ticker") or "").upper()
+    if candidate and cand_ticker and cand_ticker not in EXECUTABLE_UNIVERSE:
+        single_name_context = candidate
+        candidate = _scorecard_market_candidate(report)
     candidate_key = _candidate_key(candidate)
     restricted_chatter = sorted({
         str(c.get("ticker")).upper()
@@ -205,11 +233,26 @@ def run_watchdog(state_dir: str = DEFAULT_STATE_DIR, policy_path: str | None = N
                          "detail": f"controller policy {policy_status} at {ppath.name}"})
     if report_error:
         triggers.append({"type": "report_error", "detail": report_error})
-    if candidate_key and candidate_key != prev.get("candidate_key"):
+    prev_key = prev.get("candidate_key")
+    if candidate_key and candidate_key != prev_key:
         triggers.append({"type": "new_candidate", "candidate": candidate_key,
                          "detail": "new/changed actionable non-restricted candidate"})
+    elif candidate_key and candidate_key == prev_key:
+        # PERSISTENCE RE-ALERT (2026-08-02 retune): change-only alerting let an unchanged
+        # candidate go silent forever. An actionable candidate still on the board re-alerts every
+        # WATCHDOG_REALERT_MINUTES so the controller keeps working it instead of forgetting it.
+        last_alert = _parse_ts(prev.get("last_alert_utc"))
+        if (last_alert is None
+                or (now - last_alert).total_seconds() >= WATCHDOG_REALERT_MINUTES * 60):
+            triggers.append({"type": "candidate_persisting", "candidate": candidate_key,
+                             "detail": (f"candidate unchanged >= {WATCHDOG_REALERT_MINUTES}m "
+                                        "since last alert — re-alerting")})
 
     alert = bool(triggers)
+    first_seen = (prev.get("candidate_first_seen_utc")
+                  if candidate_key and candidate_key == prev_key else None)
+    if candidate_key and not first_seen:
+        first_seen = now.isoformat(timespec="seconds")
 
     state = {
         "version": STATE_VERSION,
@@ -219,6 +262,9 @@ def run_watchdog(state_dir: str = DEFAULT_STATE_DIR, policy_path: str | None = N
         "policy_status": policy_status,
         "spy_verdict": spy_verdict,
         "candidate_key": candidate_key,
+        "candidate_first_seen_utc": first_seen,
+        "last_alert_utc": (now.isoformat(timespec="seconds") if alert
+                           else prev.get("last_alert_utc")),
         "restricted_chatter": restricted_chatter,
         "report_ok": report_error is None,
     }
@@ -228,6 +274,8 @@ def run_watchdog(state_dir: str = DEFAULT_STATE_DIR, policy_path: str | None = N
         "triggers": triggers,
         "spy_verdict": spy_verdict,
         "candidate": candidate if candidate_key else None,   # never a restricted symbol
+        # Demoted non-executable single-name read (context only — never the candidate key).
+        "single_name_context": single_name_context,
         "restricted_chatter": restricted_chatter,
         "policy_ok": policy_ok,
         # Additive enriched, CONSERVATIVE observability block (old consumers ignore unknown keys).

@@ -61,6 +61,8 @@ def _package(now: datetime, *, sym: str | None = None, direction: str | None = N
         "expiration_date": contract.get("expiration_date"),
         "strike_price": contract.get("strike_price"),
         "option_type": contract.get("option_type"),
+        # Chase-band anchor, stamped by candidate-watch at CONFIRM_ENTRY (2026-08-02 retune).
+        "anchor_quote": contract.get("ask") or contract.get("mark"),
     }
     cand["candidate_fingerprint"] = xp.candidate_fingerprint(cand)
     gate = {"generated_at": _iso(now), "symbol": sym, "direction": direction,
@@ -376,13 +378,20 @@ def test_valid_fresh_package_issues_lease_with_maximums_and_fingerprints():
     assert lease["strike_price"] == fx["contract"]["strike_price"]
     assert lease["expiration_date"] == fx["contract"]["expiration_date"]
     assert lease["quantity"] == xp.DEFAULT_MAX_CONTRACTS
-    assert lease["max_limit_price"] == fx["contract"]["ask"]
-    assert lease["max_debit"] == round(xp.DEFAULT_MAX_CONTRACTS * fx["contract"]["ask"] * 100, 2)
+    # 2026-08-02 retune: the lease ceiling extends to the chase band above the CONFIRM_ENTRY
+    # anchor (the fixture anchors at the contract ask), still capped by the BP fraction.
+    ceiling = round(fx["contract"]["ask"] * (1 + xp.CHASE_BAND_FRACTION), 2)
+    assert lease["max_limit_price"] == ceiling
+    assert lease["max_debit"] == round(
+        min(xp.DEFAULT_MAX_CONTRACTS * ceiling * 100,
+            xp.DEFAULT_MAX_DEBIT_FRACTION * fx["broker_snapshot"]["buying_power"]), 2)
+    assert lease["anchor_quote"] == fx["contract"]["ask"]
     assert lease["candidate_fingerprint"] and lease["market_fingerprint"]
     assert lease["risk_mode"] == xp.DEFAULT_RISK_MODE
     # Policy values are serialized into the payload (and journaled from there).
     assert res["policy"]["ttl_seconds"] == xp.DEFAULT_LEASE_TTL_SECONDS
     assert res["policy"]["max_debit_fraction"] == xp.DEFAULT_MAX_DEBIT_FRACTION
+    assert res["policy"]["chase_band_fraction"] == xp.CHASE_BAND_FRACTION
     assert res["places_orders"] is False
 
 
@@ -516,3 +525,90 @@ def test_module_makes_no_broker_or_network_calls():
     for forbidden in ("robin_stocks", "requests", "openai", "anthropic", "place_order",
                       "submit_order", "urllib", "httpx", "socket"):
         assert forbidden not in src, f"odte_execution_policy must not reference {forbidden!r}"
+
+
+# --- 2026-08-02 retune: chase band + tiered BP-proportional sizing --------------------------------
+
+def test_limit_above_chase_band_is_refused():
+    # The fill ceiling is anchor*(1+band): one cent above refuses. The band is measured from the
+    # CONFIRM_ENTRY anchor, not the precompute quote — re-pricing inside the band is allowed.
+    fx = _fixture()
+    anchor = fx["contract"]["ask"]
+    too_high = round(anchor * (1 + xp.CHASE_BAND_FRACTION) + 0.01, 2)
+    res = xp.authorize_entry(**_package(PROMOTION_AT), now=PROMOTION_AT,
+                             policy={"quantity": 1, "limit_price": too_high})
+    assert res["authorized"] is False
+    assert "limit_exceeds_chase_band" in res["reason_codes"]
+    # At the ceiling exactly (still inside every BP cap for one contract) it authorizes.
+    at_ceiling = round(anchor * (1 + xp.CHASE_BAND_FRACTION), 2)
+    ok = xp.authorize_entry(**_package(PROMOTION_AT), now=PROMOTION_AT,
+                            policy={"quantity": 1, "limit_price": at_ceiling})
+    assert ok["authorized"] is True, ok["reason_codes"]
+
+
+def test_missing_anchor_quote_fails_closed():
+    pkg = _package(PROMOTION_AT)
+    pkg["candidate_decision"]["candidate"].pop("anchor_quote", None)
+    res = xp.authorize_entry(**pkg, now=PROMOTION_AT, policy={})
+    assert res["authorized"] is False
+    assert "anchor_quote_missing" in res["reason_codes"]
+
+
+def test_b_plus_tier_halves_debit_fraction():
+    # The tape-computed B+ tier (CHOP half-size) applies B_PLUS_DEBIT_FRACTION instead of the full
+    # fraction: the incident contract's $168 single-contract debit fits the full tier but not B+.
+    fx = _fixture()
+    bp = fx["broker_snapshot"]["buying_power"]
+    debit = round(fx["contract"]["ask"] * 100.0, 2)
+    assert xp.B_PLUS_DEBIT_FRACTION * bp < debit <= xp.DEFAULT_MAX_DEBIT_FRACTION * bp, \
+        "fixture must straddle the two tier caps for this test to bite"
+    full = xp.authorize_entry(**_package(PROMOTION_AT), now=PROMOTION_AT, policy={})
+    assert full["authorized"] is True, full["reason_codes"]
+    pkg = _package(PROMOTION_AT)
+    pkg["candidate_decision"]["candidate"]["tier"] = "b_plus"
+    pkg["gate"]["tier"] = "b_plus"
+    half = xp.authorize_entry(**pkg, now=PROMOTION_AT, policy={})
+    assert half["authorized"] is False
+    assert "debit_exceeds_policy" in half["reason_codes"]
+    assert half["policy"]["max_debit_fraction"] == xp.B_PLUS_DEBIT_FRACTION
+
+
+def test_candidate_gate_tier_mismatch_is_refused():
+    # The gate's recorded tier must agree with the candidate's tape-computed tier — a divergence
+    # means the artifacts describe two different setups.
+    pkg = _package(PROMOTION_AT)
+    pkg["candidate_decision"]["candidate"]["tier"] = "b_plus"
+    pkg["gate"]["tier"] = "a_plus"
+    res = xp.authorize_entry(**pkg, now=PROMOTION_AT, policy={})
+    assert res["authorized"] is False
+    assert "tier_mismatch" in res["reason_codes"]
+
+
+def test_snapshot_ttls_widened_but_in_process_artifacts_stay_tight():
+    # 2026-08-02 retune contract: ONLY the two snapshot TTLs widened (fetch→authorize latency);
+    # the three in-process artifacts stay at 60s and the lease hard cap is untouched.
+    assert xp.INPUT_TTLS_SECONDS["market_snapshot"] == xp.SNAPSHOT_TTL_SECONDS
+    assert xp.INPUT_TTLS_SECONDS["broker_snapshot"] == xp.SNAPSHOT_TTL_SECONDS
+    assert xp.SNAPSHOT_TTL_SECONDS > 60.0
+    assert xp.INPUT_TTLS_SECONDS["entry_gate"] == 60.0
+    assert xp.INPUT_TTLS_SECONDS["candidate_decision"] == 60.0
+    assert xp.INPUT_TTLS_SECONDS["vehicle_score"] == 60.0
+    assert xp.MAX_LEASE_TTL_SECONDS == 60.0
+    assert xp.DEFAULT_LEASE_TTL_SECONDS <= xp.MAX_LEASE_TTL_SECONDS
+
+
+def test_jul31_snapshot_replay_now_converts():
+    # REPLAY (2026-07-31 15:35 ET): every gate passed and the lease was refused because the
+    # market/broker snapshots were 60-120s old. Under the widened snapshot TTL the same package
+    # authorizes; at the new bound it still fails closed.
+    inside = _package(PROMOTION_AT)
+    for key in ("market_snapshot", "broker_snapshot"):
+        inside[key]["as_of"] = _iso(PROMOTION_AT - timedelta(seconds=90))
+    res = xp.authorize_entry(**inside, now=PROMOTION_AT, policy={})
+    assert res["authorized"] is True, res["reason_codes"]
+    beyond = _package(PROMOTION_AT)
+    beyond["market_snapshot"]["as_of"] = _iso(
+        PROMOTION_AT - timedelta(seconds=xp.SNAPSHOT_TTL_SECONDS + 1))
+    res2 = xp.authorize_entry(**beyond, now=PROMOTION_AT, policy={})
+    assert res2["authorized"] is False
+    assert "market_snapshot_stale" in res2["reason_codes"]

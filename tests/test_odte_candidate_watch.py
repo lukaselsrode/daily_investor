@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import data.odte_candidate_watch as cw
+import data.odte_config as oc
 import data.odte_execution_policy as xp
 import data.odte_loop_status as ls
 
@@ -99,14 +100,77 @@ def test_market_only_etf_lane_creates_candidate_without_social():
     assert payload["execution_allowed"] is False
 
 
-def test_chop_keeps_watching_unless_a_plus_confirmation():
+def test_chop_confirms_b_plus_tier_with_one_dissenter():
+    # 2026-08-02 risk-on retune: CHOP no longer demands A+. Enough confirmers with at most
+    # B_PLUS_MAX_DISSENTERS definitive dissenters converts at the half-size B+ tier.
     m = _market(day_verdict="CHOP")
     m["IWM"] = {"last": 298.0, "above_vwap": False, "orb_state": "inside"}
     payload = cw.evaluate_candidate_watch(
         {"ticker": "QQQ", "direction": "bullish"}, market=m, now=NOW
     )
+    assert payload["checks"]["confirmations"] >= oc.B_PLUS_MIN_CONFIRMATIONS
+    assert len(payload["checks"]["dissenters"]) <= oc.B_PLUS_MAX_DISSENTERS
+    assert payload["decision"] == cw.CONFIRM_ENTRY
+    assert payload["candidate"]["tier"] == "b_plus"
+    assert payload["execution_allowed"] is False
+
+
+def test_chop_keeps_watching_below_b_plus_tier():
+    # More definitive dissenters than B_PLUS_MAX_DISSENTERS -> no tier qualifies on CHOP.
+    m = _market(day_verdict="CHOP")
+    m["IWM"] = {"last": 298.0, "above_vwap": False, "orb_state": "inside"}
+    m["XSP"] = {"last": 741.0, "above_vwap": False, "orb_state": "below"}
+    payload = cw.evaluate_candidate_watch(
+        {"ticker": "QQQ", "direction": "bullish"}, market=m, now=NOW
+    )
+    assert len(payload["checks"]["dissenters"]) > oc.B_PLUS_MAX_DISSENTERS
     assert payload["decision"] == cw.KEEP_WATCHING
     assert any("CHOP" in r for r in payload["reasons"])
+
+
+def test_partial_tape_is_neutral_never_a_dissenter():
+    # XSP snapshots routinely lack above_vwap: without a definitive VWAP side the ETF must be
+    # neutral, not a silent dissenter that blocks the A+/B+ tiers.
+    m = _market(day_verdict="CHOP")
+    m["XSP"] = {"last": 741.0, "orb_state": "below"}     # no above_vwap -> neutral
+    payload = cw.evaluate_candidate_watch(
+        {"ticker": "QQQ", "direction": "bullish"}, market=m, now=NOW
+    )
+    assert "XSP" not in payload["checks"]["dissenters"]
+    assert payload["decision"] == cw.CONFIRM_ENTRY
+
+
+def test_full_alignment_confirms_a_plus_tier():
+    payload = cw.evaluate_candidate_watch(
+        {"ticker": "QQQ", "direction": "bullish"}, market=_market(), now=NOW
+    )
+    assert payload["checks"]["confirmations"] >= oc.A_PLUS_MIN_CONFIRMATIONS
+    assert payload["checks"]["dissenters"] == []
+    assert payload["candidate"]["tier"] == "a_plus"
+
+
+def test_confirm_entry_stamps_chase_band_anchor_from_contract_ask():
+    payload = cw.evaluate_candidate_watch(
+        {"ticker": "QQQ", "direction": "bullish"}, market=_market(),
+        vehicle_score={"verdict": "GOOD_BET", "direction": "bullish",
+                       "contract": {"underlying": "QQQ", "option_type": "call",
+                                    "option_id": "QQQ260629C00725000",
+                                    "expiration_date": "2026-06-29", "strike_price": 725.0,
+                                    "ask": 1.19, "mark": 1.17}},
+        now=NOW)
+    assert payload["decision"] == cw.CONFIRM_ENTRY
+    assert payload["candidate"]["anchor_quote"] == 1.19
+    assert payload["candidate"]["anchor_ts"] == NOW.isoformat(timespec="seconds")
+
+
+def test_scan_only_symbol_never_becomes_executable_candidate():
+    # XSP tape counts toward confirmation, but an XSP candidate itself can never convert.
+    assert "XSP" in cw.ETF_UNIVERSE and "XSP" not in cw.EXECUTABLE_UNIVERSE
+    payload = cw.evaluate_candidate_watch(
+        {"ticker": "XSP", "direction": "bullish"}, market=_market(), now=NOW
+    )
+    assert payload["decision"] == cw.DEGRADED_NO_TRADE
+    assert payload["execution_allowed"] is False
 
 
 def test_pin_wall_blocks_confirmation_until_acceptance_above_wall():

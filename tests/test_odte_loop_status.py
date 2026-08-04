@@ -522,7 +522,7 @@ def test_posture_confirmed_candidate_watch_scouts_fresh_setup():
     r = ls.derive_loop_state(candidate_decision=cdec, now=NOW)
     assert r["context"].get("confirmed") is True
     assert r["posture"] == "SCOUT_FRESH_SETUP"
-    assert r["next_command"] == "odte-entry-gate"
+    assert r["next_command"] == "odte-convert"
 
 
 def test_posture_promoted_gate_is_execution_ready():
@@ -577,7 +577,7 @@ def test_fresh_confirmed_entry_is_conversion_due_not_flat():
     assert r["state"] == "CANDIDATE"
     assert r["posture"] == "CONVERT_CANDIDATE_NOW"
     assert r["posture"] != "FLAT_NO_TRADE"
-    assert r["next_command"] == "odte-entry-gate"
+    assert r["next_command"] == "odte-convert"
 
 
 def test_convert_candidate_now_posture_separation():
@@ -605,8 +605,10 @@ def test_convert_candidate_now_exposes_identity_and_sla_deadline():
     assert ctx.get("conversion_due") is True
     assert ctx.get("confirmed_at") == (NOW - timedelta(seconds=30)).isoformat(timespec="seconds")
     assert ctx.get("candidate_age_seconds") == 30.0
-    assert ctx.get("conversion_due_by") == (NOW + timedelta(seconds=30)).isoformat(timespec="seconds")
-    assert ctx.get("conversion_sla_seconds_remaining") == 30.0
+    assert ctx.get("conversion_due_by") == (
+        NOW - timedelta(seconds=30)
+        + timedelta(seconds=ls.CONFIRM_CONVERSION_SLA_SECONDS)).isoformat(timespec="seconds")
+    assert ctx.get("conversion_sla_seconds_remaining") == ls.CONFIRM_CONVERSION_SLA_SECONDS - 30.0
     assert ctx.get("conversion_sla_seconds") == ls.CONFIRM_CONVERSION_SLA_SECONDS
 
 
@@ -614,7 +616,7 @@ def test_convert_candidate_now_is_not_executable_and_imperative():
     # The new posture gains NO execution authority — it commands an exact gate build, not an order.
     r = ls.derive_loop_state(candidate_decision=_confirmed_iwm_watch(minutes_ago=1), now=NOW)
     assert r["executable"] is False
-    assert r["next_command"] == "odte-entry-gate"
+    assert r["next_command"] == "odte-convert"
     assert "CONVERT NOW" in r["next_action"]
     assert "do not scan" in r["next_action"]
 
@@ -1506,3 +1508,12 @@ def test_run_loop_status_missing_guard_and_lease_files_read_missing(tmp_path):
     assert p["artifacts"]["execution_lease"] == "missing"
     assert "execution_lease" not in p          # no lease block invented when no lease exists
     assert p["artifact_ages"]["order_guard"]["as_of"] is None
+
+
+def test_run_loop_status_attaches_weekly_telemetry(tmp_path):
+    # The telemetry block rides EVERY status payload so a dying week is visible mid-week.
+    r = ls.run_loop_status(state_dir=str(tmp_path))
+    wk = r.get("weekly_telemetry")
+    assert wk is not None
+    assert "trades_this_week" in wk and "tripwire" in wk
+    assert ls.render_markdown(r)          # renders without raising

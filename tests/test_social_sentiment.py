@@ -2086,6 +2086,30 @@ def test_watchdog_new_candidate_triggers_then_dedupes(tmp_path, monkeypatch):
     assert all(t["type"] != "new_candidate" for t in p2["triggers"])
 
 
+def test_watchdog_directional_scorecard_without_single_name_surfaces_spy_candidate(tmp_path, monkeypatch):
+    """Regression: a PUT/CALL-leaning broad market scorecard with no single-name candidate must not
+    collapse to candidate=None / FLAT_NO_TRADE. It should create a scan-only SPY candidate so the live
+    controller keeps HAWK-checking instead of waiting for a user nudge."""
+    import data.odte_watchdog as wd
+    rep = {"scorecard": {"verdict": "PUT-leaning", "confidence": "low",
+                         "reasons": ["price below VWAP"]},
+           "spy_trend": {"pct_vs_prev_close": -0.35, "above_vwap": False},
+           "social_intent": {"intent": "neutral", "n_docs": 1},
+           "candidate": None, "top_chatter": []}
+    monkeypatch.setattr(ss, "build_odte_social_report", lambda allow_fetch=True: rep)
+    pol = tmp_path / "controller_policy.json"
+    pol.write_text(json.dumps({"mode": "x"}))
+    p = wd.run_watchdog(state_dir=str(tmp_path), policy_path=str(pol), allow_fetch=False)
+    assert p["alert"] is True
+    assert p["candidate"]["ticker"] == "SPY"
+    assert p["candidate"]["direction"] == "bearish"
+    assert p["candidate"]["source"] == "market_scorecard"
+    assert p["scan_only"] is True and p["execution_allowed"] is False
+    assert p["decision_context"]["thesis"]["direction"] == "bearish"
+    assert any(t["type"] == "new_candidate" for t in p["triggers"])
+
+
+
 def test_watchdog_restricted_candidate_never_actionable(tmp_path, monkeypatch):
     import data.odte_watchdog as wd
     rep = {"scorecard": {"verdict": "OBSERVE"},
@@ -2132,8 +2156,52 @@ def test_watchdog_enriched_decision_context_is_conservative(tmp_path, monkeypatc
     assert dc["observed_market_context"]["above_vwap"] is True
     assert dc["social_context"]["intent"] == "bullish"
     assert dc["gamma_context"].get("basis") == "pin_risk_only_not_dealer_gex"
-    # old consumers still find their fields
-    assert p["candidate"]["ticker"] == "TSLA" and "spy_verdict" in p
+    # 2026-08-02 retune: a single name outside the executable universe (SPY/QQQ/IWM) can no longer
+    # PARK as the candidate key — it demotes to single_name_context and the directional scorecard's
+    # SPY market candidate takes the key (old consumers still find their fields).
+    assert p["candidate"]["ticker"] == "SPY" and "spy_verdict" in p
+    assert p["single_name_context"]["ticker"] == "TSLA"
+
+
+def test_watchdog_executable_candidate_keeps_its_key(tmp_path, monkeypatch):
+    import data.odte_watchdog as wd
+    rep = {"scorecard": {"verdict": "CALL-leaning", "confidence": "medium", "reasons": ["x"]},
+           "candidate": {"ticker": "IWM", "direction": "bullish", "mentions": 9}, "top_chatter": []}
+    monkeypatch.setattr(ss, "build_odte_social_report", lambda allow_fetch=True: rep)
+    pol = tmp_path / "controller_policy.json"
+    pol.write_text(json.dumps({"mode": "x"}))
+    p = wd.run_watchdog(state_dir=str(tmp_path), policy_path=str(pol), allow_fetch=False)
+    assert p["candidate"]["ticker"] == "IWM"
+    assert p["single_name_context"] is None
+
+
+def test_watchdog_realerts_when_candidate_persists(tmp_path, monkeypatch):
+    """Change-only alerting is fixed: an unchanged actionable candidate re-alerts once the
+    re-alert window passes, instead of going silent forever (the parked-candidate failure)."""
+    from datetime import datetime, timedelta, timezone
+
+    import data.odte_config as oc
+    import data.odte_watchdog as wd
+    rep = {"scorecard": {"verdict": "CALL-leaning", "confidence": "medium", "reasons": ["x"]},
+           "candidate": {"ticker": "SPY", "direction": "bullish", "mentions": 9}, "top_chatter": []}
+    monkeypatch.setattr(ss, "build_odte_social_report", lambda allow_fetch=True: rep)
+    pol = tmp_path / "controller_policy.json"
+    pol.write_text(json.dumps({"mode": "x"}))
+    t0 = datetime(2026, 7, 31, 14, 0, tzinfo=timezone.utc)
+    first = wd.run_watchdog(state_dir=str(tmp_path), policy_path=str(pol), allow_fetch=False, now=t0)
+    assert any(t["type"] == "new_candidate" for t in first["triggers"])
+    # Same candidate one minute later: inside the window — no alert (no spam).
+    quiet = wd.run_watchdog(state_dir=str(tmp_path), policy_path=str(pol), allow_fetch=False,
+                            now=t0 + timedelta(minutes=1))
+    assert quiet["alert"] is False
+    # Past the re-alert window: the persisting candidate alerts again.
+    later = wd.run_watchdog(state_dir=str(tmp_path), policy_path=str(pol), allow_fetch=False,
+                            now=t0 + timedelta(minutes=oc.WATCHDOG_REALERT_MINUTES + 1))
+    assert any(t["type"] == "candidate_persisting" for t in later["triggers"])
+    assert later["alert"] is True
+    # first_seen sticks to the ORIGINAL sighting across runs.
+    state = json.loads((tmp_path / wd.STATE_FILENAME).read_text())
+    assert state["candidate_first_seen_utc"] == t0.isoformat(timespec="seconds")
 
 
 def test_watchdog_appends_scan_only_trigger_event(tmp_path, monkeypatch):

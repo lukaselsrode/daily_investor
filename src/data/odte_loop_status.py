@@ -73,6 +73,7 @@ from pathlib import Path
 from typing import Any
 
 from core.paths import ODTE_DATA_DIR
+from data.odte_config import CONFIRM_CONVERSION_SLA_SECONDS as _CONVERT_SLA
 
 SCHEMA_VERSION = 1
 
@@ -122,11 +123,13 @@ SUPERSEDE_GATE_MINUTES = 15
 STALE_ENTRY_GATE_MINUTES = 15
 STALE_CANDIDATE_MINUTES = 10
 STALE_TRIGGER_MINUTES = 30
-# CONFIRMED-CANDIDATE SAME-TICK SLA: an identity-bound CONFIRM_ENTRY must be converted (final live
-# refresh + odte-entry-gate) within this window. loop-status surfaces the countdown so the
+# CONFIRMED-CANDIDATE CONVERSION SLA: an identity-bound CONFIRM_ENTRY must be converted (fresh
+# snapshots + `odte-convert`) within this window. loop-status surfaces the countdown so the
 # controller sees a deadline, not a suggestion; the aged/unaccounted case fails closed as
-# EXECUTION_CONVERSION_FAILURE.
-CONFIRM_CONVERSION_SLA_SECONDS = 60
+# EXECUTION_CONVERSION_FAILURE. 2026-08-02 retune: config-tunable, default 180s — the old 60s
+# same-tick SLA was structurally unmeetable at the controller's ~5-minute tick (the 2026-07-31
+# conversion measured 73s candidate→gate); conversion itself is now one atomic command.
+CONFIRM_CONVERSION_SLA_SECONDS = _CONVERT_SLA
 # A broker-health probe older than this can't be called live truth: the chat-lane MCP can report
 # "transport down" while a CLI probe from minutes ago read healthy, so an aged payload is treated as
 # stale (orders blocked) rather than fresh confirmation that the place lane is up.
@@ -864,18 +867,20 @@ def _resolve_loop_state(active_trade: dict | None = None,
                         ctx["conversion_sla_seconds_remaining"] = round((due - now).total_seconds(), 1)
                 reasons.append(f"identity-bound CONFIRM_ENTRY "
                                f"({ctx.get('underlying') or '?'} option_id={option_id or '—'}) — "
-                               "convert to an entry gate THIS TICK")
+                               "convert it NOW with odte-convert")
                 payload = _payload("CANDIDATE", reasons, now, live=False, context=ctx)
-                payload["next_command"] = "odte-entry-gate"
+                payload["next_command"] = "odte-convert"
                 payload["next_action"] = (
-                    "CONVERT NOW: run the final live refresh and odte-entry-gate for THIS exact "
-                    "confirmed contract before anything else — do not scan another idea, do not "
-                    "end the tick; the confirm expires against the same-tick SLA")
+                    "CONVERT NOW: fetch fresh market/broker/contract snapshots and run "
+                    "odte-convert for THIS exact confirmed contract before anything else — one "
+                    "atomic command (tape re-check → gate → lease); do not scan another idea, do "
+                    "not end the tick; the confirm expires against the conversion SLA")
                 return payload
-            reasons.append("candidate watch confirmed setup; build a fresh entry gate")
+            reasons.append("candidate watch confirmed setup; run the atomic conversion")
             payload = _payload("CANDIDATE", reasons, now, live=False, context=ctx)
-            payload["next_command"] = "odte-entry-gate"
-            payload["next_action"] = "candidate confirmed — assemble/promote a fresh entry gate"
+            payload["next_command"] = "odte-convert"
+            payload["next_action"] = ("candidate confirmed — fetch fresh snapshots and run "
+                                      "odte-convert (atomic gate+lease)")
             return payload
         if watch_decision == "BROKER_BLOCKED":
             reasons.append("candidate watch blocked by broker/review lane")
@@ -1247,8 +1252,9 @@ def _flat_reason(posture: str) -> str:
         "CANCEL_PENDING_ORDER": "pending entry order stale/invalid — cancel at the broker NOW",
         "EXECUTION_CONVERSION_FAILURE": ("confirmed entry aged out unconverted — verify at the "
                                          "broker and journal the terminal no-trade verdict"),
-        "CONVERT_CANDIDATE_NOW": ("identity-bound confirm on the board — convert it to an entry "
-                                  "gate THIS TICK; conversion is the sole pre-position priority"),
+        "CONVERT_CANDIDATE_NOW": ("identity-bound confirm on the board — run odte-convert NOW "
+                                  "(atomic gate+lease); conversion is the sole pre-position "
+                                  "priority"),
     }.get(posture, "no fresh actionable setup")
 
 
@@ -1308,6 +1314,10 @@ def run_loop_status(state_dir: str | None = None, *, broker_health: dict | None 
                                 journal_events=events, errors=errors,
                                 broker_health=broker_health, order_guard=guard,
                                 live_mode=live_mode, now=now)
+    # Weekly trade-rate telemetry (2026-08-02 retune): the conversion funnel and the zero-trade
+    # tripwire ride every status payload so a dying week is visible mid-week, not in a postmortem.
+    from data.odte_journal import weekly_telemetry
+    payload["weekly_telemetry"] = weekly_telemetry(events, now=now)
     payload["artifacts"] = {
         "active_trade": plan_status,
         "position_decision": pdec_status,
@@ -1384,6 +1394,18 @@ def render_markdown(payload: dict) -> str:
             lines.append(f"Broker truth: {' · '.join(truth_bits)}  ")
         if broker.get("refresh_command"):
             lines.append(f"Refresh: {broker.get('refresh_command')}  ")
+    wk = p.get("weekly_telemetry") or {}
+    if wk:
+        target = wk.get("weekly_target") or ["?", "?"]
+        trip = wk.get("tripwire") or {}
+        trip_note = (" · **TRIPWIRE FIRED: zero trades this week**" if trip.get("fired")
+                     else " · tripwire armed" if trip.get("armed") else "")
+        lines.append(
+            f"Week {wk.get('iso_week')}: **{wk.get('trades_this_week')} trades** "
+            f"(target {target[0]}-{target[1]}) · gates passed {wk.get('gates_passed')} · "
+            f"leases {wk.get('leases_issued')}/{wk.get('leases_issued', 0) + wk.get('lease_refusals', 0)} · "
+            f"today {wk.get('trades_today')} used, {wk.get('budget_remaining_today')} left"
+            f"{trip_note}  ")
     lines.append("")
     if p.get("reasons"):
         lines += ["## Why", *[f"- {r}" for r in p["reasons"]], ""]

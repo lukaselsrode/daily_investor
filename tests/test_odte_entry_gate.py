@@ -366,11 +366,16 @@ def test_green_scalp_locks_out_same_day_reentry():
 
 
 def test_reentry_override_with_ample_bp_is_allowed():
-    # The explicit escape hatch: allow_reentry_after_green on the trigger + BP above the floor.
+    # The explicit escape hatch: allow_reentry_after_green + BP at/above the BP-scaled floor
+    # (GREEN_REENTRY_MIN_BP_MULTIPLE × the contract's own estimated cost — 2026-08-02 retune; the
+    # old flat $500 floor sat above the whole account's BP and could never arm).
     kw = _spy_gates_kwargs()
     kw["trigger"] = {"allow_reentry_after_green": True}
+    kw["vehicle_score"] = {**kw["vehicle_score"],
+                           "contract": {**kw["vehicle_score"]["contract"], "ask": 1.2}}
+    cost = 1.2 * 100.0
     kw["broker_snapshot"] = {**_GOOD_BROKER,
-                             "buying_power": eg.GREEN_REENTRY_MIN_BP + 100.0}
+                             "buying_power": eg.GREEN_REENTRY_MIN_BP_MULTIPLE * cost + 10.0}
     d = eg.build_entry_gate_decision(journal_events=_green_scalp_events(), now=_LOCK_NOW, **kw)
     assert d["execution_allowed"] is True
     assert d["allow_reentry_after_green"] is True
@@ -378,12 +383,15 @@ def test_reentry_override_with_ample_bp_is_allowed():
     assert "green_reentry_override_armed" in d["reason_codes"]
 
 
-def test_reentry_override_below_bp_floor_stays_locked():
-    # BP-aware guard: the override alone is NOT enough — below the conservative floor the green day
-    # is preserved no matter what (the live re-entry burned most of the remaining BP on 1x @1.27).
+def test_reentry_override_below_bp_multiple_stays_locked():
+    # BP-aware guard: the override alone is NOT enough — below the multiple×cost floor the green
+    # day is preserved no matter what (the live re-entry burned most of the remaining BP on 1x @1.27).
     kw = _spy_gates_kwargs()
+    kw["vehicle_score"] = {**kw["vehicle_score"],
+                           "contract": {**kw["vehicle_score"]["contract"], "ask": 1.2}}
+    cost = 1.2 * 100.0
     kw["broker_snapshot"] = {**_GOOD_BROKER,
-                             "buying_power": eg.GREEN_REENTRY_MIN_BP - 1.0,
+                             "buying_power": eg.GREEN_REENTRY_MIN_BP_MULTIPLE * cost - 1.0,
                              "allow_reentry_after_green": True}
     d = eg.build_entry_gate_decision(journal_events=_green_scalp_events(), now=_LOCK_NOW, **kw)
     assert d["execution_allowed"] is False
@@ -391,13 +399,12 @@ def test_reentry_override_below_bp_floor_stays_locked():
     assert d["allow_reentry_after_green"] is False
 
 
-def test_reentry_override_needs_bp_above_contract_cost():
-    # Even above the flat floor, BP must cover the actual contract: ask 7.00 => $700 for one.
+def test_reentry_override_with_unknown_contract_cost_stays_locked():
+    # Fail closed: a re-entry whose size cannot be estimated (no ask/mark on the contract) must
+    # stay locked regardless of buying power.
     kw = _spy_gates_kwargs()
-    kw["vehicle_score"] = {**_GOOD_VEHICLE,
-                           "contract": {**_GOOD_VEHICLE["contract"], "ask": 7.0}}
     kw["broker_snapshot"] = {**_GOOD_BROKER,
-                             "buying_power": eg.GREEN_REENTRY_MIN_BP + 100.0,
+                             "buying_power": 10_000.0,
                              "allow_reentry_after_green": True}
     d = eg.build_entry_gate_decision(journal_events=_green_scalp_events(), now=_LOCK_NOW, **kw)
     assert d["execution_allowed"] is False
@@ -454,3 +461,98 @@ def test_module_makes_no_broker_or_network_calls():
     for forbidden in ("robin_stocks", "requests", "openai", "anthropic", "place_order",
                       "submit_order", "urllib", "httpx", "socket"):
         assert forbidden not in src, f"odte_entry_gate must not reference {forbidden!r}"
+
+
+# --- Confirmation tiers (2026-08-02 retune: CHOP tradeable at A+/B+, B+ at half size) -----------
+
+def test_chop_day_with_b_plus_tier_passes_day_regime_at_half_size():
+    kw = _all_gates_kwargs()
+    kw["day_score"] = {"verdict": "CHOP"}
+    kw["candidate"]["tier"] = "b_plus"
+    d = eg.build_entry_gate_decision(**kw)
+    assert d["gates"]["day_regime"] is True
+    assert d["execution_allowed"] is True
+    assert d["tier"] == "b_plus"
+    assert d["sizing_tier"] == "half"
+
+
+def test_chop_day_with_a_plus_tier_passes_at_full_size():
+    kw = _all_gates_kwargs()
+    kw["day_score"] = {"verdict": "CHOP"}
+    kw["candidate"]["tier"] = "a_plus"
+    d = eg.build_entry_gate_decision(**kw)
+    assert d["gates"]["day_regime"] is True
+    assert d["execution_allowed"] is True
+    assert d["sizing_tier"] == "full"
+
+
+def test_bare_chop_without_tier_still_fails_closed():
+    kw = _all_gates_kwargs()
+    kw["day_score"] = {"verdict": "CHOP"}
+    d = eg.build_entry_gate_decision(**kw)
+    assert d["gates"]["day_regime"] is None
+    assert d["execution_allowed"] is False
+    assert d["decision"] == "observe"
+
+
+def test_watch_vehicle_passes_only_for_b_plus_tier_with_score_floor():
+    import data.odte_config as oc
+    kw = _all_gates_kwargs()
+    kw["candidate"]["tier"] = "b_plus"
+    kw["vehicle_score"] = {**_GOOD_VEHICLE, "verdict": "WATCH",
+                           "score": oc.B_PLUS_MIN_VEHICLE_SCORE}
+    d = eg.build_entry_gate_decision(**kw)
+    assert d["gates"]["vehicle"] is True
+    assert d["execution_allowed"] is True
+
+    kw["vehicle_score"] = {**_GOOD_VEHICLE, "verdict": "WATCH",
+                           "score": oc.B_PLUS_MIN_VEHICLE_SCORE - 1}
+    d2 = eg.build_entry_gate_decision(**kw)
+    assert d2["gates"]["vehicle"] is None
+    assert d2["execution_allowed"] is False
+
+    # A WATCH vehicle without the B+ tier stays unknown regardless of score.
+    kw2 = _all_gates_kwargs()
+    kw2["vehicle_score"] = {**_GOOD_VEHICLE, "verdict": "WATCH", "score": 10}
+    d3 = eg.build_entry_gate_decision(**kw2)
+    assert d3["gates"]["vehicle"] is None
+
+
+# --- Daily trade budget + cooldown vetoes ------------------------------------------------------
+
+def _red_trade_events(now, n=1, minutes_since_close=60.0):
+    events = []
+    for i in range(n):
+        events.append({"event_type": "order_filled", "trade_id": f"t{i}",
+                       "ts": (now - timedelta(hours=2 + i)).isoformat()})
+        events.append({"event_type": "order_closed", "trade_id": f"t{i}", "realized_pnl": -5.0,
+                       "ts": (now - timedelta(minutes=minutes_since_close + i)).isoformat()})
+    return events
+
+
+def test_daily_budget_exhausted_vetoes_new_entry():
+    import data.odte_config as oc
+    events = _red_trade_events(_LOCK_NOW, n=oc.DAILY_TRADE_BUDGET)
+    d = eg.build_entry_gate_decision(journal_events=events, now=_LOCK_NOW, **_spy_gates_kwargs())
+    assert eg.DAILY_BUDGET_VETO in d["veto_reasons"]
+    assert d["execution_allowed"] is False
+    assert d["daily_trade_budget"]["exhausted"] is True
+
+
+def test_post_trade_cooldown_vetoes_immediate_reentry():
+    events = _red_trade_events(_LOCK_NOW, n=1, minutes_since_close=1.0)
+    d = eg.build_entry_gate_decision(journal_events=events, now=_LOCK_NOW, **_spy_gates_kwargs())
+    assert eg.COOLDOWN_VETO in d["veto_reasons"]
+    assert d["execution_allowed"] is False
+
+
+def test_budget_allows_second_entry_after_cooldown():
+    import data.odte_config as oc
+    assert oc.DAILY_TRADE_BUDGET >= 2, "retune contract: at least 2 trades/day"
+    events = _red_trade_events(_LOCK_NOW, n=1,
+                               minutes_since_close=oc.REENTRY_COOLDOWN_MINUTES + 5.0)
+    d = eg.build_entry_gate_decision(journal_events=events, now=_LOCK_NOW, **_spy_gates_kwargs())
+    assert eg.DAILY_BUDGET_VETO not in d["veto_reasons"]
+    assert eg.COOLDOWN_VETO not in d["veto_reasons"]
+    assert d["execution_allowed"] is True
+    assert d["daily_trade_budget"]["remaining"] >= 1

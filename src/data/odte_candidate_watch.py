@@ -24,13 +24,23 @@ from pathlib import Path
 from typing import Any
 
 from core.paths import ODTE_DATA_DIR, atomic_write_text
+from data.odte_config import (
+    A_PLUS_MIN_CONFIRMATIONS,
+    B_PLUS_MAX_DISSENTERS,
+    B_PLUS_MIN_CONFIRMATIONS,
+    EXECUTABLE_UNIVERSE,
+    SCAN_UNIVERSE,
+)
 
 SCHEMA_VERSION = 1
 DEFAULT_STATE_DIR = ODTE_DATA_DIR
 ACTIVE_CANDIDATE_FILENAME = "active_candidate.json"
 CANDIDATE_DECISION_FILENAME = "candidate_decision.json"
 
-ETF_UNIVERSE = ("SPY", "QQQ", "XSP", "IWM")
+# Scan universe: tape counted for confirmation/dissent. Executable universe: the
+# only symbols a candidate may CONVERT on (XSP tape confirms but never converts —
+# broker liquidity for this account is unproven).
+ETF_UNIVERSE = SCAN_UNIVERSE
 CONFIRM_ENTRY = "CONFIRM_ENTRY"
 KEEP_WATCHING = "KEEP_WATCHING"
 DEGRADED_NO_TRADE = "DEGRADED_NO_TRADE"
@@ -181,9 +191,10 @@ def _extract_candidate(candidate: dict, market: dict) -> dict:
         return cand
 
     # Tape-only ETF lane: choose the strongest visible ETF candidate without social dependency.
+    # Iterates only the EXECUTABLE universe so it never manufactures a scan-only (XSP) candidate.
     if market.get("candidate") and isinstance(market.get("candidate"), dict):
         return _extract_candidate(market["candidate"], market)
-    for etf in ETF_UNIVERSE:
+    for etf in EXECUTABLE_UNIVERSE:
         block = _symbol_block(market, etf)
         if not block:
             continue
@@ -198,8 +209,9 @@ def _extract_candidate(candidate: dict, market: dict) -> dict:
 
 def _confirmation_counts(market: dict, direction: str) -> tuple[int, list[str], list[str]]:
     """Count ETF tape confirmers and DISSENTERS for `direction`. A confirmer is above VWAP + above ORB
-    (bullish) / below + below (bearish); a dissenter is an ETF with data on the WRONG side (below VWAP
-    or below ORB for a bullish read). A+ confirmation (CHOP / late-day) requires zero dissenters."""
+    (bullish) / below + below (bearish). A dissenter must carry a DEFINITIVE opposite read — its VWAP
+    side must be present; missing/partial tape (XSP snapshots routinely lack VWAP/ORB fields) is
+    neutral, never a silent veto. A+ confirmation (CHOP / late-day) requires zero dissenters."""
     hits: list[str] = []
     dissents: list[str] = []
     for etf in ETF_UNIVERSE:
@@ -211,12 +223,12 @@ def _confirmation_counts(market: dict, direction: str) -> tuple[int, list[str], 
         if direction == "bullish":
             if above is True and orb == "above":
                 hits.append(etf)
-            elif above is False or orb == "below":
+            elif above is not None and (above is False or orb == "below"):
                 dissents.append(etf)
         else:
             if above is False and orb == "below":
                 hits.append(etf)
-            elif above is True or orb == "above":
+            elif above is not None and (above is True or orb == "above"):
                 dissents.append(etf)
     return len(hits), hits, dissents
 
@@ -343,9 +355,10 @@ def evaluate_candidate_watch(candidate: dict | None = None, *, market: dict | No
     checks: dict[str, Any] = {}
 
     from data.social_sentiment import is_restricted_underlying
-    if not sym or sym not in ETF_UNIVERSE:
+    if not sym or sym not in EXECUTABLE_UNIVERSE:
         decision = DEGRADED_NO_TRADE if sym else KEEP_WATCHING
-        reasons.append("no supported ETF/index candidate" if sym else "no candidate yet")
+        reasons.append(f"candidate not in executable universe {'/'.join(EXECUTABLE_UNIVERSE)}"
+                       if sym else "no candidate yet")
         return _payload(decision, cand, reasons, checks, now)
     if is_restricted_underlying(sym):
         reasons.append("restricted employer symbol")
@@ -418,17 +431,24 @@ def evaluate_candidate_watch(candidate: dict | None = None, *, market: dict | No
         reasons.append(f"{sym} tape invalidated {direction} candidate")
         return _payload(DEGRADED_NO_TRADE, cand, reasons, checks, now)
 
-    # A+ confirmation = confirmed underlying, >=3 ETF confirmers, and ZERO dissenters (no ETF on the
-    # wrong side of the tape). Demanded in CHOP and in the late-day window, where a marginal read fails.
-    a_plus = confirmed and confirmations >= 3 and not dissenters
+    # Confirmation tiers. A+ = confirmed underlying, >=3 ETF confirmers, ZERO dissenters — demanded
+    # in the late-day window, where a marginal read fails. B+ = confirmed with >=2 confirmers and at
+    # most 1 definitive dissenter — tradeable on CHOP days at HALF size (the 2026-07-27..31 zero-trade
+    # week showed CHOP-with-directional-tape days are the modal setup; A+-or-nothing left them all
+    # unconverted). The tier rides the candidate into gate/lease, where it halves the debit fraction.
+    a_plus = confirmed and confirmations >= A_PLUS_MIN_CONFIRMATIONS and not dissenters
+    b_plus = (confirmed and confirmations >= B_PLUS_MIN_CONFIRMATIONS
+              and len(dissenters) <= B_PLUS_MAX_DISSENTERS)
+    tier = "a_plus" if a_plus else ("b_plus" if (day == "CHOP" and b_plus) else "full")
+    checks["tier"] = tier
 
     mtc = _minutes_to_close(market)
     if mtc is not None and mtc < 45 and not a_plus:
         reasons.append("late-day window requires A+ confirmation")
         return _payload(KEEP_WATCHING, cand, reasons, checks, now)
 
-    if day == "CHOP" and not a_plus:
-        reasons.append("CHOP requires A+ ETF confirmation")
+    if day == "CHOP" and not a_plus and not b_plus:
+        reasons.append("CHOP requires at least B+ ETF confirmation")
         return _payload(KEEP_WATCHING, cand, reasons, checks, now)
 
     wall = _pin_wall(cand, gamma_map)
@@ -439,7 +459,19 @@ def evaluate_candidate_watch(candidate: dict | None = None, *, market: dict | No
             return _payload(KEEP_WATCHING, cand, reasons, checks, now)
 
     if confirmed:
-        reasons.append("ETF tape confirmed candidate; build/promote a fresh entry gate next")
+        # Stamp the sizing tier and the CHASE-BAND ANCHOR at the moment of confirmation. The anchor
+        # is the fill-price reference for the lease ceiling (anchor * (1 + chase band)); anchoring
+        # here — not at precompute — is what stops the rail from vetoing entries whose premium rose
+        # BECAUSE the thesis confirmed. Deliberately NOT part of the identity fingerprint: a
+        # re-confirm re-anchors the same contract cycle without invalidating identity.
+        cand["tier"] = tier
+        anchor = _num(contract.get("ask") or contract.get("ask_price")
+                      or contract.get("mark") or contract.get("mark_price"))
+        if anchor is not None and anchor > 0:
+            cand["anchor_quote"] = anchor
+            cand["anchor_ts"] = now.isoformat(timespec="seconds")
+            checks["anchor_quote"] = anchor
+        reasons.append(f"ETF tape confirmed candidate ({tier}); run odte-convert next")
         return _payload(CONFIRM_ENTRY, cand, reasons, checks, now)
     reasons.append("candidate still forming; keep watching confirmation")
     return _payload(KEEP_WATCHING, cand, reasons, checks, now)
@@ -472,7 +504,7 @@ def _payload(decision: str, candidate: dict, reasons: list[str], checks: dict, n
 
 def _next_action(decision: str) -> str:
     if decision == CONFIRM_ENTRY:
-        return "build a fresh odte-entry-gate package; still no order until promotion and broker review"
+        return "run odte-convert (atomic gate+lease in one process); still no order until broker review consumes the lease"
     if decision == KEEP_WATCHING:
         return "continue candidate HAWK checks until confirm or degrade"
     if decision == BROKER_BLOCKED:

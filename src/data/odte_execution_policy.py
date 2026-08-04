@@ -10,7 +10,9 @@ stalled, and closed for a loss. The structural fixes enforced here:
     the deprecated flag with `execution_lease_required`, and `authorize_entry` refuses any gate
     whose `scan_only` is not explicitly False.
   * Authorization is exact-contract, exact-direction, exact-quantity, exact-price, and SHORT-LIVED:
-    default 30s TTL, configurable DOWNWARD only, hard-capped at 60s for 0DTE.
+    config default TTL, configurable DOWNWARD only, hard-capped at 60s for 0DTE.
+  * PARTIAL_ACCOUNT entries carry a CHASE BAND (2026-08-02): the fill ceiling is the CONFIRM_ENTRY
+    anchor quote × (1 + band); sizing is tiered and BP-proportional (full vs B+ half size).
   * The lease carries MAXIMUMS (quantity / limit / debit); downstream can only stay at or below.
   * A lease is SINGLE-USE: `consume_lease` burns it at submission; reuse fails closed.
   * Full-account size is permitted only under an explicit `FULL_ACCOUNT_A_PLUS` lease with the max
@@ -32,6 +34,14 @@ from pathlib import Path
 from typing import Any
 
 from core.paths import ODTE_DATA_DIR, atomic_write_text
+from data.odte_config import (
+    B_PLUS_DEBIT_FRACTION,
+    B_PLUS_MIN_VEHICLE_SCORE,
+    CHASE_BAND_FRACTION,
+    LEASE_TTL_SECONDS,
+    MAX_DEBIT_FRACTION,
+    SNAPSHOT_TTL_SECONDS,
+)
 
 SCHEMA_VERSION = 1
 
@@ -39,10 +49,12 @@ DEFAULT_STATE_DIR = ODTE_DATA_DIR
 LEASE_FILENAME = "execution_lease.json"
 CONSUMED_LEASES_FILENAME = "consumed_leases.json"
 
-# Lease TTL: 30 seconds by default; callers may shorten it but can NEVER extend past 60s for 0DTE.
+# Lease TTL: config-tunable default (60s per the 2026-08-02 retune — covers one MCP place
+# round-trip plus a timeout retry); callers may shorten it but can NEVER extend past the 60s hard
+# cap for 0DTE. The cap is an incident invariant and is deliberately NOT config-tunable.
 # Missing a fill is intentional and acceptable; acquiring a stale 0DTE position is not.
-DEFAULT_LEASE_TTL_SECONDS = 30.0
 MAX_LEASE_TTL_SECONDS = 60.0
+DEFAULT_LEASE_TTL_SECONDS = min(LEASE_TTL_SECONDS, MAX_LEASE_TTL_SECONDS)
 
 # Account-risk modes. PARTIAL_ACCOUNT is the default: one contract, debit capped to a fraction of
 # buying power. FULL_ACCOUNT_A_PLUS permits a full-account debit ONLY when the lease explicitly
@@ -55,19 +67,25 @@ FULL_ACCOUNT_REQUIRES_NAMED_INVALIDATION = True
 FULL_ACCOUNT_REQUIRES_ACTIVE_MANAGEMENT = True
 
 # Default (PARTIAL_ACCOUNT) sizing policy — the incident's 2-contract / 83.9%-of-BP order fails
-# BOTH caps. Policy overrides can only tighten these, never widen them; bigger size must go through
-# the explicit FULL_ACCOUNT_A_PLUS path.
+# BOTH caps. Per-call policy overrides can only tighten these, never widen them; bigger size must
+# go through the explicit FULL_ACCOUNT_A_PLUS path. The debit fraction is BP-proportional and
+# tiered (2026-08-02 retune, replacing the flat agent-side $120 rail): full tier 60% of BP, B+
+# (CHOP half-size) tier 30%. The 1-contract limit stays hard-coded.
 DEFAULT_MAX_CONTRACTS = 1
-DEFAULT_MAX_DEBIT_FRACTION = 0.50
+DEFAULT_MAX_DEBIT_FRACTION = MAX_DEBIT_FRACTION
 
 # Every input artifact must carry a parseable timestamp within its own TTL (seconds). A missing or
-# stale timestamp fails CLOSED — an undated artifact is never fresh.
+# stale timestamp fails CLOSED — an undated artifact is never fresh. Market/broker snapshots get a
+# wider bound (2026-08-02 retune: the 60s bound refused the one fully-qualified entry of the
+# 2026-07-27..31 zero-trade week 11s after its gate passed; price risk inside the window is bounded
+# by the chase band + lease ceilings, which are the honest rails). The three in-process artifacts
+# stay at 60s — odte-convert mints them microseconds before authorization.
 INPUT_TTLS_SECONDS: dict[str, float] = {
     "entry_gate": 60.0,
     "candidate_decision": 60.0,
     "vehicle_score": 60.0,
-    "market_snapshot": 60.0,
-    "broker_snapshot": 60.0,
+    "market_snapshot": SNAPSHOT_TTL_SECONDS,
+    "broker_snapshot": SNAPSHOT_TTL_SECONDS,
 }
 MAX_FUTURE_SKEW_SECONDS = 2.0
 
@@ -105,6 +123,10 @@ class ExecutionLease:
     market_fingerprint: str
     risk_mode: str = DEFAULT_RISK_MODE
     max_premium_loss: float | None = None
+    # 2026-08-02 retune: the tape-computed confirmation tier (sizing) and the CONFIRM_ENTRY anchor
+    # the max_limit_price chase band was derived from — journaled for auditability.
+    tier: str | None = None
+    anchor_quote: float | None = None
 
     def to_dict(self) -> dict:
         out = asdict(self)
@@ -416,6 +438,11 @@ def authorize_entry(*, gate: dict, candidate_decision: dict, vehicle_score: dict
     if not selected_at:
         reasons.append("candidate_cycle_timestamp_missing")
     candidate_contract = _contract_identity(candidate)
+    # Tier + anchor (2026-08-02 retune). TAPE-COMPUTED by candidate-watch and carried on the
+    # candidate — never read from a policy label, preserving "a label never sets size".
+    tier = str(candidate.get("tier") or "").lower() or None
+    gate_tier = str(gate.get("tier") or "").lower() or None
+    anchor = _num(candidate.get("anchor_quote"))
 
     # 3) gate: explicit booleans only. A scan-tier record can never lease (the incident's hole).
     if gate.get("scan_only") is not False:
@@ -513,8 +540,14 @@ def authorize_entry(*, gate: dict, candidate_decision: dict, vehicle_score: dict
         if is_restricted_underlying(symbol):
             reasons.append("restricted_underlying")
 
-    if str(vs.get("verdict") or "").upper() != "GOOD_BET":
-        reasons.append("vehicle_not_good_bet")
+    vehicle_verdict = str(vs.get("verdict") or "").upper()
+    if vehicle_verdict != "GOOD_BET":
+        # B+ tier (CHOP half-size) mirrors the entry gate: a WATCH vehicle passes when its raw
+        # score clears the floor. Everything else still fails closed.
+        vehicle_total = _num(vs.get("score"))
+        if not (vehicle_verdict == "WATCH" and tier == "b_plus" and vehicle_total is not None
+                and vehicle_total >= B_PLUS_MIN_VEHICLE_SCORE):
+            reasons.append("vehicle_not_good_bet")
 
     # 5) broker truth prerequisites (fail closed on missing counts/BP).
     bp = _check_broker(reasons, broker)
@@ -530,6 +563,8 @@ def authorize_entry(*, gate: dict, candidate_decision: dict, vehicle_score: dict
     debit = round(quantity * limit_price * 100.0, 2) if limit_price else None
 
     max_premium_loss: float | None = None
+    chase_ceiling: float | None = None
+    partial_frac: float | None = None
     if risk_mode == "FULL_ACCOUNT_A_PLUS":
         plan = _dict(pol.get("management_plan"))
         for field in FULL_ACCOUNT_PLAN_FIELDS:
@@ -545,10 +580,23 @@ def authorize_entry(*, gate: dict, candidate_decision: dict, vehicle_score: dict
     else:
         if quantity > DEFAULT_MAX_CONTRACTS:
             reasons.append("quantity_exceeds_policy")
+        if gate_tier and tier and gate_tier != tier:
+            reasons.append("tier_mismatch")
+        base_frac = B_PLUS_DEBIT_FRACTION if tier == "b_plus" else DEFAULT_MAX_DEBIT_FRACTION
         frac = _num(pol.get("max_debit_fraction"))
         # Policy can only TIGHTEN the debit cap, never widen it.
-        frac = min(frac, DEFAULT_MAX_DEBIT_FRACTION) if frac else DEFAULT_MAX_DEBIT_FRACTION
-        if debit is not None and bp is not None and debit > frac * bp:
+        partial_frac = min(frac, base_frac) if frac else base_frac
+        # CHASE BAND: the fill ceiling is the CONFIRM_ENTRY anchor plus a bounded band — an entry
+        # may pay up to anchor*(1+band), never more. Re-anchoring at confirmation (not precompute)
+        # is what stops the rail from vetoing entries whose premium rose BECAUSE the thesis
+        # confirmed. A missing anchor fails closed: every fresh confirm stamps one.
+        if anchor is None or anchor <= 0:
+            reasons.append("anchor_quote_missing")
+        else:
+            chase_ceiling = round(anchor * (1.0 + CHASE_BAND_FRACTION), 2)
+            if limit_price is not None and limit_price > chase_ceiling:
+                reasons.append("limit_exceeds_chase_band")
+        if debit is not None and bp is not None and debit > partial_frac * bp:
             reasons.append("debit_exceeds_policy")
     if debit is not None and bp is not None and debit > bp:
         reasons.append("debit_exceeds_buying_power")
@@ -557,8 +605,10 @@ def authorize_entry(*, gate: dict, candidate_decision: dict, vehicle_score: dict
         "risk_mode": risk_mode,
         "ttl_seconds": ttl_seconds,
         "max_contracts": (quantity if risk_mode == "FULL_ACCOUNT_A_PLUS" else DEFAULT_MAX_CONTRACTS),
-        "max_debit_fraction": (None if risk_mode == "FULL_ACCOUNT_A_PLUS"
-                               else DEFAULT_MAX_DEBIT_FRACTION),
+        "max_debit_fraction": partial_frac,
+        "tier": tier,
+        "chase_band_fraction": (None if risk_mode == "FULL_ACCOUNT_A_PLUS" else CHASE_BAND_FRACTION),
+        "anchor_quote": anchor,
         "max_premium_loss": max_premium_loss,
     }
     base = {
@@ -594,14 +644,24 @@ def authorize_entry(*, gate: dict, candidate_decision: dict, vehicle_score: dict
         f"{symbol}:{contract['option_id']}:{quantity}:{limit_price}:"
         f"{issued_at.isoformat()}:{cand_fp}:{mkt_fp}".encode()
     ).hexdigest()[:16]
+    # PARTIAL_ACCOUNT lease maxima extend to the chase-band ceiling (the fill may pay up to
+    # anchor*(1+band)), still capped by the tier's BP fraction. FULL_ACCOUNT maxima stay at the
+    # exact reviewed limit/debit.
+    if chase_ceiling is not None and partial_frac is not None and bp is not None:
+        max_limit_val = float(chase_ceiling)
+        max_debit_val = round(min(quantity * max_limit_val * 100.0, partial_frac * bp), 2)
+    else:
+        max_limit_val = float(limit_price)
+        max_debit_val = float(debit)
     lease = ExecutionLease(
         lease_id=lease_id, issued_at=issued_at, expires_at=expires_at,
         symbol=str(symbol), direction=str(direction),
         option_id=str(contract["option_id"]), expiration_date=str(contract["expiration_date"]),
         strike_price=float(contract["strike_price"]), option_type=str(contract["option_type"]),
-        quantity=quantity, max_limit_price=float(limit_price), max_debit=float(debit),
+        quantity=quantity, max_limit_price=max_limit_val, max_debit=max_debit_val,
         candidate_fingerprint=cand_fp, market_fingerprint=mkt_fp,
         risk_mode=risk_mode, max_premium_loss=max_premium_loss,
+        tier=tier, anchor_quote=anchor,
     )
     return {**base, "authorized": True, "reason_codes": [], "lease": lease.to_dict(),
             "next_action": (f"lease {lease_id} issued — SINGLE USE, expires "

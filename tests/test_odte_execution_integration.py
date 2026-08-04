@@ -55,6 +55,8 @@ def _package(now: datetime, *, sym: str | None = None, contract: dict | None = N
         "expiration_date": contract.get("expiration_date"),
         "strike_price": contract.get("strike_price"),
         "option_type": contract.get("option_type"),
+        # Chase-band anchor, stamped by candidate-watch at CONFIRM_ENTRY (2026-08-02 retune).
+        "anchor_quote": contract.get("ask") or contract.get("mark"),
     }
     candidate["candidate_fingerprint"] = xp.candidate_fingerprint(candidate)
     return {

@@ -254,6 +254,15 @@ odte-entry-gate:             ## 0DTE thesis->entry gate — NO orders/broker (TR
 odte-execution-authorize:    ## Mint/refuse a single-use 0DTE execution lease — NO orders (GATE=; CANDIDATE_DECISION=; VEHICLE=; BROKER=; MARKET=; POLICY=; JSON=1; WRITE=1; JOURNAL=1)
 	@$(DI) odte-execution-authorize $(if $(GATE),--gate $(GATE),) $(if $(CANDIDATE_DECISION),--candidate-decision $(CANDIDATE_DECISION),) $(if $(VEHICLE),--vehicle-score $(VEHICLE),) $(if $(BROKER),--broker $(BROKER),) $(if $(MARKET),--market $(MARKET),) $(if $(POLICY),--policy $(POLICY),) $(if $(STATE_DIR),--state-dir $(STATE_DIR),) $(if $(JSON),--json,) $(if $(WRITE),--write,) $(if $(JOURNAL),--journal,)
 
+# Atomic conversion (2026-08-02 retune): fresh tape re-check → computed confirmations → entry gate
+# → execution lease in ONE process under ONE clock, so the in-process freshness TTLs pass by
+# construction. Caller fetches FRESH market/broker/contract snapshots immediately before the call.
+# Non-converting stages journal an identity-bound terminal no_trade_decision. Places NO orders.
+#   make odte-convert MARKET=data/odte/market.json BROKER=data/odte/broker.json CONTRACT=data/odte/contract.json JSON=1
+.PHONY: odte-convert
+odte-convert:                ## Atomic confirm→gate→lease conversion in ONE process — NO orders (CANDIDATE=; MARKET=; BROKER=; CONTRACT=; GAMMA=; POLICY=; NO_WRITE=1; NO_JOURNAL=1; JSON=1)
+	@$(DI) odte-convert $(if $(CANDIDATE),--candidate $(CANDIDATE),) $(if $(MARKET),--market $(MARKET),) $(if $(BROKER),--broker $(BROKER),) $(if $(CONTRACT),--contract $(CONTRACT),) $(if $(GAMMA),--gamma $(GAMMA),) $(if $(POLICY),--policy $(POLICY),) $(if $(STATE_DIR),--state-dir $(STATE_DIR),) $(if $(JOURNAL_PATH),--journal-path $(JOURNAL_PATH),) $(if $(NO_WRITE),--no-write,) $(if $(NO_JOURNAL),--no-journal,) $(if $(JSON),--json,)
+
 .PHONY: odte-order-guard
 odte-order-guard:            ## 0DTE pending-order cancel-first guard — NO orders (ORDER=; LEASE=; MARKET=; JSON=1; WRITE=1; JOURNAL=1)
 	@$(DI) odte-order-guard $(if $(ORDER),--order $(ORDER),) $(if $(LEASE),--lease $(LEASE),) $(if $(MARKET),--market $(MARKET),) $(if $(STATE_DIR),--state-dir $(STATE_DIR),) $(if $(JSON),--json,) $(if $(WRITE),--write,) $(if $(JOURNAL),--journal,)

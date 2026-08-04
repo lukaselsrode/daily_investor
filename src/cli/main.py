@@ -583,6 +583,57 @@ def _cmd_odte_entry_gate(rest: list[str]) -> None:
 
 
 
+def _cmd_odte_convert(rest: list[str]) -> None:
+    # PURE/OFFLINE atomic conversion: fresh tape re-check (candidate-watch) → COMPUTED final
+    # confirmations → entry gate → execution lease, all in ONE process under ONE clock (2026-08-02
+    # retune — the multi-command conversion could not beat the freshness TTLs across a multi-minute
+    # controller tick). Consumes a confirmed/active candidate plus FRESH market/broker/contract
+    # snapshots the caller fetched immediately before the call; refuses (naming the stale input)
+    # otherwise. Every non-converting stage journals an identity-bound terminal no_trade_decision —
+    # no silent scan-only dead ends. Places NO orders, makes NO broker/network/LLM calls; the lease
+    # is still minted only by the unchanged odte-execution-authorize policy (single-use, 60s cap,
+    # chase band, tiered sizing).
+    import json
+
+    from data.odte_convert import render_markdown, run_convert
+    if "--help" in rest or "-h" in rest:
+        print("Usage: odte-convert [--candidate PATH] --market PATH|--market-json '{...}' "
+              "--broker PATH|--broker-json '{...}' --contract PATH|--contract-json '{...}' "
+              "[--gamma PATH] [--policy PATH] [--journal-path PATH] [--state-dir DIR] "
+              "[--no-write] [--no-journal] [--json]\n"
+              "Atomic CONFIRM_ENTRY→gate→lease conversion in one process. Candidate defaults to "
+              "data/odte/active_candidate.json. Snapshots must be fresh (snapshot TTL). "
+              "Places NO orders.")
+        return
+    try:
+        payload = run_convert(
+            candidate_path=_flag_value(rest, "--candidate"),
+            candidate_json=_flag_value(rest, "--candidate-json"),
+            market_path=_flag_value(rest, "--market"),
+            market_json=_flag_value(rest, "--market-json"),
+            broker_path=_flag_value(rest, "--broker"),
+            broker_json=_flag_value(rest, "--broker-json"),
+            contract_path=_flag_value(rest, "--contract"),
+            contract_json=_flag_value(rest, "--contract-json"),
+            gamma_path=_flag_value(rest, "--gamma"),
+            gamma_json=_flag_value(rest, "--gamma-json"),
+            policy_path=_flag_value(rest, "--policy"),
+            policy_json=_flag_value(rest, "--policy-json"),
+            journal_path=_flag_value(rest, "--journal-path"),
+            state_dir=_flag_value(rest, "--state-dir"),
+            write="--no-write" not in rest,
+            journal="--no-journal" not in rest,
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"odte-convert: could not read/parse input: {exc}")
+        sys.exit(2)
+    print(json.dumps(payload, separators=(",", ":"), default=str) if "--json" in rest
+          else render_markdown(payload))
+    if payload.get("stage") == "journal":
+        print("odte-convert: journal append failed; lease withheld", file=sys.stderr)
+        sys.exit(2)
+
+
 def _cmd_odte_execution_authorize(rest: list[str]) -> None:
     # PURE/OFFLINE execution-lease authorization — the ONE tier that mints execution authority, as
     # a SINGLE-USE short-lived lease (default 30s TTL, hard cap 60s) bound to one exact contract/
@@ -939,6 +990,7 @@ _COMMANDS: dict[str, Callable[[list[str]], None]] = {
     "odte-vehicle-score": _cmd_odte_vehicle_score,
     "odte-day-score": _cmd_odte_day_score,
     "odte-entry-gate": _cmd_odte_entry_gate,
+    "odte-convert": _cmd_odte_convert,
     "odte-execution-authorize": _cmd_odte_execution_authorize,
     "odte-order-guard": _cmd_odte_order_guard,
     "odte-candidate-watch": _cmd_odte_candidate_watch,

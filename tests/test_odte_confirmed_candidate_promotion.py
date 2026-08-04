@@ -28,6 +28,8 @@ def _candidate() -> dict:
         "option_type": "put",
         "option_id": "iwm-20260727-292p",
         "scan_only": True,
+        # Chase-band anchor, stamped by candidate-watch at CONFIRM_ENTRY (2026-08-02 retune).
+        "anchor_quote": 0.70,
     }
     candidate["candidate_fingerprint"] = xp.candidate_fingerprint(candidate)
     return candidate
@@ -119,8 +121,12 @@ def test_fresh_matching_confirmed_candidate_crosses_scan_to_gate_and_leases() ->
         policy={"quantity": 1, "limit_price": 0.70},
     )
     assert result["authorized"] is True, result["reason_codes"]
-    assert result["lease"]["max_limit_price"] == 0.70
-    assert result["lease"]["max_debit"] == 70.0
+    # 2026-08-02 retune: the lease ceiling extends to the chase band above the 0.70 anchor
+    # (still capped by the tier's BP fraction; see test_odte_execution_policy for the cap case).
+    ceiling = round(0.70 * (1 + xp.CHASE_BAND_FRACTION), 2)
+    assert result["lease"]["max_limit_price"] == ceiling
+    assert result["lease"]["max_debit"] == round(ceiling * 100.0, 2)
+    assert result["lease"]["anchor_quote"] == 0.70
 
 
 def test_stale_confirmed_candidate_cannot_cross_scan_boundary() -> None:

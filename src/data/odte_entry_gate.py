@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any
 
 from core.paths import ODTE_REPORT_DIR
+from data.odte_config import B_PLUS_MIN_VEHICLE_SCORE, GREEN_REENTRY_MIN_BP_MULTIPLE
 
 SCHEMA_VERSION = 1
 
@@ -57,11 +58,17 @@ _BEARISH = {"put", "bearish", "long_put", "puts", "down"}
 # ET day (per journal events), a fresh entry gate is VETOED — the banked green must not be handed
 # back on a re-entry (live 2026-07-10 failure: 3x SPY 753C scalped green, then re-entered 1x for a
 # scratch). The ONLY way back in is an EXPLICIT `allow_reentry_after_green: true` on the trigger or
-# broker snapshot, and even then buying power must comfortably cover the re-entry: below the
-# contract's own estimated cost or this conservative floor, the green day is preserved no matter what.
+# broker snapshot, and even then buying power must comfortably cover the re-entry at a multiple of
+# the contract's own estimated cost (BP-SCALED, 2026-08-02 retune: the old flat $500 floor sat above
+# the whole account's buying power, so the override could never arm and any green trade permanently
+# ended the day — incompatible with the 2-trades/day budget). Unknown contract cost stays locked.
 GREEN_LOCKOUT_VETO = "green_day_preservation_lockout"
 GREEN_REENTRY_BP_VETO = "insufficient_bp_for_green_reentry"
-GREEN_REENTRY_MIN_BP = 500.0
+
+# Daily trade cadence (2026-08-02 retune): a hard per-ET-day entry budget plus a cooldown after
+# every completed trade. Enforced from the day's journal events (see odte_journal.daily_trade_budget).
+DAILY_BUDGET_VETO = "daily_trade_budget_exhausted"
+COOLDOWN_VETO = "post_trade_cooldown_active"
 
 # FAIL-CLOSED promotion (2026-07-23 delayed-fill incident): `promote_to_execution=True` is a
 # DEPRECATED input. A bare boolean can no longer demote a scan-tier record to the execution tier —
@@ -376,8 +383,10 @@ def build_entry_gate_decision(trigger: dict | None = None, candidate: dict | Non
     GREEN-DAY PRESERVATION: when `journal_events` (the day's decision journal) shows a completed
     profitable trade for the current ET day, the gate VETOES (`green_day_preservation_lockout`) —
     re-entry needs an explicit `allow_reentry_after_green: true` on the trigger/broker snapshot AND
-    buying power at/above max(contract cost, GREEN_REENTRY_MIN_BP), else
-    `insufficient_bp_for_green_reentry`."""
+    buying power at/above GREEN_REENTRY_MIN_BP_MULTIPLE × the contract's estimated cost, else
+    `insufficient_bp_for_green_reentry`. `journal_events` also drives the DAILY TRADE BUDGET: at
+    most `odte_config.DAILY_TRADE_BUDGET` entries per ET day (`daily_trade_budget_exhausted`) with a
+    `REENTRY_COOLDOWN_MINUTES` gap after every completed trade (`post_trade_cooldown_active`)."""
     trigger = _dict(trigger)
     dctx = _dict(trigger.get("decision_context"))
     candidate = _dict(candidate) or _dict(trigger.get("candidate"))
@@ -424,9 +433,36 @@ def build_entry_gate_decision(trigger: dict | None = None, candidate: dict | Non
     veh_verdict = str(vehicle_score.get("verdict") or "").upper()
     acct_ok, acct_veto = _account_gate(broker)
 
+    # Confirmation tier, stamped by candidate-watch at CONFIRM_ENTRY (tape-computed, never a model
+    # label). CHOP is no longer an automatic unknown: an A+/B+ tier passes the day gate (B+ at half
+    # size — the lease tier halves the debit fraction), and a WATCH vehicle verdict passes for B+
+    # when its raw score clears the floor. Bare CHOP/WATCH still fail closed.
+    tier = (str(candidate.get("tier")
+                or _dict(candidate_decision.get("candidate")).get("tier") or "").lower() or None)
+    veh_score_total = _num(vehicle_score.get("score"))
+
+    def _day_regime_gate() -> bool | None:
+        if day_verdict == "GOOD_DAY":
+            return True
+        if day_verdict == "AVOID":
+            return False
+        if day_verdict == "CHOP" and tier in ("a_plus", "b_plus"):
+            return True
+        return None
+
+    def _vehicle_gate() -> bool | None:
+        if veh_verdict == "GOOD_BET":
+            return True
+        if veh_verdict == "BAD_BET":
+            return False
+        if (veh_verdict == "WATCH" and tier == "b_plus" and veh_score_total is not None
+                and veh_score_total >= B_PLUS_MIN_VEHICLE_SCORE):
+            return True
+        return None
+
     gates: dict[str, bool | None] = {
-        "day_regime": True if day_verdict == "GOOD_DAY" else (False if day_verdict == "AVOID" else None),
-        "vehicle": True if veh_verdict == "GOOD_BET" else (False if veh_verdict == "BAD_BET" else None),
+        "day_regime": _day_regime_gate(),
+        "vehicle": _vehicle_gate(),
         "directional_thesis": True if direction else None,
         "account": acct_ok,
     }
@@ -460,10 +496,24 @@ def build_entry_gate_decision(trigger: dict | None = None, candidate: dict | Non
     reentry_override = (trigger.get("allow_reentry_after_green") is True
                         or broker.get("allow_reentry_after_green") is True)
     bp = _buying_power(broker)
-    reentry_floor = max(GREEN_REENTRY_MIN_BP, _contract_cost(vehicle_score) or 0.0)
-    reentry_armed = bool(reentry_override and bp is not None and bp >= reentry_floor)
+    # BP-scaled arming: the override needs buying power at a multiple of the contract's OWN cost.
+    # Unknown cost fails closed — a re-entry whose size cannot be estimated stays locked.
+    reentry_cost = _contract_cost(vehicle_score)
+    reentry_armed = bool(reentry_override and bp is not None and reentry_cost is not None
+                         and bp >= GREEN_REENTRY_MIN_BP_MULTIPLE * reentry_cost)
     if green_locked and not reentry_armed:
         veto_reasons.append(GREEN_REENTRY_BP_VETO if reentry_override else GREEN_LOCKOUT_VETO)
+
+    # DAILY TRADE BUDGET + COOLDOWN (2026-08-02 retune): a hard per-ET-day entry cap and a minimum
+    # gap after every completed trade. Deterministic from the same journal the green lockout reads.
+    budget = None
+    if journal_events is not None:
+        from data.odte_journal import daily_trade_budget
+        budget = daily_trade_budget(journal_events, now=current_now)
+        if budget.get("exhausted"):
+            veto_reasons.append(DAILY_BUDGET_VETO)
+        elif budget.get("cooldown_active"):
+            veto_reasons.append(COOLDOWN_VETO)
 
     confirmation_states = {name: confirmations.get(name) for name in REQUIRED_CONFIRMATIONS}
     confirmations_ok = all(confirmation_states[name] is True for name in REQUIRED_CONFIRMATIONS)
@@ -577,6 +627,9 @@ def build_entry_gate_decision(trigger: dict | None = None, candidate: dict | Non
         "execution_allowed": execution_allowed,
         "green_day_preservation": preservation,
         "allow_reentry_after_green": reentry_armed,
+        "tier": tier,
+        "sizing_tier": ("half" if tier == "b_plus" else "full"),
+        "daily_trade_budget": budget,
         "places_orders": False,
         "basis": ("offline entry-gate decision: day_regime + vehicle + directional_thesis + account "
                   "gates; records intent only, places NO orders"),

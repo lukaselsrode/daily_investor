@@ -795,3 +795,90 @@ def test_new_event_types_roundtrip_through_journal(tmp_path):
     assert [e["event_type"] for e in stored] == list(oj.EXECUTION_SAFETY_EVENT_TYPES)
     # Every stored record stays non-authoritative.
     assert all(e["execution_allowed"] is False for e in stored)
+
+
+# --- daily trade budget (2026-08-02 retune: 2/day cap + post-close cooldown) --------------------
+
+def test_daily_trade_budget_counts_fills_and_exhausts_at_budget():
+    from datetime import datetime, timedelta, timezone
+
+    import data.odte_config as oc
+    now = datetime(2026, 7, 31, 18, 0, tzinfo=timezone.utc)
+    fills = [{"event_type": "order_filled", "trade_id": f"t{i}",
+              "ts": (now - timedelta(hours=2 + i)).isoformat()}
+             for i in range(oc.DAILY_TRADE_BUDGET)]
+    b = oj.daily_trade_budget(fills, now=now)
+    assert b["trades_today"] == oc.DAILY_TRADE_BUDGET
+    assert b["budget"] == oc.DAILY_TRADE_BUDGET
+    assert b["remaining"] == 0
+    assert b["exhausted"] is True
+    under = oj.daily_trade_budget(fills[:-1], now=now)
+    assert under["exhausted"] is False and under["remaining"] == 1
+
+
+def test_daily_trade_budget_dedupes_same_trade_and_ignores_other_days():
+    from datetime import datetime, timedelta, timezone
+    now = datetime(2026, 7, 31, 18, 0, tzinfo=timezone.utc)
+    dup = [{"event_type": "order_filled", "trade_id": "t1", "ts": now.isoformat()},
+           {"event_type": "order_filled", "trade_id": "t1", "ts": now.isoformat()}]
+    assert oj.daily_trade_budget(dup, now=now)["trades_today"] == 1
+    yesterday = [{"event_type": "order_filled", "trade_id": "t9",
+                  "ts": (now - timedelta(days=1)).isoformat()}]
+    assert oj.daily_trade_budget(yesterday, now=now)["trades_today"] == 0
+
+
+def test_daily_trade_budget_cooldown_window():
+    from datetime import datetime, timedelta, timezone
+
+    import data.odte_config as oc
+    now = datetime(2026, 7, 31, 18, 0, tzinfo=timezone.utc)
+    closed = [{"event_type": "order_closed", "trade_id": "t1", "realized_pnl": -5.0,
+               "ts": (now - timedelta(minutes=1)).isoformat()}]
+    hot = oj.daily_trade_budget(closed, now=now)
+    assert hot["cooldown_active"] is True
+    assert hot["cooldown_until"] is not None
+    cold = oj.daily_trade_budget(closed, now=now + timedelta(minutes=oc.REENTRY_COOLDOWN_MINUTES))
+    assert cold["cooldown_active"] is False
+
+
+# --- weekly telemetry + zero-trade tripwire (2026-08-02 retune) ---------------------------------
+
+def test_weekly_telemetry_counts_funnel_and_fires_tripwire():
+    from datetime import datetime, timedelta, timezone
+
+    import data.odte_config as oc
+    # 2026-07-31 was a Friday: the tripwire weekday (default Wed) has long passed.
+    now = datetime(2026, 7, 31, 20, 0, tzinfo=timezone.utc)
+    events = [
+        {"event_type": "entry_decision", "decision": "enter", "execution_allowed": True,
+         "ts": (now - timedelta(hours=5)).isoformat()},
+        {"event_type": "execution_lease_issued", "authorized": False, "decision": "deny",
+         "reason_codes": ["market_snapshot_stale", "broker_snapshot_stale"],
+         "ts": (now - timedelta(hours=5)).isoformat()},
+        {"event_type": "no_trade_decision", "ts": (now - timedelta(days=1)).isoformat()},
+        # last ISO week: must not count
+        {"event_type": "order_filled", "trade_id": "old", "ts": (now - timedelta(days=8)).isoformat()},
+    ]
+    wk = oj.weekly_telemetry(events, now=now)
+    assert wk["trades_this_week"] == 0
+    assert wk["gates_passed"] == 1
+    assert wk["lease_refusals"] == 1
+    assert wk["leases_issued"] == 0
+    assert wk["no_trade_decisions"] == 1
+    assert ("market_snapshot_stale", 1) in wk["top_refusal_reasons"]
+    assert wk["weekly_target"] == [oc.WEEKLY_TRADE_TARGET_MIN, oc.WEEKLY_TRADE_TARGET_MAX]
+    assert wk["tripwire"]["armed"] is True
+    assert wk["tripwire"]["fired"] is True, "a Friday with zero trades must fire the tripwire"
+
+
+def test_weekly_telemetry_tripwire_quiet_early_week_or_with_trades():
+    from datetime import datetime, timedelta, timezone
+    monday = datetime(2026, 7, 27, 15, 0, tzinfo=timezone.utc)
+    wk = oj.weekly_telemetry([], now=monday)
+    assert wk["tripwire"]["armed"] is False and wk["tripwire"]["fired"] is False
+    friday = datetime(2026, 7, 31, 20, 0, tzinfo=timezone.utc)
+    traded = [{"event_type": "order_filled", "trade_id": "t1",
+               "ts": (friday - timedelta(days=2)).isoformat()}]
+    wk2 = oj.weekly_telemetry(traded, now=friday)
+    assert wk2["trades_this_week"] == 1
+    assert wk2["tripwire"]["fired"] is False

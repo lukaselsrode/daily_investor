@@ -1086,3 +1086,36 @@ options_social:
   market_open_et: "09:30"         # regular-session open (ET)
   market_close_et: "16:00"        # regular-session close (ET)
   include_paper_options: true   # attach a PAPER-ONLY same-day option chain idea (yfinance; no orders)
+
+# ── 0DTE execution-conversion knobs (2026-08-02 risk-on retune) ───────────────
+# Read by src/data/odte_config.py; every key has a code default, so deleting a
+# key (or this whole section) reverts that knob. These tune the CONVERSION
+# layer only — the execution-safety invariants (60s lease hard cap, 1-contract
+# PARTIAL_ACCOUNT limit, single-use leases, FULL_ACCOUNT_A_PLUS proof) are NOT
+# config-tunable by design.
+# Context: week of 2026-07-27 produced 0 trades — every qualified setup died on
+# a 60s freshness cascade, a precompute-anchored no-chase rail, a flat $120
+# debit ceiling, or the CHOP→A+-only bar. User directive 2026-08-02: risk-on
+# but disciplined; 2 trades/day cap; 3-4 trades/week target.
+odte:
+  scan_universe: [SPY, QQQ, XSP, IWM]   # tape counted for confirmation/dissent
+  executable_universe: [SPY, QQQ, IWM]  # candidates may convert; XSP is scan-only
+  chase_band_fraction: 0.15       # max fill above the CONFIRM_ENTRY anchor quote
+  max_debit_fraction: 0.60        # full-tier debit cap as fraction of BP (was 0.50)
+  b_plus_debit_fraction: 0.30     # half-size tier for B+ setups on CHOP days
+  a_plus_min_confirmations: 3     # A+ = confirmed + >=3 confirmers + 0 dissenters
+  b_plus_min_confirmations: 2     # B+ = confirmed + >=2 confirmers + <=1 dissenter
+  b_plus_max_dissenters: 1
+  b_plus_min_vehicle_score: 3     # WATCH verdict acceptable for B+ at/above this score
+  good_day_min_score: 4           # unchanged default; tune only on telemetry evidence
+  daily_trade_budget: 2           # hard cap on entries per ET day
+  reentry_cooldown_minutes: 20    # min gap between a close and the next entry
+  green_reentry_min_bp_multiple: 1.5  # re-entry after green armed when BP >= mult*cost
+  lease_ttl_seconds: 60           # default lease TTL (hard cap 60s stays in code)
+  snapshot_ttl_seconds: 120       # market+broker snapshot freshness at authorize
+  confirm_conversion_sla_seconds: 180  # CONFIRM_ENTRY -> disposition accountability SLA
+  spread_cap_fraction: 0.25       # computed spread_cap_check ceiling in odte-convert
+  watchdog_realert_minutes: 10    # re-alert when a candidate persists unchanged
+  weekly_trade_target_min: 3
+  weekly_trade_target_max: 4
+  zero_trade_tripwire_weekday: 2  # 0=Mon; advisory fires if 0 trades by Wednesday
