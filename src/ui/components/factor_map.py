@@ -470,7 +470,7 @@ def _render_portfolio_lens(df: pd.DataFrame, metric_threshold: float) -> None:
         "Blue = your owned positions.  Green = current buy candidates.  "
         "Gray = full universe."
     )
-    st.plotly_chart(_factor_profile(df, factors), use_container_width=True, key="lens_profile")
+    st.plotly_chart(_factor_profile(df, factors), width="stretch", key="lens_profile")
 
     # ── 2. Percentile rank cards ──────────────────────────────────────────────
     st.divider()
@@ -509,7 +509,7 @@ def _render_portfolio_lens(df: pd.DataFrame, metric_threshold: float) -> None:
             key="lens_y",
         )
 
-    st.plotly_chart(_scatter_2d(df, x_col, y_col), use_container_width=True, key="lens_scatter")
+    st.plotly_chart(_scatter_2d(df, x_col, y_col), width="stretch", key="lens_scatter")
 
     # ── 4. Tables ─────────────────────────────────────────────────────────────
     st.divider()
@@ -537,7 +537,7 @@ def _render_portfolio_lens(df: pd.DataFrame, metric_threshold: float) -> None:
             st.dataframe(
                 cands[show].sort_values(sort_col, ascending=False)
                     .style.format(fmt, na_rep="—"),
-                use_container_width=True, hide_index=True,
+                width="stretch", hide_index=True,
             )
 
     with t2:
@@ -555,7 +555,7 @@ def _render_portfolio_lens(df: pd.DataFrame, metric_threshold: float) -> None:
                     "value_metric" if "value_metric" in owned.columns else "symbol",
                     ascending=False,
                 ).style.format({**fmt, "equity": "${:,.0f}"}, na_rep="—"),
-                use_container_width=True, hide_index=True,
+                width="stretch", hide_index=True,
             )
 
 
@@ -592,7 +592,7 @@ def _render_loadings_heatmap(df: pd.DataFrame, title: str, key_suffix: str) -> N
         font=dict(color="#cdd6f4", size=9),
         xaxis=dict(side="top"),
     )
-    st.plotly_chart(fig, use_container_width=True, key=f"loadings_{key_suffix}")
+    st.plotly_chart(fig, width="stretch", key=f"loadings_{key_suffix}")
 
 
 def _render_component_report(diags: dict) -> None:
@@ -817,7 +817,7 @@ def _render_nearest_tables(fig, df_out, centroids, coord_cols, event) -> None:
             tbl = _nearest_table(df_out, centroid, coord_cols)
             st.dataframe(
                 tbl.style.format({k: v for k, v in fmt.items() if k in tbl.columns}, na_rep="—"),
-                hide_index=True, use_container_width=True,
+                hide_index=True, width="stretch",
             )
 
 
@@ -941,11 +941,11 @@ def _render_3d_map(df: pd.DataFrame, metric_threshold: float, config: dict | Non
 
     try:
         event = st.plotly_chart(
-            fig, use_container_width=True, key="fm3d_chart", on_select="rerun",
+            fig, width="stretch", key="fm3d_chart", on_select="rerun",
         )
     except TypeError:
         # Older Streamlit without on_select — fall back to a static chart.
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
         event = None
 
     if exclude_outliers:
@@ -986,7 +986,7 @@ def _render_3d_map(df: pd.DataFrame, metric_threshold: float, config: dict | Non
                 xaxis=dict(title="Active equity ($)", gridcolor="#2d3436"),
                 yaxis=dict(gridcolor="#2d3436"),
             )
-            st.plotly_chart(_fig_eq, use_container_width=True, key="cluster_equity_bar")
+            st.plotly_chart(_fig_eq, width="stretch", key="cluster_equity_bar")
 
         show_cols = [c for c in [
             "cluster", "owned_count", "equity_$", "equity_weight",
@@ -997,7 +997,7 @@ def _render_3d_map(df: pd.DataFrame, metric_threshold: float, config: dict | Non
             fmt["equity_weight"] = "{:.1%}"
         if "equity_$" in cs.columns:
             fmt["equity_$"] = "${:,.0f}"
-        st.dataframe(cs[show_cols].style.format(fmt, na_rep="—"), use_container_width=True, hide_index=True)
+        st.dataframe(cs[show_cols].style.format(fmt, na_rep="—"), width="stretch", hide_index=True)
 
 
 # ---------------------------------------------------------------------------

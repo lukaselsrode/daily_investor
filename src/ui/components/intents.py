@@ -121,4 +121,4 @@ def render() -> None:
         if subset.empty:
             continue
         with st.expander(f"{side_label} ({len(subset)})"):
-            st.dataframe(subset[disp_cols] if disp_cols else subset, use_container_width=True)
+            st.dataframe(subset[disp_cols] if disp_cols else subset, width="stretch")

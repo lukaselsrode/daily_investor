@@ -108,7 +108,7 @@ def render() -> None:
         index=0,
     )
     view_sorted = view[display_cols].sort_values(sort_col, ascending=False) if sort_col in view.columns else view[display_cols]
-    st.dataframe(view_sorted, use_container_width=True, height=400)
+    st.dataframe(view_sorted, width="stretch", height=400)
 
     # ---- Symbol drill-down ------------------------------------------------
     st.divider()

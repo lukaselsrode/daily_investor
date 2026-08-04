@@ -358,7 +358,7 @@ def _comparison_charts(results: dict[str, dict]) -> None:
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
         hovermode="x unified",
     )
-    st.plotly_chart(fig_eq, use_container_width=True)
+    st.plotly_chart(fig_eq, width="stretch")
 
     # ── Metrics bar chart ─────────────────────────────────────────────────
     good_names = [n for n, r in results.items() if "error" not in r]
@@ -388,7 +388,7 @@ def _comparison_charts(results: dict[str, dict]) -> None:
         height=280,
         margin=dict(l=0, r=0, t=40, b=60),
     )
-    st.plotly_chart(fig_bar, use_container_width=True)
+    st.plotly_chart(fig_bar, width="stretch")
 
     # ── Metrics table ─────────────────────────────────────────────────────
     import pandas as pd
@@ -408,7 +408,7 @@ def _comparison_charts(results: dict[str, dict]) -> None:
                 "Max DD":  f"{r['max_drawdown']:.1%}",
                 "Trades":  r.get("trades", "—"),
             })
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
 
 # ---------------------------------------------------------------------------
@@ -442,7 +442,7 @@ def render_config_variants() -> None:
     with c2:
         st.write("")
         st.write("")
-        if st.button("💾 Save variant", key="cv_save_btn", use_container_width=True):
+        if st.button("💾 Save variant", key="cv_save_btn", width="stretch"):
             if not variant_name.strip():
                 st.error("Enter a name.")
             else:
@@ -456,7 +456,7 @@ def render_config_variants() -> None:
         st.write("")
         existing = _list_variants()
         variant_files = [p for _, p in existing if p.stem.startswith("config_")]
-        if variant_files and st.button("🗑️ Delete variant", key="cv_del_btn", use_container_width=True):
+        if variant_files and st.button("🗑️ Delete variant", key="cv_del_btn", width="stretch"):
             st.session_state["cv_show_delete"] = True
     if st.session_state.get("cv_show_delete"):
         del_map = {n: p for n, p in _list_variants() if p.stem.startswith("config_")}
@@ -498,7 +498,7 @@ def render_config_variants() -> None:
     with c3:
         st.write("")
         st.write("")
-        run = st.button("▶ Compare", type="primary", key="cv_compare_run", use_container_width=True)
+        run = st.button("▶ Compare", type="primary", key="cv_compare_run", width="stretch")
 
     if run:
         name_to_path = {name: path for name, path in variants}

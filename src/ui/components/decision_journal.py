@@ -99,9 +99,9 @@ def render() -> None:
     # ── Table ─────────────────────────────────────────────────────────────────
     try:
         styled = view.style.applymap(_colour_action, subset=["final_action"]) if "final_action" in view.columns else view.style
-        st.dataframe(styled, use_container_width=True, height=400)
+        st.dataframe(styled, width="stretch", height=400)
     except Exception:
-        st.dataframe(view, use_container_width=True, height=400)
+        st.dataframe(view, width="stretch", height=400)
 
     df_download(view, "decision_journal.csv")
 
@@ -117,7 +117,7 @@ def render() -> None:
                 rates[col] = f"{valid.mean():.1%} ({valid.sum():.0f}/{len(valid)})"
         if rates:
             rate_df = pd.DataFrame(rates.items(), columns=["Outcome", "Rate"]).set_index("Outcome")
-            st.dataframe(rate_df, use_container_width=True)
+            st.dataframe(rate_df, width="stretch")
         else:
             st.info("Outcome columns present but all null — run `daily-investor update-outcomes`.")
     else:

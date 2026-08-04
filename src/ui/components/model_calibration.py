@@ -106,7 +106,7 @@ def _render_by_state(result) -> None:
         df["Pct Positive"] = df["Pct Positive"].apply(lambda x: f"{x:.0%}" if pd.notna(x) else "—")
     if "Pct Negative" in df.columns:
         df["Pct Negative"] = df["Pct Negative"].apply(lambda x: f"{x:.0%}" if pd.notna(x) else "—")
-    st.dataframe(df, use_container_width=True)
+    st.dataframe(df, width="stretch")
 
 
 def _render_confusion_matrix(result) -> None:
@@ -117,7 +117,7 @@ def _render_confusion_matrix(result) -> None:
         st.info("Not enough outcomes to compute confusion matrix.")
         return
 
-    st.dataframe(result.confusion_matrix, use_container_width=True)
+    st.dataframe(result.confusion_matrix, width="stretch")
 
 
 def _render_calibration_curve(result) -> None:
@@ -158,7 +158,7 @@ def _render_calibration_curve(result) -> None:
         margin=dict(t=40, b=40),
         yaxis=dict(tickformat=".1f", ticksuffix="%"),
     )
-    st.plotly_chart(fig, use_container_width=True, key="calib_curve_bar")
+    st.plotly_chart(fig, width="stretch", key="calib_curve_bar")
 
 
 def _render_calibration_state() -> None:
@@ -216,7 +216,7 @@ def _render_raw_outcomes() -> None:
         "outperformed_spy_30d",
     ]
     show_cols = [c for c in display_cols if c in df.columns]
-    st.dataframe(df[show_cols].tail(200), use_container_width=True)
+    st.dataframe(df[show_cols].tail(200), width="stretch")
 
 
 def _render_by_group(result, attr: str, label: str, group_col: str) -> None:
@@ -250,7 +250,7 @@ def _render_by_group(result, attr: str, label: str, group_col: str) -> None:
             margin=dict(t=40, b=80),
             yaxis=dict(tickformat=".1f", ticksuffix="%"),
         )
-        st.plotly_chart(fig, use_container_width=True, key=f"by_group_{attr}")
+        st.plotly_chart(fig, width="stretch", key=f"by_group_{attr}")
 
     table = display.copy()
     table.columns = [c.replace("_", " ").title() for c in table.columns]
@@ -260,7 +260,7 @@ def _render_by_group(result, attr: str, label: str, group_col: str) -> None:
         table["Pct Positive"] = table["Pct Positive"].apply(lambda x: f"{x:.0%}" if pd.notna(x) else "—")
     if "Pct Negative" in table.columns:
         table["Pct Negative"] = table["Pct Negative"].apply(lambda x: f"{x:.0%}" if pd.notna(x) else "—")
-    st.dataframe(table, use_container_width=True)
+    st.dataframe(table, width="stretch")
 
 
 def _render_apply_calibration(result) -> None:

@@ -65,7 +65,7 @@ def render_cluster_diagnostics(cluster_result) -> None:
         yaxis_title="Max cluster weight (%)",
         xaxis_title="Trading day",
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
     # ── Stacked cluster weight composition ────────────────────────────────
     if cluster_result.cluster_timeline is not None:
@@ -93,7 +93,7 @@ def render_cluster_diagnostics(cluster_result) -> None:
             xaxis_title="Trading day",
             legend=dict(orientation="h", y=-0.3),
         )
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig2, width="stretch")
 
     # ── Violation table ────────────────────────────────────────────────────
     if cluster_result.n_violation_days > 0:
@@ -110,7 +110,7 @@ def render_cluster_diagnostics(cluster_result) -> None:
                     "Positions held":   s.n_held,
                 })
         with st.expander(f"Violation details ({cluster_result.n_violation_days} days)"):
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
 
 def _text_fallback(cluster_result) -> None:
@@ -161,7 +161,7 @@ def render_cluster_attribution_table(sim_result) -> None:
             "dominant_sectors": dom_sect.get(c, "—"),
             "dominant_archetypes": dom_arch.get(c, "—"),
         })
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
     if dec_counts:
         cols = st.columns(4)

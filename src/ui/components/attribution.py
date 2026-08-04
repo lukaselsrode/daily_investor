@@ -81,7 +81,7 @@ def _render_stability_attribution() -> None:
         styled = display.style
         if "stability" in display.columns:
             styled = styled.applymap(_colour_stability, subset=["stability"])
-        st.dataframe(styled, use_container_width=True)
+        st.dataframe(styled, width="stretch")
         df_download(stab_df, "stability_attribution.csv")
 
     except Exception as exc:

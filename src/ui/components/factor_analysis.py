@@ -177,10 +177,10 @@ def render() -> None:
             aspect="equal",
         )
         fig.update_layout(height=400)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
     except ImportError:
         st.dataframe(corr_df.style.background_gradient(cmap="RdBu", vmin=-1, vmax=1),
-                     use_container_width=True)
+                     width="stretch")
 
     # Highlight the most important pair
     off_diag = corr_df.where(np.triu(np.ones(corr_df.shape), k=1).astype(bool))
@@ -224,7 +224,7 @@ def render() -> None:
                     showarrow=False, bgcolor="rgba(255,255,255,0.7)",
                 )],
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
         except ImportError:
             st.scatter_chart(scatter_df[[fa, fb]], x=fa, y=fb)
 
@@ -255,7 +255,7 @@ def render() -> None:
             "residual std": round(float(resid.dropna().std()), 4) if resid.dropna().std() > 0 else float("nan"),
         })
     resid_df = pd.DataFrame(resid_table).sort_values("R²", ascending=False)
-    st.dataframe(resid_df, use_container_width=True, hide_index=True)
+    st.dataframe(resid_df, width="stretch", hide_index=True)
 
     st.caption(
         "R² > 0.25 → factors share >25% variance — consider whether the overlap is intentional. "
@@ -322,11 +322,11 @@ def render() -> None:
         )
         fig.add_hline(y=2, line_dash="dot", annotation_text="VIF=2 (mild)", line_color="orange")
         fig.add_hline(y=5, line_dash="dot", annotation_text="VIF=5 (high)", line_color="red")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
     except ImportError:
         st.bar_chart(vif_df["VIF"])
 
-    st.dataframe(vif_df, use_container_width=True)
+    st.dataframe(vif_df, width="stretch")
 
     # ── 5. Portfolio rank impact ─────────────────────────────────────────────
     st.divider()
@@ -394,7 +394,7 @@ def render() -> None:
                     added_rows = df[df["symbol"].isin(added)][
                         ["symbol", "value_score", "momentum_score", "value_metric", "value_metric_orth"]
                     ].sort_values("value_metric_orth", ascending=False)
-                    st.dataframe(added_rows.reset_index(drop=True), use_container_width=True)
+                    st.dataframe(added_rows.reset_index(drop=True), width="stretch")
                 else:
                     st.write("None")
             with ci2:
@@ -403,7 +403,7 @@ def render() -> None:
                     rem_rows = df[df["symbol"].isin(removed)][
                         ["symbol", "value_score", "momentum_score", "value_metric", "value_metric_orth"]
                     ].sort_values("value_metric", ascending=False)
-                    st.dataframe(rem_rows.reset_index(drop=True), use_container_width=True)
+                    st.dataframe(rem_rows.reset_index(drop=True), width="stretch")
                 else:
                     st.write("None")
 

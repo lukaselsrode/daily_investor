@@ -41,7 +41,7 @@ def _render_scorecard() -> None:
         by_mode = summary.get("by_mode") or {}
         if by_mode:
             st.markdown("**By mode**")
-            st.dataframe(pd.DataFrame(by_mode).T, use_container_width=True)
+            st.dataframe(pd.DataFrame(by_mode).T, width="stretch")
 
         seq = summary.get("pnl_sequence") or []
         if seq:

@@ -284,7 +284,7 @@ def render_ablation() -> None:
                                "Count":  list(result["sector_counts"].values())})
                 .sort_values("Count", ascending=False)
             )
-            st.dataframe(sec_df, use_container_width=True, hide_index=True)
+            st.dataframe(sec_df, width="stretch", hide_index=True)
 
     if result["lookahead"] == "HIGH":
         st.error("HIGH bias — do not use these results for parameter selection.")
@@ -395,7 +395,7 @@ def render_candidate_drift() -> None:
         label_a:        [f"{da.avg_quality:.3f}", f"{da.avg_momentum:.3f}", f"{da.avg_income:.3f}", f"{da.avg_value:.3f}"],
         label_b:        [f"{db.avg_quality:.3f}", f"{db.avg_momentum:.3f}", f"{db.avg_income:.3f}", f"{db.avg_value:.3f}"],
     })
-    st.dataframe(factor_df.set_index("Factor"), use_container_width=True)
+    st.dataframe(factor_df.set_index("Factor"), width="stretch")
 
     # ── Symbol sets ───────────────────────────────────────────────────────
     c1, c2, c3 = st.columns(3)
@@ -419,7 +419,7 @@ def render_candidate_drift() -> None:
             label_b:  [dr["sectors_b"].get(s, 0) for s in all_sectors],
         }
         sec_df = pd.DataFrame(sec_data).set_index("Sector").sort_values(label_a, ascending=False)
-        st.dataframe(sec_df, use_container_width=True)
+        st.dataframe(sec_df, width="stretch")
 
     # ── High-income / low-momentum flags ─────────────────────────────────
     st.subheader("High-Income / Low-Momentum Flags")
@@ -480,7 +480,7 @@ def render_exit_diagnostics() -> None:
         {"Trigger": "Score gate (REVIEW)","Condition": f"Score < {exit_d.get('review_score_below', 0.45):.2f}", "Action": "REVIEW flag"},
         {"Trigger": "Hard exit gate",     "Condition": f"Score < {exit_d.get('hard_exit_score_below', 0.20):.2f}", "Action": "Forced exit"},
     ]
-    st.dataframe(pd.DataFrame(ladder), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(ladder), width="stretch", hide_index=True)
 
     # ── Backtest simulation ladder ────────────────────────────────────────
     st.subheader("Backtest Simulated Exits")
@@ -493,7 +493,7 @@ def render_exit_diagnostics() -> None:
         {"Simulated": "Harvest",         "Condition": "NOT simulated",                            "Action": "❌ Missing"},
         {"Simulated": "REVIEW / WATCH",  "Condition": "NOT simulated",                            "Action": "❌ Missing"},
     ]
-    st.dataframe(pd.DataFrame(bt_ladder), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(bt_ladder), width="stretch", hide_index=True)
 
     # ── Gap analysis ──────────────────────────────────────────────────────
     st.subheader("Live vs Backtest Gap Analysis")

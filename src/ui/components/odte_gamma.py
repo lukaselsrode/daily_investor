@@ -129,7 +129,7 @@ def render() -> None:
 
     fig = _plot_by_strike(gmap)
     if fig is not None:
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
     with st.expander("Full map JSON"):
         st.json(gmap)

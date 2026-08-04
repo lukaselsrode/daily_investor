@@ -235,7 +235,7 @@ def render() -> None:
         return f"color: {color}; font-weight: bold"
 
     styled = sum_df.style.map(_style_ic, subset=["Mean IC"])
-    st.dataframe(styled, use_container_width=True, hide_index=True)
+    st.dataframe(styled, width="stretch", hide_index=True)
 
     st.caption(
         "ICIR = Mean IC / Std IC (higher = more consistent signal). "
@@ -283,7 +283,7 @@ def render() -> None:
             legend=dict(orientation="h", y=-0.15),
             height=420,
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
     except ImportError:
         st.line_chart(ic_pivot[chosen_factors].dropna(how="all"))
@@ -329,7 +329,7 @@ def render() -> None:
                 legend=dict(orientation="h", y=-0.15),
                 height=380,
             )
-            st.plotly_chart(fig2, use_container_width=True)
+            st.plotly_chart(fig2, width="stretch")
         except ImportError:
             st.line_chart(roll_df)
     else:
@@ -372,7 +372,7 @@ def render() -> None:
                     height=380,
                     legend=dict(orientation="h", y=-0.15),
                 )
-                st.plotly_chart(fig3, use_container_width=True)
+                st.plotly_chart(fig3, width="stretch")
         except (ImportError, Exception):
             # Fallback to simple bar chart per factor
             for factor in dist_cols:
@@ -390,7 +390,7 @@ def render() -> None:
         show_df = ic_df.copy()
         show_df["factor"] = show_df["factor"].map(lambda c: _FACTOR_LABELS.get(c, c))
         show_df = show_df.sort_values(["date", "factor"]).reset_index(drop=True)
-        st.dataframe(show_df, use_container_width=True, hide_index=True)
+        st.dataframe(show_df, width="stretch", hide_index=True)
 
         try:
             csv_bytes = show_df.to_csv(index=False).encode()

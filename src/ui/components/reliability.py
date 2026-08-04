@@ -41,7 +41,7 @@ def render() -> None:
             st.bar_chart(nan_df.set_index("column")["coverage_pct"])
         with c2:
             st.dataframe(nan_df.style.format({"nan_pct": "{:.1%}", "coverage_pct": "{:.1%}"}),
-                         use_container_width=True)
+                         width="stretch")
 
     # ---- Yield trap flags -------------------------------------------------
     st.divider()

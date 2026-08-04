@@ -157,7 +157,7 @@ def render() -> None:
             top5["equity"] = top5["equity"].map("${:,.2f}".format)
             top5["percent_change"] = top5["percent_change"].map("{:+.2f}%".format) if "percent_change" in top5.columns else "—"
             st.caption("Top 5 positions by equity")
-            st.dataframe(top5.set_index("symbol"), use_container_width=True)
+            st.dataframe(top5.set_index("symbol"), width="stretch")
 
     st.divider()
 

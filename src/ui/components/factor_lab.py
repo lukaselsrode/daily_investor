@@ -362,7 +362,7 @@ def _render_regime_ic(regime_df: pd.DataFrame, sel_factors: list[str]) -> None:
         margin=dict(t=10, b=10, l=0, r=0),
         xaxis=dict(side="top"),
     )
-    st.plotly_chart(fig_heat, use_container_width=True)
+    st.plotly_chart(fig_heat, width="stretch")
 
     # ── Key insight callouts ─────────────────────────────────────────────────
     if not pivot.empty:
@@ -433,7 +433,7 @@ def _render_regime_ic(regime_df: pd.DataFrame, sel_factors: list[str]) -> None:
             margin=dict(t=10, b=10),
             title_text=f"{_FRIENDLY.get(drill_factor, drill_factor)} — IC by Regime",
         )
-        st.plotly_chart(fig_bar, use_container_width=True)
+        st.plotly_chart(fig_bar, width="stretch")
 
         # ICIR table for this factor
         disp = factor_rows[["regime_label", "mean_ic", "icir", "hit_rate", "t_stat", "n_periods"]].copy()
@@ -452,7 +452,7 @@ def _render_regime_ic(regime_df: pd.DataFrame, sel_factors: list[str]) -> None:
         st.dataframe(
             disp.style.format("{:.3f}", subset=["Mean IC", "ICIR", "Hit Rate", "t-stat"])
             .map(_regime_ic_color, subset=["Mean IC"]),
-            use_container_width=True,
+            width="stretch",
         )
     else:
         st.info(f"No regime IC data for {_FRIENDLY.get(drill_factor, drill_factor)}.")
@@ -508,7 +508,7 @@ def _render_weight_recommendations(recs: dict, n_dates: int = 0) -> None:
             margin=dict(t=8, b=8, l=0, r=80),
             showlegend=False,
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
         # Metrics with delta vs current config
         cols = st.columns(len(weights))
@@ -655,7 +655,7 @@ def render() -> None:
         if mean_col:
             styled = styled.map(_color_ic, subset=[mean_col])
 
-        st.dataframe(styled, use_container_width=True, hide_index=True)
+        st.dataframe(styled, width="stretch", hide_index=True)
     else:
         st.info("No IC summary data — snapshots may not span sufficient time.")
 
@@ -686,7 +686,7 @@ def render() -> None:
             margin=dict(t=10),
             legend_title="Factor",
         )
-        st.plotly_chart(fig_decay, use_container_width=True)
+        st.plotly_chart(fig_decay, width="stretch")
     else:
         st.info("Decay data unavailable.")
 
@@ -722,7 +722,7 @@ def render() -> None:
             height=320,
             margin=dict(t=10),
         )
-        st.plotly_chart(fig_cum, use_container_width=True)
+        st.plotly_chart(fig_cum, width="stretch")
     else:
         st.info("Not enough data for cumulative IC at this horizon.")
 
@@ -767,7 +767,7 @@ def render() -> None:
             height=320,
             margin=dict(t=10),
         )
-        st.plotly_chart(fig_dec, use_container_width=True)
+        st.plotly_chart(fig_dec, width="stretch")
 
         if len(decile_df) >= 2:
             top_ret = decile_df.loc[decile_df["decile"].idxmax(), "mean_forward_return"]
@@ -821,7 +821,7 @@ def render() -> None:
             margin=dict(t=10),
             legend=dict(orientation="h", y=1.08),
         )
-        st.plotly_chart(fig_roll, use_container_width=True)
+        st.plotly_chart(fig_roll, width="stretch")
     else:
         st.info("Not enough IC periods for rolling ICIR at this configuration.")
 
@@ -859,7 +859,7 @@ Interpret with caution for horizons > 60 days.
         if not ic_df.empty:
             st.dataframe(
                 ic_df.sort_values(["horizon_days", "factor", "date"]),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
             st.download_button(
@@ -925,7 +925,7 @@ def render_ic_analysis_tab(
         mean_col = next((c for c in disp.columns if "Mean" in c and "Ic" in c), None)
         if mean_col:
             styled = styled.map(_color_ic, subset=[mean_col])
-        st.dataframe(styled, use_container_width=True, hide_index=True)
+        st.dataframe(styled, width="stretch", hide_index=True)
     else:
         st.info("No IC summary — build more snapshot history.")
 
@@ -951,7 +951,7 @@ def render_ic_analysis_tab(
             xaxis_title="Horizon (days)", yaxis_title="Mean IC",
             height=360, margin=dict(t=10), legend_title="Factor",
         )
-        st.plotly_chart(fig_d, use_container_width=True)
+        st.plotly_chart(fig_d, width="stretch")
     else:
         st.info("Decay data unavailable.")
 
@@ -978,7 +978,7 @@ def render_ic_analysis_tab(
             ))
         fig_c.add_hline(y=0, line_dash="solid", line_color="gray", line_width=0.5)
         fig_c.update_layout(xaxis_title="Date", yaxis_title="Cumulative IC", height=300, margin=dict(t=10))
-        st.plotly_chart(fig_c, use_container_width=True)
+        st.plotly_chart(fig_c, width="stretch")
     else:
         st.info("Not enough data for cumulative IC at this horizon.")
 
@@ -1018,7 +1018,7 @@ def render_ic_analysis_tab(
             height=320, margin=dict(t=10),
             legend=dict(orientation="h", y=1.08),
         )
-        st.plotly_chart(fig_r, use_container_width=True)
+        st.plotly_chart(fig_r, width="stretch")
     else:
         st.info("Not enough IC periods for rolling ICIR at this configuration.")
 
@@ -1026,7 +1026,7 @@ def render_ic_analysis_tab(
         if not ic_df.empty:
             st.dataframe(
                 ic_df.sort_values(["horizon_days", "factor", "date"]),
-                use_container_width=True, hide_index=True,
+                width="stretch", hide_index=True,
             )
             st.download_button(
                 "Download IC CSV", ic_df.to_csv(index=False), "factor_ic.csv", "text/csv",
@@ -1063,7 +1063,7 @@ def render_decile_tab(sel_factors: list[str], sel_horizons: list[int]) -> None:
             yaxis_title="Mean Forward Return (%)",
             height=320, margin=dict(t=10),
         )
-        st.plotly_chart(fig_dec, use_container_width=True)
+        st.plotly_chart(fig_dec, width="stretch")
         if len(decile_df) >= 2:
             top_r = decile_df.loc[decile_df["decile"].idxmax(), "mean_forward_return"]
             bot_r = decile_df.loc[decile_df["decile"].idxmin(), "mean_forward_return"]

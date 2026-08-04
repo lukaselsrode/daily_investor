@@ -162,7 +162,7 @@ def render() -> None:
         height=300,
         margin=dict(t=10),
     )
-    st.plotly_chart(fig_tilt, use_container_width=True)
+    st.plotly_chart(fig_tilt, width="stretch")
 
     st.divider()
 
@@ -190,7 +190,7 @@ def render() -> None:
                 height=max(200, len(report.sector_weights) * 28),
                 margin=dict(t=10),
             )
-            st.plotly_chart(fig_sec, use_container_width=True)
+            st.plotly_chart(fig_sec, width="stretch")
 
     with col_conc:
         st.subheader("Concentration")
@@ -224,7 +224,7 @@ def render() -> None:
                 "Composite": p.value_metric,
                 "ETF":       "✓" if p.is_etf else "",
             })
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
     st.divider()
 
@@ -268,7 +268,7 @@ def render() -> None:
             height=300,
             margin=dict(t=10),
         )
-        st.plotly_chart(fig_drift, use_container_width=True)
+        st.plotly_chart(fig_drift, width="stretch")
     else:
         st.info(
             "Not enough snapshot history for drift analysis. "
@@ -305,4 +305,4 @@ def _render_universe_distribution(df: pd.DataFrame) -> None:
             box_visible=True, meanline_visible=True,
         ))
     fig.update_layout(yaxis_title="Score", height=360, margin=dict(t=10))
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")

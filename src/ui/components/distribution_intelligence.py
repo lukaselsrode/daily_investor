@@ -152,7 +152,7 @@ def _try_plotly_bar(df: pd.DataFrame, x: str, y: str, title: str,
             kwargs["color_continuous_scale"] = color_scale
         fig = px.bar(df, **kwargs)
         fig.add_hline(y=0, line_dash="dot", line_color="gray")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
     except ImportError:
         st.bar_chart(df.set_index(x)[y])
 
@@ -165,7 +165,7 @@ def _try_plotly_line(df: pd.DataFrame, x: str, y: str | list, title: str) -> Non
         else:
             fig = px.line(df, x=x, y=y, title=title)
         fig.add_hline(y=0, line_dash="dot", line_color="gray")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
     except ImportError:
         cols = y if isinstance(y, list) else [y]
         st.line_chart(df.set_index(x)[cols])
@@ -180,7 +180,7 @@ def _try_plotly_scatter(df: pd.DataFrame, x: str, y: str, title: str,
             kwargs["color"] = color
         fig = px.scatter(df, **kwargs)
         fig.add_hline(y=0, line_dash="dot", line_color="gray")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
     except ImportError:
         st.line_chart(df.set_index(x)[[y]])
 
@@ -196,10 +196,10 @@ def _try_plotly_heatmap(matrix_df: pd.DataFrame, title: str) -> None:
             title=title,
             aspect="auto",
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
     except ImportError:
         st.dataframe(matrix_df.style.background_gradient(cmap="RdBu", vmin=-0.15, vmax=0.15),
-                     use_container_width=True)
+                     width="stretch")
 
 
 # ---------------------------------------------------------------------------
@@ -237,7 +237,7 @@ def _tab_distribution(df: pd.DataFrame, df_json: str, score_col: str, return_col
         fig = px.histogram(s, nbins=40, title=f"{score_col} distribution",
                            labels={"value": score_col, "count": "count"})
         fig.update_layout(showlegend=False)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
     except ImportError:
         st.bar_chart(fmt_bin_index(s.value_counts(bins=30, sort=False).sort_index()))
 
@@ -325,7 +325,7 @@ def _tab_tail_analysis(df: pd.DataFrame, df_json: str, score_col: str, return_co
         bucket_df.style.background_gradient(
             subset=["mean_return", "hit_rate", "sharpe_proxy"], cmap="RdYlGn"
         ),
-        use_container_width=True, hide_index=True,
+        width="stretch", hide_index=True,
     )
 
     st.divider()
@@ -363,7 +363,7 @@ def _tab_tail_analysis(df: pd.DataFrame, df_json: str, score_col: str, return_co
         mono_df.style.background_gradient(
             subset=["mean_return", "hit_rate", "sharpe_proxy"], cmap="RdYlGn"
         ),
-        use_container_width=True, hide_index=True,
+        width="stretch", hide_index=True,
     )
 
 
@@ -415,7 +415,7 @@ def _tab_local_ic(df: pd.DataFrame, df_json: str, score_col: str, return_col: st
             xaxis_title="Score percentile (0=bottom, 1=top)",
             yaxis_title="Local IC",
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
     except ImportError:
         _try_plotly_line(local_ic_df, x="center_pct", y="local_ic",
                          title="Local IC by score percentile")
@@ -434,7 +434,7 @@ def _tab_local_ic(df: pd.DataFrame, df_json: str, score_col: str, return_col: st
             )
 
     with st.expander("Raw local IC data"):
-        st.dataframe(local_ic_df, use_container_width=True, hide_index=True)
+        st.dataframe(local_ic_df, width="stretch", hide_index=True)
 
 
 def _tab_regime_clusters(df: pd.DataFrame, df_json: str, return_col: str) -> None:
@@ -481,7 +481,7 @@ def _tab_regime_clusters(df: pd.DataFrame, df_json: str, return_col: str) -> Non
             subset=[c for c in ["mean_return", "hit_rate", "sharpe_proxy"] if c in cluster_summary.columns],
             cmap="RdYlGn",
         ),
-        use_container_width=True, hide_index=True,
+        width="stretch", hide_index=True,
     )
 
     # Cluster interpretation
@@ -533,7 +533,7 @@ def _tab_conditional_alpha(df: pd.DataFrame, df_json: str, return_col: str) -> N
                     color="ic")
     st.dataframe(
         cic_df.style.background_gradient(subset=["ic"], cmap="RdYlGn", vmin=-0.2, vmax=0.2),
-        use_container_width=True, hide_index=True,
+        width="stretch", hide_index=True,
     )
 
     # Summary insight
@@ -560,7 +560,7 @@ def _tab_conditional_alpha(df: pd.DataFrame, df_json: str, return_col: str) -> N
     if not matrix_df.empty:
         _try_plotly_heatmap(matrix_df, "Conditional IC matrix (primary × conditioning factor)")
         with st.expander("Raw interaction matrix"):
-            st.dataframe(matrix_df, use_container_width=True)
+            st.dataframe(matrix_df, width="stretch")
 
 
 def _tab_threshold_simulation(df: pd.DataFrame, df_json: str,
@@ -593,7 +593,7 @@ def _tab_threshold_simulation(df: pd.DataFrame, df_json: str,
         display_df.style.background_gradient(
             subset=["mean_return", "hit_rate", "sharpe_proxy"], cmap="RdYlGn"
         ),
-        use_container_width=True, hide_index=True,
+        width="stretch", hide_index=True,
     )
 
     # Summary: find best threshold by hit rate with >5% universe coverage
@@ -662,7 +662,7 @@ def _tab_confidence_engine(return_col: str) -> None:
                         title="Factor confidence score (0=low, 1=high)",
                         color="confidence", color_scale="RdYlGn")
     with c2:
-        st.dataframe(conf_df, use_container_width=True, hide_index=True)
+        st.dataframe(conf_df, width="stretch", hide_index=True)
 
     # Suggested weight adjustments
     st.subheader("Suggested weight adjustments")
@@ -717,7 +717,7 @@ def _tab_evolution(score_col: str) -> None:
                      title="Tail spread (p90 − p10) over time")
 
     with st.expander("Raw data"):
-        st.dataframe(evo_df, use_container_width=True, hide_index=True)
+        st.dataframe(evo_df, width="stretch", hide_index=True)
 
 
 # ---------------------------------------------------------------------------

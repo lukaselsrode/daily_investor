@@ -544,7 +544,7 @@ def _tab_holdings_intel(df: pd.DataFrame) -> None:
     if "percent_change" in view_display.columns:
         styled = styled.map(_color_pct, subset=["percent_change"])
 
-    st.dataframe(styled, use_container_width=True, height=480, hide_index=True)
+    st.dataframe(styled, width="stretch", height=480, hide_index=True)
 
     # Risk alerts
     exits   = df[(df["state"] == "EXIT") & (df["sleeve"] == "active")]
@@ -602,7 +602,7 @@ def _sector_breakdown(df: pd.DataFrame) -> None:
                 legend=dict(font=dict(size=10), bgcolor="rgba(0,0,0,0)"),
                 showlegend=False,
             )
-            st.plotly_chart(fig, use_container_width=True, key="sector_pie")
+            st.plotly_chart(fig, width="stretch", key="sector_pie")
 
     with c2:
         if "industry" in active.columns:
@@ -631,7 +631,7 @@ def _sector_breakdown(df: pd.DataFrame) -> None:
                     xaxis=dict(gridcolor="#2d3436", showticklabels=False),
                     yaxis=dict(gridcolor="#2d3436"),
                 )
-                st.plotly_chart(fig, use_container_width=True, key="industry_bar")
+                st.plotly_chart(fig, width="stretch", key="industry_bar")
 
 
 # ---------------------------------------------------------------------------
@@ -668,7 +668,7 @@ def _position_score_chart(history: pd.DataFrame, key_prefix: str = "") -> None:
         xaxis=dict(gridcolor="#2d3436"),
         yaxis=dict(gridcolor="#2d3436", zeroline=False),
     )
-    st.plotly_chart(fig, use_container_width=True, key=f"score_hist_{key_prefix}")
+    st.plotly_chart(fig, width="stretch", key=f"score_hist_{key_prefix}")
 
 
 def _render_exit_analysis(ea, key_prefix: str = "") -> None:
@@ -754,7 +754,7 @@ def _render_exit_analysis(ea, key_prefix: str = "") -> None:
             plot_bgcolor="#0e1117", paper_bgcolor="#0e1117",
             font=dict(color="#cdd6f4", size=11),
         )
-        st.plotly_chart(fig, use_container_width=True, key=f"exit_weights_{key_prefix}")
+        st.plotly_chart(fig, width="stretch", key=f"exit_weights_{key_prefix}")
 
         # Raw weight table in expander
         with st.expander("Exit reason weights (full breakdown)", key=f"exit_weights_exp_{key_prefix}"):
@@ -762,7 +762,7 @@ def _render_exit_analysis(ea, key_prefix: str = "") -> None:
                 {"Driver": DRIVER_LABELS.get(k, k), "Weight": f"{v:.1%}"}
                 for k, v in ordered_weights.items()
             ])
-            st.dataframe(weight_df, use_container_width=True, hide_index=True)
+            st.dataframe(weight_df, width="stretch", hide_index=True)
 
 
 def _factor_decomp_chart(contribs: dict[str, float], key_prefix: str = "") -> None:
@@ -784,7 +784,7 @@ def _factor_decomp_chart(contribs: dict[str, float], key_prefix: str = "") -> No
         xaxis=dict(gridcolor="#2d3436"),
         yaxis=dict(gridcolor="#2d3436"),
     )
-    st.plotly_chart(fig, use_container_width=True, key=f"factor_decomp_{key_prefix}")
+    st.plotly_chart(fig, width="stretch", key=f"factor_decomp_{key_prefix}")
 
 
 def _tab_active_sleeve(df: pd.DataFrame) -> None:
@@ -824,7 +824,7 @@ def _tab_active_sleeve(df: pd.DataFrame) -> None:
         except Exception:
             pass
         st.markdown("**Archetype sleeve allocation**")
-        st.dataframe(pd.DataFrame(_arch_rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(_arch_rows), width="stretch", hide_index=True)
 
     agg = _load_agg()
 
@@ -963,7 +963,7 @@ def _tab_active_sleeve(df: pd.DataFrame) -> None:
                     st.caption("Recent journal events")
                     st.dataframe(
                         sym_journal[["timestamp", "event_type", "status", "rationale"]],
-                        use_container_width=True, hide_index=True,
+                        width="stretch", hide_index=True,
                     )
 
 
@@ -1072,7 +1072,7 @@ def _tab_attribution(df: pd.DataFrame, agg: pd.DataFrame | None) -> None:
             tilt_df.style.format({
                 "Portfolio": "{:.3f}", "Universe": "{:.3f}", "Δ vs Univ": "{:+.3f}"
             }, na_rep="—"),
-            use_container_width=True, hide_index=True,
+            width="stretch", hide_index=True,
         )
 
         # Bar chart of Δ
@@ -1093,7 +1093,7 @@ def _tab_attribution(df: pd.DataFrame, agg: pd.DataFrame | None) -> None:
                 xaxis=dict(gridcolor="#2d3436"),
                 yaxis=dict(gridcolor="#2d3436", zeroline=False),
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
     st.divider()
 
@@ -1108,13 +1108,13 @@ def _tab_attribution(df: pd.DataFrame, agg: pd.DataFrame | None) -> None:
             st.caption("Best contributors")
             st.dataframe(
                 contrib_df.head(5).style.format({"equity_change": "${:+,.2f}", "percent_change": "{:+.2f}%"}, na_rep="—"),
-                use_container_width=True, hide_index=True,
+                width="stretch", hide_index=True,
             )
         with bc2:
             st.caption("Worst contributors")
             st.dataframe(
                 contrib_df.tail(5).style.format({"equity_change": "${:+,.2f}", "percent_change": "{:+.2f}%"}, na_rep="—"),
-                use_container_width=True, hide_index=True,
+                width="stretch", hide_index=True,
             )
 
 
@@ -1133,7 +1133,7 @@ def _tab_journal(df: pd.DataFrame) -> None:
         st.info("No journal entries yet. The journal logs position state transitions automatically.")
     else:
         st.caption(f"{len(journal)} total entries")
-        st.dataframe(journal.sort_values("timestamp", ascending=False).head(50), use_container_width=True, hide_index=True)
+        st.dataframe(journal.sort_values("timestamp", ascending=False).head(50), width="stretch", hide_index=True)
 
     st.divider()
     if st.button("📝 Log today's portfolio review", key="pi_log_review"):

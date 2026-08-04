@@ -125,12 +125,12 @@ def render() -> None:
         )
         fig.update_layout(height=420, margin=dict(l=0, r=0, t=10, b=0),
                           coloraxis_colorbar=dict(title="interaction"))
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
     except Exception:
-        st.dataframe(mat, use_container_width=True)
+        st.dataframe(mat, width="stretch")
 
     st.subheader("Pair verdicts (sorted by synergy)")
-    st.dataframe(result.pairs_df(), use_container_width=True, hide_index=True)
+    st.dataframe(result.pairs_df(), width="stretch", hide_index=True)
     st.caption(
         "🟢 synergy → co-tune the pair (the join beats either alone) · "
         "🔴 clash → tuning one undermines the other · "

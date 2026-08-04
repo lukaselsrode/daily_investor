@@ -145,7 +145,7 @@ def _render_recent_outcomes(df: pd.DataFrame) -> None:
                 lambda v: f"{v:.1%}" if pd.notna(v) else ""
             )
 
-    st.dataframe(resolved, use_container_width=True, hide_index=True)
+    st.dataframe(resolved, width="stretch", hide_index=True)
 
 
 def render() -> None:

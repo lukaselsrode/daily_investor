@@ -167,6 +167,6 @@ def render() -> None:
             sp_df = pd.DataFrame({"parameter": list(spread.keys()), "spread": list(spread.values())})
             sp_df = sp_df.sort_values("spread", ascending=False)
             sp_df["flag"] = sp_df["spread"].apply(lambda x: "⚠️ unstable" if x > 0.05 else "✅")
-            st.dataframe(sp_df, use_container_width=True)
+            st.dataframe(sp_df, width="stretch")
 
         st.caption(result.summary())

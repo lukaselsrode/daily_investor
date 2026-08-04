@@ -41,7 +41,7 @@ def _render_csv_inventory() -> None:
             "Size": _file_size(p),
             "Modified": pd.Timestamp(p.stat().st_mtime, unit="s").strftime("%Y-%m-%d %H:%M"),
         })
-    st.dataframe(pd.DataFrame(rows), use_container_width=True)
+    st.dataframe(pd.DataFrame(rows), width="stretch")
     st.caption(f"{len(files)} CSV files, total {sum(p.stat().st_size for p in files) / 1024:.0f} KB")
 
 
@@ -58,7 +58,7 @@ def _render_snapshot_inventory() -> None:
     rows = []
     for p in snaps[:50]:
         rows.append({"File": p.name, "Size": _file_size(p)})
-    st.dataframe(pd.DataFrame(rows), use_container_width=True)
+    st.dataframe(pd.DataFrame(rows), width="stretch")
     if len(snaps) > 50:
         st.caption(f"Showing 50 of {len(snaps)} snapshots")
 
@@ -102,7 +102,7 @@ def _render_outcomes_health() -> None:
         for col in outcome_cols:
             non_null = df[col].notna().sum()
             fill_rows.append({"Column": col, "Filled": non_null, "Fill %": f"{non_null/total:.1%}"})
-        st.dataframe(pd.DataFrame(fill_rows), use_container_width=True)
+        st.dataframe(pd.DataFrame(fill_rows), width="stretch")
 
     # Date range
     if "decision_date" in df.columns:
@@ -131,7 +131,7 @@ def _render_reports_inventory() -> None:
             "Size": _file_size(p),
             "Modified": pd.Timestamp(p.stat().st_mtime, unit="s").strftime("%Y-%m-%d %H:%M"),
         })
-    st.dataframe(pd.DataFrame(rows), use_container_width=True)
+    st.dataframe(pd.DataFrame(rows), width="stretch")
 
 
 def render() -> None:

@@ -222,7 +222,7 @@ def render() -> None:
     # ── Score weights ─────────────────────────────────────────────────────
     st.subheader("Score Weights")
     df = _build_section_df("weights", visible, _score_weights)
-    st.dataframe(df, use_container_width=True)
+    st.dataframe(df, width="stretch")
 
     # ── Allocation ────────────────────────────────────────────────────────
     st.subheader("Allocation & ETF/Stock Split")
@@ -230,7 +230,7 @@ def render() -> None:
         "alloc", visible, _allocation,
         as_pct_keys={"index_pct", "min_index_pct", "min_candidate_allocation_pct", "max_order_pct_of_cash"},
     )
-    st.dataframe(df, use_container_width=True)
+    st.dataframe(df, width="stretch")
 
     st.caption(
         "⚠️ index_pct below min_index_pct means the live bot runs at an allocation "
@@ -244,7 +244,7 @@ def render() -> None:
         as_pct_keys={"top_percentile", "absolute_score_floor", "min_quality_score",
                      "min_momentum_score", "min_conditional_momentum_score"},
     )
-    st.dataframe(df, use_container_width=True)
+    st.dataframe(df, width="stretch")
 
     # ── Exit / Trim / Harvest ─────────────────────────────────────────────
     st.subheader("Exit / Trim / Harvest Thresholds")
@@ -255,7 +255,7 @@ def render() -> None:
                      "stop_loss_pct", "sell_weak_value_below", "profit_harvest_pct",
                      "hard_exit_score_below", "review_score_below"},
     )
-    st.dataframe(df, use_container_width=True)
+    st.dataframe(df, width="stretch")
 
     st.warning(
         "Backtest simulates a full exit at `take_profit_pct`. "
@@ -266,12 +266,12 @@ def render() -> None:
     # ── Turnover penalty ──────────────────────────────────────────────────
     st.subheader("Backtest / Turnover Penalty")
     df = _build_section_df("tp", visible, _turnover_penalty)
-    st.dataframe(df, use_container_width=True)
+    st.dataframe(df, width="stretch")
 
     # ── Frozen parameters summary ─────────────────────────────────────────
     st.subheader("Frozen Parameters")
     rows = [{"Config": lbl, "Frozen params": _frozen_params(c)} for lbl, c in visible]
-    st.dataframe(pd.DataFrame(rows).set_index("Config"), use_container_width=True)
+    st.dataframe(pd.DataFrame(rows).set_index("Config"), width="stretch")
 
     # ── Major diffs from current ──────────────────────────────────────────
     if len(visible) < 2:

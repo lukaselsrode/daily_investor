@@ -161,7 +161,7 @@ def render() -> None:
                 )
                 .properties(height=220)
             )
-            st.altair_chart(chart, use_container_width=True)
+            st.altair_chart(chart, width="stretch")
         except ImportError:
             st.caption("Install altair for distribution charts.")
 
@@ -170,7 +170,7 @@ def render() -> None:
         with st.expander("Sector distribution of selected candidates"):
             sec = selected["sector"].fillna("Unknown").value_counts().reset_index()
             sec.columns = ["Sector", "Count"]
-            st.dataframe(sec, use_container_width=True, hide_index=True)
+            st.dataframe(sec, width="stretch", hide_index=True)
 
     # ── 4. High-income / low-momentum exposure ────────────────────────────
     with st.expander("High-income / low-momentum analysis"):
@@ -194,7 +194,7 @@ def render() -> None:
             show_cols = [c for c in show_cols if c in excluded.columns]
             st.dataframe(
                 excluded[show_cols].sort_values("income_score", ascending=False).head(15),
-                use_container_width=True, hide_index=True,
+                width="stretch", hide_index=True,
             )
 
     # ── 4b. Peer-relative fallback-reason rollup ──────────────────────────
@@ -211,7 +211,7 @@ def render() -> None:
                     fb_rows.append({"factor": col, "fallback": str(reason), "n": int(n)})
             if fb_rows:
                 st.markdown("**Fallback-reason coverage**")
-                st.dataframe(pd.DataFrame(fb_rows), use_container_width=True, hide_index=True)
+                st.dataframe(pd.DataFrame(fb_rows), width="stretch", hide_index=True)
 
     # ── 5. Threshold sensitivity ──────────────────────────────────────────
     with st.expander("Threshold sensitivity"):
@@ -228,9 +228,9 @@ def render() -> None:
                 )
                 .properties(height=200)
             )
-            st.altair_chart(chart, use_container_width=True)
+            st.altair_chart(chart, width="stretch")
         except ImportError:
-            st.dataframe(sens, use_container_width=True, hide_index=True)
+            st.dataframe(sens, width="stretch", hide_index=True)
 
     # ── 6. A/B/C static pool comparison ──────────────────────────────────
     with st.expander("A / B / C pool comparison (static, no backtest)"):
@@ -268,7 +268,7 @@ def render() -> None:
                 "Avg Income": round(float(sel["income_score"].mean()), 3) if len(sel) else 0,
                 "Income>0 count": int((sel["income_score"] > 0).sum()) if len(sel) else 0,
             })
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
     # ── 7. Backtest comparison (slow, on demand) ──────────────────────────
     st.divider()
@@ -318,4 +318,4 @@ def render() -> None:
                 "Income trap excl.": p.n_income_trap_excluded,
             })
         st.markdown(f"**Benchmark return:** {bench:+.2%}")
-        st.dataframe(pd.DataFrame(rows_bt), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(rows_bt), width="stretch", hide_index=True)

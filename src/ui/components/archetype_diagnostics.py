@@ -72,7 +72,7 @@ def render_archetype_breakdown(sim_result) -> None:
             margin=dict(l=0, r=0, t=30, b=0),
             yaxis_title="PnL ($)",
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
     with col2:
         count_vals = [counts.get(a, 0) for a in all_archetypes]
@@ -87,7 +87,7 @@ def render_archetype_breakdown(sim_result) -> None:
             margin=dict(l=0, r=0, t=30, b=0),
             yaxis_title="Sells",
         )
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig2, width="stretch")
 
     # ── Summary table ──────────────────────────────────────────────────────
     import pandas as pd
@@ -130,7 +130,7 @@ def render_archetype_breakdown(sim_result) -> None:
             "Harvests":      ex.get("harvest_exit", 0),
             "Trims":         ex.get("trim_exit", 0),
         })
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
 
 def _table_fallback(pnl, counts, exits) -> None:
@@ -142,4 +142,4 @@ def _table_fallback(pnl, counts, exits) -> None:
             "Sells": counts.get(a, 0),
             "Total PnL": f"${pnl.get(a, 0.0):+,.2f}",
         })
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)

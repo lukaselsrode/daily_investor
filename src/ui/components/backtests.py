@@ -135,7 +135,7 @@ def _equity_chart(train_result, val_result=None, equity_override=None, bench_ove
     fig.update_yaxes(title_text="DD %",  row=2, col=1)
     fig.update_xaxes(title_text="Trading days", row=2, col=1)
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
 def _metric_cards(train, rpt, val=None):
@@ -239,7 +239,7 @@ def _detail_expander(rpt, train):
                         {"sector": list(p.sector_counts.keys()),
                          "candidates": list(p.sector_counts.values())}
                     ).sort_values("candidates", ascending=False),
-                    use_container_width=True, hide_index=True,
+                    width="stretch", hide_index=True,
                 )
 
     # Trade log
@@ -277,7 +277,7 @@ def _detail_expander(rpt, train):
                     "hold_d":    getattr(t, "hold_days", ""),
                     "partial":   "✓" if getattr(t, "is_partial", False) else "",
                 })
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
 
 # ---------------------------------------------------------------------------
@@ -439,7 +439,7 @@ def render() -> None:
             from backtesting.artifacts import list_saved_runs
             saved = list_saved_runs()
             if saved:
-                st.dataframe(pd.DataFrame(saved), use_container_width=True, hide_index=True)
+                st.dataframe(pd.DataFrame(saved), width="stretch", hide_index=True)
             else:
                 st.caption("No saved runs yet. Check 'Save artifacts' before running.")
         except Exception as exc:

@@ -107,7 +107,7 @@ def render() -> None:
         view = view.sort_values(sort_col, ascending=ascending)
 
     show_cols = [c for c in col_select if c in view.columns] or view.columns.tolist()
-    st.dataframe(view[show_cols], use_container_width=True, height=380)
+    st.dataframe(view[show_cols], width="stretch", height=380)
     st.download_button("⬇ Download filtered CSV", view[show_cols].to_csv(index=False),
                        file_name="export.csv", mime="text/csv")
 
@@ -132,7 +132,7 @@ def render() -> None:
             color_col = color_by if color_by != "(none)" and color_by in view.columns else None
             sdf = view[[x, y] + ([color_col] if color_col else [])].dropna()
             fig = px.scatter(sdf, x=x, y=y, color=color_col, opacity=0.6)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
         except ImportError:
             st.scatter_chart(scatter_df, x=x, y=y)
 
@@ -149,7 +149,7 @@ def render() -> None:
                 import plotly.express as px
                 fig = px.imshow(corr, text_auto=".2f", color_continuous_scale="RdBu_r",
                                 title="Factor score correlations")
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
             except ImportError:
                 st.dataframe(corr.style.background_gradient(cmap="RdBu", vmin=-1, vmax=1))
         else:
@@ -189,7 +189,7 @@ def _render_preset(df: pd.DataFrame, preset: str, num_cols: list[str]) -> None:
                              color="sector" if "sector" in df.columns else None,
                              hover_data=["symbol"] if "symbol" in df.columns else None,
                              opacity=0.6)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
         except ImportError:
             st.scatter_chart(df[["quality_score", "momentum_score"]].dropna(),
                              x="quality_score", y="momentum_score")
@@ -203,14 +203,14 @@ def _render_preset(df: pd.DataFrame, preset: str, num_cols: list[str]) -> None:
 
     elif preset == "Sector-level mean scores" and "sector" in df.columns and score_cols:
         tbl = df.groupby("sector")[score_cols].mean().reset_index()
-        st.dataframe(tbl.style.format({c: "{:.3f}" for c in score_cols}), use_container_width=True)
+        st.dataframe(tbl.style.format({c: "{:.3f}" for c in score_cols}), width="stretch")
 
     elif preset == "Correlation matrix (factor scores)" and len(score_cols) >= 2:
         corr = df[score_cols].corr()
         try:
             import plotly.express as px
             fig = px.imshow(corr, text_auto=".2f", color_continuous_scale="RdBu_r")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
         except ImportError:
             st.dataframe(corr)
 

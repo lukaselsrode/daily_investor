@@ -104,7 +104,7 @@ def _fan_chart(summary, use_active: bool = False) -> None:
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         hovermode="x unified",
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
 def _drawdown_fan_chart(summary, use_active: bool = False) -> None:
@@ -165,7 +165,7 @@ def _drawdown_fan_chart(summary, use_active: bool = False) -> None:
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         hovermode="x unified",
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
 def _distribution_chart(df, col: str, label: str, benchmark_col: str | None = None):
@@ -185,7 +185,7 @@ def _distribution_chart(df, col: str, label: str, benchmark_col: str | None = No
     fig.update_layout(barmode="overlay", xaxis_title=f"{label} (%)",
                       yaxis_title="Windows", height=280,
                       margin=dict(l=0, r=0, t=10, b=0), legend=dict(orientation="h"))
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
 def _scatter_chart(df):
@@ -206,7 +206,7 @@ def _scatter_chart(df):
     fig.add_vline(x=0, line_dash="dot", line_color="gray", opacity=0.5)
     fig.update_layout(xaxis_title="Sharpe", yaxis_title="Excess return (%)",
                       height=280, margin=dict(l=0, r=0, t=10, b=0))
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
 def _summary_cards(summary) -> None:
@@ -256,7 +256,7 @@ def _horizon_heatmap(scan_result) -> None:
     elif overfit > 0.2:
         st.info(f"Moderate horizon inconsistency (overfit score: {overfit:.0%}).")
 
-    st.dataframe(disp, use_container_width=True, hide_index=True)
+    st.dataframe(disp, width="stretch", hide_index=True)
 
 
 def _seed_heatmap(scan_result) -> None:
@@ -272,7 +272,7 @@ def _seed_heatmap(scan_result) -> None:
             continue
         disp[col] = disp[col].map(lambda v: f"{v:+.1%}" if not (v != v) else "—")
 
-    st.dataframe(disp, use_container_width=True, hide_index=True)
+    st.dataframe(disp, width="stretch", hide_index=True)
     st.caption(
         "Each row is a different random seed. Similar values across rows → "
         "results are seed-stable. Large variance → config is sensitive to luck."
@@ -552,7 +552,7 @@ def render() -> None:
                 disp[col] = disp[col].map("{:+.2%}".format)
         if "sharpe" in disp.columns:
             disp["sharpe"] = df["sharpe"].map("{:.3f}".format)
-        st.dataframe(disp, use_container_width=True, hide_index=True)
+        st.dataframe(disp, width="stretch", hide_index=True)
 
     with tab_cells:
         import pandas as pd
@@ -571,7 +571,7 @@ def render() -> None:
                 "median DD":     f"{sm.median_drawdown:.1%}",
             })
         if rows:
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
     with st.expander("Interpreting the robust score"):
         if is_active and display_summary.active_robust_score is not None:

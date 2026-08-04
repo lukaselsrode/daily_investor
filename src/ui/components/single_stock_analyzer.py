@@ -72,7 +72,7 @@ def _render_price_table(res) -> None:
             "20d ann vol": _pct(t.vol20_ann),
         })
     if rows:
-        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
 
 
 def _render_factors(res) -> None:
@@ -80,7 +80,7 @@ def _render_factors(res) -> None:
     if not res.cached_factors:
         st.caption("No cached agg_data row for this symbol (run fetch-data to populate).")
         return
-    st.dataframe(pd.DataFrame([res.cached_factors]), hide_index=True, use_container_width=True)
+    st.dataframe(pd.DataFrame([res.cached_factors]), hide_index=True, width="stretch")
 
 
 def _render_fundamentals(res) -> None:
@@ -100,7 +100,7 @@ def _render_fundamentals(res) -> None:
         else:
             disp[k] = "n/a" if v is None else str(v)
     with st.expander("yfinance fundamentals / analyst snapshot", expanded=False):
-        st.dataframe(pd.DataFrame([disp]).T.rename(columns={0: "value"}), use_container_width=True)
+        st.dataframe(pd.DataFrame([disp]).T.rename(columns={0: "value"}), width="stretch")
 
 
 def _render_news(res) -> None:
@@ -157,7 +157,7 @@ def _render_leverage(res) -> None:
             "daily-reset 2x synthetic": _pct(d.get("daily_2x_synth")),
             "tracking gap": _pct(d.get("tracking_gap")),
         } for label, d in lev.periods.items()]
-        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
     st.warning(
         "A daily-reset leveraged ETF compounds daily and is path-dependent: over multi-day "
         "horizons it can diverge sharply from 2× the underlying's move (the 'tracking gap' "
@@ -175,7 +175,7 @@ def _render_options(res) -> None:
         for side in ("calls_top_oi", "puts_top_oi"):
             if opt.get(side):
                 st.markdown(f"**{side.replace('_', ' ')}**")
-                st.dataframe(pd.DataFrame(opt[side]), hide_index=True, use_container_width=True)
+                st.dataframe(pd.DataFrame(opt[side]), hide_index=True, width="stretch")
 
 
 def _render_position_helper(res) -> None:

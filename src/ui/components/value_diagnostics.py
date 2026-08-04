@@ -88,7 +88,7 @@ def render() -> None:
             st.bar_chart(fmt_bin_index(s.value_counts(bins=30, sort=False).sort_index()))
         with c_pct:
             st.caption("Percentile table")
-            st.dataframe(_percentile_table(s), use_container_width=True, hide_index=True)
+            st.dataframe(_percentile_table(s), width="stretch", hide_index=True)
 
     # (Legacy v2/raw side-by-side comparison removed — value_score_raw is no longer
     # written by any scorer.)
@@ -115,11 +115,11 @@ def render() -> None:
                 color="sector",
             )
             fig.update_layout(showlegend=False, xaxis_tickangle=-30)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
         except ImportError:
             st.bar_chart(sector_stats["median"])
 
-        st.dataframe(sector_stats, use_container_width=True)
+        st.dataframe(sector_stats, width="stretch")
 
     # ── 3. Outlier table ─────────────────────────────────────────────────────
     st.divider()
@@ -137,11 +137,11 @@ def render() -> None:
         with co1:
             st.markdown(f"**Top {outlier_pct}% (highest value_score)** — genuinely cheap or distress?")
             top_df = df[df["value_score"] >= hi_cut][display_cols].sort_values("value_score", ascending=False)
-            st.dataframe(top_df.reset_index(drop=True), use_container_width=True)
+            st.dataframe(top_df.reset_index(drop=True), width="stretch")
         with co2:
             st.markdown(f"**Bottom {outlier_pct}% (lowest value_score)** — expensive or no-data penalty?")
             bot_df = df[df["value_score"] <= lo_cut][display_cols].sort_values("value_score")
-            st.dataframe(bot_df.reset_index(drop=True), use_container_width=True)
+            st.dataframe(bot_df.reset_index(drop=True), width="stretch")
 
     # ── 4. Decile analysis ───────────────────────────────────────────────────
     st.divider()
@@ -182,11 +182,11 @@ def render() -> None:
                     labels={"decile": "Value decile (1=cheapest)", "avg_return": f"Avg {ret_col}"},
                 )
                 fig.add_hline(y=0, line_dash="dot", line_color="gray")
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
             except ImportError:
                 st.bar_chart(decile_agg["avg_return"])
 
-            st.dataframe(decile_agg, use_container_width=True)
+            st.dataframe(decile_agg, width="stretch")
 
             # IC
             ic = decile_df[["value_score", ret_col]].corr(method="spearman").iloc[0, 1]
@@ -217,10 +217,10 @@ def render() -> None:
                 title=f"Factor correlation matrix ({corr_method})",
                 aspect="auto",
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
         except ImportError:
             st.dataframe(corr.style.background_gradient(cmap="RdBu", vmin=-1, vmax=1),
-                         use_container_width=True)
+                         width="stretch")
 
         # Highlight value_score correlations explicitly
         if "value_score" in corr.columns:
@@ -235,7 +235,7 @@ def render() -> None:
             vc["interpretation"] = vc["correlation"].apply(
                 lambda r: "positive (aligned)" if r > 0.1 else ("negative (opposed)" if r < -0.1 else "weak / neutral")
             )
-            st.dataframe(vc, use_container_width=True, hide_index=True)
+            st.dataframe(vc, width="stretch", hide_index=True)
 
     # ── 6. Peer-relative diagnostics (fallback coverage) ──────────────────────
     _peer_cols = [c for c in (
@@ -261,7 +261,7 @@ def render() -> None:
                 ) if c in df.columns]
                 st.markdown("**Top 20 by composite (peer leaders)**")
                 top = df.sort_values("value_metric", ascending=False).head(20)
-                st.dataframe(top[lead_cols].reset_index(drop=True), use_container_width=True)
+                st.dataframe(top[lead_cols].reset_index(drop=True), width="stretch")
 
         with peer_tab_fb:
             fb_rows = []
@@ -271,7 +271,7 @@ def render() -> None:
                     for reason, n in df[fb_col].value_counts(dropna=False).items():
                         fb_rows.append({"factor": fb_col, "fallback": str(reason), "n": int(n)})
             if fb_rows:
-                st.dataframe(pd.DataFrame(fb_rows), use_container_width=True, hide_index=True)
+                st.dataframe(pd.DataFrame(fb_rows), width="stretch", hide_index=True)
                 st.caption(
                     "industry = primary group had ≥ min_group_size peers; "
                     "sector / market indicate fallback was used; legacy_checklist = "

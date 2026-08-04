@@ -282,7 +282,7 @@ each run. There is no mechanism to sell ETFs to fund the active sleeve.
         df_hist = df_hist.set_index("Date")
         # Add target line
         df_hist["Target %"] = index_pct_target * 100
-        st.line_chart(df_hist, use_container_width=True)
+        st.line_chart(df_hist, width="stretch")
 
     # Capital flow diagram
     st.markdown("**Active sleeve funding sources (per run)**")
@@ -419,14 +419,14 @@ def _render_position_breakdown(holdings: pd.DataFrame, etfs: list[str]) -> None:
         if not etf_df.empty:
             etf_df[equity_col] = etf_df[equity_col].map("${:,.0f}".format)
             st.dataframe(etf_df.rename(columns={equity_col: "Equity"}),
-                         use_container_width=True, hide_index=True)
+                         width="stretch", hide_index=True)
     with col2:
         st.markdown(f"**Active Sleeve** ({len(active_df)} positions)")
         if not active_df.empty:
             top = active_df.head(20)
             top[equity_col] = top[equity_col].map("${:,.0f}".format)
             st.dataframe(top.rename(columns={equity_col: "Equity"}),
-                         use_container_width=True, hide_index=True)
+                         width="stretch", hide_index=True)
             if len(active_df) > 20:
                 st.caption(f"… and {len(active_df) - 20} more positions")
 
@@ -461,7 +461,7 @@ def _render_capital_sources(events: pd.DataFrame) -> None:
         .sort_values("Total ($)", ascending=False)
     )
     summary["Total ($)"] = summary["Total ($)"].map("${:,.0f}".format)
-    st.dataframe(summary, use_container_width=True, hide_index=True)
+    st.dataframe(summary, width="stretch", hide_index=True)
 
     with st.expander("View all events"):
         display_cols = ["event_date", "event_type", "source_symbol", "destination",
@@ -469,7 +469,7 @@ def _render_capital_sources(events: pd.DataFrame) -> None:
         show = recent[[c for c in display_cols if c in recent.columns]].sort_values(
             "event_date", ascending=False
         )
-        st.dataframe(show, use_container_width=True, hide_index=True)
+        st.dataframe(show, width="stretch", hide_index=True)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -564,7 +564,7 @@ def _render_concentration_diagnostics() -> None:
                 font=dict(color="#cdd6f4", size=10),
                 showlegend=False,
             )
-            st.plotly_chart(fig, use_container_width=True, key="conc_cluster_bar")
+            st.plotly_chart(fig, width="stretch", key="conc_cluster_bar")
         else:
             st.caption("No cluster data available.")
 
@@ -600,7 +600,7 @@ def _render_concentration_diagnostics() -> None:
                 font=dict(color="#cdd6f4", size=10),
                 showlegend=False,
             )
-            st.plotly_chart(fig2, use_container_width=True, key="conc_sector_bar")
+            st.plotly_chart(fig2, width="stretch", key="conc_sector_bar")
         else:
             st.caption("No sector data available.")
 

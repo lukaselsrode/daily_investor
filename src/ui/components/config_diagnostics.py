@@ -459,7 +459,7 @@ def render() -> None:
                 "Problem summary": f.problem[:120] + ("…" if len(f.problem) > 120 else ""),
                 "Recommendation": f.recommendation[:100] + ("…" if len(f.recommendation) > 100 else ""),
             })
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
     # ── Detailed findings ─────────────────────────────────────────────────
     st.subheader("Finding Details")
@@ -536,7 +536,7 @@ def render() -> None:
         },
     ]
     df = pd.DataFrame(rows)
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.dataframe(df, width="stretch", hide_index=True)
 
     # ── Tuner bound conflicts ─────────────────────────────────────────────
     st.divider()
@@ -588,7 +588,7 @@ def render() -> None:
             "Frozen":      "Yes" if is_frozen else "No",
         })
 
-    st.dataframe(pd.DataFrame(bound_rows), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(bound_rows), width="stretch", hide_index=True)
 
     # ── Recommended patch ────────────────────────────────────────────────
     st.divider()

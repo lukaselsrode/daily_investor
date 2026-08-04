@@ -45,6 +45,7 @@ _SECTOR_NORMALIZATION = {
     "Energy Minerals": "Energy",
     "Non-Energy Minerals": "Basic Materials",
     "Non Energy Minerals": "Basic Materials",   # spelling variant in source data
+    "Consumer Non Durables": "Consumer Non-Durables",   # spelling variant in source data
     "Process Industries": "Basic Materials",
     "Producer Manufacturing": "Industrials",
     "Industrial Services": "Industrials",

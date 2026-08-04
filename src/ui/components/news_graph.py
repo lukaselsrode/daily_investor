@@ -161,7 +161,7 @@ def _draw_network(edges: pd.DataFrame, feats: pd.DataFrame, color_by: str,
     fig.update_layout(title=title, height=620, showlegend=bool(hx),
                       xaxis=dict(visible=False), yaxis=dict(visible=False),
                       margin=dict(l=10, r=10, t=40, b=10))
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
 def _draw_ego_timelapse(
@@ -272,7 +272,7 @@ def _draw_ego_timelapse(
             } for d in ordered_dates],
         }],
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
 def render() -> None:
@@ -311,7 +311,7 @@ def render() -> None:
                                   yaxis2=dict(title="edges", overlaying="y", side="right"),
                                   margin=dict(l=10, r=10, t=40, b=10),
                                   legend=dict(orientation="h"))
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
             with c2:
                 fig = go.Figure()
                 fig.add_scatter(x=ev["date"], y=ev["mean_sentiment"], name="mean sentiment")
@@ -320,14 +320,14 @@ def render() -> None:
                 fig.update_layout(title="Sentiment & disagreement over time", height=320,
                                   margin=dict(l=10, r=10, t=40, b=10),
                                   legend=dict(orientation="h"))
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
             st.caption(
                 "⚠️ Research note: aggregate graph sentiment showed a *suggestive* "
                 "contrarian tie to forward market returns (high mood → softer next-week "
                 "returns) but n≈13 dates — NOT confirmed. Watch it accumulate; do not trade it yet."
             )
             with st.expander("Evolution table"):
-                st.dataframe(ev, use_container_width=True, hide_index=True)
+                st.dataframe(ev, width="stretch", hide_index=True)
 
     # ── Sector breakdown ──────────────────────────────────────────────────────
     with tabs[1]:
@@ -369,7 +369,7 @@ def render() -> None:
             fig_att.update_layout(height=40 * min(top_n, len(pivot_att)) + 80,
                                   margin=dict(l=10, r=10, t=10, b=60))
             fig_att.update_xaxes(tickangle=-45)
-            st.plotly_chart(fig_att, use_container_width=True)
+            st.plotly_chart(fig_att, width="stretch")
 
             # ── Chart 2: Sentiment heatmap (which sectors are positive/negative) ──
             st.subheader("Mean sentiment by sector over time")
@@ -392,7 +392,7 @@ def render() -> None:
             fig_sent.update_layout(height=40 * min(top_n, len(pivot_sent)) + 80,
                                    margin=dict(l=10, r=10, t=10, b=60))
             fig_sent.update_xaxes(tickangle=-45)
-            st.plotly_chart(fig_sent, use_container_width=True)
+            st.plotly_chart(fig_sent, width="stretch")
 
             # ── Chart 3: Cross-sector ratio over time ───────────────────────────
             st.subheader("Cross-sector narrative ratio over time")
@@ -422,7 +422,7 @@ def render() -> None:
                                     yaxis=dict(title="Cross-sector ratio", range=[0, 1]),
                                     xaxis=dict(type="category", categoryorder="array",
                                                categoryarray=all_dates, tickangle=-45))
-            st.plotly_chart(fig_cross, use_container_width=True)
+            st.plotly_chart(fig_cross, width="stretch")
 
             # ── Latest snapshot snapshot table ────────────────────────────────
             latest_date = sec_df["date"].max()
@@ -439,7 +439,7 @@ def render() -> None:
                         "intra_edges": "intra-edges", "cross_edges": "cross-edges",
                         "cross_ratio": "cross ratio", "attention_share": "attention %",
                     }),
-                    use_container_width=True, hide_index=True,
+                    width="stretch", hide_index=True,
                 )
 
     # ── Network ───────────────────────────────────────────────────────────────
@@ -527,10 +527,10 @@ def render() -> None:
                     margin=dict(l=10, r=10, t=40, b=60),
                     legend=dict(orientation="h"),
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
 
                 with st.expander("Evolution table"):
-                    st.dataframe(summary, use_container_width=True, hide_index=True)
+                    st.dataframe(summary, width="stretch", hide_index=True)
 
                 st.subheader("Linked article evidence by date")
                 st.caption(
@@ -550,12 +550,12 @@ def render() -> None:
                             try:
                                 st.dataframe(
                                     arts[cols],
-                                    use_container_width=True,
+                                    width="stretch",
                                     hide_index=True,
                                     column_config={"link": st.column_config.LinkColumn("link")},
                                 )
                             except Exception:
-                                st.dataframe(arts[cols], use_container_width=True, hide_index=True)
+                                st.dataframe(arts[cols], width="stretch", hide_index=True)
         else:
             cdate, _ = st.columns([2, 3])
             with cdate:
@@ -570,4 +570,4 @@ def render() -> None:
                     max_nodes=200,
                 )
                 st.dataframe(e.sort_values("weight", ascending=False),
-                             use_container_width=True, hide_index=True)
+                             width="stretch", hide_index=True)

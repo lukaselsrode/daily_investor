@@ -111,7 +111,7 @@ def _render_leaderboard(df: pd.DataFrame) -> None:
                  "t-stat", "Tail IC (p25)", "Stability", "n", "Verdict"]
     st.dataframe(
         display[cols_show].reset_index(drop=True),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 
@@ -165,7 +165,7 @@ def _render_timeseries(ts: pd.DataFrame, selected_features: list[str]) -> None:
         xaxis=dict(gridcolor="#2d3436"),
         yaxis=dict(gridcolor="#2d3436", zeroline=False),
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +260,7 @@ def _render_decile_comparison(best_feature: str, horizon: int) -> None:
                 xaxis=dict(gridcolor="#2d3436"),
                 yaxis=dict(gridcolor="#2d3436", zeroline=False),
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
 
 # ---------------------------------------------------------------------------

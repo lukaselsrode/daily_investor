@@ -65,7 +65,7 @@ def render() -> None:
                     if sym_filter != "All":
                         df = df[df["symbol"] == sym_filter]
 
-                st.dataframe(df, use_container_width=True)
+                st.dataframe(df, width="stretch")
                 st.download_button("⬇ Download", df.to_csv(index=False), file_name=chosen,
                                    key=f"dl_{prefix}_{chosen}")
             except Exception as exc:
@@ -86,7 +86,7 @@ def render() -> None:
                 if sym_filter != "All" and "symbol" in ndf.columns:
                     ndf = ndf[ndf["symbol"] == sym_filter]
                 display_cols = [c for c in ["symbol", "title", "pub_date", "publisher"] if c in ndf.columns]
-                st.dataframe(ndf[display_cols] if display_cols else ndf, use_container_width=True)
+                st.dataframe(ndf[display_cols] if display_cols else ndf, width="stretch")
             except Exception as exc:
                 st.error(str(exc))
     else:

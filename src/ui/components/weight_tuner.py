@@ -101,7 +101,7 @@ def _equity_chart_simple(equity_curve: np.ndarray, bench_equity: np.ndarray):
     fig.add_hline(y=100, line_dash="dot", line_color="gray", opacity=0.3)
     fig.update_layout(height=260, margin=dict(l=0, r=0, t=10, b=0),
                       legend=dict(orientation="h"), hovermode="x unified")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
 def _robust_score_bar_chart(df, active_param_names: list[str] | None = None):
@@ -144,7 +144,7 @@ def _robust_score_bar_chart(df, active_param_names: list[str] | None = None):
         xaxis_title="Robust score",
         yaxis=dict(autorange="reversed"),
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +236,7 @@ def _weight_change_bar(
         yaxis=dict(title="Weight", range=[0, 1.0]),
         legend=dict(orientation="h"),
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
 def _momentum_weight_bar(
@@ -272,7 +272,7 @@ def _momentum_weight_bar(
         yaxis=dict(title="Sub-weight"),
         legend=dict(orientation="h"),
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
 def _multi_equity_chart(named_sims: list[tuple[str, object, str]]) -> None:
@@ -310,7 +310,7 @@ def _multi_equity_chart(named_sims: list[tuple[str, object, str]]) -> None:
         yaxis=dict(title="Growth (indexed to 100)"),
         legend=dict(orientation="h"), hovermode="x unified",
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
 # ---------------------------------------------------------------------------
@@ -755,7 +755,7 @@ Config bounds from `tuning.parameter_bounds` are respected when enabled.
         for col, f in fmt_cols.items():
             if col in disp.columns:
                 disp[col] = df[col].map(f.format)
-        st.dataframe(disp, use_container_width=True, hide_index=True)
+        st.dataframe(disp, width="stretch", hide_index=True)
         best = rows[0] if rows else None
         if best:
             import yaml as _yaml
@@ -812,7 +812,7 @@ Config bounds from `tuning.parameter_bounds` are respected when enabled.
     if cmp_df is not None:
         col1, col2 = st.columns([1, 2])
         with col1:
-            st.dataframe(cmp_df, use_container_width=True, hide_index=True)
+            st.dataframe(cmp_df, width="stretch", hide_index=True)
         with col2:
             if result.best_candidate:
                 import plotly.graph_objects as go
@@ -836,7 +836,7 @@ Config bounds from `tuning.parameter_bounds` are respected when enabled.
                                          textposition="outside"))
                 fig.update_layout(barmode="group", height=260, margin=dict(l=0, r=0, t=10, b=0),
                                   yaxis_title="Value", legend=dict(orientation="h"))
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
 
     # ── Horizon / seed heatmaps for the best candidate ────────────────────
     _best_scan = getattr(result.best_candidate, "scan_result", None) if result.best_candidate else None
@@ -866,7 +866,7 @@ Config bounds from `tuning.parameter_bounds` are respected when enabled.
                 disp["% beating"] = disp["% beating"].map(lambda v: f"{v:.0%}" if not (v != v) else "—")
             if "horizon (days)" in disp.columns:
                 disp["horizon (days)"] = disp["horizon (days)"].astype(str) + "d"
-            st.dataframe(disp, use_container_width=True, hide_index=True)
+            st.dataframe(disp, width="stretch", hide_index=True)
         except Exception as exc:
             st.caption(f"Could not render horizon heatmap: {exc}")
 
@@ -882,7 +882,7 @@ Config bounds from `tuning.parameter_bounds` are respected when enabled.
                     disp_sd[col] = disp_sd[col].map(
                         lambda v: f"{v:+.1%}" if not (v != v) else "—"
                     )
-                st.dataframe(disp_sd, use_container_width=True, hide_index=True)
+                st.dataframe(disp_sd, width="stretch", hide_index=True)
                 st.caption(
                     "Each row is a random seed. Similar values across rows → results are seed-stable; "
                     "large variance → config may be sensitive to luck."
@@ -904,7 +904,7 @@ Config bounds from `tuning.parameter_bounds` are respected when enabled.
             for col, f in fmt.items():
                 if col in disp.columns:
                     disp[col] = df[col].map(f.format)
-            st.dataframe(disp, use_container_width=True, hide_index=True)
+            st.dataframe(disp, width="stretch", hide_index=True)
 
     st.subheader("Export")
     yaml_snippet = result.best_weights_yaml()
@@ -1216,7 +1216,7 @@ def _render_scipy_mode(scope: str = "overall_strategy", preset: str | None = Non
         disp["Current"]        = df["Current"].map("{:.4f}".format)
         disp["Optimized"]      = df["Optimized"].map("{:.4f}".format)
         disp["Δ Optimized"]    = df["Δ Optimized"].map("{:+.4f}".format)
-        st.dataframe(disp, use_container_width=True, hide_index=True)
+        st.dataframe(disp, width="stretch", hide_index=True)
 
         # ── Horizon / seed heatmaps for the optimized config ──────────
         scan = sp.get("scan_result")
@@ -1246,7 +1246,7 @@ def _render_scipy_mode(scope: str = "overall_strategy", preset: str | None = Non
                     disp_h["% beating"] = disp_h["% beating"].map(lambda v: f"{v:.0%}" if not (v != v) else "—")
                 if "horizon (days)" in disp_h.columns:
                     disp_h["horizon (days)"] = disp_h["horizon (days)"].astype(str) + "d"
-                st.dataframe(disp_h, use_container_width=True, hide_index=True)
+                st.dataframe(disp_h, width="stretch", hide_index=True)
             except Exception as exc:
                 st.caption(f"Could not render horizon heatmap: {exc}")
 
@@ -1261,7 +1261,7 @@ def _render_scipy_mode(scope: str = "overall_strategy", preset: str | None = Non
                         disp_sd[col] = disp_sd[col].map(
                             lambda v: f"{v:+.1%}" if not (v != v) else "—"
                         )
-                    st.dataframe(disp_sd, use_container_width=True, hide_index=True)
+                    st.dataframe(disp_sd, width="stretch", hide_index=True)
                     st.caption(
                         "Each row is a random seed. Similar values across rows → results are seed-stable; "
                         "large variance → config may be sensitive to luck."
@@ -1340,14 +1340,14 @@ def _render_scipy_mode(scope: str = "overall_strategy", preset: str | None = Non
         for col in delta_cols:
             if col in disp.columns:
                 disp[col] = df[col].map("{:+.4f}".format)
-        st.dataframe(disp, use_container_width=True, hide_index=True)
+        st.dataframe(disp, width="stretch", hide_index=True)
 
         # --- Stability analysis ---
         with st.expander("Parameter stability (Sharpe vs Calmar spread)"):
             spread = result.param_spread
             sp_df = pd.DataFrame({"parameter": list(spread.keys()), "spread": list(spread.values())})
             sp_df["flag"] = sp_df["spread"].apply(lambda x: "⚠️ unstable" if x > 0.05 else "✅")
-            st.dataframe(sp_df.sort_values("spread", ascending=False), use_container_width=True, hide_index=True)
+            st.dataframe(sp_df.sort_values("spread", ascending=False), width="stretch", hide_index=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1463,12 +1463,12 @@ def _render_auto_tune_all() -> None:
     m4.metric("Clusters accepted", f"{len(staged.accepted_clusters)}/{len(r['clusters'])}")
 
     st.subheader("Staged trace")
-    st.dataframe(staged.trace_df(), use_container_width=True, hide_index=True)
+    st.dataframe(staged.trace_df(), width="stretch", hide_index=True)
 
     hdf = validation.get("horizon_df")
     if hdf is not None and not hdf.empty:
         st.subheader("Per-horizon robustness (validated config)")
-        st.dataframe(hdf, use_container_width=True, hide_index=True)
+        st.dataframe(hdf, width="stretch", hide_index=True)
 
     # Parameter changes table (tuned slots = union of selected clusters).
     st.subheader("Parameter changes")
@@ -1481,7 +1481,7 @@ def _render_auto_tune_all() -> None:
     pdf["Current"] = pdf["Current"].map("{:.4f}".format)
     pdf["Tuned"] = pdf["Tuned"].map("{:.4f}".format)
     pdf["Δ Tuned"] = pdf["Δ Tuned"].map("{:+.4f}".format)
-    st.dataframe(pdf, use_container_width=True, hide_index=True)
+    st.dataframe(pdf, width="stretch", hide_index=True)
 
     # Apply — gated by config-write permission AND a confirmed result.
     from ui.utils import ui_config

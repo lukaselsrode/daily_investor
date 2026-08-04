@@ -103,7 +103,7 @@ def render() -> None:
         st.dataframe(
             stability_df.sort_values("instability_score", ascending=False)
                          .style.apply(_color_row, axis=1),
-            use_container_width=True,
+            width="stretch",
         )
 
     # Heatmaps
@@ -112,7 +112,7 @@ def render() -> None:
     if heatmaps_found:
         st.subheader("Heatmaps")
         for img_path in sorted(heatmaps_found):
-            st.image(str(img_path), caption=img_path.name, use_container_width=True)
+            st.image(str(img_path), caption=img_path.name, width="stretch")
 
     # Robustness report text
     txt = _load_robustness_txt(out_dir)

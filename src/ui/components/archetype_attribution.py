@@ -93,7 +93,7 @@ def render() -> None:
             "Avg hold (days)":    _f1(m.get("avg_holding_days")),
         })
 
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
     # ── Per-archetype detail cards ────────────────────────────────────────────
     st.divider()
@@ -141,6 +141,6 @@ def render() -> None:
 
     st.dataframe(
         sub[display_cols].sort_values("decision_date", ascending=False),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
