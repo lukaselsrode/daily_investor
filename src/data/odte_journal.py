@@ -68,8 +68,15 @@ EXECUTION_SAFETY_EVENT_TYPES = ("execution_lease_issued", "execution_lease_consu
                                 "entry_order_pending", "entry_order_cancelled_stale",
                                 "execution_safety_incident")
 
-_ENTRY_EVENTS = {"entry_decision", "order_filled"}
-_EXIT_EVENTS = {"exit_decision", "order_closed"}
+# FILL VOCABULARY (2026-08-04): the live controller journals `entry_fill`/`exit_fill` while the
+# repo's original schema said `order_filled`. Every cadence/telemetry counter must accept BOTH —
+# on 2026-08-03 the day's real fill was an `entry_fill`, so an `order_filled`-only counter read
+# zero trades and would have left the 2/day budget and the zero-trade tripwire non-functional.
+ENTRY_FILL_EVENTS = ("order_filled", "entry_fill")
+EXIT_FILL_EVENTS = ("order_closed", "exit_fill", "exit_decision")
+
+_ENTRY_EVENTS = {"entry_decision", *ENTRY_FILL_EVENTS}
+_EXIT_EVENTS = {"exit_decision", "order_closed", "exit_fill"}
 
 _BLOCKS = "▁▂▃▄▅▆▇█"
 
@@ -354,7 +361,7 @@ def green_day_winning_tier(events: list[dict] | None, active_trade: dict | None 
     entry_events = [
         e for e in (events or [])
         if isinstance(e, dict)
-        and e.get("event_type") in ("entry_decision", "execution_lease_issued", "order_filled")
+        and e.get("event_type") in ("entry_decision", "execution_lease_issued", *ENTRY_FILL_EVENTS)
         and _et_date(e.get("ts")) == today
     ]
 
@@ -427,7 +434,7 @@ def daily_trade_budget(events: list[dict] | None, now: datetime | None = None) -
         if not isinstance(e, dict) or _et_date(e.get("ts")) != today:
             continue
         et = e.get("event_type")
-        if et == "order_filled":
+        if et in ENTRY_FILL_EVENTS:
             entry_keys.add(str(e.get("trade_id") or e.get("option_id")
                                or f"event#{e.get('seq', i)}"))
         elif et in _EXIT_EVENTS:
@@ -475,7 +482,7 @@ def weekly_telemetry(events: list[dict] | None, now: datetime | None = None) -> 
         if dt is None or dt.astimezone(ET).isocalendar()[:2] != (year, week):
             continue
         et = e.get("event_type")
-        if et == "order_filled":
+        if et in ENTRY_FILL_EVENTS:
             trade_keys.add(str(e.get("trade_id") or e.get("option_id")
                                or f"event#{e.get('seq', i)}"))
         elif et == "entry_decision":

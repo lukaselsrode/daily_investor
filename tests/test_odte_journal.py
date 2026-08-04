@@ -951,3 +951,58 @@ def test_entry_gate_and_lease_events_carry_tier():
                                           "anchor_quote": 0.63}}
     le = oj.event_from_execution_lease(auth)
     assert le["tier"] == "a_plus" and le["anchor_quote"] == 0.63
+
+
+# --- LIVE fill vocabulary (2026-08-04 regression) -----------------------------------------------
+# The live controller journals `entry_fill`/`exit_fill`; the repo schema originally said
+# `order_filled`. An order_filled-only counter read ZERO trades on 2026-08-03 (a real traded day),
+# which would have left the daily budget cap and the zero-trade tripwire non-functional.
+
+def _live_vocab_day(now, trade_id="spy-20260803-756c-scalp-114245"):
+    from datetime import timedelta
+    return [
+        {"event_type": "execution_lease_issued", "trade_id": trade_id, "underlying": "SPY",
+         "option_id": "opt-756c", "tier": "a_plus", "authorized": True,
+         "ts": (now - timedelta(hours=3)).isoformat()},
+        {"event_type": "entry_fill", "trade_id": trade_id, "underlying": "SPY",
+         "option_id": "opt-756c", "ts": (now - timedelta(hours=3)).isoformat()},
+        {"event_type": "exit_fill", "trade_id": trade_id, "underlying": "SPY",
+         "option_id": "opt-756c", "ts": (now - timedelta(hours=2)).isoformat()},
+        {"event_type": "order_closed", "trade_id": trade_id, "underlying": "SPY",
+         "option_id": "opt-756c", "realized_pnl": 9.0,
+         "ts": (now - timedelta(hours=2)).isoformat()},
+    ]
+
+
+def test_daily_budget_counts_live_entry_fill_vocabulary():
+    from datetime import datetime, timezone
+    now = datetime(2026, 8, 3, 20, 0, tzinfo=timezone.utc)
+    b = oj.daily_trade_budget(_live_vocab_day(now), now=now)
+    assert b["trades_today"] == 1, "an entry_fill IS a trade — the budget must decrement"
+    assert b["remaining"] == b["budget"] - 1
+    assert b["cooldown_active"] is False          # closed 2h ago
+
+
+def test_weekly_telemetry_counts_live_entry_fill_vocabulary():
+    from datetime import datetime, timezone
+    now = datetime(2026, 8, 3, 20, 0, tzinfo=timezone.utc)
+    wk = oj.weekly_telemetry(_live_vocab_day(now), now=now)
+    assert wk["trades_this_week"] == 1
+    assert wk["tripwire"]["fired"] is False, "a traded week must not fire the zero-trade tripwire"
+
+
+def test_winning_tier_joins_live_entry_fill_vocabulary():
+    from datetime import datetime, timezone
+    now = datetime(2026, 8, 3, 20, 0, tzinfo=timezone.utc)
+    wt = oj.green_day_winning_tier(_live_vocab_day(now), now=now)
+    assert wt["winning_tier"] == "a_plus"
+    assert wt["trades"][0]["tier_source"] != "default_full"
+
+
+def test_both_fill_spellings_dedupe_to_one_trade():
+    from datetime import datetime, timedelta, timezone
+    now = datetime(2026, 8, 3, 20, 0, tzinfo=timezone.utc)
+    events = _live_vocab_day(now) + [
+        {"event_type": "order_filled", "trade_id": "spy-20260803-756c-scalp-114245",
+         "option_id": "opt-756c", "ts": (now - timedelta(hours=3)).isoformat()}]
+    assert oj.daily_trade_budget(events, now=now)["trades_today"] == 1
