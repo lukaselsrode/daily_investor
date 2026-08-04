@@ -1,2 +1,0 @@
-Read-only Robinhood MCP option quote lane. Do not review/place/cancel orders.
-Fetch HOOD 2026-06-26 calls and puts at strikes 95,96,97,98,99,100, plus current HOOD equity quote. Return JSON only: {ok, hood_last, rows:[{chain_symbol:"HOOD", expiration:"2026-06-26", strike, type, bid, ask, mark, delta, gamma, implied_volatility, open_interest, volume, updated_at}], errors}.
