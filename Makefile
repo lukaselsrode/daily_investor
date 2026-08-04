@@ -264,6 +264,14 @@ odte-execution-authorize:    ## Mint/refuse a single-use 0DTE execution lease �
 odte-convert:                ## Atomic confirm→gate→lease conversion in ONE process — NO orders (CANDIDATE=; MARKET=; BROKER=; CONTRACT=; GAMMA=; POLICY=; NO_WRITE=1; NO_JOURNAL=1; JSON=1)
 	@$(DI) odte-convert $(if $(CANDIDATE),--candidate $(CANDIDATE),) $(if $(MARKET),--market $(MARKET),) $(if $(BROKER),--broker $(BROKER),) $(if $(CONTRACT),--contract $(CONTRACT),) $(if $(GAMMA),--gamma $(GAMMA),) $(if $(POLICY),--policy $(POLICY),) $(if $(STATE_DIR),--state-dir $(STATE_DIR),) $(if $(JOURNAL_PATH),--journal-path $(JOURNAL_PATH),) $(if $(NO_WRITE),--no-write,) $(if $(NO_JOURNAL),--no-journal,) $(if $(JSON),--json,)
 
+# Deterministic data/odte sweep — the ONLY sanctioned cleanup (hardcoded keep-list protects the
+# canonical loop state; ad-hoc mv sweeps are forbidden). Dry-run unless APPLY=1.
+#   make odte-cleanup            # dry-run: list what would be swept
+#   make odte-cleanup APPLY=1 PRUNE_SCRAPE=1
+.PHONY: odte-cleanup
+odte-cleanup:                ## Sweep non-canonical data/odte artifacts — dry-run by default (APPLY=1; PRUNE_SCRAPE=1; SCRAPE_KEEP=N; JSON=1)
+	@$(DI) odte-cleanup $(if $(APPLY),--apply,) $(if $(PRUNE_SCRAPE),--prune-scrape,) $(if $(SCRAPE_KEEP),--scrape-keep $(SCRAPE_KEEP),) $(if $(STATE_DIR),--state-dir $(STATE_DIR),) $(if $(JSON),--json,)
+
 .PHONY: odte-order-guard
 odte-order-guard:            ## 0DTE pending-order cancel-first guard — NO orders (ORDER=; LEASE=; MARKET=; JSON=1; WRITE=1; JOURNAL=1)
 	@$(DI) odte-order-guard $(if $(ORDER),--order $(ORDER),) $(if $(LEASE),--lease $(LEASE),) $(if $(MARKET),--market $(MARKET),) $(if $(STATE_DIR),--state-dir $(STATE_DIR),) $(if $(JSON),--json,) $(if $(WRITE),--write,) $(if $(JOURNAL),--journal,)

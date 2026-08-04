@@ -337,3 +337,23 @@ def test_order_limit_above_chase_band_ceiling_is_blocked():
               "debit": round(lease["quantity"] * lease["max_limit_price"] * 100.0, 2)}
     r2 = og.evaluate_order_guard(inside, lease=lease, now=PROMOTION_AT + timedelta(seconds=5))
     assert r2["state"] == og.PENDING_FRESH
+
+
+def test_run_order_guard_materializes_consumed_ledger(tmp_path):
+    # 2026-08-03 forensics: consumed_leases.json had NEVER existed on disk because the guard was
+    # never invoked on the live path. Pin the contract: one run_order_guard call on a live order
+    # writes the ledger and burns the lease exactly once.
+    import json as _json
+    lease = _full_account_lease()
+    order = {**_pending_order(lease, PROMOTION_AT + timedelta(seconds=2))}
+    r = og.run_order_guard(order_json=_json.dumps(order), lease_json=_json.dumps(lease),
+                           state_dir=str(tmp_path), write=True,
+                           now=PROMOTION_AT + timedelta(seconds=5))
+    ledger = tmp_path / "consumed_leases.json"
+    assert ledger.exists(), "the single-use ledger must materialize on first guarded order"
+    assert lease["lease_id"] in _json.loads(ledger.read_text())
+    assert r["lease_consumed_now"] is True
+    r2 = og.run_order_guard(order_json=_json.dumps(order), lease_json=_json.dumps(lease),
+                            state_dir=str(tmp_path),
+                            now=PROMOTION_AT + timedelta(seconds=6))
+    assert r2["lease_consumed_now"] is False

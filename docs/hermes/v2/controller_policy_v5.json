@@ -36,8 +36,29 @@
     "affordability_is_not_edge as an entry veto (superseded by tiered BP-proportional sizing)"
   ],
   "artifact_hygiene": {
-    "cleanup_exclusions": ["triggers.json", "watchdog_state.json", "consumed_leases.json", "broker_health.json", "decision_journal.jsonl", "active_state.json", "swarm/"],
-    "note": "cleanup_stale_artifacts sweeps may archive candidate/gate/lease WORK artifacts only. The exclusion list is canonical loop state; archiving consumed_leases.json weakens single-use lease enforcement (it was archived post-trade on 2026-08-03)."
+    "rule": "Cleanup runs ONLY via `make odte-cleanup` (deterministic sweep, hardcoded keep-list in src/data/odte_cleanup.py). Ad-hoc mv/archive commands against data/odte are FORBIDDEN \u2014 prose exclusion lists failed 21 times.",
+    "cleanup_exclusions_enforced_in_code": [
+      "triggers.json",
+      "watchdog_state.json",
+      "active_candidate.json",
+      "candidate_decision.json",
+      "execution_lease.json",
+      "consumed_leases.json",
+      "broker_health.json",
+      "decision_journal.jsonl",
+      "active_state.json",
+      "position_state.json",
+      "position_decision.json",
+      "active_trade.json",
+      "order_guard_decision.json",
+      "days/",
+      "reports/",
+      "scrape/",
+      "swarm/",
+      "precompute/",
+      "archive/"
+    ],
+    "note": "The consumed-leases ledger materializes on the first guarded order (verified 2026-08-03); it must never be moved."
   },
   "advisory_swarm": {
     "path": "data/odte/swarm/conviction.json",

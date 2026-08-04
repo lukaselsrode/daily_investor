@@ -2016,7 +2016,7 @@ def _gather_odte_sources(p: dict, allowed: set[str] | None, allow_fetch: bool, i
                   "weight": 0, "title": (t.get("text", "") or "")[:140], "score": 0,
                   "url": f"https://twitter.com/i/web/status/{t.get('id', '')}", "source": "x"}
                  for t in x_posts]
-    # Dump the in-window texts this run analyzed to ~/0dte/{reddit,x}_text.txt (overwritten each run).
+    # Dump the in-window texts this run analyzed to data/odte/scrape/{reddit,x}_text.txt (overwritten each run).
     _dump_analyzed_texts(combined)
     # ODTE evidence requires an allowed ticker + options/day-trading context (drops generic
     # SPY/QQQ chatter and risk-management platitudes that aren't 0DTE signal).

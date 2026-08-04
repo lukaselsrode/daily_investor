@@ -645,6 +645,29 @@ def _cmd_odte_convert(rest: list[str]) -> None:
         sys.exit(2)
 
 
+def _cmd_odte_cleanup(rest: list[str]) -> None:
+    # Deterministic data/odte sweep with a HARDCODED keep-list (2026-08-03: ad-hoc LLM `mv`
+    # cleanup archived canonical loop state 21x, incl. the lease ledger). Dry-run by default;
+    # --apply moves non-canonical top-level artifacts into ONE dated archive dir with a manifest.
+    # Canonical loop files/dirs are untouchable by construction. Places NO orders.
+    import json
+
+    from data.odte_cleanup import render_markdown, run_cleanup
+    if "--help" in rest or "-h" in rest:
+        print("Usage: odte-cleanup [--apply] [--prune-scrape] [--scrape-keep N] "
+              "[--state-dir DIR] [--json]\n"
+              "The ONLY sanctioned data/odte sweep. Dry-run by default; canonical loop state is "
+              "protected by a hardcoded keep-list. Places NO orders.")
+        return
+    keep = _int_flag(rest, "--scrape-keep")
+    payload = run_cleanup(state_dir=_flag_value(rest, "--state-dir"),
+                          apply="--apply" in rest,
+                          prune_scrape="--prune-scrape" in rest,
+                          **({"scrape_keep": keep} if keep is not None else {}))
+    print(json.dumps(payload, separators=(",", ":"), default=str) if "--json" in rest
+          else render_markdown(payload))
+
+
 def _cmd_odte_execution_authorize(rest: list[str]) -> None:
     # PURE/OFFLINE execution-lease authorization — the ONE tier that mints execution authority, as
     # a SINGLE-USE short-lived lease (default 30s TTL, hard cap 60s) bound to one exact contract/
@@ -1002,6 +1025,7 @@ _COMMANDS: dict[str, Callable[[list[str]], None]] = {
     "odte-day-score": _cmd_odte_day_score,
     "odte-entry-gate": _cmd_odte_entry_gate,
     "odte-convert": _cmd_odte_convert,
+    "odte-cleanup": _cmd_odte_cleanup,
     "odte-execution-authorize": _cmd_odte_execution_authorize,
     "odte-order-guard": _cmd_odte_order_guard,
     "odte-candidate-watch": _cmd_odte_candidate_watch,
