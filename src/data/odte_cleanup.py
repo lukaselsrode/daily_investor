@@ -45,11 +45,18 @@ KEEP_FILES: frozenset[str] = frozenset({
     "position_decision.json",
     "active_trade.json",
     "order_guard_decision.json",
+    "session_constants.json",
+    # Fast-lane canon (2026-08-05): the two-lane state files must survive every sweep.
+    "armed_intents.json",
+    "armed_intent_state.json",
+    "fast_lane_stage.json",
+    "fast_lane_status.json",
+    "fast_lane_pause",
 })
 
 # Canonical subdirectories — never entered, never moved.
 KEEP_DIRS: frozenset[str] = frozenset({
-    "days", "reports", "scrape", "swarm", "precompute", "archive",
+    "days", "reports", "scrape", "swarm", "precompute", "archive", "shadow",
 })
 
 # Scrape snapshot kinds (data/odte/scrape/<kind>_text_YYYY_MM_DD_HH_MM.txt + stable pointer).

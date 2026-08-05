@@ -96,3 +96,23 @@ def test_module_is_pure_offline():
     src = inspect.getsource(cl)
     for forbidden in ("robin_stocks", "requests", "place_order", "urllib", "httpx", "socket"):
         assert forbidden not in src
+
+
+def test_fast_lane_canon_survives_the_sweep(tmp_path):
+    # The two-lane state files (2026-08-05) + the session-constant gap file are canonical: a
+    # mid-session sweep must never archive them.
+    fast_lane_files = ("armed_intents.json", "armed_intent_state.json", "fast_lane_stage.json",
+                      "fast_lane_status.json", "fast_lane_pause", "session_constants.json")
+    for name in fast_lane_files:
+        assert name in cl.KEEP_FILES, name
+        (tmp_path / name).write_text("{}")
+    assert "shadow" in cl.KEEP_DIRS
+    shadow = tmp_path / "shadow"
+    shadow.mkdir()
+    (shadow / "decision_journal.jsonl").write_text("")
+    (tmp_path / "stray_artifact.json").write_text("{}")
+    payload = cl.run_cleanup(str(tmp_path), apply=True)
+    for name in fast_lane_files:
+        assert (tmp_path / name).exists(), name
+    assert (shadow / "decision_journal.jsonl").exists()
+    assert not (tmp_path / "stray_artifact.json").exists()   # the sweep itself still works

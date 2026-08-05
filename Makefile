@@ -311,6 +311,50 @@ odte-fmp-context:            ## FMP meme/squeeze sanity context — NO orders/op
 odte-loop-status:            ## 0DTE loop state machine — posture + where in scan→exit→review + next command (BROKER_HEALTH=path; OFFLINE=1; JSON=1)
 	@$(DI) odte-loop-status $(if $(STATE_DIR),--state-dir $(STATE_DIR),) $(if $(BROKER_HEALTH),--broker-health $(BROKER_HEALTH),) $(if $(OFFLINE),--offline,) $(if $(JSON),--json,)
 
+# ── 0DTE fast lane (two-lane architecture, 2026-08-05) ──────────────────────────────────────
+# The slow lane (Hermes) ARMs machine-readable intents; the deterministic daemon fires them
+# with zero LLM turns. Stage file (data/odte/fast_lane_stage.json) is the mode authority:
+# shadow → exits_live → entries_live. Flags can only be MORE conservative than the stage.
+#   make odte-arm INTENT=intent.json            # validate + arm (fail-closed)
+#   make odte-arm DISARM=all                    # kill switch #2
+#   make odte-fast-lane MODE=shadow             # run the daemon (or ONCE=1 for one tick)
+#   make odte-fast-lane-pause / -resume         # kill switch #1 (halts placements next tick)
+#   make odte-fast-lane-stage STAGE=shadow      # rollout stage control / kill switch #4
+#   make odte-shadow-report                     # the rollout-gate adjudication surface
+.PHONY: odte-arm
+odte-arm:                    ## Arm/disarm/list fast-lane intents — NO orders (INTENT=path; INTENT_JSON='{...}'; DISARM=id|all; LIST=1; JSON=1)
+	@$(DI) odte-arm $(if $(INTENT),--intent $(INTENT),) $(if $(INTENT_JSON),--intent-json '$(INTENT_JSON)',) $(if $(DISARM),--disarm $(DISARM),) $(if $(LIST),--list,) $(if $(STATE_DIR),--state-dir $(STATE_DIR),) $(if $(JSON),--json,)
+
+.PHONY: odte-fast-lane
+odte-fast-lane:              ## Run the fast-lane daemon (MODE=shadow|exits|live; ONCE=1; ACCOUNT=; STATE_DIR=)
+	@$(DI) odte-fast-lane $(if $(filter shadow,$(MODE)),--shadow,) $(if $(filter exits,$(MODE)),--exits-only,) $(if $(filter live,$(MODE)),--live,) $(if $(ONCE),--once,) $(if $(ACCOUNT),--account $(ACCOUNT),) $(if $(STATE_DIR),--state-dir $(STATE_DIR),)
+
+.PHONY: odte-fast-lane-pause
+odte-fast-lane-pause:        ## KILL SWITCH: halt all fast-lane placements on the next tick
+	@touch data/odte/fast_lane_pause && echo "fast lane PAUSED (data/odte/fast_lane_pause)"
+
+.PHONY: odte-fast-lane-resume
+odte-fast-lane-resume:       ## Remove the fast-lane pause file
+	@rm -f data/odte/fast_lane_pause && echo "fast lane resumed"
+
+.PHONY: odte-fast-lane-stage
+odte-fast-lane-stage:        ## Set the rollout stage (STAGE=shadow|exits_live|entries_live)
+	@test -n "$(STAGE)" || { echo "usage: make odte-fast-lane-stage STAGE=shadow|exits_live|entries_live"; exit 2; }
+	@echo '{"stage": "$(STAGE)", "set_at": "'$$(date -u +%Y-%m-%dT%H:%M:%SZ)'", "set_by": "make odte-fast-lane-stage"}' > data/odte/fast_lane_stage.json
+	@cat data/odte/fast_lane_stage.json
+
+.PHONY: odte-shadow-report
+odte-shadow-report:          ## Shadow-vs-live divergence report — the rollout-gate evidence (JSON=1)
+	@$(DI) odte-shadow-report $(if $(STATE_DIR),--state-dir $(STATE_DIR),) $(if $(JSON),--json,)
+
+.PHONY: odte-fast-lane-install
+odte-fast-lane-install:      ## Install the launchd supervisor (Mon-Fri 09:25 ET start)
+	@cp scripts/launchd/com.dailyinvestor.odte-fastlane.plist ~/Library/LaunchAgents/ && launchctl unload ~/Library/LaunchAgents/com.dailyinvestor.odte-fastlane.plist 2>/dev/null; launchctl load ~/Library/LaunchAgents/com.dailyinvestor.odte-fastlane.plist && echo "installed + loaded"
+
+.PHONY: odte-fast-lane-uninstall
+odte-fast-lane-uninstall:    ## KILL SWITCH: unload + remove the launchd supervisor
+	@launchctl unload ~/Library/LaunchAgents/com.dailyinvestor.odte-fastlane.plist 2>/dev/null; rm -f ~/Library/LaunchAgents/com.dailyinvestor.odte-fastlane.plist && echo "uninstalled"
+
 .PHONY: regime
 regime:                      ## Print current market regime  (live SPY + VIX fetch)
 	$(PYTHON) -c "import sys; sys.path.insert(0, '$(SRC)'); from strategy.regimes import RegimeDetector; s = RegimeDetector().detect(); dma = f'{s.spy_vs_200dma_pct:+.2%}' if s.spy_vs_200dma_pct is not None else 'N/A'; print(f'Regime: {s.regime.upper()}  |  Confidence: {s.confidence:.0%}  |  VIX: {s.vix}  |  SPY vs 200DMA: {dma}'); print('Notes:', '  '.join(s.notes) if s.notes else 'none')"

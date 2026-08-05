@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 import sys
 from collections.abc import Callable
+from pathlib import Path
 
 from core.logging import configure_logging
 
@@ -1003,6 +1004,141 @@ def _cmd_factor_map(rest: list[str]) -> None:
 
 
 # Command-name → handler. Aliases (e.g. options-social) map to the same handler.
+def _cmd_odte_arm(rest: list[str]) -> None:
+    # The slow lane's ONLY sanctioned write path into armed_intents.json (the fast-lane daemon
+    # reads it; nothing else writes it). Validation is fail-closed at ARM time — an intent that
+    # would be ambiguous at fire time is refused HERE with named reason codes. Places NO orders:
+    # an armed intent is authorization to EVALUATE; every deterministic gate still applies at
+    # fire time and the lease stays authoritative.
+    import json
+    from datetime import datetime, timezone
+
+    from core.paths import ODTE_DATA_DIR, atomic_write_text
+    from data.odte_armed_intent import ARMED_INTENTS_FILENAME, validate_armed_intent
+    if "--help" in rest or "-h" in rest:
+        print("Usage: odte-arm --intent-json '{...}' | --intent PATH | --disarm ID|all | "
+              "--list [--state-dir DIR] [--json]\n"
+              "Validate + append an armed intent (fail-closed), disarm, or list. NO orders.")
+        return
+    state_dir = Path(os.path.expanduser(_flag_value(rest, "--state-dir") or ODTE_DATA_DIR))
+    path = state_dir / ARMED_INTENTS_FILENAME
+    try:
+        doc = json.loads(path.read_text()) if path.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        doc = {}
+    intents = [i for i in (doc.get("intents") or []) if isinstance(i, dict)]
+    now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    def _write() -> None:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(path, json.dumps({"schema_version": 1, "intents": intents},
+                                           indent=2, default=str))
+
+    if "--list" in rest:
+        rows = [{"intent_id": i.get("intent_id"), "status": i.get("status"),
+                 "symbol": i.get("symbol"), "direction": i.get("direction"),
+                 "expires_at": i.get("expires_at")} for i in intents]
+        print(json.dumps(rows, indent=None if "--json" in rest else 2, default=str))
+        return
+    disarm = _flag_value(rest, "--disarm")
+    if disarm:
+        hit = 0
+        for intent in intents:
+            if disarm == "all" or str(intent.get("intent_id")) == disarm:
+                if str(intent.get("status")) == "armed":
+                    intent["status"] = "disarmed"
+                    intent.setdefault("status_history", []).append(
+                        {"status": "disarmed", "ts": now_iso, "by": "odte-arm"})
+                    hit += 1
+        _write()
+        print(json.dumps({"disarmed": hit}, default=str))
+        return
+    raw = _flag_value(rest, "--intent-json")
+    intent_path = _flag_value(rest, "--intent")
+    if not raw and not intent_path:
+        print("odte-arm: provide --intent-json '{...}', --intent PATH, --disarm, or --list")
+        sys.exit(2)
+    try:
+        intent = json.loads(raw) if raw else json.loads(
+            Path(os.path.expanduser(intent_path)).read_text())
+    except (OSError, json.JSONDecodeError, TypeError) as exc:
+        print(f"odte-arm: could not read/parse intent: {exc}")
+        sys.exit(2)
+    intent.setdefault("armed_at", now_iso)
+    intent.setdefault("status", "armed")
+    intent.setdefault("status_history", []).append(
+        {"status": "armed", "ts": now_iso, "by": intent.get("armed_by") or "odte-arm"})
+    reasons = validate_armed_intent(intent)
+    if reasons:
+        print(json.dumps({"armed": False, "reasons": reasons}, default=str))
+        sys.exit(2)
+    if any(str(i.get("intent_id")) == str(intent.get("intent_id")) for i in intents):
+        print(json.dumps({"armed": False, "reasons": ["intent_id_already_exists"]}))
+        sys.exit(2)
+    intents.append(intent)
+    _write()
+    print(json.dumps({"armed": True, "intent_id": intent.get("intent_id"),
+                      "intents_on_file": len(intents)}, default=str))
+
+
+def _cmd_odte_fast_lane(rest: list[str]) -> None:
+    # Run the fast-lane daemon (or one tick with --once). The stage file
+    # (data/odte/fast_lane_stage.json) is the mode authority — these flags can only be MORE
+    # conservative; a <48h broker token downgrades to shadow loudly. Account number comes from
+    # --account or ODTE_ACCOUNT_NUMBER, never a hardcoded default.
+    import asyncio
+
+    from execution.odte_fast_lane import run_fast_lane
+    from execution.odte_mcp_client import OdteMcpClient
+    if "--help" in rest or "-h" in rest:
+        print("Usage: odte-fast-lane [--shadow|--exits-only|--live] [--once] "
+              "[--account NUM] [--state-dir DIR]\n"
+              "The deterministic fast-lane daemon. Stage file caps the mode; shadow mode is "
+              "structurally unable to place orders.")
+        return
+    account = _flag_value(rest, "--account") or os.environ.get("ODTE_ACCOUNT_NUMBER")
+    if not account:
+        print("odte-fast-lane: provide --account or set ODTE_ACCOUNT_NUMBER", file=sys.stderr)
+        sys.exit(2)
+    mode = ("shadow" if "--shadow" in rest else "exits" if "--exits-only" in rest
+            else "live" if "--live" in rest else None)
+    kwargs: dict = {"account_number": account, "mode": mode, "once": "--once" in rest}
+    state_dir = _flag_value(rest, "--state-dir")
+    if state_dir:
+        kwargs["state_dir"] = state_dir
+    status = asyncio.run(run_fast_lane(OdteMcpClient(), **kwargs))
+    import json
+    print(json.dumps(status, default=str))
+
+
+def _cmd_odte_shadow_report(rest: list[str]) -> None:
+    # PURE/OFFLINE: join the live decision journal with the fast lane's shadow journal into the
+    # rollout-gate adjudication report (matched latency/limit deltas, shadow-only / live-only
+    # divergences, exit divergences, incidents, and the Gate-1 `clean` flag).
+    import json
+
+    from core.paths import ODTE_DATA_DIR
+    from data.odte_journal import read_events
+    from data.odte_shadow_report import build_shadow_report, render_markdown
+    if "--help" in rest or "-h" in rest:
+        print("Usage: odte-shadow-report [--state-dir DIR] [--json]\n"
+              "Shadow-vs-live divergence report; every divergence needs adjudication before "
+              "the next rollout stage.")
+        return
+    state_dir = Path(os.path.expanduser(_flag_value(rest, "--state-dir") or ODTE_DATA_DIR))
+    try:
+        real = read_events(str(state_dir / "decision_journal.jsonl"))
+    except OSError:
+        real = []
+    try:
+        shadow = read_events(str(state_dir / "shadow" / "decision_journal.jsonl"))
+    except OSError:
+        shadow = []
+    report = build_shadow_report(real, shadow)
+    print(json.dumps(report, separators=(",", ":"), default=str) if "--json" in rest
+          else render_markdown(report))
+
+
 _COMMANDS: dict[str, Callable[[list[str]], None]] = {
     "list-presets": _cmd_list_presets,
     "fetch-data": _cmd_fetch_data,
@@ -1031,6 +1167,9 @@ _COMMANDS: dict[str, Callable[[list[str]], None]] = {
     "odte-candidate-watch": _cmd_odte_candidate_watch,
     "odte-fmp-context": _cmd_odte_fmp_context,
     "odte-loop-status": _cmd_odte_loop_status,
+    "odte-arm": _cmd_odte_arm,
+    "odte-fast-lane": _cmd_odte_fast_lane,
+    "odte-shadow-report": _cmd_odte_shadow_report,
     "stability-scan": _cmd_stability_scan,
     "interaction-screen": _cmd_interaction_screen,
     "auto-tune-all": _cmd_auto_tune_all,
