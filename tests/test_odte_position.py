@@ -2,8 +2,11 @@
 
 No Robinhood, no network, no LLM. evaluate_position() is pure: a trade plan + a caller-supplied
 snapshot in, structured triggers out. Covers single-contract scalp take-profit (+20-25%), the +25%
-strong exit, thesis-death levels, bid-floor, time-risk, monitoring-degraded, the no-position quiet
-path, the NVDA employer-restriction refusal, and the run_position_watchdog file writer.
+strong exit, thesis-death levels (incl. IWM + the zero-stop-is-absent guard), bid-floor (incl. the
+risk_rules.initial_bid_floor fallback), percent-vs-fraction threshold normalization, the
+BID_MEMORY_PROTECT giveback harvest (incl. the 2026-08-03 tape replay), time-risk,
+monitoring-degraded, the no-position quiet path, the NVDA employer-restriction refusal, and the
+run_position_watchdog file writer.
 """
 import json
 import os
@@ -289,3 +292,173 @@ def test_position_watchdog_journal_failure_never_crashes(monkeypatch, tmp_path):
     assert payload["decision"] == "TAKE_PROFIT"                  # unchanged
     assert (tmp_path / "position_decision.json").exists()        # files still written
     assert _read_journal(tmp_path) == []                         # nothing journaled, no crash
+
+
+# --- iwm stop / zero-stop guard (2026-08-04 exit-fidelity fixes) -----------------------------
+
+def test_thesis_dead_call_iwm_support_lost():
+    # iwm_stop was silently ignored by _thesis_breaches — a declared IWM support never fired.
+    plan = _scalp_plan(thesis={"iwm_stop": 295.20}, time_rules={})
+    r = op.evaluate_position(plan, {"option_mark": 1.00, "iwm_last": 295.00})
+    assert r["decision"] == "THESIS_DEAD"
+    reasons = next(t for t in r["triggers"] if t["type"] == "THESIS_DEAD")["reasons"]
+    assert any("IWM" in x and "support lost" in x for x in reasons)
+
+
+def test_thesis_dead_put_iwm_resistance_reclaimed():
+    plan = _scalp_plan(option_type="put", thesis={"iwm_stop": 295.20}, time_rules={})
+    r = op.evaluate_position(plan, {"option_mark": 1.00, "iwm_last": 295.50})
+    assert r["decision"] == "THESIS_DEAD"
+
+
+def test_thesis_alive_call_iwm_above_support():
+    plan = _scalp_plan(thesis={"iwm_stop": 295.20}, time_rules={})
+    r = op.evaluate_position(plan, {"option_mark": 1.00, "iwm_last": 295.50})
+    assert "THESIS_DEAD" not in _types(r)
+
+
+def test_zero_stop_levels_are_absent_not_live():
+    # The 2026-08-03 live plan shipped vix_stop 0.0; read literally "vix >= 0" is always true for
+    # a call and would kill every position the moment a snapshot carried vix.
+    plan = _scalp_plan(thesis={"vix_stop": 0.0, "underlying_stop": 0.0, "vixy_stop": 20.20},
+                       time_rules={})
+    r = op.evaluate_position(plan, {"option_mark": 1.00, "vix": 17.5, "underlying_last": 505.0,
+                                    "vixy": 19.0})
+    assert "THESIS_DEAD" not in _types(r)
+    # A real (nonzero) vol stop still fires.
+    r2 = op.evaluate_position(plan, {"option_mark": 1.00, "vixy": 20.50})
+    assert r2["decision"] == "THESIS_DEAD"
+
+
+# --- bid floor mapping (risk_rules.initial_bid_floor) ----------------------------------------
+
+def test_risk_rules_initial_bid_floor_fires():
+    # The 2026-08-03 plan declared its floor ONLY as risk_rules.initial_bid_floor (0.427) — the
+    # evaluator read top-level bid_floor and fell back to the 0.05 default, so it never fired.
+    plan = _scalp_plan(thesis={}, time_rules={}, risk_rules={"initial_bid_floor": 0.427})
+    r = op.evaluate_position(plan, {"option_bid": 0.42})
+    assert r["decision"] == "BID_FLOOR"
+    r2 = op.evaluate_position(plan, {"option_bid": 0.45})
+    assert "BID_FLOOR" not in _types(r2)
+
+
+def test_top_level_bid_floor_wins_over_risk_rules():
+    plan = _scalp_plan(thesis={}, time_rules={}, bid_floor=0.10,
+                       risk_rules={"initial_bid_floor": 0.427})
+    r = op.evaluate_position(plan, {"option_bid": 0.42})
+    assert "BID_FLOOR" not in _types(r)
+
+
+# --- percent-vs-fraction normalization -------------------------------------------------------
+
+def test_percent_thresholds_equal_fraction_thresholds():
+    # The 2026-08-03 plan carried take_profit_pct: 20 (percent). Read as a fraction (+2000%) the
+    # declared take-profit could never fire. 20 must mean exactly what 0.20 means.
+    for tp in (20, 0.20):
+        plan = _scalp_plan(thesis={}, time_rules={}, profit_rules={"take_profit_pct": tp})
+        r = op.evaluate_position(plan, {"option_mark": 1.21})
+        assert r["decision"] == "TAKE_PROFIT", f"take_profit_pct={tp}"
+    # Legacy top-level fields normalize the same way; strong stage too.
+    for strong in (25, 0.25):
+        plan = _scalp_plan(thesis={}, time_rules={}, strong_exit_pct=strong)
+        r = op.evaluate_position(plan, {"option_mark": 1.26})
+        tp = next(t for t in r["triggers"] if t["type"] == "TAKE_PROFIT")
+        assert tp["stage"] == "strong", f"strong_exit_pct={strong}"
+
+
+# --- bid-memory giveback protection (BID_MEMORY_PROTECT) -------------------------------------
+
+def _bm_floor(entry, best):
+    return entry + (best - entry) * (1.0 - op.BID_MEMORY_GIVEBACK_FRACTION)
+
+
+def test_bid_memory_not_armed_below_gain_threshold():
+    # Best-seen just under the arm threshold: never fires, whatever the fade.
+    entry = 1.00
+    best = entry * (1.0 + op.BID_MEMORY_ARM_GAIN_PCT) - 0.01
+    plan = _scalp_plan(thesis={}, time_rules={}, entry_price=entry,
+                       management={"best_seen_bid": best})
+    r = op.evaluate_position(plan, {"option_bid": entry * 0.9})
+    assert "BID_MEMORY_PROTECT" not in _types(r)
+
+
+def test_bid_memory_armed_no_fire_at_peak():
+    # At a fresh peak the bid IS best-seen — above the giveback floor by construction.
+    entry = 1.00
+    peak = entry * (1.0 + op.BID_MEMORY_ARM_GAIN_PCT) + 0.10
+    plan = _scalp_plan(thesis={}, time_rules={}, entry_price=entry,
+                       management={"best_seen_bid": peak - 0.05})
+    r = op.evaluate_position(plan, {"option_bid": peak})
+    assert "BID_MEMORY_PROTECT" not in _types(r)
+    assert r["best_seen_bid"] == peak                      # evaluator returns the updated peak
+
+
+def test_bid_memory_fires_on_giveback():
+    entry = 1.00
+    best = 1.40                                            # comfortably armed
+    fade = _bm_floor(entry, best) - 0.01
+    plan = _scalp_plan(thesis={}, time_rules={}, entry_price=entry,
+                       management={"best_seen_bid": best})
+    r = op.evaluate_position(plan, {"option_bid": fade})
+    assert r["decision"] == "BID_MEMORY_PROTECT"
+    bm = next(t for t in r["triggers"] if t["type"] == "BID_MEMORY_PROTECT")
+    assert bm["action"] == "harvest_now"
+    assert abs(bm["giveback_floor"] - _bm_floor(entry, best)) < 1e-6
+
+
+def test_bid_memory_aug3_tape_replay():
+    # The trade that proved the rule: SPY 756C 2026-08-03 — entry 0.61, peak bid 0.76, fade to
+    # 0.67. The manual close harvested at 0.70; the rule must fire on the same tape.
+    entry, peak, fade = 0.61, 0.76, 0.67
+    assert peak >= entry * (1.0 + op.BID_MEMORY_ARM_GAIN_PCT)      # armed on this tape
+    assert fade <= _bm_floor(entry, peak)                          # fade breaches the floor
+    plan = _scalp_plan(thesis={}, time_rules={}, entry_price=entry,
+                       management={"best_seen_bid": peak})
+    r = op.evaluate_position(plan, {"option_bid": fade})
+    assert r["decision"] == "BID_MEMORY_PROTECT"
+
+
+def test_bid_memory_outranks_take_profit_but_not_thesis_death():
+    entry = 1.00
+    plan = _scalp_plan(thesis={}, time_rules={}, entry_price=entry,
+                       management={"best_seen_bid": 1.40})
+    both = {"option_mark": 1.22, "option_bid": _bm_floor(entry, 1.40) - 0.01}
+    r = op.evaluate_position(plan, both)
+    assert {"BID_MEMORY_PROTECT", "TAKE_PROFIT"} <= _types(r)
+    assert r["decision"] == "BID_MEMORY_PROTECT"
+    dead = dict(both, underlying_last=498.0)
+    r2 = op.evaluate_position(_scalp_plan(thesis={"underlying_stop": 500.0}, time_rules={},
+                                          entry_price=entry,
+                                          management={"best_seen_bid": 1.40}), dead)
+    assert r2["decision"] == "THESIS_DEAD"
+
+
+def test_bid_memory_overrides_via_plan():
+    # Plan-level bid_memory overrides the module constants (accepted top-level or in profit_rules).
+    entry = 1.00
+    plan = _scalp_plan(thesis={}, time_rules={}, entry_price=entry,
+                       bid_memory={"arm_gain_pct": 0.05, "giveback_fraction": 0.50},
+                       management={"best_seen_bid": 1.10})       # +10%: armed only via override
+    r = op.evaluate_position(plan, {"option_bid": 1.04})         # floor = 1 + 0.10*0.5 = 1.05
+    assert r["decision"] == "BID_MEMORY_PROTECT"
+
+
+def test_best_seen_bid_tracks_and_survives_missing_bid():
+    entry = 1.00
+    plan = _scalp_plan(thesis={}, time_rules={}, entry_price=entry,
+                       management={"best_seen_bid": 1.05})
+    r = op.evaluate_position(plan, {"option_bid": 1.12})
+    assert r["best_seen_bid"] == 1.12                            # new peak returned for persisting
+    r2 = op.evaluate_position(plan, {"option_mark": 1.10})       # no bid this poll
+    assert r2["best_seen_bid"] == 1.05                           # unchanged, not reset
+
+
+def test_watchdog_payload_carries_best_seen_bid(tmp_path):
+    plan = _scalp_plan(thesis={}, time_rules={}, entry_price=1.00,
+                       management={"best_seen_bid": 1.05})
+    plan_path = tmp_path / "active_trade.json"
+    plan_path.write_text(json.dumps(plan))
+    payload = op.run_position_watchdog(plan_path=str(plan_path),
+                                       snapshot={"option_bid": 1.12, "option_mark": 1.12},
+                                       state_dir=str(tmp_path))
+    assert payload["best_seen_bid"] == 1.12

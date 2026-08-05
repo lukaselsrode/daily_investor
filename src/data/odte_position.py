@@ -29,6 +29,9 @@ active_trade.json schema (all fields optional unless noted; unknown keys are ign
   entry_time:       ISO (passed through)
   take_profit_pct:  scale take-profit trigger (scalp default 0.20; legacy/non-scalp default 0.35)
   strong_exit_pct:  strong-profit trigger (scalp default 0.25; legacy/non-scalp default 0.60)
+                    Both accept FRACTION (0.20) or PERCENT (20) — any threshold > 3 is treated as a
+                    percent and divided by 100 (the 2026-08-03 live plan carried 20 meaning +20%;
+                    read literally that take-profit could never fire).
   profit_rules:     optional mode-aware overrides (any subset; falls back to the mode profile):
                       take_profit_pct, strong_exit_pct,
                       take_profit_action      (qty-agnostic take-profit action override),
@@ -42,17 +45,27 @@ active_trade.json schema (all fields optional unless noted; unknown keys are ign
                       lotto  -> hold_but_alert                                      / strong: harvest_optional
                       runner -> trail_runner                                       / strong: trail_runner
                     Unknown/blank mode uses the scalp profile (original behavior).
-  bid_floor:        per-share bid at/under which the option is treated near-worthless (default 0.05)
-  thesis:           { underlying_stop, spy_stop, qqq_stop, vix_stop, vixy_stop }  (any subset)
+  bid_floor:        per-share bid at/under which the option is treated near-worthless; falls back to
+                    risk_rules.initial_bid_floor, then the 0.05 default (the 2026-08-03 live plan
+                    declared only risk_rules.initial_bid_floor — unmapped, its floor never fired)
+  thesis:           { underlying_stop, spy_stop, qqq_stop, iwm_stop, vix_stop, vixy_stop } (subset)
                     A "stop" is the level that KILLS the thesis when crossed AGAINST the position.
-                    Direction is inferred from option_type (see _thesis_breaches).
+                    Direction is inferred from option_type (see _thesis_breaches). A level of 0 is
+                    treated as ABSENT, never as a live stop (a vix_stop of 0.0 read literally makes
+                    "vix >= 0" instantly true for calls).
+  bid_memory:       { arm_gain_pct, giveback_fraction } — giveback harvest overrides (also accepted
+                    under profit_rules.bid_memory). Once best-seen bid >= entry*(1+arm_gain_pct),
+                    BID_MEMORY_PROTECT fires when the live bid gives back giveback_fraction of the
+                    best-seen gain. Caller persists management.best_seen_bid between polls (the
+                    evaluator is pure and returns the updated value).
+  management:       { best_seen_bid } — highest bid seen while managing (caller-persisted)
   time_rules:       { tighten_after: "HH:MM" ET, flat_before: "HH:MM" ET }
 
 live snapshot schema (caller-supplied; real broker/market values only)
   option_mark:  current premium per share         (P/L vs entry_price)
   pnl_pct:      OR provide P/L fraction directly (0.42 == +42%); wins over option_mark
   option_bid:   current per-share bid              (BID_FLOOR)
-  underlying_last, spy_last, qqq_last, vix, vixy:  thesis levels
+  underlying_last, spy_last, qqq_last, iwm_last, vix, vixy:  thesis levels
   now_et:       ISO timestamp (else uses `now`/wall clock) for time rules
   monitoring_ok: explicit False => MONITORING_DEGRADED
 """
@@ -85,6 +98,12 @@ DEFAULT_TAKE_PROFIT_PCT = 0.35         # +35% — legacy/non-scalp take-profit t
 DEFAULT_STRONG_EXIT_PCT = 0.60         # +60% — legacy/non-scalp strong-profit trigger
 DEFAULT_BID_FLOOR = 0.05         # per-share bid at/under which an option is treated near-worthless
 
+# Bid-memory / giveback protection (the rule that closed the 2026-08-03 winner, prose-only until
+# now): once the best-seen bid prints a meaningful gain over entry, never let it round-trip — fire
+# a harvest when the live bid has given back a large share of the best-seen gain.
+BID_MEMORY_ARM_GAIN_PCT = 0.15       # arm once best_seen_bid >= entry * (1 + this)
+BID_MEMORY_GIVEBACK_FRACTION = 0.40  # fire once bid <= entry + (best_seen - entry) * (1 - this)
+
 # Mode-specific profit semantics. SCALP mode harvests earlier at +20% / +25% because tiny-account
 # 0DTE impulse gains can fade quickly; the old +35% / +60% defaults remain for trend/lotto/runner
 # alerting unless the plan overrides thresholds. The recommended ACTION is mode-aware so a
@@ -110,9 +129,11 @@ _MODE_PROFIT_PROFILES: dict[str, dict] = {
 }
 _DEFAULT_PROFIT_PROFILE = _MODE_PROFIT_PROFILES["scalp"]   # backward-compatible default
 
-# Primary-decision priority (most urgent first). HOLD is the implicit default.
-_PRIORITY = ["RESTRICTED", "THESIS_DEAD", "BID_FLOOR", "TIME_RISK", "TAKE_PROFIT",
-             "MONITORING_DEGRADED"]
+# Primary-decision priority (most urgent first). HOLD is the implicit default. BID_MEMORY_PROTECT
+# outranks TAKE_PROFIT (a fading winner is harvested before a plain profit scale) but yields to the
+# death/floor/time triggers.
+_PRIORITY = ["RESTRICTED", "THESIS_DEAD", "BID_FLOOR", "TIME_RISK", "BID_MEMORY_PROTECT",
+             "TAKE_PROFIT", "MONITORING_DEGRADED"]
 
 _INACTIVE_STATUS = {"closed", "exited", "flat", "done"}
 
@@ -124,6 +145,15 @@ def _num(v) -> float | None:
         return float(v)
     except (TypeError, ValueError):
         return None
+
+
+def _norm_pct(v: float | None) -> float | None:
+    """Normalize a profit threshold to a FRACTION. Values > 3 are percent (20 -> 0.20): no sane
+    0DTE take-profit is +300% as a fraction, but 20-meaning-20% is exactly what the 2026-08-03
+    live plan shipped (its own take_profit_price proved percent intent)."""
+    if v is None:
+        return None
+    return v / 100.0 if v > 3 else v
 
 
 def _norm_type(v) -> str:
@@ -188,9 +218,10 @@ def _resolve_profit_config(plan: dict, mode: str, qty: int) -> dict:
     profit_rules.take_profit_action overrides both. strong_exit_action drives the strong stage."""
     profile = _MODE_PROFIT_PROFILES.get(mode, _DEFAULT_PROFIT_PROFILE)
     pr = plan.get("profit_rules") or {}
-    tp = (_num(pr.get("take_profit_pct")) or _num(plan.get("take_profit_pct"))
+    tp = (_norm_pct(_num(pr.get("take_profit_pct"))) or _norm_pct(_num(plan.get("take_profit_pct")))
           or profile["take_profit_pct"])
-    strong = (_num(pr.get("strong_exit_pct")) or _num(plan.get("strong_exit_pct"))
+    strong = (_norm_pct(_num(pr.get("strong_exit_pct")))
+              or _norm_pct(_num(plan.get("strong_exit_pct")))
               or profile["strong_exit_pct"])
     if qty <= 1:
         scale_action = (pr.get("single_contract_action") or pr.get("take_profit_action")
@@ -214,11 +245,14 @@ def _thesis_breaches(option_type: str, thesis: dict, snapshot: dict) -> list[str
         return []
     bullish = option_type == "call"
     out: list[str] = []
+    # A 0 level is ABSENT, never a live stop: writers emit 0.0 for "unused" (the 2026-08-03 plan
+    # shipped vix_stop 0.0 — read literally, "vix >= 0" is always true for a call).
     for key, snap_key, label in (("underlying_stop", "underlying_last", "underlying"),
                                  ("spy_stop", "spy_last", "SPY"),
-                                 ("qqq_stop", "qqq_last", "QQQ")):
+                                 ("qqq_stop", "qqq_last", "QQQ"),
+                                 ("iwm_stop", "iwm_last", "IWM")):
         lvl, val = _num(thesis.get(key)), _num(snapshot.get(snap_key))
-        if lvl is None or val is None:
+        if not lvl or val is None:
             continue
         if bullish and val <= lvl:
             out.append(f"{label} {val:g} <= stop {lvl:g} (support lost)")
@@ -226,7 +260,7 @@ def _thesis_breaches(option_type: str, thesis: dict, snapshot: dict) -> list[str
             out.append(f"{label} {val:g} >= stop {lvl:g} (resistance reclaimed)")
     for key, snap_key, label in (("vix_stop", "vix", "VIX"), ("vixy_stop", "vixy", "VIXY")):
         lvl, val = _num(thesis.get(key)), _num(snapshot.get(snap_key))
-        if lvl is None or val is None:
+        if not lvl or val is None:
             continue
         if bullish and val >= lvl:
             out.append(f"{label} {val:g} >= stop {lvl:g} (vol spiked against calls)")
@@ -291,8 +325,12 @@ def evaluate_position(plan: dict | None, snapshot: dict | None,
     bid = _num(snapshot.get("option_bid"))
     can_value = pnl_pct is not None or bid is not None
 
-    bid_floor = float(_num(plan.get("bid_floor")) if plan.get("bid_floor") is not None
-                      else DEFAULT_BID_FLOOR)
+    # bid_floor falls back to risk_rules.initial_bid_floor — live plans declare the floor there
+    # (2026-08-03: initial_bid_floor 0.427 never fired because only top-level bid_floor was read).
+    _floor = _num(plan.get("bid_floor"))
+    if _floor is None:
+        _floor = _num((plan.get("risk_rules") or {}).get("initial_bid_floor"))
+    bid_floor = float(_floor) if _floor is not None else DEFAULT_BID_FLOOR
 
     # 1) Take-profit. Scalp mode uses the earlier +20% / +25% harvest band; non-scalp modes keep the
     #    legacy +35% / +60% alert/trail bands unless overridden. The recommended ACTION is mode-aware
@@ -313,29 +351,52 @@ def evaluate_position(plan: dict | None, snapshot: dict | None,
                              "pnl_pct": round(pnl_pct, 4),
                              "detail": f"+{pnl_pct:.0%} >= take-profit {pc['tp']:.0%} ({label})"})
 
-    # 2) Thesis death.
+    # 2) Bid-memory giveback protection. Once the best-seen bid arms (a meaningful gain over
+    #    entry), a fade through the giveback floor harvests instead of round-tripping. best_seen_bid
+    #    is caller-persisted (plan["management"]["best_seen_bid"]) and returned updated — this
+    #    evaluator stays pure.
+    entry = _num(plan.get("entry_price"))
+    bm = plan.get("bid_memory") or (plan.get("profit_rules") or {}).get("bid_memory") or {}
+    arm_gain = _norm_pct(_num(bm.get("arm_gain_pct"))) or BID_MEMORY_ARM_GAIN_PCT
+    giveback = _num(bm.get("giveback_fraction")) or BID_MEMORY_GIVEBACK_FRACTION
+    prev_best = _num((plan.get("management") or {}).get("best_seen_bid"))
+    best_seen = prev_best
+    if bid is not None:
+        best_seen = bid if prev_best is None else max(prev_best, bid)
+    if (bid is not None and entry and best_seen is not None
+            and best_seen >= entry * (1.0 + arm_gain)):
+        giveback_floor = entry + (best_seen - entry) * (1.0 - giveback)
+        if bid <= giveback_floor + 1e-9:
+            triggers.append({"type": "BID_MEMORY_PROTECT", "action": "harvest_now",
+                             "bid": bid, "best_seen_bid": best_seen,
+                             "giveback_floor": round(giveback_floor, 4),
+                             "detail": f"bid {bid:.2f} <= giveback floor {giveback_floor:.2f} "
+                                       f"(best {best_seen:.2f}, entry {entry:.2f})"})
+
+    # 3) Thesis death.
     breaches = _thesis_breaches(option_type, plan.get("thesis") or {}, snapshot)
     if breaches:
         triggers.append({"type": "THESIS_DEAD", "action": "exit",
                          "reasons": breaches, "detail": "; ".join(breaches)})
 
-    # 3) Bid floor — near-worthless / no path.
+    # 4) Bid floor — near-worthless / no path.
     if bid is not None and bid <= bid_floor:
         triggers.append({"type": "BID_FLOOR", "action": "exit_or_let_expire", "bid": bid,
                          "detail": f"bid {bid:.2f} <= floor {bid_floor:.2f}"})
 
-    # 4) Time risk.
+    # 5) Time risk.
     t = _time_risk(plan.get("time_rules") or {}, snapshot, now)
     if t:
         triggers.append(t)
 
-    # 5) Monitoring degraded — can't value the live position, or caller flagged the feed bad.
+    # 6) Monitoring degraded — can't value the live position, or caller flagged the feed bad.
     if snapshot.get("monitoring_ok") is False or not can_value:
         triggers.append({"type": "MONITORING_DEGRADED", "action": "verify_feed",
                          "detail": "cannot value live position (no mark/bid/pnl) or monitoring_ok=false"})
 
     return {"decision": _primary_decision(triggers), "triggers": triggers, "active": True,
             "pnl_pct": (round(pnl_pct, 4) if pnl_pct is not None else None),
+            "best_seen_bid": best_seen,
             "underlying": underlying, "option_id": option_id, "mode": mode,
             "option_type": option_type}
 
@@ -373,6 +434,7 @@ def run_position_watchdog(plan_path: str | None = None, snapshot: dict | None = 
         "decision": decision,
         "triggers": result["triggers"],
         "pnl_pct": result["pnl_pct"],
+        "best_seen_bid": result.get("best_seen_bid"),
         "underlying": result.get("underlying"),
         "option_id": result.get("option_id"),
         "mode": result.get("mode"),
