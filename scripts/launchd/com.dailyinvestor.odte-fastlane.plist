@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  0DTE fast-lane daemon supervisor (two-lane architecture, 2026-08-05).
+
+  Starts the daemon Mon-Fri at 09:25 ET; the daemon self-fences to 09:25-16:05 ET and exits 0
+  at session end. KeepAlive.SuccessfulExit=false restarts a CRASH (nonzero exit) but never a
+  clean session end. The stage file data/odte/fast_lane_stage.json remains the mode authority -
+  this supervisor never chooses a mode, so a stage rollback or `make odte-fast-lane-pause`
+  takes effect without touching launchd.
+
+  Install:   make odte-fast-lane-install
+  Uninstall: make odte-fast-lane-uninstall    (kill switch #3)
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.dailyinvestor.odte-fastlane</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/zsh</string>
+        <string>-lc</string>
+        <string>cd $HOME/dev_work/daily_investor &amp;&amp; .venv/bin/daily-investor odte-fast-lane</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>ODTE_ACCOUNT_NUMBER</key>
+        <string>435050133</string>
+    </dict>
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>25</integer></dict>
+        <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>25</integer></dict>
+        <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>25</integer></dict>
+        <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>25</integer></dict>
+        <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>25</integer></dict>
+    </array>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/tmp/odte-fastlane.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/odte-fastlane.err.log</string>
+</dict>
+</plist>
