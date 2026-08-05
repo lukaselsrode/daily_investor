@@ -102,3 +102,36 @@ def test_module_makes_no_broker_or_network_calls():
     for forbidden in ("robin_stocks", "requests", "openai", "anthropic", "place_order",
                       "submit_order", "urllib", "httpx", "socket", "yfinance"):
         assert forbidden not in src, f"odte_day_score must not reference {forbidden!r}"
+
+
+# --- good_day_min_score knob wiring + component-presence telemetry (2026-08-05) ---------------
+
+def test_good_day_boundary_uses_the_config_knob(monkeypatch):
+    # The knob was defined in odte_config but the scorer used a literal 4 — a dead knob.
+    market = {"spy_above_vwap": True, "spy_orb_state": "above",
+              "qqq_above_vwap": True, "qqq_orb_state": "above",
+              "iwm_above_vwap": True, "iwm_orb_state": "above",
+              "gap_pct": 0.5, "minutes_to_close": 300}
+    from data.odte_config import GOOD_DAY_MIN_SCORE
+    assert ods.GOOD_DAY_MIN_SCORE == GOOD_DAY_MIN_SCORE       # wired, not re-hardcoded
+    assert ods.score_day(market=market)["verdict"] == "GOOD_DAY"   # score 4 at default knob 4
+    chop = dict(market)
+    del chop["gap_pct"]                                       # the Aug-4 flip: 4 -> 3
+    assert ods.score_day(market=chop)["verdict"] == "CHOP"
+    monkeypatch.setattr(ods, "GOOD_DAY_MIN_SCORE", 3)
+    assert ods.score_day(market=chop)["verdict"] == "GOOD_DAY"  # knob now actually turns
+
+
+def test_component_presence_telemetry_shows_zero_headroom():
+    # On the live tape vix + expected_move are structurally absent: max achievable == threshold.
+    market = {"spy_above_vwap": True, "spy_orb_state": "above",
+              "qqq_above_vwap": True, "qqq_orb_state": "above",
+              "iwm_above_vwap": True, "iwm_orb_state": "above",
+              "gap_pct": 0.5, "vixy_change_pct": -1.0, "minutes_to_close": 300}
+    p = ods.score_day(market=market)
+    assert p["components_supplied"] == 4                      # all but expected_move
+    assert p["components_missing"] == ["expected_move"]
+    assert p["max_possible_score"] == 4                       # 3 trend + 1 gap; vixy adds nothing
+    assert p["max_possible_score"] == ods.GOOD_DAY_MIN_SCORE   # the zero-headroom fact, pinned
+    with_vix = ods.score_day(market={**market, "vix": 18.0})
+    assert with_vix["max_possible_score"] == 5                # a literal vix restores headroom

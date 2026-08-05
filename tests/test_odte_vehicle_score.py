@@ -67,3 +67,39 @@ def test_watch_when_market_and_gamma_are_missing_but_contract_is_liquid(tmp_path
     payload = run_vehicle_score(contract_path=str(path), direction="bearish", buying_power="108")
     assert payload["verdict"] in {WATCH, GOOD_BET}
     assert payload["places_orders"] is False
+
+
+# --- bp_fit: the gate's budget_check dollars at selection time (2026-08-05) -------------------
+
+def test_bp_fit_names_the_aug4_mismatch():
+    # Aug-4 replay: ask 2.88, BP 357.06 -> scored GOOD_BET against raw BP while the gate
+    # refused 12x against the 60% tier cap. bp_fit must expose the gate's arithmetic verbatim
+    # WITHOUT changing the score or verdict.
+    from data.odte_config import MAX_DEBIT_FRACTION
+    contract = {"underlying": "SPY", "option_type": "call", "bid": 2.85, "ask": 2.88,
+                "volume": 184746, "open_interest": 6734}
+    p = score_vehicle(contract, direction="bullish", buying_power=357.06)
+    fit = p["bp_fit"]
+    assert fit["fits"] is False and fit["debit"] == 288.0
+    assert fit["cap"] == round(MAX_DEBIT_FRACTION * 357.06, 2)
+    assert fit["max_affordable_ask"] == round(MAX_DEBIT_FRACTION * 357.06 / 100.0, 2)
+    assert any("CANNOT pass the gate's budget_check" in r for r in p["reasons"])
+    # Verdict/score are UNCHANGED by bp_fit (additive telemetry only).
+    baseline = score_vehicle(contract, direction="bullish", buying_power=357.06)
+    assert p["verdict"] == baseline["verdict"] and p["score"] == baseline["score"]
+
+
+def test_bp_fit_tier_selects_fraction_and_fitting_contract_passes():
+    from data.odte_config import B_PLUS_DEBIT_FRACTION
+    contract = {"underlying": "IWM", "option_type": "call", "bid": 0.78, "ask": 0.80,
+                "volume": 50000, "open_interest": 4000}
+    p = score_vehicle(contract, direction="bullish", buying_power=357.06, tier="b_plus")
+    fit = p["bp_fit"]
+    assert fit["tier"] == "b_plus" and fit["fraction"] == B_PLUS_DEBIT_FRACTION
+    assert fit["fits"] is (80.0 <= round(B_PLUS_DEBIT_FRACTION * 357.06, 2))
+    assert any("fits the gate's budget_check" in r for r in p["reasons"])
+
+
+def test_bp_fit_absent_without_buying_power():
+    p = score_vehicle({"underlying": "SPY", "ask": 1.0}, direction="bullish")
+    assert p["bp_fit"] is None

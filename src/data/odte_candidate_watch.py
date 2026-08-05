@@ -419,6 +419,12 @@ def evaluate_candidate_watch(candidate: dict | None = None, *, market: dict | No
                    "vixy_weak": _vixy_weak(market),
                    "vixy_firming": _vixy_firming(market),
                    "minutes_to_close": _minutes_to_close(market)})
+    # Telemetry (2026-08-05): _vixy_weak short-circuits on above_vwap=False, _vixy_firming on
+    # above_vwap=True — an above-VWAP-but-down-on-day VIXY satisfies BOTH, silently handing a
+    # free vol confirmation to EITHER direction. Flag it; the mutual-exclusion fix waits for a
+    # clean session of this telemetry.
+    if checks["vixy_weak"] and checks["vixy_firming"]:
+        checks["vixy_conflict"] = True
 
     if direction == "bullish":
         invalidated = underlying_above is False or underlying_orb == "below"

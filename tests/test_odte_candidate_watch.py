@@ -344,3 +344,18 @@ def test_relative_strength_rank_is_deterministic_selection_context():
     assert spy["candidate"]["relative_strength_rank"] == 1
     qqq = cw.evaluate_candidate_watch({"ticker": "QQQ", "direction": "bearish"}, market=m, now=NOW)
     assert qqq["candidate"]["relative_strength_rank"] == 2
+
+
+def test_vixy_conflict_flag_when_both_directions_confirmed(monkeypatch):
+    # The real Aug-4 VIXY block: above VWAP (firming short-circuit) but down on the day (weak
+    # fallback) -> BOTH helpers True, a free vol confirmation for either direction. Flag it.
+    market = {
+        "SPY": {"last": 770.0, "above_vwap": True, "orb_state": "above"},
+        "QQQ": {"last": 700.0, "above_vwap": True, "orb_state": "above"},
+        "IWM": {"last": 300.0, "above_vwap": True, "orb_state": "above"},
+        "VIXY": {"above_vwap": True, "change_pct": -0.7371, "last": 20.2},
+    }
+    assert cw._vixy_weak(market) and cw._vixy_firming(market)  # the underlying contradiction
+    result = cw.evaluate_candidate_watch({"ticker": "SPY", "direction": "bullish"},
+                                         market=market, now=NOW)
+    assert result["checks"].get("vixy_conflict") is True

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from core.paths import ODTE_REPORT_DIR
+from data.odte_config import B_PLUS_DEBIT_FRACTION, MAX_DEBIT_FRACTION
 
 GOOD_BET = "GOOD_BET"
 WATCH = "WATCH"
@@ -218,8 +219,14 @@ def _liquidity_score(contract: dict, buying_power: float | None) -> tuple[int, l
 
 
 def score_vehicle(contract: dict, direction: str | None = None, market: dict | None = None,
-                  gamma: dict | None = None, buying_power: float | None = None) -> dict:
-    """Return deterministic GOOD_BET/WATCH/BAD_BET score for a candidate vehicle/contract."""
+                  gamma: dict | None = None, buying_power: float | None = None,
+                  tier: str | None = None) -> dict:
+    """Return deterministic GOOD_BET/WATCH/BAD_BET score for a candidate vehicle/contract.
+
+    `tier` (a_plus/full/b_plus, optional) selects the debit fraction for the ADDITIVE `bp_fit`
+    block — the gate's own budget_check arithmetic surfaced at SELECTION time. 2026-08-04: the
+    scorer certified a $288 contract GOOD_BET against raw BP while the gate refused it against
+    the 60%-tier cap 12x in a row; the scorer and the gate must speak the same dollars."""
     direction = (direction or contract.get("direction") or contract.get("option_type") or contract.get("type") or "").lower()
     if direction == "call":
         direction = "bullish"
@@ -236,6 +243,27 @@ def score_vehicle(contract: dict, direction: str | None = None, market: dict | N
         components[name] = score
         total += score
         reasons.extend(f"{name}: {r}" for r in rs)
+    # ADDITIVE bp_fit: the gate's budget_check numbers (tier fraction x BP), visible at
+    # selection time. Never changes the score/verdict — it exists so a contract that can never
+    # pass the gate is named as such HERE, with the affordable ask to rotate toward.
+    bp_fit = None
+    if buying_power:
+        frac = B_PLUS_DEBIT_FRACTION if str(tier or "").lower() == "b_plus" else MAX_DEBIT_FRACTION
+        cap = round(frac * buying_power, 2)
+        bp_fit = {"tier": (str(tier).lower() if tier else "full"), "fraction": frac,
+                  "cap": cap, "max_affordable_ask": round(cap / 100.0, 2),
+                  "debit": None, "fits": None}
+        ask_px = (_num(contract.get("ask") or contract.get("ask_price"))
+                  or _num(contract.get("mark") or contract.get("mark_price")))
+        if ask_px:
+            debit = round(ask_px * 100.0, 2)
+            bp_fit.update({"debit": debit, "fits": debit <= cap})
+            reasons.append(
+                f"bp_fit: debit ${debit:.2f} vs {frac:.0%} tier cap ${cap:.2f} — "
+                + ("fits the gate's budget_check" if debit <= cap else
+                   f"CANNOT pass the gate's budget_check; rotate to a contract with "
+                   f"ask <= ${cap / 100.0:.2f}"))
+
     hard_bad = any("breakeven" in r and "expected-move" in r and ("above" in r or "below" in r)
                    for r in reasons)
     late_cap = (_num((market or {}).get("minutes_to_close")) or 9999) <= 20
@@ -252,6 +280,7 @@ def score_vehicle(contract: dict, direction: str | None = None, market: dict | N
         "verdict": verdict,
         "score": total,
         "components": components,
+        "bp_fit": bp_fit,
         "direction": direction,
         "contract": contract,
         "reasons": reasons,

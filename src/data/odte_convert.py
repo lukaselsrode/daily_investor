@@ -350,7 +350,8 @@ def run_convert(candidate_json: str | dict | None = None, candidate_path: str | 
     bp = _first_num(broker, "buying_power", "options_buying_power", "account_buying_power")
     direction = str(candidate.get("direction") or candidate.get("option_type") or "") or None
     vehicle_score = score_vehicle(contract, direction=direction, market=market, gamma=gamma,
-                                  buying_power=bp)
+                                  buying_power=bp,
+                                  tier=str(candidate.get("tier") or "") or None)
     # The scores are computed in-process AT `now` — stamp them with the conversion clock so the
     # lease freshness checks measure this run's clock, not the module wall clock.
     day_score["generated_at"] = now.isoformat(timespec="seconds")

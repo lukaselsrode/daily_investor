@@ -131,7 +131,11 @@ CONFIRMED_CANDIDATE_MAX_FUTURE_SKEW_SECONDS = 2.0
 # refreshes the exact input instead of stalling on an "unknown" gate.
 _GATE_INPUT_COMMANDS = {
     "day_regime": "make odte-day-score MARKET=<market.json> JSON=1",
-    "vehicle": "make odte-vehicle-score CONTRACT=<contract.json> MARKET=<market.json> BP=<bp> JSON=1",
+    "vehicle": ("make odte-vehicle-score CONTRACT=<contract.json> MARKET=<market.json> BP=<bp> "
+                "JSON=1  # if a WATCH score BELOW the B+ floor already exists, the input is "
+                "PRESENT — re-scoring the same contract cannot pass this gate; rotate to a "
+                "stronger BP-fitting QQQ/SPY/IWM contract (its bp_fit.max_affordable_ask names "
+                "the price) or keep the candidate HAWK loop"),
     "account": "supply a fresh broker snapshot (BROKER=<broker.json> from the Hermes MCP read lane)",
     "directional_thesis": "make odte-watchdog JSON=1  # or pass CANDIDATE= with an explicit direction",
 }

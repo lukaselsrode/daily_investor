@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from core.paths import ODTE_REPORT_DIR
+from data.odte_config import GOOD_DAY_MIN_SCORE
 
 GOOD_DAY = "GOOD_DAY"
 CHOP = "CHOP"
@@ -227,10 +228,33 @@ def score_day(market: dict | None = None, gamma: dict | None = None) -> dict:
                [f"gap: {r}" for r in gap_r] + [f"expected_move: {r}" for r in em_r] +
                [f"time: {r}" for r in tim_r])
 
+    # Component-presence telemetry (2026-08-05): on the live tape vix and expected_move are
+    # structurally absent, so the maximum achievable score EQUALS the GOOD_DAY threshold — a
+    # single missing component (the Aug-4 gap_pct drop) flips the verdict. Surface how much of
+    # the scorecard was actually in play so a boundary tune can be argued from evidence.
+    supplied = {
+        "trend": any(k in market for k in ("spy_above_vwap", "qqq_above_vwap", "iwm_above_vwap",
+                                           "spy_orb_state", "qqq_orb_state", "iwm_orb_state")),
+        "volatility": (_num(market.get("vix")) is not None
+                       or _num(market.get("vix_change_pct")) is not None
+                       or _num(market.get("vixy_change_pct")) is not None
+                       or isinstance(market.get("vixy"), dict)),
+        "gap": _num(market.get("gap_pct")) is not None,
+        "expected_move": (_num(market.get("expected_move_pct")) is not None
+                          or isinstance(gamma.get("expected_move"), dict)),
+        "time": _num(market.get("minutes_to_close")) is not None,
+    }
+    # Max POSITIVE contribution actually reachable: trend +3, gap +1, em +1; volatility's +1
+    # needs a literal vix (VIXY change can only subtract); time never adds.
+    max_possible = ((3 if supplied["trend"] else 0)
+                    + (1 if _num(market.get("vix")) is not None else 0)
+                    + (1 if supplied["gap"] else 0)
+                    + (1 if supplied["expected_move"] else 0))
+
     hard_avoid = vol_avoid or time_avoid
     if hard_avoid:
         verdict = AVOID
-    elif total >= 4:
+    elif total >= GOOD_DAY_MIN_SCORE:
         verdict = GOOD_DAY
     elif total <= -3:
         verdict = AVOID
@@ -241,6 +265,9 @@ def score_day(market: dict | None = None, gamma: dict | None = None) -> dict:
         "verdict": verdict,
         "score": total,
         "components": components,
+        "components_supplied": sum(supplied.values()),
+        "components_missing": sorted(k for k, v in supplied.items() if not v),
+        "max_possible_score": max_possible,
         "reasons": reasons,
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "basis": "non_sentiment_day_regime_scorecard: trend + volatility + gap + expected-move + time",
