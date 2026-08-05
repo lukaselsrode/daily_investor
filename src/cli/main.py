@@ -260,18 +260,21 @@ def _cmd_odte_watchdog(rest: list[str]) -> None:
     # Script-only 0DTE watchdog — NO LLM, NO Robinhood, places no orders. Runs the LOCAL report,
     # diffs the actionable candidate vs the prior run, and writes data/odte/{watchdog_state,triggers}.json.
     # The controller policy it checks is a secret read from ~/0dte/ (override with --policy).
-    # stdout contract for a no_agent cron: EMPTY when nothing actionable; compact one-line JSON when a
-    # trigger fires. --json always prints the compact state. --no-fetch runs offline (cache-only).
+    # stdout contract for a no_agent cron: EMPTY when nothing actionable; a compact HUMAN pulse
+    # when a trigger fires (the no-agent cron delivers stdout verbatim to Telegram — machines
+    # read triggers.json or pass --json, which always prints the compact state).
     import json
     import logging
     logging.disable(logging.ERROR)   # keep stdout a clean machine contract
-    from data.odte_watchdog import DEFAULT_STATE_DIR, run_watchdog
+    from data.odte_watchdog import DEFAULT_STATE_DIR, render_pulse, run_watchdog
     state_dir = _flag_value(rest, "--state-dir")
     policy = _flag_value(rest, "--policy")
     payload = run_watchdog(state_dir=state_dir or DEFAULT_STATE_DIR,
                            policy_path=policy, allow_fetch="--no-fetch" not in rest)
-    if "--json" in rest or payload.get("alert"):
+    if "--json" in rest:
         print(json.dumps(payload, separators=(",", ":"), default=str))
+    elif payload.get("alert"):
+        print(render_pulse(payload))
 
 
 def _cmd_odte_position(rest: list[str]) -> None:

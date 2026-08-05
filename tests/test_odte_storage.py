@@ -163,3 +163,30 @@ def test_ui_scrape_snapshot_helpers_exclude_latest_pointer(tmp_path, monkeypatch
     ]  # the stable 'reddit_text.txt' pointer is excluded; dated snapshots only
     assert u.latest_scrape_snapshot("reddit").name == "reddit_text_2026_06_25_09_00.txt"
     assert u.latest_scrape_snapshot("x") is None
+
+
+# --- watchdog Telegram pulse (2026-08-05: no raw JSON to humans) ------------------------------
+
+def test_render_pulse_is_human_readable_not_json():
+    from data.odte_watchdog import render_pulse
+    payload = {
+        "alert": True, "spy_verdict": "CALL-leaning",
+        "candidate": {"ticker": "SPY", "direction": "bullish",
+                      "scorecard_confidence": "low"},
+        "triggers": [
+            {"type": "candidate_persisting", "candidate": "SPY:bullish",
+             "detail": "candidate unchanged >= 10m since last alert — re-alerting"},
+        ],
+    }
+    text = render_pulse(payload)
+    assert text.startswith("🔔 0DTE watchdog — candidate_persisting")
+    assert "SPY bullish" in text and "CALL-leaning" in text and "confidence low" in text
+    assert "candidate unchanged" in text
+    assert "odte-candidate-watch" in text                     # the hand-off is named
+    assert "{" not in text and '":' not in text               # no JSON leaks to Telegram
+
+
+def test_render_pulse_minimal_payload_never_crashes():
+    from data.odte_watchdog import render_pulse
+    text = render_pulse({"alert": True, "triggers": [{}]})
+    assert text.startswith("🔔 0DTE watchdog")

@@ -295,6 +295,31 @@ def run_watchdog(state_dir: str = DEFAULT_STATE_DIR, policy_path: str | None = N
     return payload
 
 
+def render_pulse(payload: dict) -> str:
+    """Compact HUMAN pulse for a fired trigger — what lands in Telegram via the no-agent cron.
+
+    The machine contract is untouched: controllers read data/odte/triggers.json (or --json).
+    2026-08-05: the cron delivered the compact-JSON alert line verbatim to Telegram, so every
+    trigger read as a wall of JSON on a phone. A pulse names the trigger, the candidate, and
+    the hand-off — nothing else."""
+    cand = payload.get("candidate") or {}
+    triggers = payload.get("triggers") or []
+    types = ", ".join(sorted({str(t.get("type") or "trigger") for t in triggers})) or "trigger"
+    lines = [f"🔔 0DTE watchdog — {types}"]
+    if cand:
+        who = " ".join(str(x) for x in (cand.get("ticker"), cand.get("direction")) if x)
+        verdict = str(payload.get("spy_verdict") or cand.get("market_verdict") or "").strip()
+        conf = str(cand.get("scorecard_confidence") or "").strip()
+        detail = ", ".join(x for x in (verdict, f"confidence {conf}" if conf else "") if x)
+        lines.append(f"• candidate: {who}" + (f" ({detail})" if detail else ""))
+    for trig in triggers[:3]:
+        detail = str(trig.get("detail") or "").strip()
+        if detail:
+            lines.append(f"• {detail}")
+    lines.append("→ controller works it on its next tick (odte-candidate-watch → odte-convert)")
+    return "\n".join(lines)
+
+
 def _journal_watchdog_trigger(payload: dict, triggers_text: str, triggers_path: Path) -> None:
     """Best-effort: fold the watchdog trigger payload into the standardized decision journal as a
     scan-tier `watchdog_trigger` event. FULLY fail-safe — any error is swallowed so it can NEVER
