@@ -294,3 +294,68 @@ def test_zero_buying_power_fails_closed_not_fallback(tmp_path):
     p = _convert(tmp_path, broker=broke)
     assert p["converted"] is False
     assert p["confirmation_detail"]["budget_check"]["buying_power"] == 0.0
+
+
+# --- fast-lane prerequisites (2026-08-04): dict inputs + journal_events read override ------------
+
+def test_dict_inputs_identical_to_json_string_inputs(tmp_path):
+    # The daemon holds the artifacts in memory — passing dicts must produce the exact decision
+    # a json.dumps round trip produces.
+    kw_a = dict(state_dir=str(tmp_path / "a"), journal=False, write=False, now=NOW,
+                journal_path=str(tmp_path / "a" / "decision_journal.jsonl"))
+    kw_b = dict(state_dir=str(tmp_path / "b"), journal=False, write=False, now=NOW,
+                journal_path=str(tmp_path / "b" / "decision_journal.jsonl"))
+    p_str = cv.run_convert(candidate_json=json.dumps(_candidate()),
+                           market_json=json.dumps(_market()),
+                           broker_json=json.dumps(_broker()),
+                           contract_json=json.dumps(_contract()), **kw_a)
+    p_dict = cv.run_convert(candidate_json=_candidate(), market_json=_market(),
+                            broker_json=_broker(), contract_json=_contract(), **kw_b)
+    assert p_dict["converted"] is True
+    assert (json.dumps(p_dict, sort_keys=True, default=str)
+            == json.dumps(p_str, sort_keys=True, default=str))
+
+
+def test_journal_events_override_enforces_budget_with_zero_appends(tmp_path):
+    # Shadow mode: read the REAL journal's budget/green state via journal_events while journal=False
+    # guarantees no append anywhere. A 2-entry day must refuse daily_trade_budget_exhausted.
+    real_events = []
+    for i, hours_ago in enumerate((4, 2)):
+        ts = (NOW - timedelta(hours=hours_ago)).isoformat()
+        real_events += [
+            {"event_type": "execution_lease_issued", "trade_id": f"t{i}", "underlying": "SPY",
+             "option_id": f"spy-{i}", "tier": "full", "authorized": True, "ts": ts},
+            {"event_type": "order_filled", "trade_id": f"t{i}", "underlying": "SPY",
+             "option_id": f"spy-{i}", "ts": ts},
+            {"event_type": "order_closed", "trade_id": f"t{i}", "underlying": "SPY",
+             "option_id": f"spy-{i}", "realized_pnl": 5.0,
+             "ts": (NOW - timedelta(hours=hours_ago - 1)).isoformat()},
+        ]
+    assert len([e for e in real_events if e["event_type"] == "order_filled"]) \
+        == oc.DAILY_TRADE_BUDGET
+    payload = cv.run_convert(candidate_json=_candidate(), market_json=_market(),
+                             broker_json=_broker(), contract_json=_contract(),
+                             state_dir=str(tmp_path), write=False, journal=False,
+                             journal_events=real_events,
+                             journal_path=str(tmp_path / "decision_journal.jsonl"), now=NOW)
+    assert payload["converted"] is False
+    assert payload["stage"] == "entry_gate"
+    import data.odte_entry_gate as eg
+    assert any(eg.DAILY_BUDGET_VETO in str(r) for r in payload["reason_codes"])
+    assert not (tmp_path / "decision_journal.jsonl").exists()   # zero appends anywhere
+
+
+def test_warm_convert_on_dicts_is_fast(tmp_path):
+    # The daemon calls run_convert inside the FIRING window — the warm in-process conversion must
+    # stay far under the lease clock (measured ~30ms; loose CI bound).
+    import time
+    kw = dict(state_dir=str(tmp_path), write=False, journal=False, journal_events=[],
+              journal_path=str(tmp_path / "decision_journal.jsonl"))
+    cv.run_convert(candidate_json=_candidate(), market_json=_market(), broker_json=_broker(),
+                   contract_json=_contract(), now=NOW, **kw)          # warm imports/caches
+    t0 = time.perf_counter()
+    p = cv.run_convert(candidate_json=_candidate(), market_json=_market(), broker_json=_broker(),
+                       contract_json=_contract(), now=NOW, **kw)
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+    assert p["converted"] is True
+    assert elapsed_ms < 150, f"warm convert took {elapsed_ms:.1f}ms"

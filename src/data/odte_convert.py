@@ -72,7 +72,12 @@ def _first_num(d: dict, *keys: str) -> float | None:
     return None
 
 
-def _load_json(path: str | None, raw_json: str | None, default: dict | None = None) -> dict:
+def _load_json(path: str | None, raw_json: str | dict | None,
+               default: dict | None = None) -> dict:
+    # Callers holding the artifact in memory (the fast-lane daemon) pass the dict itself — a
+    # json.dumps round trip would be pure waste on the latency-critical path.
+    if isinstance(raw_json, dict):
+        return raw_json
     if raw_json:
         obj = json.loads(raw_json)
     elif path:
@@ -183,23 +188,28 @@ def _journal_no_trade(stage: str, reason_codes: list[str], candidate: dict,
                                    journal_path=journal_path, now=now)
 
 
-def run_convert(candidate_json: str | None = None, candidate_path: str | None = None,
-                market_json: str | None = None, market_path: str | None = None,
-                broker_json: str | None = None, broker_path: str | None = None,
-                contract_json: str | None = None, contract_path: str | None = None,
-                gamma_json: str | None = None, gamma_path: str | None = None,
-                policy_json: str | None = None, policy_path: str | None = None,
+def run_convert(candidate_json: str | dict | None = None, candidate_path: str | None = None,
+                market_json: str | dict | None = None, market_path: str | None = None,
+                broker_json: str | dict | None = None, broker_path: str | None = None,
+                contract_json: str | dict | None = None, contract_path: str | None = None,
+                gamma_json: str | dict | None = None, gamma_path: str | None = None,
+                policy_json: str | dict | None = None, policy_path: str | None = None,
                 journal_path: str | None = None, state_dir: str | None = None,
                 write: bool = True, journal: bool = True,
+                journal_events: list[dict] | None = None,
                 now: datetime | None = None) -> dict:
     """Run the full CONFIRM_ENTRY→gate→lease conversion atomically under one clock.
 
     Inputs: an active/confirmed candidate (default `data/odte/active_candidate.json`), fresh market
     + broker snapshots, the exact locked contract quote, optional gamma map and lease policy.
-    Returns `{converted, stage, reason_codes, day_score, vehicle_score, candidate_decision,
-    entry_gate, authorization, ...}`. `write=True` persists candidate_decision/active_candidate and
-    the lease artifact through the same atomic writers the individual CLIs use; `journal=True`
-    appends the entry_decision / execution_lease_issued / terminal no_trade events.
+    The `*_json` inputs accept a JSON string OR the already-parsed dict (fast-lane callers skip
+    the serialize/parse round trip). Returns `{converted, stage, reason_codes, day_score,
+    vehicle_score, candidate_decision, entry_gate, authorization, ...}`. `write=True` persists
+    candidate_decision/active_candidate and the lease artifact through the same atomic writers the
+    individual CLIs use; `journal=True` appends the entry_decision / execution_lease_issued /
+    terminal no_trade events. `journal_events` overrides the budget/green/cooldown READ without
+    touching append behavior — shadow mode reads the REAL journal (so those gates evaluate as they
+    would live) while appending nowhere (`journal=False`) or to a shadow journal.
     """
     now = now or datetime.now(timezone.utc)
     if now.tzinfo is None:
@@ -232,12 +242,15 @@ def run_convert(candidate_json: str | None = None, candidate_path: str | None = 
     gamma = _load_json(gamma_path, gamma_json, default={})
     policy = _load_json(policy_path, policy_json, default={})
     journal_path = journal_path or DEFAULT_JOURNAL_PATH
-    try:
-        journal_events = read_events(journal_path) if journal else []
-    except OSError:
-        # An unreadable journal is not fatal here — the append below fails loudly and withholds
-        # the lease, which is the honest fail-closed surface for a broken journal path.
-        journal_events = []
+    if journal_events is None:
+        try:
+            journal_events = read_events(journal_path) if journal else []
+        except OSError:
+            # An unreadable journal is not fatal here — the append below fails loudly and
+            # withholds the lease, which is the honest fail-closed surface for a broken journal.
+            journal_events = []
+    else:
+        journal_events = list(journal_events)
 
     base_dir = Path(os.path.expanduser(state_dir or DEFAULT_STATE_DIR))
 
