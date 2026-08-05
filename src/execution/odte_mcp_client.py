@@ -398,6 +398,13 @@ class OdteMcpClient:
         ref_id — the broker dedupes, so worst case is one order, never two."""
         return await self.call(TOOL_PLACE_OPTION_ORDER, {**order_args, "ref_id": str(ref_id)})
 
+    async def open_option_orders(self, account_number: str) -> list[dict]:
+        """All currently-working option orders (pending/partial/pending-cancel states)."""
+        payload = await self.call(TOOL_OPTION_ORDERS, {"account_number": str(account_number)})
+        return [r for r in _rows(payload)
+                if str(r.get("state") or r.get("status") or "").strip().lower()
+                in _PENDING_ORDER_STATES]
+
     async def cancel_option_order(self, order_id: str, account_number: str) -> Any:
         # account_number is REQUIRED by the server schema (mismatches are rejected).
         return await self.call(TOOL_CANCEL_OPTION_ORDER,
