@@ -63,7 +63,7 @@ CANCEL_STATES = (CANCEL_STALE_ENTRY, CANCEL_THESIS_INVALID)
 INCIDENT_STATES = (FILLED_WITHOUT_VALID_LEASE, BROKER_MISMATCH_BLOCKED)
 
 _PENDING_STATUSES = {"pending", "queued", "confirmed", "placed", "open", "live", "unconfirmed",
-                     "submitted"}
+                     "submitted", "partially_filled", "pending_cancelled"}
 _FILLED_STATUSES = {"filled", "executed", "complete", "completed"}
 _GONE_STATUSES = {"", "none", "cancelled", "canceled", "rejected", "expired", "failed"}
 
@@ -113,6 +113,11 @@ def _lease_dict(lease: dict | None) -> dict:
 
 def _order_status(order: dict) -> str:
     s = str(order.get("status") or order.get("state") or "").strip().lower()
+    # A partial fill is a LIVE working order (the remainder is still at the broker) even though
+    # the broker stamps filled_at/filled_quantity on it, and a pending cancel is not yet gone —
+    # both must stay guarded, never read as a completed fill or as "no live order".
+    if s in ("partially_filled", "pending_cancelled"):
+        return "pending"
     if s in _FILLED_STATUSES or order.get("filled_at"):
         return "filled"
     if s in _PENDING_STATUSES:
@@ -316,7 +321,8 @@ def evaluate_order_guard(order: dict | None = None, *, lease: dict | None = None
         "lease_id": ld.get("lease_id"),
         "order": {k: order.get(k) for k in
                   ("status", "symbol", "option_id", "option_type", "strike_price",
-                   "expiration_date", "quantity", "limit_price", "submitted_at", "filled_at")
+                   "expiration_date", "quantity", "limit_price", "submitted_at", "filled_at",
+                   "filled_quantity")
                   if order.get(k) is not None},
         "cancel_required": cancel_required,
         "safety_incident": incident,

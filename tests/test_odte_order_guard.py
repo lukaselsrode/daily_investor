@@ -357,3 +357,43 @@ def test_run_order_guard_materializes_consumed_ledger(tmp_path):
                             state_dir=str(tmp_path),
                             now=PROMOTION_AT + timedelta(seconds=6))
     assert r2["lease_consumed_now"] is False
+
+
+# --- partial fills / pending cancels stay guarded (2026-08-04 fast-lane prerequisite) --------------
+
+def test_partially_filled_inside_lease_is_pending_fresh():
+    # A partial fill is a LIVE working order. Before this fix `partially_filled` fell through to
+    # "gone" (NO_ORDER) — and the broker stamps filled_at on partials, which must never classify
+    # the working remainder as a completed fill.
+    lease = _full_account_lease()
+    order = {**_pending_order(lease, PROMOTION_AT + timedelta(seconds=2)),
+             "status": "partially_filled", "filled_quantity": 1,
+             "filled_at": _iso(PROMOTION_AT + timedelta(seconds=4))}
+    r = og.evaluate_order_guard(order, lease=lease,
+                                market_snapshot={"SPY": {"above_vwap": False}},
+                                now=PROMOTION_AT + timedelta(seconds=5))
+    assert r["state"] == og.PENDING_FRESH
+    assert r["order"]["filled_quantity"] == 1          # passed through for partial-fill handling
+
+
+def test_partially_filled_past_lease_cancels_remainder():
+    lease = _full_account_lease()
+    ttl = xp.lease_seconds_remaining(lease, PROMOTION_AT) or 0
+    order = {**_pending_order(lease, PROMOTION_AT + timedelta(seconds=2)),
+             "status": "partially_filled", "filled_quantity": 1}
+    r = og.evaluate_order_guard(order, lease=lease,
+                                now=PROMOTION_AT + timedelta(seconds=ttl + 1))
+    assert r["state"] == og.CANCEL_STALE_ENTRY
+    assert r["cancel_required"] is True
+
+
+def test_pending_cancelled_is_still_guarded_not_no_order():
+    # A cancel REQUEST is not a confirmed cancel — the order may still fill; keep guarding.
+    lease = _full_account_lease()
+    order = {**_pending_order(lease, PROMOTION_AT + timedelta(seconds=2)),
+             "status": "pending_cancelled"}
+    r = og.evaluate_order_guard(order, lease=lease,
+                                market_snapshot={"SPY": {"above_vwap": False}},
+                                now=PROMOTION_AT + timedelta(seconds=5))
+    assert r["state"] != og.NO_ORDER
+    assert r["state"] == og.PENDING_FRESH
