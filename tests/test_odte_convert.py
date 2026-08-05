@@ -224,3 +224,73 @@ def test_post_green_kill_switch_off_refuses_at_gate(tmp_path, monkeypatch):
     assert payload["converted"] is False
     assert payload["stage"] == "entry_gate"
     assert any("green_day_preservation_lockout" in str(r) for r in payload["reason_codes"])
+
+
+# --- 2026-08-04 day-1 fixes: gap backfill, components, deadline, guidance pass-through ----------
+
+def test_gap_pct_persists_and_backfills_same_et_day(tmp_path):
+    # THE 24-CENT KILL: gap_pct (an overnight constant) vanished mid-session -> GOOD_DAY->CHOP ->
+    # tier halved -> a $214.00 debit refused against $214.24. First sighting persists; a later
+    # snapshot that lost the key is backfilled, loudly flagged.
+    p1 = _convert(tmp_path)                                   # market has gap_pct 0.5
+    assert p1["converted"] is True
+    sc = json.loads((tmp_path / cv.SESSION_CONSTANTS_FILENAME).read_text())
+    assert sc["gap_pct"] == 0.5
+    assert p1["gap_pct_backfilled"] is False
+    assert p1["day_score"]["components"]["gap"] == 1
+
+    # A later tick (distinct clock so journal event_ids differ) whose snapshot lost the key.
+    from datetime import timedelta
+    later = NOW + timedelta(minutes=5)
+    m2 = _market(now=later)
+    del m2["gap_pct"]                                         # the Aug-4 dropped key
+    p2 = _convert(tmp_path, now=later, market=m2, contract=_contract(now=later),
+                  broker=_broker(now=later), candidate=_candidate(now=later))
+    assert p2["gap_pct_backfilled"] is True
+    assert p2["day_score"]["components"]["gap"] == 1, "backfilled gap must restore the component"
+    assert p2["converted"] is True
+    events = oj.read_events(str(tmp_path / "decision_journal.jsonl"))
+    flagged = [e for e in events if e.get("gap_pct_backfilled")]
+    assert flagged, "the backfill must be visible in the journal"
+
+
+def test_gap_backfill_never_crosses_et_dates(tmp_path):
+    from datetime import timedelta
+    p1 = _convert(tmp_path)
+    assert (tmp_path / cv.SESSION_CONSTANTS_FILENAME).exists()
+    tomorrow = NOW + timedelta(days=1)
+    m2 = _market(now=tomorrow)
+    del m2["gap_pct"]
+    p2 = _convert(tmp_path, now=tomorrow, market=m2,
+                  contract=_contract(now=tomorrow), broker=_broker(now=tomorrow),
+                  candidate=_candidate(now=tomorrow))
+    assert p2["gap_pct_backfilled"] is False, "yesterday's gap must never leak into today"
+
+
+def test_converted_payload_carries_machine_deadline(tmp_path):
+    p = _convert(tmp_path)
+    assert p["converted"] is True
+    assert p["place_deadline"] == p["lease"]["expires_at"]
+    assert p["lease_seconds_remaining"] is not None
+    assert 0 < p["lease_seconds_remaining"] <= 60.0
+
+
+def test_entry_gate_refusal_passes_through_rotation_guidance(tmp_path):
+    # 2026-08-04: convert's generic refusal prose OVERWROTE the gate's rotate-vehicle guidance.
+    # A budget-check refusal must surface the gate's own next_action/next_command.
+    # Inside BP (vehicle stays GOOD_BET) but over the 60% tier cap -> budget_check fails at the
+    # gate, which is exactly the Aug-4 shape.
+    expensive = _contract(ask=2.50, bid=2.48, mark=2.49)       # debit $250 vs cap ~$208.9
+    p = _convert(tmp_path, contract=expensive)
+    assert p["converted"] is False
+    assert p["stage"] == "entry_gate"
+    assert "QQQ/SPY/IWM" in p["next_action"]
+    assert "odte-candidate-watch" in p["next_command"]
+    assert "refresh the named inputs" not in p["next_action"]
+
+
+def test_zero_buying_power_fails_closed_not_fallback(tmp_path):
+    broke = _broker(buying_power=0.0, options_buying_power=5000.0)
+    p = _convert(tmp_path, broker=broke)
+    assert p["converted"] is False
+    assert p["confirmation_detail"]["budget_check"]["buying_power"] == 0.0

@@ -30,12 +30,19 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from core.paths import ODTE_DATA_DIR, atomic_write_text
 from data.odte_config import SNAPSHOT_TTL_SECONDS, SPREAD_CAP_FRACTION
 
+_ET = ZoneInfo("America/New_York")
+
 SCHEMA_VERSION = 1
 DEFAULT_STATE_DIR = ODTE_DATA_DIR
+
+# Session constants persisted per ET trade date (currently just the overnight gap) so a snapshot
+# that loses a constant key mid-session can be backfilled instead of silently re-tiering the day.
+SESSION_CONSTANTS_FILENAME = "session_constants.json"
 
 # Conversion stages, in order. `stage` in the payload names the FIRST stage that refused.
 STAGES = ("preflight", "candidate_watch", "entry_gate", "journal", "authorize")
@@ -53,6 +60,16 @@ def _num(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return out if out == out else None
+
+
+def _first_num(d: dict, *keys: str) -> float | None:
+    """First key whose value PARSES as a number — a legitimate 0.0 wins (2026-08-04 hardening:
+    `or`-chains let a real zero fall through to the next key, silently sizing off the wrong field)."""
+    for key in keys:
+        val = _num(d.get(key))
+        if val is not None:
+            return val
+    return None
 
 
 def _load_json(path: str | None, raw_json: str | None, default: dict | None = None) -> dict:
@@ -119,8 +136,8 @@ def _computed_confirmations(candidate: dict, contract: dict, broker: dict,
                                     "quote_age_seconds": (round((now - quote_ts).total_seconds(), 1)
                                                           if quote_ts else None)}
 
-    bid = _num(contract.get("bid") or contract.get("bid_price"))
-    ask = _num(contract.get("ask") or contract.get("ask_price"))
+    bid = _first_num(contract, "bid", "bid_price")
+    ask = _first_num(contract, "ask", "ask_price")
     spread = None
     if bid is not None and ask is not None and (bid + ask) > 0:
         spread = (ask - bid) / ((ask + bid) / 2.0)
@@ -129,8 +146,7 @@ def _computed_confirmations(candidate: dict, contract: dict, broker: dict,
                                    "cap": SPREAD_CAP_FRACTION}
 
     from data.odte_config import B_PLUS_DEBIT_FRACTION, MAX_DEBIT_FRACTION
-    bp = _num(broker.get("buying_power") or broker.get("options_buying_power")
-              or broker.get("account_buying_power"))
+    bp = _first_num(broker, "buying_power", "options_buying_power", "account_buying_power")
     tier = str(candidate.get("tier") or "").lower() or None
     frac = B_PLUS_DEBIT_FRACTION if tier == "b_plus" else MAX_DEBIT_FRACTION
     debit = round(ask * 100.0, 2) if ask is not None else None
@@ -144,7 +160,8 @@ def _computed_confirmations(candidate: dict, contract: dict, broker: dict,
 
 
 def _journal_no_trade(stage: str, reason_codes: list[str], candidate: dict,
-                      journal_path: str | None, now: datetime) -> dict:
+                      journal_path: str | None, now: datetime,
+                      extra: dict | None = None) -> dict:
     """Journal the identity-bound terminal no_trade_decision for a non-converting stage."""
     from data.odte_journal import append_decision_journal
     ident = _identity(candidate)
@@ -154,6 +171,7 @@ def _journal_no_trade(stage: str, reason_codes: list[str], candidate: dict,
         "ts": now.isoformat(timespec="seconds"),
         "stage": stage,
         "reason_codes": list(reason_codes),
+        **(extra or {}),
         **ident,
         "candidate": {k: candidate.get(k) for k in
                       ("ticker", "direction", "option_id", "expiration_date", "strike_price",
@@ -223,6 +241,32 @@ def run_convert(candidate_json: str | None = None, candidate_path: str | None = 
 
     base_dir = Path(os.path.expanduser(state_dir or DEFAULT_STATE_DIR))
 
+    # ── SESSION-CONSTANT GAP BACKFILL (2026-08-04 hardening) ─────────────────────────────────
+    # gap_pct is the OVERNIGHT gap — constant for the whole session. On 2026-08-04 the controller
+    # dropped the key mid-day, which silently flipped GOOD_DAY→CHOP → tier full→b_plus → cap
+    # halved → a $214.00 debit refused against $214.24. Persist the first sighting per ET day and
+    # backfill later snapshots that lost it, loudly flagged.
+    gap_backfilled = False
+    session_constants: dict[str, Any] = {}
+    sc_path = base_dir / SESSION_CONSTANTS_FILENAME
+    et_today = now.astimezone(_ET).date().isoformat()
+    try:
+        session_constants = json.loads(sc_path.read_text()) if sc_path.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        session_constants = {}
+    gap_now = _num(market.get("gap_pct"))
+    if gap_now is not None:
+        if write and (session_constants.get("trade_date") != et_today
+                      or session_constants.get("gap_pct") != gap_now):
+            session_constants = {"trade_date": et_today, "gap_pct": gap_now}
+            base_dir.mkdir(parents=True, exist_ok=True)
+            atomic_write_text(sc_path, json.dumps(session_constants, indent=2))
+    elif (session_constants.get("trade_date") == et_today
+          and _num(session_constants.get("gap_pct")) is not None):
+        market = {**market, "gap_pct": _num(session_constants["gap_pct"]),
+                  "gap_pct_backfilled": True}
+        gap_backfilled = True
+
     payload: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": now.isoformat(timespec="seconds"),
@@ -236,15 +280,38 @@ def run_convert(candidate_json: str | None = None, candidate_path: str | None = 
                   "existing deterministic tiers, weakens none of them, places NO orders"),
     }
 
+    # Authorize-stage reasons that mean THE CONTRACT didn't fit the account, not the day — the
+    # correct next step is a FRESH candidate cycle on a BP-fitting vehicle, not a stand-down.
+    _AUTHORIZE_BP_REASONS = {"debit_exceeds_policy", "debit_exceeds_buying_power",
+                             "insufficient_buying_power"}
+
     def _refuse(stage: str, reasons: list[str], **extra: Any) -> dict:
         payload.update({"stage": stage, "reason_codes": reasons, **extra})
-        payload["next_action"] = (f"conversion refused at {stage} ({', '.join(reasons[:4])}) — "
-                                  "refresh the named inputs and re-run odte-convert, or let the "
-                                  "candidate degrade; the refusal is journaled terminally")
-        payload["next_command"] = "odte-convert  # after refreshing the failing inputs"
+        # GUIDANCE PASS-THROUGH (2026-08-04): the generic "refresh and re-run" prose here used to
+        # OVERWRITE the entry gate's specific guidance — the rotate-to-a-BP-fitting-vehicle
+        # instruction never reached the controller, which re-tried one unaffordable SPY contract
+        # 12x while an $80 IWM GOOD_BET sat on disk. Stage-specific guidance wins.
+        gate_payload = _dict(payload.get("entry_gate"))
+        if stage == "entry_gate" and gate_payload.get("next_action"):
+            payload["next_action"] = gate_payload["next_action"]
+            payload["next_command"] = gate_payload.get("next_command") or "odte-convert"
+        elif stage == "authorize" and _AUTHORIZE_BP_REASONS.intersection(reasons):
+            payload["next_action"] = (
+                "the CONTRACT doesn't fit the account, not the day — start a FRESH candidate "
+                "cycle on a BP-fitting vehicle (QQQ/SPY/IWM; the vehicle lock forbids silent "
+                "substitution), then re-run odte-convert; reject only if every candidate vehicle "
+                "fails")
+            payload["next_command"] = ("make odte-candidate-watch CANDIDATE=<other-vehicle "
+                                       "candidate.json> ... JSON=1 → odte-convert")
+        else:
+            payload["next_action"] = (f"conversion refused at {stage} ({', '.join(reasons[:4])}) "
+                                      "— refresh the named inputs and re-run odte-convert, or let "
+                                      "the candidate degrade; the refusal is journaled terminally")
+            payload["next_command"] = "odte-convert  # after refreshing the failing inputs"
         if journal:
             result = _journal_no_trade(stage, reasons, _dict(payload.get("candidate")) or candidate,
-                                       journal_path, now)
+                                       journal_path, now,
+                                       extra={"gap_pct_backfilled": True} if gap_backfilled else None)
             payload["journal_append"] = {"status": result.get("status"),
                                          "event_id": result.get("event_id")}
         return payload
@@ -267,8 +334,7 @@ def run_convert(candidate_json: str | None = None, candidate_path: str | None = 
 
     # ── deterministic scores under the same clock ─────────────────────────────────────────────
     day_score = score_day(market=market, gamma=gamma)
-    bp = _num(broker.get("buying_power") or broker.get("options_buying_power")
-              or broker.get("account_buying_power"))
+    bp = _first_num(broker, "buying_power", "options_buying_power", "account_buying_power")
     direction = str(candidate.get("direction") or candidate.get("option_type") or "") or None
     vehicle_score = score_vehicle(contract, direction=direction, market=market, gamma=gamma,
                                   buying_power=bp)
@@ -276,7 +342,13 @@ def run_convert(candidate_json: str | None = None, candidate_path: str | None = 
     # lease freshness checks measure this run's clock, not the module wall clock.
     day_score["generated_at"] = now.isoformat(timespec="seconds")
     vehicle_score["generated_at"] = now.isoformat(timespec="seconds")
-    payload["day_score"] = {"verdict": day_score.get("verdict"), "score": day_score.get("score")}
+    # Components ride every payload so a single-component flip (the 2026-08-04 gap 1→0) is
+    # VISIBLE, never a silent re-tiering.
+    payload["day_score"] = {"verdict": day_score.get("verdict"), "score": day_score.get("score"),
+                            "components": day_score.get("components")}
+    payload["gap_pct_backfilled"] = gap_backfilled
+    if gap_backfilled:
+        payload["session_constants"] = session_constants
     payload["vehicle_score"] = {"verdict": vehicle_score.get("verdict"),
                                  "score": vehicle_score.get("score")}
 
@@ -316,6 +388,8 @@ def run_convert(candidate_json: str | None = None, candidate_path: str | None = 
     payload["entry_gate"] = gate
     if journal:
         gate_event = event_from_entry_gate(gate)
+        if gap_backfilled:
+            gate_event["gap_pct_backfilled"] = True
         gate_result = append_decision_journal(gate_event, source="odte_convert",
                                               event_type="entry_decision",
                                               journal_path=journal_path, now=now)
@@ -366,6 +440,7 @@ def run_convert(candidate_json: str | None = None, candidate_path: str | None = 
         atomic_write_text(lease_path, json.dumps(auth, indent=2, default=str))
         payload["lease_artifact"] = str(lease_path)
 
+    lease_expires = _parse_ts(_dict(auth.get("lease")).get("expires_at"))
     payload.update({
         "converted": True,
         "stage": "authorize",
@@ -373,6 +448,11 @@ def run_convert(candidate_json: str | None = None, candidate_path: str | None = 
         "execution_allowed": True,
         "scan_only": False,
         "lease": auth.get("lease"),
+        # Machine-readable race deadline (2026-08-04: the expiry lived only in prose and a nested
+        # field; the controller lost a lease by 2.2s). Place BEFORE this moment or the cycle dies.
+        "place_deadline": _dict(auth.get("lease")).get("expires_at"),
+        "lease_seconds_remaining": (round((lease_expires - now).total_seconds(), 1)
+                                    if lease_expires else None),
         "next_action": ("CONVERTED — consume the single-use lease at broker review/place via the "
                         "Hermes MCP lane IMMEDIATELY (it expires at "
                         f"{_dict(auth.get('lease')).get('expires_at')}), then run the "

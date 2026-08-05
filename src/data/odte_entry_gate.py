@@ -137,8 +137,11 @@ _GATE_INPUT_COMMANDS = {
 }
 # Veto reasons that mean the CONTRACT didn't fit, not the day: before declaring no-trade on these,
 # scan the other index ETF vehicles for a BP-fit structure — one bullet a day must not die on the
-# first contract checked.
-_BP_FIT_VETOES = {"insufficient_buying_power", "vehicle_bad_bet"}
+# first contract checked. 2026-08-04: `final_confirmation_budget_check_failed` was MISSING from
+# this set, so the rotate-vehicle guidance never fired and the controller re-tried one
+# unaffordable SPY contract 12x while an $80 IWM GOOD_BET sat quoted on disk.
+_BP_FIT_VETOES = {"insufficient_buying_power", "vehicle_bad_bet",
+                  "final_confirmation_budget_check_failed"}
 
 
 def _next_step(intent: str, execution_allowed: bool, gates: dict, veto_reasons: list[str],
@@ -165,11 +168,13 @@ def _next_step(intent: str, execution_allowed: bool, gates: dict, veto_reasons: 
                 "bar, bank the green day.",
                 "odte-convert  # only a same-or-better-tier setup can re-enter; else bank the day")
     if any(v in _BP_FIT_VETOES for v in veto_reasons):
-        return ("vehicle/BP fit failed for THIS contract — before declaring no-trade on BP, scan "
-                "the other index ETF vehicles (QQQ/SPY/IWM) for a BP-fit structure; reject only if "
-                "every candidate vehicle fails",
-                "make odte-vehicle-score CONTRACT=<qqq|spy|iwm contract.json> "
-                "MARKET=<market.json> BP=<bp> JSON=1")
+        return ("vehicle/BP fit failed for THIS contract — the day may still be tradeable: start "
+                "a FRESH candidate cycle on a BP-fitting vehicle (QQQ/SPY/IWM; the vehicle lock "
+                "forbids silent substitution — a switch is a new watch/score/convert cycle), then "
+                "run odte-convert; reject only if every candidate vehicle fails",
+                "make odte-candidate-watch CANDIDATE=<other-vehicle candidate.json> "
+                "MARKET=<market.json> VEHICLE=<its vehicle_score.json> JSON=1 WRITE=1 → "
+                "odte-convert")
     if intent == "veto":
         return (f"hard veto ({', '.join(veto_reasons) or 'restricted'}) — stand down for this "
                 "candidate and resume the scan lane",
@@ -347,10 +352,13 @@ def _coalesce_symbol(candidate: dict, vehicle_score: dict, trigger: dict) -> str
 
 
 def _buying_power(broker: dict) -> float | None:
-    bp = _num(broker.get("buying_power"))
-    if bp is None:
-        bp = _num(broker.get("account_buying_power") or broker.get("options_buying_power"))
-    return bp
+    # Sequential checks so a legitimate 0.0 in an earlier key wins (2026-08-04 hardening — an
+    # or-chain would silently size off the next key on a zeroed account).
+    for key in ("buying_power", "account_buying_power", "options_buying_power"):
+        bp = _num(broker.get(key))
+        if bp is not None:
+            return bp
+    return None
 
 
 def _broker_count(broker: dict, *keys: str) -> float | None:
@@ -512,7 +520,10 @@ def build_entry_gate_decision(trigger: dict | None = None, candidate: dict | Non
             return True
         if veh_verdict == "BAD_BET":
             return False
-        if (veh_verdict == "WATCH" and tier == "b_plus" and veh_score_total is not None
+        # Any CONFIRMED tier (b_plus/full/a_plus) may pass a WATCH vehicle at/above the score
+        # floor — sizing stays tier-based. 2026-08-04 fix: the old b_plus-only rule was a
+        # monotonicity inversion (a_plus tape — strictly stronger — got a WORSE gate).
+        if (veh_verdict == "WATCH" and tier is not None and veh_score_total is not None
                 and veh_score_total >= B_PLUS_MIN_VEHICLE_SCORE):
             return True
         return None

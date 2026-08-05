@@ -285,9 +285,10 @@ def test_passed_gate_next_step_is_broker_review_place_then_watch():
     assert d["failing_gates"] == [] and d["unknown_gates"] == []
 
 
-def test_bp_vehicle_veto_guides_multi_etf_scan_before_no_trade():
+def test_bp_vehicle_veto_guides_fresh_cycle_on_other_vehicle():
     # One bullet a day must not die on the first contract checked: a BP/vehicle-fit veto points at
-    # scanning the other index ETF vehicles before declaring no-trade.
+    # a FRESH candidate cycle on another vehicle (2026-08-04: next_command now candidate-watch →
+    # odte-convert, never a bare vehicle-score or a stand-down).
     for kw_over in ({"broker_snapshot": {"buying_power": 0.0, "day_trades_left": 3}},
                     {"vehicle_score": {"verdict": "BAD_BET", "score": -3, "direction": "bullish"}}):
         kw = _all_gates_kwargs()
@@ -295,7 +296,33 @@ def test_bp_vehicle_veto_guides_multi_etf_scan_before_no_trade():
         d = eg.build_entry_gate_decision(**kw)
         assert d["execution_allowed"] is False
         assert "QQQ/SPY/IWM" in d["next_action"]
-        assert "odte-vehicle-score" in d["next_command"]
+        assert "odte-candidate-watch" in d["next_command"]
+        assert "odte-convert" in d["next_command"]
+
+
+def test_budget_check_failure_fires_bp_fit_rotation():
+    # THE 2026-08-04 REGRESSION: 12 budget_check failures each answered "stand down / resume scan"
+    # while an $80 IWM GOOD_BET sat on disk — final_confirmation_budget_check_failed was missing
+    # from _BP_FIT_VETOES. It must now fire the rotate-vehicle guidance.
+    assert "final_confirmation_budget_check_failed" in eg._BP_FIT_VETOES
+    kw = _all_gates_kwargs()
+    kw["confirmations"] = {**_CONFIRMATIONS, "budget_check": False}
+    d = eg.build_entry_gate_decision(**kw)
+    assert d["execution_allowed"] is False
+    assert "final_confirmation_budget_check_failed" in d["veto_reasons"]
+    assert "QQQ/SPY/IWM" in d["next_action"]
+    assert "odte-candidate-watch" in d["next_command"]
+    assert "odte-watchdog" not in d["next_command"]
+
+
+def test_zero_buying_power_wins_over_fallback_keys():
+    # 2026-08-04 hardening: a legit 0.0 in an earlier BP key must NOT fall through to the next.
+    kw = _all_gates_kwargs()
+    kw["broker_snapshot"] = {**_GOOD_BROKER, "buying_power": 0.0,
+                             "options_buying_power": 5000.0}
+    d = eg.build_entry_gate_decision(**kw)
+    assert d["gates"]["account"] is False
+    assert "insufficient_buying_power" in d["veto_reasons"]
 
 
 def test_missing_gate_inputs_name_the_producing_commands():
@@ -494,7 +521,7 @@ def test_bare_chop_without_tier_still_fails_closed():
     assert d["decision"] == "observe"
 
 
-def test_watch_vehicle_passes_only_for_b_plus_tier_with_score_floor():
+def test_watch_vehicle_passes_for_any_confirmed_tier_with_score_floor():
     import data.odte_config as oc
     kw = _all_gates_kwargs()
     kw["candidate"]["tier"] = "b_plus"
@@ -510,7 +537,16 @@ def test_watch_vehicle_passes_only_for_b_plus_tier_with_score_floor():
     assert d2["gates"]["vehicle"] is None
     assert d2["execution_allowed"] is False
 
-    # A WATCH vehicle without the B+ tier stays unknown regardless of score.
+    # 2026-08-04 monotonicity fix: a_plus and full (STRONGER tape) must pass at least as easily.
+    for t in ("a_plus", "full"):
+        kw3 = _all_gates_kwargs()
+        kw3["candidate"]["tier"] = t
+        kw3["vehicle_score"] = {**_GOOD_VEHICLE, "verdict": "WATCH",
+                                "score": oc.B_PLUS_MIN_VEHICLE_SCORE}
+        d4 = eg.build_entry_gate_decision(**kw3)
+        assert d4["gates"]["vehicle"] is True, t
+
+    # A WATCH vehicle without ANY confirmed tier stays unknown regardless of score.
     kw2 = _all_gates_kwargs()
     kw2["vehicle_score"] = {**_GOOD_VEHICLE, "verdict": "WATCH", "score": 10}
     d3 = eg.build_entry_gate_decision(**kw2)

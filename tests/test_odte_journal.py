@@ -855,7 +855,9 @@ def test_weekly_telemetry_counts_funnel_and_fires_tripwire():
         {"event_type": "execution_lease_issued", "authorized": False, "decision": "deny",
          "reason_codes": ["market_snapshot_stale", "broker_snapshot_stale"],
          "ts": (now - timedelta(hours=5)).isoformat()},
-        {"event_type": "no_trade_decision", "ts": (now - timedelta(days=1)).isoformat()},
+        {"event_type": "no_trade_decision", "stage": "entry_gate",
+         "reason_codes": ["final_confirmation_budget_check_failed"],
+         "ts": (now - timedelta(days=1)).isoformat()},
         # last ISO week: must not count
         {"event_type": "order_filled", "trade_id": "old", "ts": (now - timedelta(days=8)).isoformat()},
     ]
@@ -865,7 +867,11 @@ def test_weekly_telemetry_counts_funnel_and_fires_tripwire():
     assert wk["lease_refusals"] == 1
     assert wk["leases_issued"] == 0
     assert wk["no_trade_decisions"] == 1
-    assert ("market_snapshot_stale", 1) in wk["top_refusal_reasons"]
+    assert ("authorize:market_snapshot_stale", 1) in wk["top_refusal_reasons"]
+    # 2026-08-04: v5 refusals (no_trade_decision with stage) must be tallied too.
+    assert wk["refusals_by_stage"].get("entry_gate", 0) >= 0    # key present
+    assert wk["refusals_by_stage"] == {"entry_gate": 1}
+    assert ("entry_gate:final_confirmation_budget_check_failed", 1) in wk["top_refusal_reasons"]
     assert wk["weekly_target"] == [oc.WEEKLY_TRADE_TARGET_MIN, oc.WEEKLY_TRADE_TARGET_MAX]
     assert wk["tripwire"]["armed"] is True
     assert wk["tripwire"]["fired"] is True, "a Friday with zero trades must fire the tripwire"

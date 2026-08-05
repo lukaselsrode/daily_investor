@@ -474,6 +474,7 @@ def weekly_telemetry(events: list[dict] | None, now: datetime | None = None) -> 
     year, week, iso_weekday = now.astimezone(ET).isocalendar()
     counts: Counter = Counter()
     refusals: Counter = Counter()
+    stage_counts: Counter = Counter()
     trade_keys: set[str] = set()
     for i, e in enumerate(events or []):
         if not isinstance(e, dict):
@@ -495,9 +496,16 @@ def weekly_telemetry(events: list[dict] | None, now: datetime | None = None) -> 
             else:
                 counts["lease_refusals"] += 1
                 for r in (e.get("reason_codes") or []):
-                    refusals[str(r)] += 1
+                    refusals[f"authorize:{r}"] += 1
         elif et == "no_trade_decision":
             counts["no_trade_decisions"] += 1
+            # v5 refusals happen at preflight/candidate_watch/entry_gate — BEFORE any lease event
+            # exists. 2026-08-04: an 18-refusal day read `top_refusal_reasons: []` because only
+            # lease refusals were tallied. Stage-prefix every terminal reason.
+            stage = str(e.get("stage") or "unknown")
+            stage_counts[stage] += 1
+            for r in (e.get("reason_codes") or []):
+                refusals[f"{stage}:{r}"] += 1
     trades = len(trade_keys)
     budget = daily_trade_budget(events, now=now)
     armed = (iso_weekday - 1) >= ZERO_TRADE_TRIPWIRE_WEEKDAY   # isocalendar: 1=Mon
@@ -512,6 +520,7 @@ def weekly_telemetry(events: list[dict] | None, now: datetime | None = None) -> 
         "lease_refusals": counts["lease_refusals"],
         "no_trade_decisions": counts["no_trade_decisions"],
         "top_refusal_reasons": refusals.most_common(5),
+        "refusals_by_stage": dict(stage_counts),
         "trades_today": budget["trades_today"],
         "budget_remaining_today": budget["remaining"],
         "tripwire": {"armed": armed, "fired": bool(armed and trades == 0),
