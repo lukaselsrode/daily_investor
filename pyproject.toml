@@ -42,6 +42,13 @@ dependencies = [
     "langchain-core>=1.0",
     "langgraph>=1.0",
 
+    # 0DTE fast lane — direct MCP broker client (streamable HTTP + Bearer token)
+    "mcp>=1.28",
+    "httpx-sse>=0.4",
+    "pydantic-settings>=2.5",
+    "pyjwt[crypto]>=2.8",
+    "sse-starlette>=2.1",
+
     # Typing backport
     "typing_extensions>=4.0",
 ]
@@ -204,7 +211,7 @@ type              = "forbidden"
 source_modules    = ["data"]
 forbidden_modules = [
     "ui", "portfolio", "backtesting",
-    "tuning", "reporting", "research",
+    "tuning", "reporting", "research", "execution",
 ]
 # data.fundamentals calls strategy scoring functions when saving snapshots — known coupling,
 # tracked as a future refactor (move score computation out of the data layer).
