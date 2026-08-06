@@ -359,3 +359,20 @@ def test_warm_convert_on_dicts_is_fast(tmp_path):
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
     assert p["converted"] is True
     assert elapsed_ms < 150, f"warm convert took {elapsed_ms:.1f}ms"
+
+
+def test_mint_seeds_the_consumed_ledger(tmp_path):
+    # 2026-08-05 audit: the ledger only materialized on the first guard/consume call, and the
+    # Hermes pre-order hook SKIPS its replay check when the file is absent — Aug-3's lease was
+    # replayable for its whole TTL. Minting now seeds an empty ledger first.
+    ledger = tmp_path / "consumed_leases.json"
+    assert not ledger.exists()
+    payload = _convert(tmp_path)
+    assert payload["converted"] is True
+    assert json.loads(ledger.read_text()) == []
+    # Seeding is idempotent and NEVER truncates an existing ledger.
+    import data.odte_execution_policy as xp
+    xp.record_consumed(str(ledger), "burned-1")
+    p2 = _convert(tmp_path, now=NOW + timedelta(minutes=5))
+    assert p2["converted"] is True
+    assert "burned-1" in json.loads(ledger.read_text())

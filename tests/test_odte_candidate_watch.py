@@ -194,7 +194,14 @@ def test_degraded_or_expired_candidate_never_authorizes_execution():
     assert avoid["execution_allowed"] is False
 
     old = {"ticker": "SPY", "direction": "bullish", "created_at": "2026-06-29T13:00:00+00:00"}
-    expired = cw.evaluate_candidate_watch(old, market=_market(), now=NOW, max_watch_minutes=20)
+    # Strong tape: expiry closes the OLD cycle and the tape lane re-seeds a FRESH candidate in
+    # the same run (2026-08-05 zombie-trap fix) — still scan-only, never execution authority.
+    reseeded = cw.evaluate_candidate_watch(old, market=_market(), now=NOW, max_watch_minutes=20)
+    assert reseeded["prior_candidate_expired"] is True
+    assert reseeded["execution_allowed"] is False
+    assert any("expired" in r for r in reseeded["reasons"])
+    # No tape to re-seed from: expiry is final.
+    expired = cw.evaluate_candidate_watch(old, market={}, now=NOW, max_watch_minutes=20)
     assert expired["decision"] == cw.EXPIRED_NO_CONFIRMATION
     assert expired["execution_allowed"] is False
 
@@ -359,3 +366,69 @@ def test_vixy_conflict_flag_when_both_directions_confirmed(monkeypatch):
     result = cw.evaluate_candidate_watch({"ticker": "SPY", "direction": "bullish"},
                                          market=market, now=NOW)
     assert result["checks"].get("vixy_conflict") is True
+
+
+# --- 2026-08-05 zombie-trap fixes: session anchor, tombstone, expiry fall-through -------------
+
+def test_pre_open_candidate_clock_starts_at_the_bell():
+    # The Aug-5 phantom was minted 09:01 ET and expired 09:22 — before the market opened. A
+    # same-ET-day pre-open candidate now starts its watch clock at 09:30.
+    from datetime import datetime, timezone
+    pre_open_cand = {"ticker": "SPY", "direction": "bullish",
+                     "created_at": "2026-08-05T13:01:07+00:00"}          # 09:01 ET
+    at_0922 = datetime(2026, 8, 5, 13, 22, tzinfo=timezone.utc)          # 09:22 ET
+    assert cw._candidate_age_minutes(pre_open_cand, at_0922) == 0.0      # clock not started
+    at_0945 = datetime(2026, 8, 5, 13, 45, tzinfo=timezone.utc)          # 09:45 ET
+    assert cw._candidate_age_minutes(pre_open_cand, at_0945) == 15.0     # 15m since the bell
+    # A PRIOR-day candidate keeps its raw age and expires immediately, as it must.
+    stale = {"ticker": "SPY", "direction": "bullish",
+             "created_at": "2026-08-04T14:00:00+00:00"}
+    assert cw._candidate_age_minutes(stale, at_0945) > 1000
+
+
+def test_expiry_writes_inert_tombstone_and_reopens_tape_lane(tmp_path):
+    import json as _json
+    old = {"ticker": "SPY", "direction": "bullish", "created_at": "2026-06-29T13:00:00+00:00"}
+    payload = cw.run_candidate_watch(candidate_json=_json.dumps(old), market_json="{}",
+                                     state_dir=str(tmp_path), write=True)
+    assert payload["decision"] == cw.EXPIRED_NO_CONFIRMATION
+    tomb = _json.loads((tmp_path / "active_candidate.json").read_text())
+    assert "ticker" not in tomb and "direction" not in tomb              # inert to the tape lane
+    assert tomb["decision"] == cw.EXPIRED_NO_CONFIRMATION
+    assert tomb["prior"]["ticker"] == "SPY"                              # audit trail preserved
+    # Next run consumes the tombstone as the candidate: the tape lane now manufactures.
+    payload2 = cw.run_candidate_watch(candidate_json=_json.dumps(tomb),
+                                      market_json=_json.dumps(_market()),
+                                      state_dir=str(tmp_path), write=True)
+    assert payload2["decision"] in {cw.KEEP_WATCHING, cw.CONFIRM_ENTRY}
+    assert payload2["candidate"].get("ticker")                           # a REAL fresh candidate
+
+
+def test_aug5_zombie_replay_expires_with_session_anchored_age():
+    # The keystone replay: the real zombie (created 09:01 ET) against the best tape of the day
+    # (10:16 ET: all three ETFs above VWAP but INSIDE their opening ranges — the archived
+    # snapshot shape). The session-anchored age is 46m (09:30→10:16), not the raw 75m; the tape
+    # lane cannot re-seed (no ORB breakout), so the cycle expires cleanly — the CORRECT verdict
+    # for Aug-5, reached while still reading the tape instead of blind.
+    from datetime import datetime, timezone
+    zombie = {"ticker": "SPY", "direction": "bullish",
+              "created_at": "2026-08-05T13:01:07+00:00"}
+    tape_1016 = {
+        "SPY": {"last": 776.24, "above_vwap": True, "orb_state": "inside"},
+        "QQQ": {"last": 727.11, "above_vwap": True, "orb_state": "inside"},
+        "IWM": {"last": 302.83, "above_vwap": True, "orb_state": "inside"},
+        "VIXY": {"above_vwap": False, "change_pct": -0.34},
+    }
+    at_1016 = datetime(2026, 8, 5, 14, 16, tzinfo=timezone.utc)
+    r = cw.evaluate_candidate_watch(zombie, market=tape_1016, now=at_1016,
+                                    max_watch_minutes=20)
+    assert r["decision"] == cw.EXPIRED_NO_CONFIRMATION
+    assert r["checks"]["age_minutes"] == 46.0                            # anchored, not 75
+    # Same moment, ORB breakout tape: the SAME call re-seeds a fresh cycle instead.
+    breakout = {k: dict(v) for k, v in tape_1016.items()}
+    for sym in ("SPY", "QQQ", "IWM"):
+        breakout[sym]["orb_state"] = "above"
+    r2 = cw.evaluate_candidate_watch(zombie, market=breakout, now=at_1016,
+                                     max_watch_minutes=20)
+    assert r2.get("prior_candidate_expired") is True
+    assert r2["candidate"]["ticker"] in ("SPY", "QQQ", "IWM")

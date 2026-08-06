@@ -15,11 +15,17 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime, timezone
+from datetime import time as dtime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from core.paths import ODTE_REPORT_DIR
 from data.odte_config import GOOD_DAY_MIN_SCORE
+
+_ET = ZoneInfo("America/New_York")
+_RTH_OPEN = dtime(9, 30)
+_RTH_CLOSE = dtime(16, 0)
 
 GOOD_DAY = "GOOD_DAY"
 CHOP = "CHOP"
@@ -183,9 +189,26 @@ def _expected_move_score(market: dict, gamma: dict) -> tuple[int, list[str]]:
     return 0, [f"expected move {em_pct:.2f}%{src} is wide — big range but more risk"]
 
 
-def _time_score(market: dict) -> tuple[int, list[str], bool]:
+def derived_minutes_to_close(now: datetime | None) -> float | None:
+    """Wall-clock minutes to the 16:00 ET close, DURING RTH only — else None.
+
+    DERIVED CLOCK (2026-08-05): every hand-authored snapshot omitted minutes_to_close, so the
+    time component read "missing" all session and the late-day gates never engaged. During RTH
+    the wall clock is authoritative — a snapshot cannot lose it anymore."""
+    if now is None:
+        return None
+    et = now.astimezone(_ET)
+    if et.weekday() < 5 and _RTH_OPEN <= et.time() < _RTH_CLOSE:
+        close = et.replace(hour=16, minute=0, second=0, microsecond=0)
+        return round((close - et).total_seconds() / 60.0, 1)
+    return None
+
+
+def _time_score(market: dict, now: datetime | None = None) -> tuple[int, list[str], bool]:
     """Late-day theta gate. Returns (score, reasons, hard_avoid)."""
     mtc = _num(market.get("minutes_to_close"))
+    if mtc is None:
+        mtc = derived_minutes_to_close(now)
     if mtc is None:
         return 0, [], False
     if mtc <= 30:
@@ -195,7 +218,8 @@ def _time_score(market: dict) -> tuple[int, list[str], bool]:
     return 0, [], False
 
 
-def score_day(market: dict | None = None, gamma: dict | None = None) -> dict:
+def score_day(market: dict | None = None, gamma: dict | None = None,
+              now: datetime | None = None) -> dict:
     """Return a deterministic GOOD_DAY/CHOP/AVOID score for the trading day from a market snapshot.
 
     Inputs (all optional): vix, vix_change_pct, vixy_change_pct/vixy{day_change_pct}, gap_pct,
@@ -219,7 +243,7 @@ def score_day(market: dict | None = None, gamma: dict | None = None) -> dict:
     vol, vol_r, vol_avoid = _vol_score(market)
     gap, gap_r = _gap_score(market)
     em, em_r = _expected_move_score(market, gamma)
-    tim, tim_r, time_avoid = _time_score(market)
+    tim, tim_r, time_avoid = _time_score(market, now)
 
     components = {"trend": trend, "volatility": vol, "gap": gap,
                   "expected_move": em, "time": tim}
@@ -242,7 +266,8 @@ def score_day(market: dict | None = None, gamma: dict | None = None) -> dict:
         "gap": _num(market.get("gap_pct")) is not None,
         "expected_move": (_num(market.get("expected_move_pct")) is not None
                           or isinstance(gamma.get("expected_move"), dict)),
-        "time": _num(market.get("minutes_to_close")) is not None,
+        "time": (_num(market.get("minutes_to_close")) is not None
+                 or derived_minutes_to_close(now) is not None),
     }
     # Max POSITIVE contribution actually reachable: trend +3, gap +1, em +1; volatility's +1
     # needs a literal vix (VIXY change can only subtract); time never adds.
@@ -280,7 +305,7 @@ def run_day_score(market_json: str | None = None, market_path: str | None = None
                   out_dir: str | None = None, write: bool = False) -> dict:
     market = _load_json(market_path, market_json, default={})
     gamma = _load_json(gamma_path, gamma_json, default={})
-    payload = score_day(market=market, gamma=gamma)
+    payload = score_day(market=market, gamma=gamma, now=datetime.now(timezone.utc))
     if write:
         out = Path(os.path.expanduser(out_dir or ODTE_REPORT_DIR))
         out.mkdir(parents=True, exist_ok=True)

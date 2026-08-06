@@ -74,6 +74,7 @@ from typing import Any
 
 from core.paths import ODTE_DATA_DIR
 from data.odte_config import CONFIRM_CONVERSION_SLA_SECONDS as _CONVERT_SLA
+from data.odte_strategy_policy import ET
 
 SCHEMA_VERSION = 1
 
@@ -436,6 +437,38 @@ def _next_for(state: str, *, live: bool) -> tuple[str, str]:
                 "odte-position --snapshot <live.json>")
     return ("a live artifact is malformed/stale — fold and inspect the journal",
             "odte-ingest-artifacts")
+
+
+def _rescan_override(payload: dict, events: list[dict], now: datetime) -> None:
+    """While the session is OPEN with entry budget remaining, an idle flat loop must RE-SCAN
+    the tape, not re-journal (2026-08-05: 68 consecutive controller ticks obeyed 'roll up the
+    journal report' verbatim while bars were fetched and discarded — zero scorer runs after
+    10:19). Mutates next_action/next_command in place; the broker-lane fail-closed overrides
+    downstream still outrank this, and late-day/no-budget keeps the original instruction."""
+    et_now = now.astimezone(ET)
+    if et_now.weekday() >= 5:
+        return
+    session_open = et_now.replace(hour=9, minute=30, second=0, microsecond=0)
+    rescan_cutoff = et_now.replace(hour=15, minute=15, second=0, microsecond=0)  # >45m to close
+    if not (session_open <= et_now < rescan_cutoff):
+        return
+    from data.odte_journal import daily_trade_budget
+    budget = daily_trade_budget(events, now=now)
+    try:
+        remaining = int(budget.get("remaining") or 0)
+    except (TypeError, ValueError):
+        remaining = 0
+    if remaining < 1:
+        return
+    payload["next_action"] = (
+        "session OPEN with entry budget remaining — RE-SCAN the tape, do not re-journal: build "
+        "a FRESH market snapshot (fast_path_snapshots.md shapes, INCLUDE minutes_to_close), run "
+        "odte-day-score, then odte-candidate-watch WITH MARKET= so the tape lane can "
+        "manufacture/confirm a candidate (a bare invocation without MARKET= scans nothing)")
+    payload["next_command"] = ("make odte-day-score MARKET=<fresh market.json> JSON=1 → "
+                               "make odte-candidate-watch MARKET=<fresh market.json> JSON=1 "
+                               "WRITE=1")
+    payload["rescan_override"] = True
 
 
 def _latest_event(events: list[dict], event_type: str) -> dict | None:
@@ -1029,13 +1062,26 @@ def _resolve_loop_state(active_trade: dict | None = None,
             "underlying": candidate.get("ticker"), "direction": candidate.get("direction"),
             "spy_verdict": trig.get("spy_verdict"), "scan_only": True})
     if reviewed:
-        reasons.append(f"trade {trade_id or '?'} closed and reviewed — idle")
-        return _payload("REVIEWED", reasons, now, live=False,
-                        context={"trade_id": trade_id, "underlying": plan.get("underlying")})
-    if closed_trade and not reviewed:
+        # REVIEWED DATE-GATE (2026-08-05): only TODAY's reviewed trade parks the loop. A
+        # prior-day reviewed trade handed "roll up the journal report" as next_command every
+        # morning — and on Aug-5 the controller obeyed it for 68 consecutive ticks while the
+        # session tape went unread. Prior-day reviews fall through to SCAN.
+        close_dt = _parse_ts(close_ts)
+        close_et_date = close_dt.astimezone(ET).date() if close_dt else None
+        if close_et_date == now.astimezone(ET).date():
+            reasons.append(f"trade {trade_id or '?'} closed and reviewed — idle")
+            payload = _payload("REVIEWED", reasons, now, live=False,
+                               context={"trade_id": trade_id,
+                                        "underlying": plan.get("underlying")})
+            _rescan_override(payload, events, now)
+            return payload
+        reasons.append(f"prior-day trade {trade_id or '?'} reviewed — resuming scan")
+    elif closed_trade and not reviewed:
         reasons.append(f"prior trade {trade_id or '?'} unreviewed but stale — scanning")
     reasons.append("no actionable candidate, gate, or live position")
-    return _payload("SCAN", reasons, now, live=False, context={})
+    payload = _payload("SCAN", reasons, now, live=False, context={})
+    _rescan_override(payload, events, now)
+    return payload
 
 
 def _gate_ctx(gate: dict) -> dict:
@@ -1465,6 +1511,15 @@ def run_loop_status(state_dir: str | None = None, *, broker_health: dict | None 
     guard_display_ts = (guard_d.get("generated_at") or guard_d.get("ts")) \
         if str(guard_d.get("state") or "").upper() in _ACTIVE_GUARD_STATES else None
     lease_display_ts = lease.get("issued_at") if lease.get("lease_id") else None
+    # PRIOR-DAY EXPIRED LEASE IS INERT (2026-08-05): every reader fails closed on expiry (hook,
+    # guard, fast lane), so a lease that expired on a previous ET day is audit trail, not
+    # current work — the only artifact row that lacked an inertness predicate nagged
+    # "STALE, ttl 1m" in every recap. Same-day leases (live or freshly expired) still show.
+    lease_info = _dict(payload.get("execution_lease"))
+    if lease_display_ts and lease_info.get("expired"):
+        issued_dt = _parse_ts(lease_display_ts)
+        if issued_dt and issued_dt.astimezone(ET).date() < now.astimezone(ET).date():
+            lease_display_ts = None
     payload["artifact_ages"] = {
         "triggers": _age_entry(trigger_display_ts, now, STALE_TRIGGER_MINUTES),
         "candidate": _age_entry(watch_display_ts, now, STALE_CANDIDATE_MINUTES),

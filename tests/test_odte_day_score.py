@@ -135,3 +135,31 @@ def test_component_presence_telemetry_shows_zero_headroom():
     assert p["max_possible_score"] == ods.GOOD_DAY_MIN_SCORE   # the zero-headroom fact, pinned
     with_vix = ods.score_day(market={**market, "vix": 18.0})
     assert with_vix["max_possible_score"] == 5                # a literal vix restores headroom
+
+
+# --- 2026-08-05: minutes_to_close derived from the wall clock ---------------------------------
+
+def test_minutes_to_close_derived_from_wall_clock_during_rth():
+    from datetime import datetime, timezone
+    market = {"spy_above_vwap": True, "spy_orb_state": "above",
+              "qqq_above_vwap": True, "qqq_orb_state": "above",
+              "iwm_above_vwap": True, "iwm_orb_state": "above", "gap_pct": 0.5}
+    # 14:00 ET: 120 minutes to close — time supplied via the wall clock, no penalty.
+    midday = datetime(2026, 8, 5, 18, 0, tzinfo=timezone.utc)
+    p = ods.score_day(market=market, now=midday)
+    assert "time" not in p["components_missing"]
+    assert p["components"]["time"] == 0
+    # 15:45 ET: 15 minutes to close — the late-day hard gate engages from the wall clock even
+    # though the snapshot lost the key (the Aug-5 controller omitted it ALL session).
+    late = datetime(2026, 8, 5, 19, 45, tzinfo=timezone.utc)
+    p2 = ods.score_day(market=market, now=late)
+    assert p2["verdict"] == "AVOID"
+    # No `now` (pure/backtest callers): exact old behavior — time is simply missing.
+    p3 = ods.score_day(market=market)
+    assert "time" in p3["components_missing"]
+    # Off-hours `now`: no derivation (weekend/evening scoring stays neutral).
+    evening = datetime(2026, 8, 5, 23, 30, tzinfo=timezone.utc)
+    assert "time" in ods.score_day(market=market, now=evening)["components_missing"]
+    # A snapshot that DOES carry the key always wins over the clock.
+    p4 = ods.score_day(market={**market, "minutes_to_close": 300}, now=late)
+    assert p4["verdict"] != "AVOID"

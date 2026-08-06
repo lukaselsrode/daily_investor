@@ -1599,3 +1599,70 @@ def test_live_rails_green_reentry_state_reflects_journal():
     assert gr["structurally_armable"] is True          # budget slot open, cooldown clear
     assert gr["winning_tier_today"] == "full"          # legacy journal -> default tier
     assert gr["manual_override_key"] == "allow_reentry_after_green"
+
+
+# --- 2026-08-05 blind-day fixes: REVIEWED date-gate, rescan override, lease suppression -------
+
+def _pm(trade_id="SPY-T1"):
+    return {"event_type": "postmortem", "trade_id": trade_id, "seq": 9, "ts": _ts(minutes_ago=10)}
+
+
+def test_prior_day_reviewed_trade_resumes_scan():
+    # Aug-5: the Aug-3 reviewed trade parked the loop at REVIEWED all session and the controller
+    # obeyed "roll up the journal report" for 68 ticks. A PRIOR-ET-day review now falls to SCAN.
+    plan = _closed_plan(closed_at=_ts(hours_ago=30), exit_fill_time=_ts(hours_ago=30),
+                        entry_fill_time=_ts(hours_ago=31), updated_at=_ts(hours_ago=30))
+    r = ls.derive_loop_state(active_trade=plan, journal_events=[_pm()], now=NOW)
+    assert r["state"] == "SCAN"
+    assert any("prior-day" in reason for reason in r["reasons"])
+    assert "odte-journal-report" not in r["next_command"]
+
+
+def test_same_day_reviewed_keeps_state_but_gets_rescan_override():
+    # NOW is 14:00 ET Friday: session open, budget untouched — even a legitimately REVIEWED
+    # same-day loop must RE-SCAN, not re-journal.
+    r = ls.derive_loop_state(active_trade=_closed_plan(), journal_events=[_pm()], now=NOW)
+    assert r["state"] == "REVIEWED"
+    assert r.get("rescan_override") is True
+    assert "odte-candidate-watch MARKET=" in r["next_command"]
+    assert "odte-journal-report" not in r["next_command"]
+
+
+def test_rescan_override_respects_budget_and_late_day():
+    from datetime import datetime, timezone
+
+    import data.odte_config as oc
+    # Budget exhausted today: no override — the original REVIEWED instruction stands.
+    fills = [{"event_type": "order_filled", "trade_id": f"t{i}", "option_id": f"o{i}",
+              "ts": _ts(hours_ago=2)} for i in range(oc.DAILY_TRADE_BUDGET)]
+    r = ls.derive_loop_state(active_trade=_closed_plan(), journal_events=[_pm(), *fills], now=NOW)
+    assert r.get("rescan_override") is None
+    assert "odte-journal-report" in r["next_command"]
+    # 15:30 ET (<45 min to close): no override.
+    late = datetime(2026, 6, 26, 19, 30, tzinfo=timezone.utc)
+    plan = _closed_plan(closed_at=(late.isoformat()), updated_at=late.isoformat())
+    pm = {"event_type": "postmortem", "trade_id": "SPY-T1", "seq": 9, "ts": late.isoformat()}
+    r2 = ls.derive_loop_state(active_trade=plan, journal_events=[pm], now=late)
+    assert r2.get("rescan_override") is None
+
+
+def test_bare_scan_gets_rescan_override_in_session():
+    r = ls.derive_loop_state(now=NOW)
+    assert r["state"] == "SCAN"
+    assert r.get("rescan_override") is True
+    assert "odte-day-score" in r["next_command"]
+
+
+def test_prior_day_expired_lease_age_is_suppressed(tmp_path):
+    from datetime import timedelta
+    prior_issue = (NOW - timedelta(hours=30))
+    lease = {"authorized": True,
+             "lease": {"lease_id": "L-old", "symbol": "SPY",
+                       "issued_at": prior_issue.isoformat(),
+                       "expires_at": (prior_issue + timedelta(seconds=60)).isoformat()}}
+    (tmp_path / ls.EXECUTION_LEASE_FILENAME).write_text(json.dumps(lease))
+    p = ls.run_loop_status(state_dir=str(tmp_path), now=NOW)
+    assert p["execution_lease"]["expired"] is True
+    assert p["artifact_ages"]["execution_lease"]["as_of"] is None       # inert audit trail
+    # A SAME-day expired lease still shows (it is current work that just died) — pinned by
+    # test_run_loop_status_reads_order_guard_and_lease_files above.

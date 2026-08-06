@@ -60,6 +60,16 @@ def fetch_spy_trend(ticker: str = "SPY", allow_fetch: bool = True) -> dict:
         day_of = [d.date() if hasattr(d, "date") else d for d in hist.index]
         dates = sorted(set(day_of))
         today = dates[-1]
+        # PHANTOM GUARD (2026-08-05): pre-open, yfinance's latest session is YESTERDAY — the
+        # watchdog spent 09:00-09:29 replaying Aug-4's +1.80% as live tape and minted a
+        # candidate whose watch TTL burned out before the bell. The latest session must BE the
+        # current ET date or this fails closed — a prior session is never served as "today".
+        from zoneinfo import ZoneInfo
+        actual_today = datetime.now(ZoneInfo("America/New_York")).date()
+        if today != actual_today:
+            return {"ok": False,
+                    "status": (f"no cash-session bars yet for {actual_today.isoformat()} "
+                               f"(latest session {today.isoformat()})")}
         today_bars = hist[[d == today for d in day_of]]
         if getattr(today_bars, "empty", True):
             return {"ok": False, "status": "no same-day intraday bars"}

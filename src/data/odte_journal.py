@@ -517,7 +517,9 @@ def weekly_telemetry(events: list[dict] | None, now: datetime | None = None) -> 
         "entry_decisions": counts["entry_decisions"],
         "gates_passed": counts["gates_passed"],
         "leases_issued": counts["leases_issued"],
-        "lease_refusals": counts["lease_refusals"],
+        # Total refusals across ALL stages (2026-08-05: the scalar counted only lease-stage
+        # refusals, reading 0 on an 18-refusal week while refusals_by_stage held the truth).
+        "lease_refusals": counts["lease_refusals"] + sum(stage_counts.values()),
         "no_trade_decisions": counts["no_trade_decisions"],
         "top_refusal_reasons": refusals.most_common(5),
         "refusals_by_stage": dict(stage_counts),
@@ -730,6 +732,9 @@ _ARTIFACT_PATTERNS: tuple[tuple[str, str, str, str], ...] = (
     ("candidate_*.json",       "candidate",       "candidate",        "candidate"),
     ("*vehicle_score*.json",   "vehicle_score",   "vehicle_score",    "candidate"),
     ("*gamma_map*.json",       "gamma_map",       "gamma_map",        "candidate"),
+    # 2026-08-05: day-score payloads (incl. components_supplied/max_possible_score headroom
+    # telemetry) were computed all morning and never journaled — no pattern matched them.
+    ("*day_score*.json",       "day_score",       "day_score",        "watchdog"),
     ("controller_*.json",      "controller",      "controller_event", "execution"),
     ("event_*.json",           "event",           "controller_event", "execution"),
 )
@@ -895,7 +900,12 @@ def _classify_day_stream(e: dict) -> str:
         return "candidates"
     if et == "vehicle_score" or "vehicle_score" in src or e.get("vehicle_score"):
         return "vehicle_scores"
-    if et in _ENTRY_EVENTS or et in _EXIT_EVENTS or et == "management_check":
+    # TRADES = trade LIFECYCLE only (2026-08-05 fix): fills, exits, and the postmortem. The old
+    # classifier also routed `management_check` (monitoring polls) and bare `entry_decision`
+    # (gate verdicts, mostly veto/observe) here — Aug-3's packet held 1 real trade event out of
+    # 29 rows and Aug-4's "trades" were 13 vetoes. Gate/monitoring telemetry belongs in
+    # controller_events; a trades.jsonl row must be usable as P/L evidence.
+    if et in ENTRY_FILL_EVENTS or et in EXIT_FILL_EVENTS or et == "postmortem":
         return "trades"
     return "controller_events"
 

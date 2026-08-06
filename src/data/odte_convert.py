@@ -223,7 +223,12 @@ def run_convert(candidate_json: str | dict | None = None, candidate_path: str | 
     )
     from data.odte_day_score import score_day
     from data.odte_entry_gate import build_entry_gate_decision
-    from data.odte_execution_policy import LEASE_FILENAME, authorize_entry
+    from data.odte_execution_policy import (
+        CONSUMED_LEASES_FILENAME,
+        LEASE_FILENAME,
+        authorize_entry,
+        seed_consumed_ledger,
+    )
     from data.odte_journal import (
         DEFAULT_JOURNAL_PATH,
         append_decision_journal,
@@ -453,6 +458,8 @@ def run_convert(candidate_json: str | dict | None = None, candidate_path: str | 
         lease_path = base_dir / LEASE_FILENAME
         atomic_write_text(lease_path, json.dumps(auth, indent=2, default=str))
         payload["lease_artifact"] = str(lease_path)
+        # The ledger must EXIST before any place so no reader can skip the replay check.
+        seed_consumed_ledger(base_dir / CONSUMED_LEASES_FILENAME)
 
     lease_expires = _parse_ts(_dict(auth.get("lease")).get("expires_at"))
     payload.update({

@@ -549,6 +549,9 @@ def test_build_day_packet_routes_streams_and_is_idempotent(tmp_path):
     oj.append_decision_journal({"underlying": "IWM", "ts": f"{td}T11:00:00-04:00",
                                 "decision": {"action": "open"}},
                                source="controller", event_type="entry_decision", journal_path=jp)
+    oj.append_decision_journal({"underlying": "IWM", "ts": f"{td}T11:01:00-04:00",
+                                "trade_id": "t-iwm", "fill_price": 0.80},
+                               source="controller", event_type="entry_fill", journal_path=jp)
     oj.append_decision_journal({"underlying": "SPY", "ts": f"{td}T09:00:00-04:00", "decision": "no_trade"},
                                source="controller", event_type="controller_event", journal_path=jp)
     # event from a DIFFERENT day must not leak into this packet
@@ -556,12 +559,14 @@ def test_build_day_packet_routes_streams_and_is_idempotent(tmp_path):
                                source="ingest:candidate", event_type="candidate", journal_path=jp)
 
     s = oj.build_day_packet(trade_date=td, journal_path=jp, out_root=str(ddir))
-    assert s["events_written"] == 5            # the 06-25 event excluded
+    assert s["events_written"] == 6            # the 06-25 event excluded
     assert s["files"]["market_snapshots.jsonl"] == 1
     assert s["files"]["candidates.jsonl"] == 1
     assert s["files"]["vehicle_scores.jsonl"] == 1
+    # 2026-08-05 fix: trades.jsonl is trade LIFECYCLE only — the entry_fill lands there; the
+    # entry_decision (a gate verdict) now routes to controller_events, never to trades.
     assert s["files"]["trades.jsonl"] == 1
-    assert s["files"]["controller_events.jsonl"] == 1
+    assert s["files"]["controller_events.jsonl"] == 2
     root = ddir / "days" / td
     assert (root / "postmortem.md").exists()
     cand_lines = (root / "candidates.jsonl").read_text().strip().splitlines()
@@ -570,7 +575,7 @@ def test_build_day_packet_routes_streams_and_is_idempotent(tmp_path):
     # postmortem edits are preserved on rebuild; streams are regenerated (idempotent)
     (root / "postmortem.md").write_text("# my notes")
     s2 = oj.build_day_packet(trade_date=td, journal_path=jp, out_root=str(ddir))
-    assert s2["events_written"] == 5
+    assert s2["events_written"] == 6
     assert (root / "postmortem.md").read_text() == "# my notes"
 
 
@@ -864,7 +869,9 @@ def test_weekly_telemetry_counts_funnel_and_fires_tripwire():
     wk = oj.weekly_telemetry(events, now=now)
     assert wk["trades_this_week"] == 0
     assert wk["gates_passed"] == 1
-    assert wk["lease_refusals"] == 1
+    # 2026-08-05: lease_refusals totals refusals across ALL stages (1 lease-stage denial +
+    # 1 entry_gate no_trade_decision) — the lease-only scalar read 0 on an 18-refusal week.
+    assert wk["lease_refusals"] == 2
     assert wk["leases_issued"] == 0
     assert wk["no_trade_decisions"] == 1
     assert ("authorize:market_snapshot_stale", 1) in wk["top_refusal_reasons"]

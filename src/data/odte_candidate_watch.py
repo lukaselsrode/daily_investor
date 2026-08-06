@@ -22,6 +22,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from core.paths import ODTE_DATA_DIR, atomic_write_text
 from data.odte_config import (
@@ -41,6 +42,8 @@ CANDIDATE_DECISION_FILENAME = "candidate_decision.json"
 # only symbols a candidate may CONVERT on (XSP tape confirms but never converts —
 # broker liquidity for this account is unproven).
 ETF_UNIVERSE = SCAN_UNIVERSE
+_ET = ZoneInfo("America/New_York")
+_SESSION_OPEN_ET = (9, 30)
 CONFIRM_ENTRY = "CONFIRM_ENTRY"
 KEEP_WATCHING = "KEEP_WATCHING"
 DEGRADED_NO_TRADE = "DEGRADED_NO_TRADE"
@@ -169,14 +172,32 @@ def _day_verdict(market: dict, day_score: dict) -> str:
     return str(day_score.get("verdict") or market.get("day_score") or market.get("day_verdict") or "").upper()
 
 
-def _minutes_to_close(market: dict) -> float | None:
-    return _num(market.get("minutes_to_close") or market.get("minutes_to_close_et"))
+def _minutes_to_close(market: dict, now: datetime | None = None) -> float | None:
+    mtc = _num(market.get("minutes_to_close") or market.get("minutes_to_close_et"))
+    if mtc is not None:
+        return mtc
+    # DERIVED CLOCK (2026-08-05): snapshots that lose minutes_to_close must not disable the
+    # late-day A+ rule — during RTH the wall clock is authoritative.
+    from data.odte_day_score import derived_minutes_to_close
+    return derived_minutes_to_close(now)
 
 
 def _candidate_age_minutes(candidate: dict, now: datetime) -> float | None:
+    """Watch-clock age, SESSION-ANCHORED (2026-08-05): a candidate minted pre-open on the SAME
+    ET day starts its clock at the 09:30 bell, not at mint — the phantom created 09:01 burned
+    its whole 20-minute TTL before the market opened and expired at 09:22. A candidate from a
+    PRIOR ET day keeps its raw (huge) age and expires immediately, as it must."""
     created = _parse_ts(candidate.get("created_at") or candidate.get("ts") or candidate.get("generated_at"))
     if created is None:
         return None
+    created_et = created.astimezone(_ET)
+    now_et = now.astimezone(_ET)
+    if created_et.date() == now_et.date():
+        session_open = now_et.replace(hour=_SESSION_OPEN_ET[0], minute=_SESSION_OPEN_ET[1],
+                                      second=0, microsecond=0)
+        if created_et < session_open:
+            start = min(session_open, now_et)   # pre-open now: the clock simply hasn't started
+            return (now_et - start).total_seconds() / 60.0
     return (now - created).total_seconds() / 60.0
 
 
@@ -391,6 +412,22 @@ def evaluate_candidate_watch(candidate: dict | None = None, *, market: dict | No
     if age is not None and age > max_watch_minutes:
         checks["age_minutes"] = round(age, 1)
         reasons.append(f"candidate expired ({age:.0f}m > {max_watch_minutes}m)")
+        # EXPIRY FALL-THROUGH (2026-08-05): the old short-circuit returned EXPIRED without ever
+        # reading the tape, and the expired identity then blocked the tape-only ETF lane for the
+        # rest of the session (68 blind ticks). Expiry now closes the OLD cycle and, in the SAME
+        # run, lets the live tape manufacture a FRESH candidate (new identity, new clock).
+        fresh = _extract_candidate({}, market)
+        if fresh.get("ticker") and _norm_direction(fresh.get("direction")):
+            fresh.setdefault("created_at", now.isoformat(timespec="seconds"))
+            payload = evaluate_candidate_watch(
+                fresh, market=market, day_score=day_score, vehicle_score=None,
+                gamma_map=gamma_map, broker_health=broker_health, now=now,
+                max_watch_minutes=max_watch_minutes)
+            payload["reasons"] = [
+                f"prior candidate {sym} {direction} expired ({age:.0f}m > {max_watch_minutes}m)"
+                " — tape lane re-seeded a fresh cycle", *payload.get("reasons", [])]
+            payload["prior_candidate_expired"] = True
+            return payload
         return _payload(EXPIRED_NO_CONFIRMATION, cand, reasons, checks, now)
 
     if broker.get("blocked") is True or broker.get("execution_lane") == "blocked":
@@ -418,7 +455,7 @@ def evaluate_candidate_watch(candidate: dict | None = None, *, market: dict | No
                    "dissenters": dissenters,
                    "vixy_weak": _vixy_weak(market),
                    "vixy_firming": _vixy_firming(market),
-                   "minutes_to_close": _minutes_to_close(market)})
+                   "minutes_to_close": _minutes_to_close(market, now)})
     # Telemetry (2026-08-05): _vixy_weak short-circuits on above_vwap=False, _vixy_firming on
     # above_vwap=True — an above-VWAP-but-down-on-day VIXY satisfies BOTH, silently handing a
     # free vol confirmation to EITHER direction. Flag it; the mutual-exclusion fix waits for a
@@ -448,7 +485,7 @@ def evaluate_candidate_watch(candidate: dict | None = None, *, market: dict | No
     tier = "a_plus" if a_plus else ("b_plus" if (day == "CHOP" and b_plus) else "full")
     checks["tier"] = tier
 
-    mtc = _minutes_to_close(market)
+    mtc = _minutes_to_close(market, now)
     if mtc is not None and mtc < 45 and not a_plus:
         reasons.append("late-day window requires A+ confirmation")
         return _payload(KEEP_WATCHING, cand, reasons, checks, now)
@@ -549,6 +586,16 @@ def run_candidate_watch(candidate_json: str | None = None, candidate_path: str |
                            "execution_allowed": False})
             atomic_write_text(base / ACTIVE_CANDIDATE_FILENAME,
                               json.dumps(active, indent=2, default=str))
+        elif payload["decision"] == EXPIRED_NO_CONFIRMATION:
+            # ZOMBIE-TRAP FIX (2026-08-05): an expired candidate left in place kept its
+            # ticker/direction, so _extract_candidate early-returned on it forever and the
+            # tape lane never ran again. Expiry now leaves an INERT tombstone — no top-level
+            # identity, prior cycle preserved for audit — so the next run scans the tape.
+            tombstone = {"state": payload["state"], "decision": payload["decision"],
+                         "expired_at": payload["generated_at"], "scan_only": True,
+                         "execution_allowed": False, "prior": dict(payload["candidate"])}
+            atomic_write_text(base / ACTIVE_CANDIDATE_FILENAME,
+                              json.dumps(tombstone, indent=2, default=str))
     return payload
 
 

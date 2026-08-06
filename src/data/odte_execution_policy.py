@@ -294,6 +294,19 @@ def load_consumed_ids(path: str | Path) -> set[str]:
         return set()
 
 
+def seed_consumed_ledger(path: str | Path) -> None:
+    """Ensure the single-use ledger EXISTS (empty list) so no reader can skip the replay check.
+
+    2026-08-05 audit: the ledger only materialized on the first guard/consume call, and the
+    Hermes pre-order hook skips its already-consumed check when the file is absent — Aug-3's
+    lease was replayable for its whole TTL. Minting a lease now seeds the ledger first."""
+    p = Path(os.path.expanduser(str(path)))
+    if p.exists():
+        return
+    p.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(p, "[]")
+
+
 def record_consumed(path: str | Path, lease_id: str) -> None:
     """Append one lease id to the ledger atomically (idempotent)."""
     p = Path(os.path.expanduser(str(path)))
