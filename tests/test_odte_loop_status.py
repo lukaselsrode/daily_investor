@@ -1182,7 +1182,7 @@ def test_fresh_candidate_after_green_scalp_consumed_when_auto_arm_off(monkeypatc
     assert any("green_day_preservation_lockout" in s for s in r["reasons"])
 
 
-def test_fresh_candidate_after_green_scalp_consumed_when_budget_exhausted():
+def test_fresh_candidate_after_green_scalp_consumed_when_budget_exhausted(monkeypatch):
     import data.odte_config as oc
     journal = _green_scalp_journal()
     for i in range(2, oc.DAILY_TRADE_BUDGET + 1):
@@ -1192,11 +1192,18 @@ def test_fresh_candidate_after_green_scalp_consumed_when_budget_exhausted():
             {**base, "event_type": "order_closed", "seq": 20 + i, "ts": _ts(hours_ago=1.0),
              "realized_pnl": 4.0},
         ]
-    r = ls.derive_loop_state(triggers=_candidate_triggers(ts=_ts(minutes_ago=1), alert=True),
-                             journal_events=journal, now=NOW)
-    assert r["state"] != "CANDIDATE"
-    assert r["posture"] == "FLAT_NO_TRADE"
-    assert any("budget" in s for s in r["reasons"])
+    trig = _candidate_triggers(ts=_ts(minutes_ago=1), alert=True)
+    # A+ UNCAPPED (2026-08-06 user policy): a net-GREEN exhausted-budget day keeps the scan
+    # lane ALIVE — only a_plus can convert (the gate enforces the tier).
+    r = ls.derive_loop_state(triggers=trig, journal_events=journal, now=NOW)
+    assert r["state"] == "CANDIDATE"
+    assert any("green_reentry_auto_arm" in s for s in r["reasons"])
+    # Kill switch off: the original consume-at-cap behavior stands.
+    monkeypatch.setattr(oc, "DAILY_BUDGET_APLUS_UNCAPPED", False)
+    r2 = ls.derive_loop_state(triggers=trig, journal_events=journal, now=NOW)
+    assert r2["state"] != "CANDIDATE"
+    assert r2["posture"] == "FLAT_NO_TRADE"
+    assert any("budget" in s for s in r2["reasons"])
 
 
 def test_confirmed_candidate_watch_after_green_scalp_surfaces():
@@ -1363,10 +1370,11 @@ def test_todays_net_green_low_bp_day_ends_clean_flat_no_new_entry():
     r = ls.derive_loop_state(triggers=_candidate_triggers(ts=_ts(minutes_ago=1), alert=True),
                              journal_events=_todays_two_scalp_journal(),
                              broker_health=bh, live_mode=True, now=NOW)
-    assert r["posture"] == "FLAT_NO_TRADE"
+    # A+ UNCAPPED (2026-08-06): a net-green day keeps WATCHING past the cap — but nothing is
+    # executable, and the $7.60 BP means the gate/authorize refuses any actual entry (bp_ok).
+    assert r["posture"] == "WAIT_FRESH_CONFIRMATION"
     assert "STALE" not in r["posture"] and r["posture"] != "BROKER_DEGRADED"
     assert r["executable"] is False
-    assert any("green_day_preservation_lockout" in s for s in r["reasons"])
     assert r["broker_lane"]["truth"]["buying_power"] == 7.6
     joined = " ".join(r["reasons"] + r.get("notes", [])).lower()
     assert "violation" not in joined and "error" not in joined
@@ -1632,12 +1640,23 @@ def test_rescan_override_respects_budget_and_late_day():
     from datetime import datetime, timezone
 
     import data.odte_config as oc
-    # Budget exhausted today: no override — the original REVIEWED instruction stands.
-    fills = [{"event_type": "order_filled", "trade_id": f"t{i}", "option_id": f"o{i}",
-              "ts": _ts(hours_ago=2)} for i in range(oc.DAILY_TRADE_BUDGET)]
+    # Budget exhausted on a net-RED day: no override — the anti-tilt half of the rail holds.
+    fills = []
+    for i in range(oc.DAILY_TRADE_BUDGET):
+        fills += [{"event_type": "order_filled", "trade_id": f"t{i}", "option_id": f"o{i}",
+                   "ts": _ts(hours_ago=2)},
+                  {"event_type": "order_closed", "trade_id": f"t{i}", "option_id": f"o{i}",
+                   "realized_pnl": -4.0, "ts": _ts(hours_ago=1)}]
     r = ls.derive_loop_state(active_trade=_closed_plan(), journal_events=[_pm(), *fills], now=NOW)
     assert r.get("rescan_override") is None
     assert "odte-journal-report" in r["next_command"]
+    # Budget exhausted on a net-GREEN day: the scan stays alive, A_PLUS-only, said explicitly.
+    green_fills = [dict(f, realized_pnl=4.0) if f["event_type"] == "order_closed" else f
+                   for f in fills]
+    rg = ls.derive_loop_state(active_trade=_closed_plan(), journal_events=[_pm(), *green_fills],
+                              now=NOW)
+    assert rg.get("rescan_override") is True
+    assert "A_PLUS-TIER SETUPS ONLY" in rg["next_action"]
     # 15:30 ET (<45 min to close): no override.
     late = datetime(2026, 6, 26, 19, 30, tzinfo=timezone.utc)
     plan = _closed_plan(closed_at=(late.isoformat()), updated_at=late.isoformat())

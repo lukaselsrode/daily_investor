@@ -484,7 +484,11 @@ def daily_trade_budget(events: list[dict] | None, now: datetime | None = None) -
     trade (order_closed / exit_decision) and lasts REENTRY_COOLDOWN_MINUTES. Reads only the supplied
     events — no IO, no broker. Returns {trades_today, budget, remaining, exhausted, last_close_ts,
     cooldown_until, cooldown_active, trade_date}."""
-    from data.odte_config import DAILY_TRADE_BUDGET, REENTRY_COOLDOWN_MINUTES
+    from data.odte_config import (
+        DAILY_BUDGET_APLUS_UNCAPPED,
+        DAILY_TRADE_BUDGET,
+        REENTRY_COOLDOWN_MINUTES,
+    )
     now = now or datetime.now(timezone.utc)
     today = now.astimezone(ET).date().isoformat()
     fills: list[tuple[dict, int]] = []
@@ -503,11 +507,19 @@ def daily_trade_budget(events: list[dict] | None, now: datetime | None = None) -
     cooldown_until = (last_close + timedelta(minutes=REENTRY_COOLDOWN_MINUTES)
                       if last_close is not None else None)
     trades_today = len(entry_keys)
+    # A+ UNCAPPED (2026-08-06 user policy): while the day's realized P/L is >= 0, an a_plus-tier
+    # setup may enter past the base cap (the GATE enforces the tier; this payload carries the
+    # eligibility so every consumer reads one source). Any net-red day de-activates it.
+    net_day = _num(green_day_preservation(events, now=now).get("net_day_pnl"))
+    aplus_uncapped_active = bool(DAILY_BUDGET_APLUS_UNCAPPED
+                                 and (net_day is None or net_day >= 0))
     return {
         "trades_today": trades_today,
         "budget": DAILY_TRADE_BUDGET,
         "remaining": max(0, DAILY_TRADE_BUDGET - trades_today),
         "exhausted": trades_today >= DAILY_TRADE_BUDGET,
+        "day_net_pnl": net_day,
+        "aplus_uncapped_active": aplus_uncapped_active,
         "last_close_ts": last_close.isoformat(timespec="seconds") if last_close else None,
         "cooldown_until": cooldown_until.isoformat(timespec="seconds") if cooldown_until else None,
         "cooldown_active": bool(cooldown_until is not None and now < cooldown_until),

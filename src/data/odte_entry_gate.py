@@ -78,6 +78,10 @@ GREEN_REENTRY_BP_VETO = "insufficient_bp_for_green_reentry"
 # every completed trade. Enforced from the day's journal events (see odte_journal.daily_trade_budget).
 DAILY_BUDGET_VETO = "daily_trade_budget_exhausted"
 COOLDOWN_VETO = "post_trade_cooldown_active"
+# A+ UNCAPPED (2026-08-06 user policy): an a_plus-tier candidate passes an exhausted daily
+# budget WHILE the day is net-green (budget.aplus_uncapped_active). Everything else about the
+# entry is unchanged — sizing, cooldown, chase band, green re-entry tier bar all still apply.
+APLUS_BUDGET_EXCEPTION = "daily_budget_aplus_exception"
 
 # FAIL-CLOSED promotion (2026-07-23 delayed-fill incident): `promote_to_execution=True` is a
 # DEPRECATED input. A bare boolean can no longer demote a scan-tier record to the execution tier —
@@ -588,8 +592,12 @@ def build_entry_gate_decision(trigger: dict | None = None, candidate: dict | Non
         winning = green_day_winning_tier(journal_events, now=current_now)
         winning_tier_today = winning.get("winning_tier")
         winning_rank = winning.get("winning_rank", 0)
-        cadence_clear = bool(budget and budget.get("remaining", 0) >= 1
-                             and not budget.get("cooldown_active"))
+        # A+ UNCAPPED (2026-08-06): on a net-green day an a_plus candidate has a budget slot by
+        # exception — otherwise the auto-arm died exactly when the uncapped rule should apply.
+        slot_open = bool(budget and (budget.get("remaining", 0) >= 1
+                                     or (budget.get("aplus_uncapped_active")
+                                         and str(tier or "").lower() == "a_plus")))
+        cadence_clear = bool(budget and slot_open and not budget.get("cooldown_active"))
         tier_qualifies = tier_rank(tier) >= 1 and tier_rank(tier) >= winning_rank
         tier_below_winner = bool(tier is not None and tier_rank(tier) < winning_rank)
         auto_armed = cadence_clear and tier_qualifies and bp_ok
@@ -603,9 +611,13 @@ def build_entry_gate_decision(trigger: dict | None = None, candidate: dict | Non
 
     # DAILY TRADE BUDGET + COOLDOWN (2026-08-02 retune): a hard per-ET-day entry cap and a minimum
     # gap after every completed trade. Deterministic from the same journal the green lockout reads.
+    aplus_budget_exception = False
     if budget is not None:
         if budget.get("exhausted"):
-            veto_reasons.append(DAILY_BUDGET_VETO)
+            aplus_budget_exception = bool(budget.get("aplus_uncapped_active")
+                                          and str(tier or "").lower() == "a_plus")
+            if not aplus_budget_exception:
+                veto_reasons.append(DAILY_BUDGET_VETO)
         elif budget.get("cooldown_active"):
             veto_reasons.append(COOLDOWN_VETO)
 
@@ -640,6 +652,8 @@ def build_entry_gate_decision(trigger: dict | None = None, candidate: dict | Non
             # Deprecated bare promotion: refused, and the fail-closed reason names the fix.
             reason_codes.append(EXECUTION_LEASE_REQUIRED)
     reason_codes.extend(transition_reasons)
+    if aplus_budget_exception:
+        reason_codes.append(APLUS_BUDGET_EXCEPTION)
     if green_locked:
         if auto_armed:
             reason_codes.append("green_reentry_auto_armed_tier")

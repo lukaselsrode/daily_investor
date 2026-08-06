@@ -72,6 +72,11 @@ GOOD_DAY_MIN_SCORE: int = _int("good_day_min_score", 4)
 
 # ── Trade cadence ──────────────────────────────────────────────────────────────
 DAILY_TRADE_BUDGET: int = _int("daily_trade_budget", 2)
+# A+ UNCAPPED (2026-08-06, user policy): an a_plus-tier setup (>=3 confirmers, zero dissenters)
+# is exempt from the daily budget cap WHILE the day is net-green — winners fund more attempts,
+# any net-red day hard-stops at the base cap (the anti-tilt half of the rail stays). Every other
+# rail applies per trade: tier-fraction BP sizing, cooldown, chase band, green re-entry tier bar.
+DAILY_BUDGET_APLUS_UNCAPPED: bool = _bool("daily_budget_aplus_uncapped", True)
 REENTRY_COOLDOWN_MINUTES: int = _int("reentry_cooldown_minutes", 20)
 GREEN_REENTRY_MIN_BP_MULTIPLE: float = _num("green_reentry_min_bp_multiple", 1.5)
 # 2026-08-03: after a banked green, re-entry auto-arms when the daily budget has a slot, the

@@ -319,6 +319,8 @@ def test_dict_inputs_identical_to_json_string_inputs(tmp_path):
 def test_journal_events_override_enforces_budget_with_zero_appends(tmp_path):
     # Shadow mode: read the REAL journal's budget/green state via journal_events while journal=False
     # guarantees no append anywhere. A 2-entry day must refuse daily_trade_budget_exhausted.
+    # (Day kept net-RED so the 2026-08-06 a_plus-uncapped green-day exception cannot apply —
+    # this test pins the zero-append mechanics, not the exception.)
     real_events = []
     for i, hours_ago in enumerate((4, 2)):
         ts = (NOW - timedelta(hours=hours_ago)).isoformat()
@@ -328,7 +330,7 @@ def test_journal_events_override_enforces_budget_with_zero_appends(tmp_path):
             {"event_type": "order_filled", "trade_id": f"t{i}", "underlying": "SPY",
              "option_id": f"spy-{i}", "ts": ts},
             {"event_type": "order_closed", "trade_id": f"t{i}", "underlying": "SPY",
-             "option_id": f"spy-{i}", "realized_pnl": 5.0,
+             "option_id": f"spy-{i}", "realized_pnl": -5.0,
              "ts": (NOW - timedelta(hours=hours_ago - 1)).isoformat()},
         ]
     assert len([e for e in real_events if e["event_type"] == "order_filled"]) \
@@ -376,3 +378,74 @@ def test_mint_seeds_the_consumed_ledger(tmp_path):
     p2 = _convert(tmp_path, now=NOW + timedelta(minutes=5))
     assert p2["converted"] is True
     assert "burned-1" in json.loads(ledger.read_text())
+
+
+# --- A+ uncapped daily budget (2026-08-06 user policy) ----------------------------------------
+
+def _budget_exhausted_events(now, day_pnl=5.0):
+    """Two completed trades today (base cap consumed) with a chosen net day P/L."""
+    events = []
+    for i, hours_ago in enumerate((4, 2)):
+        ts = (now - timedelta(hours=hours_ago)).isoformat()
+        events += [
+            {"event_type": "entry_fill", "trade_id": f"t{i}", "underlying": "SPY",
+             "option_id": f"spy-{i}", "ts": ts},
+            {"event_type": "order_closed", "trade_id": f"t{i}", "underlying": "SPY",
+             "option_id": f"spy-{i}", "realized_pnl": day_pnl / 2.0,
+             "ts": (now - timedelta(hours=hours_ago - 1)).isoformat()},
+        ]
+    return events
+
+
+def test_aplus_converts_past_exhausted_budget_on_green_day():
+    # a_plus tape (the default _market: 3 confirmers, 0 dissenters) + budget 2/2 used + day
+    # net-green -> the gate grants the a_plus exception and the conversion mints a lease.
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as td:
+        payload = cv.run_convert(candidate_json=_candidate(), market_json=_market(),
+                                 broker_json=_broker(), contract_json=_contract(),
+                                 state_dir=td, write=False, journal=False,
+                                 journal_events=_budget_exhausted_events(NOW, day_pnl=9.0),
+                                 journal_path=str(Path(td) / "j.jsonl"), now=NOW)
+    assert payload["converted"] is True, payload["reason_codes"]
+    import data.odte_entry_gate as eg
+    assert eg.APLUS_BUDGET_EXCEPTION in payload["entry_gate"]["reason_codes"]
+
+
+def test_non_aplus_and_red_days_stay_capped(monkeypatch):
+    import tempfile
+    from pathlib import Path
+
+    import data.odte_entry_gate as eg
+    import data.odte_journal as oj
+
+    def _run(market, events, td):
+        return cv.run_convert(candidate_json=_candidate(), market_json=market,
+                              broker_json=_broker(), contract_json=_contract(),
+                              state_dir=td, write=False, journal=False,
+                              journal_events=events,
+                              journal_path=str(Path(td) / "j.jsonl"), now=NOW)
+
+    # B+ tier (CHOP + one dissenter) on a green day: still vetoed at the cap.
+    bplus_market = _market()
+    bplus_market["IWM"] = {"last": 298.0, "above_vwap": False, "orb_state": "inside"}
+    bplus_market["gap_pct"] = 0.1                      # muted gap -> CHOP day
+    with tempfile.TemporaryDirectory() as td:
+        refused = _run(bplus_market, _budget_exhausted_events(NOW, day_pnl=9.0), td)
+    assert refused["converted"] is False
+    assert any(eg.DAILY_BUDGET_VETO in str(r) for r in refused["reason_codes"])
+
+    # a_plus tape but the day is net-RED: the anti-tilt half holds — vetoed.
+    with tempfile.TemporaryDirectory() as td:
+        red = _run(_market(), _budget_exhausted_events(NOW, day_pnl=-6.0), td)
+    assert red["converted"] is False
+    assert any(eg.DAILY_BUDGET_VETO in str(r) for r in red["reason_codes"])
+
+    # Kill switch off: vetoed regardless.
+    monkeypatch.setattr(oj, "green_day_preservation", oj.green_day_preservation)  # no-op guard
+    import data.odte_config as oc2
+    monkeypatch.setattr(oc2, "DAILY_BUDGET_APLUS_UNCAPPED", False)
+    with tempfile.TemporaryDirectory() as td:
+        off = _run(_market(), _budget_exhausted_events(NOW, day_pnl=9.0), td)
+    assert off["converted"] is False

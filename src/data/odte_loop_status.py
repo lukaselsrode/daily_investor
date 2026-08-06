@@ -464,13 +464,20 @@ def _rescan_override(payload: dict, events: list[dict], now: datetime) -> None:
         remaining = int(budget.get("remaining") or 0)
     except (TypeError, ValueError):
         remaining = 0
+    aplus_only = False
     if remaining < 1:
-        return
+        # A+ UNCAPPED (2026-08-06): a net-green day keeps scanning past the base cap, but ONLY
+        # a_plus-tier setups can convert (the gate enforces it) — say so explicitly.
+        if not budget.get("aplus_uncapped_active"):
+            return
+        aplus_only = True
     payload["next_action"] = (
         "session OPEN with entry budget remaining — RE-SCAN the tape, do not re-journal: build "
         "a FRESH market snapshot (fast_path_snapshots.md shapes, INCLUDE minutes_to_close), run "
         "odte-day-score, then odte-candidate-watch WITH MARKET= so the tape lane can "
-        "manufacture/confirm a candidate (a bare invocation without MARKET= scans nothing)")
+        "manufacture/confirm a candidate (a bare invocation without MARKET= scans nothing)"
+        + (" — BUDGET BASE EXHAUSTED on a net-green day: A_PLUS-TIER SETUPS ONLY (the gate "
+           "enforces the tier; a net-red day ends entries)" if aplus_only else ""))
     payload["next_command"] = ("make odte-day-score MARKET=<fresh market.json> JSON=1 → "
                                "make odte-candidate-watch MARKET=<fresh market.json> JSON=1 "
                                "WRITE=1")
@@ -665,7 +672,12 @@ def _green_reentry_scan_allowed(events: list[dict] | None, now: datetime | None,
         return False, "profitable trade already banked today (auto-arm disabled)"
     budget = daily_trade_budget(events, now=now)
     if budget.get("remaining", 0) < 1:
-        return False, "daily trade budget exhausted"
+        # A+ UNCAPPED (2026-08-06): a green day keeps the scan lane alive past the base cap for
+        # a_plus-tier work — an untiered candidate passes through (the gate enforces the tier).
+        aplus_ok = bool(budget.get("aplus_uncapped_active")
+                        and (tier is None or str(tier).lower() == "a_plus"))
+        if not aplus_ok:
+            return False, "daily trade budget exhausted (a_plus-only exception not available)"
     if budget.get("cooldown_active"):
         return False, f"post-trade cooldown active until {budget.get('cooldown_until')}"
     if tier is not None:

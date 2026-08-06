@@ -636,7 +636,7 @@ def test_green_reentry_auto_arm_kill_switch(monkeypatch):
     assert d["green_reentry"]["auto_arm_enabled"] is False
 
 
-def test_green_reentry_auto_arm_blocked_by_budget_and_cooldown():
+def test_green_reentry_auto_arm_blocked_by_budget_and_cooldown(monkeypatch):
     import data.odte_config as oc
     # Budget exhausted: seed DAILY_TRADE_BUDGET completed green trades.
     events = []
@@ -645,12 +645,25 @@ def test_green_reentry_auto_arm_blocked_by_budget_and_cooldown():
         events += [{**base, "event_type": "order_filled", "ts": _ts_hours_ago(3.0 - i * 0.1)},
                    {**base, "event_type": "order_closed", "realized_pnl": 5.0,
                     "ts": _ts_hours_ago(2.0 - i * 0.1)}]
+    # A+ UNCAPPED (2026-08-06 user policy): a_plus on a net-GREEN exhausted-budget day now
+    # AUTHORIZES with the exception reason code — the scenario this test used to forbid.
     d = eg.build_entry_gate_decision(journal_events=events, now=_LOCK_NOW,
                                      **_auto_arm_kwargs(tier="a_plus"))
-    assert d["execution_allowed"] is False
-    assert eg.DAILY_BUDGET_VETO in d["veto_reasons"]
-    assert d["green_reentry"]["auto_armed"] is False
-    # Cooldown active: close 1 minute ago.
+    assert d["execution_allowed"] is True
+    assert eg.APLUS_BUDGET_EXCEPTION in d["reason_codes"]
+    # A non-a_plus tier stays capped on the same day.
+    full = eg.build_entry_gate_decision(journal_events=events, now=_LOCK_NOW,
+                                        **_auto_arm_kwargs(tier="full"))
+    assert full["execution_allowed"] is False
+    # Kill switch off: the original block stands even for a_plus.
+    monkeypatch.setattr(oc, "DAILY_BUDGET_APLUS_UNCAPPED", False)
+    off = eg.build_entry_gate_decision(journal_events=events, now=_LOCK_NOW,
+                                       **_auto_arm_kwargs(tier="a_plus"))
+    assert off["execution_allowed"] is False
+    assert eg.DAILY_BUDGET_VETO in off["veto_reasons"]
+    assert off["green_reentry"]["auto_armed"] is False
+    monkeypatch.setattr(oc, "DAILY_BUDGET_APLUS_UNCAPPED", True)
+    # Cooldown active: close 1 minute ago — applies to EVERY tier, exception or not.
     hot = _green_scalp_events(hours_ago=1 / 60)
     d2 = eg.build_entry_gate_decision(journal_events=hot, now=_LOCK_NOW,
                                       **_auto_arm_kwargs(tier="a_plus"))
