@@ -89,3 +89,15 @@ lease refused by the hook) passes.
 | Same intent seems dead after one fire | intents are single-shot (`fired_at`); re-arm deliberately |
 | Parked MCP connection (Hermes lane) | unchanged v5 protocol + un-parker; the daemon holds its OWN session and reconnects once per call, so a Hermes park does not affect it |
 | Both lanes near one position | entries: consumed ledger arbiters; exits: daemon writes `management.decision`, Hermes defers (prompt v6); a true double-close rejects at the broker (no position) |
+
+## H2. Incident adjudication (added 2026-08-06)
+
+The execution-safety lockout has EXACTLY ONE sanctioned escape: a human-authorized
+`execution_safety_incident_adjudicated` journal event (via `odte-journal --event-json`) that is
+same-ET-day, NAMES the incident (`incident_event_id`, fallback `incident_seq`), and carries
+`adjudicated_by` + `reason`. Preconditions, in order, non-negotiable: (1) the incident is
+PROVEN false from artifacts, (2) the underlying defect is FIXED and committed with the
+incident's exact payload replaying green, (3) Lukas explicitly authorizes. The controller is
+told nothing about this event type and must never emit one — an agent-emitted adjudication is
+itself an incident. Precedent: 2026-08-06 IWM 301C (guard key-collision false positive,
+incident event 777c82248c98e543, fix bbbca46).
