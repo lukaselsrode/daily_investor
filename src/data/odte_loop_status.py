@@ -400,9 +400,12 @@ def _next_for(state: str, *, live: bool) -> tuple[str, str]:
     if state == "SCAN":
         return ("keep scanning for a non-restricted candidate", "odte-watchdog")
     if state == "CANDIDATE":
-        return ("run the candidate HAWK loop; on CONFIRM_ENTRY fetch fresh snapshots and run the "
-                "atomic conversion",
-                "odte-candidate-watch → odte-convert (on CONFIRM_ENTRY)")
+        return ("run the candidate HAWK loop WITH ITS INPUTS — pass the candidate from "
+                "triggers.json as CANDIDATE= and a FRESH market snapshot as MARKET= (a bare "
+                "invocation scans nothing and returns 'no candidate yet'); on CONFIRM_ENTRY "
+                "fetch fresh snapshots and run the atomic conversion",
+                "make odte-candidate-watch CANDIDATE=<triggers.json candidate> "
+                "MARKET=<fresh market.json> JSON=1 WRITE=1 → odte-convert (on CONFIRM_ENTRY)")
     if state == "GATED":
         return ("gate not execution-allowed — refresh the failing/missing inputs and re-run the "
                 "atomic conversion (it re-confirms + re-gates + mints the lease under one clock); "
