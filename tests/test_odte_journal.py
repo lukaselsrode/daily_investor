@@ -1019,3 +1019,42 @@ def test_both_fill_spellings_dedupe_to_one_trade():
         {"event_type": "order_filled", "trade_id": "spy-20260803-756c-scalp-114245",
          "option_id": "opt-756c", "ts": (now - timedelta(hours=3)).isoformat()}]
     assert oj.daily_trade_budget(events, now=now)["trades_today"] == 1
+
+
+# --- 2026-08-06: sanctioned incident adjudication (human-only, named, same-day) ---------------
+
+def test_adjudication_unlocks_only_the_named_same_day_incident():
+    from datetime import datetime, timezone
+    now = datetime(2026, 8, 6, 15, 0, tzinfo=timezone.utc)
+    incident = {"event_type": "execution_safety_incident", "event_id": "ev-abc", "seq": 5937,
+                "ts": "2026-08-06T14:14:54+00:00", "underlying": "IWM",
+                "reason_codes": ["broker order disagrees with the lease: option_type_mismatch"],
+                "guard_state": "BROKER_MISMATCH_BLOCKED"}
+    adjudication = {"event_type": "execution_safety_incident_adjudicated",
+                    "incident_event_id": "ev-abc", "ts": "2026-08-06T15:30:00+00:00",
+                    "adjudicated_by": "lukas",
+                    "reason": "guard key-collision false positive; contract identity verified"}
+    # Named + attributed + same ET day: unlocked, and the record shows WHO and WHY.
+    out = oj.execution_safety_lockout([incident, adjudication], now=now)
+    assert out["locked"] is False
+    assert out["adjudicated"][0]["adjudicated_by"] == "lukas"
+    assert out["incidents"] == []
+    # Fallback matching by incident_seq also works.
+    by_seq = {**adjudication, "incident_event_id": None, "incident_seq": 5937}
+    assert oj.execution_safety_lockout([incident, by_seq], now=now)["locked"] is False
+    # An adjudication that names the WRONG incident clears nothing.
+    wrong = {**adjudication, "incident_event_id": "ev-other"}
+    assert oj.execution_safety_lockout([incident, wrong], now=now)["locked"] is True
+    # Unattributed or reasonless adjudications clear nothing.
+    assert oj.execution_safety_lockout(
+        [incident, {**adjudication, "adjudicated_by": ""}], now=now)["locked"] is True
+    assert oj.execution_safety_lockout(
+        [incident, {**adjudication, "reason": ""}], now=now)["locked"] is True
+    # A prior-day adjudication clears nothing (same-ET-day only).
+    stale = {**adjudication, "ts": "2026-08-05T15:30:00+00:00"}
+    assert oj.execution_safety_lockout([incident, stale], now=now)["locked"] is True
+    # A second unadjudicated incident keeps the day locked even with one cleared.
+    incident2 = {**incident, "event_id": "ev-def", "seq": 6000,
+                 "ts": "2026-08-06T15:40:00+00:00"}
+    both = oj.execution_safety_lockout([incident, incident2, adjudication], now=now)
+    assert both["locked"] is True and len(both["adjudicated"]) == 1

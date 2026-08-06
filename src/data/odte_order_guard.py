@@ -135,23 +135,89 @@ def _symbol_block(market: dict, symbol: str | None) -> dict:
     return {}
 
 
+def _norm_option_type(value: Any) -> str:
+    """Normalize to call/put; ANYTHING else is absent — never comparison material. 2026-08-06:
+    a raw broker order row's top-level `type` is the ORDER type ('limit'), which the old
+    `option_type or type` fallback compared against the lease's 'call' and flattened a healthy
+    +4.7% position as a BROKER_MISMATCH incident."""
+    s = str(value or "").strip().lower()
+    if s in ("call", "c", "calls"):
+        return "call"
+    if s in ("put", "p", "puts"):
+        return "put"
+    return ""
+
+
+def _ids_comparable(a: str, b: str) -> bool:
+    """Option identifiers are only comparable in the SAME format — a Robinhood UUID can never
+    legitimately equal an OCC symbol, so comparing across formats guarantees a false mismatch.
+    When formats differ, the legs-derived strike/type/expiration checks carry identity."""
+    return ("-" in a) == ("-" in b)
+
+
+def _closing_only(order: dict) -> bool:
+    """True when every leg (or the flat order) is unambiguously position_effect=close."""
+    legs = [leg for leg in (order.get("legs") or []) if isinstance(leg, dict)]
+    effects = ([str(leg.get("position_effect") or "").lower() for leg in legs]
+               or [str(order.get("position_effect") or "").lower()])
+    return all(e == "close" for e in effects) and any(effects)
+
+
+def _normalize_order(order: dict) -> dict:
+    """Map a VERBATIM broker order row onto the guard's field contract. The raw
+    `get_option_orders` row keeps the ORDER type at `type`, the option identity inside
+    `legs[0]`, the fill time at `legs[0].executions[*].timestamp`, and uses
+    `state`/`price`/`created_at`/`processed_quantity` aliases — the guard read none of that on
+    2026-08-06 and declared a false incident on a perfectly leased fill. Top-level values
+    always WIN; legs and aliases only fill gaps."""
+    out = dict(order)
+    legs = [leg for leg in (order.get("legs") or []) if isinstance(leg, dict)]
+    leg = legs[0] if legs else {}
+    option_id = leg.get("option_id") or leg.get("option")
+    if isinstance(option_id, str) and "/" in option_id:      # URL form: take the UUID tail
+        option_id = option_id.rstrip("/").rsplit("/", 1)[-1]
+    for key, value in (("option_id", option_id),
+                       ("option_type", leg.get("option_type")),
+                       ("strike_price", leg.get("strike_price")),
+                       ("expiration_date", leg.get("expiration_date")),
+                       ("position_effect", leg.get("position_effect")),
+                       ("status", order.get("state")),
+                       ("order_id", order.get("id")),
+                       ("submitted_at", order.get("created_at")),
+                       ("limit_price", order.get("price")),
+                       ("filled_quantity", order.get("processed_quantity"))):
+        if out.get(key) in (None, "") and value not in (None, ""):
+            out[key] = value
+    if _order_status(out) == "filled" and not out.get("filled_at"):
+        executions = [e for e in (leg.get("executions") or []) if isinstance(e, dict)]
+        out["filled_at"] = ((executions[-1].get("timestamp") if executions else None)
+                            or order.get("last_transaction_at") or order.get("updated_at"))
+    return out
+
+
 def _identity_mismatches(order: dict, lease: dict) -> list[str]:
     """Exact-identity + maximums check between the broker order and the lease. Any disagreement is
     a hard mismatch — a contract for another underlying is never an equivalent substitute."""
     out: list[str] = []
-    o_sym = str(order.get("symbol") or order.get("underlying") or order.get("chain_symbol")
+    # Least-ambiguous symbol key first: on some payloads `symbol` is the OCC/contract symbol,
+    # not the underlying ticker (2026-08-06 collision audit).
+    o_sym = str(order.get("underlying") or order.get("chain_symbol") or order.get("symbol")
                 or "").upper()
     if o_sym and o_sym != str(lease.get("symbol") or "").upper():
         out.append(f"symbol_mismatch:{o_sym}!={lease.get('symbol')}")
     o_id = order.get("option_id") or order.get("occ_symbol")
-    if o_id and str(o_id) != str(lease.get("option_id")):
+    l_id = lease.get("option_id")
+    if (o_id and l_id and _ids_comparable(str(o_id), str(l_id))
+            and str(o_id) != str(l_id)):
         out.append("option_id_mismatch")
-    o_type = str(order.get("option_type") or order.get("type") or "").strip().lower()
-    if o_type and o_type != str(lease.get("option_type") or "").lower():
+    o_type = _norm_option_type(order.get("option_type") or order.get("type"))
+    if o_type and o_type != _norm_option_type(lease.get("option_type")):
         out.append("option_type_mismatch")
     o_strike = _num(order.get("strike_price") or order.get("strike"))
     l_strike = _num(lease.get("strike_price"))
-    if o_strike is not None and l_strike is not None and abs(o_strike - l_strike) > 1e-9:
+    if (o_strike is not None and l_strike is not None
+            and abs(o_strike - l_strike) > 1e-9
+            and abs(o_strike / 1000.0 - l_strike) > 1e-9):   # OCC 1/1000 units (301000 == 301.0)
         out.append("strike_mismatch")
     o_exp = order.get("expiration_date") or order.get("expiration")
     if o_exp and str(o_exp) != str(lease.get("expiration_date")):
@@ -237,7 +303,7 @@ def evaluate_order_guard(order: dict | None = None, *, lease: dict | None = None
     """PURE cancel-first state machine over broker order truth + the execution lease. Never raises,
     never calls a broker, places NO orders — it only classifies and instructs."""
     now = now or datetime.now(timezone.utc)
-    order = _dict(order)
+    order = _normalize_order(_dict(order))
     ld = _lease_dict(lease)
     market = _dict(market_snapshot)
     reasons: list[str] = []
@@ -256,7 +322,13 @@ def evaluate_order_guard(order: dict | None = None, *, lease: dict | None = None
     issued = _parse_ts(ld.get("issued_at")) if has_lease else None
     predates_lease = bool(submitted is not None and issued is not None and submitted < issued)
 
-    if status == "gone":
+    if order and _closing_only(order):
+        # Exits are never lease-gated (the incident-remediation invariant); feeding a
+        # sell-to-close to the ENTRY guard used to read FILLED_WITHOUT_VALID_LEASE
+        # (2026-08-06 10:20 confusion). Out of scope, never an incident.
+        reasons.append("closing order — exits are never lease-gated; not entry-guard scope")
+        state = NO_ORDER
+    elif status == "gone":
         if order:
             reasons.append(f"order status '{order.get('status') or 'none'}' — no live entry order")
         else:
@@ -319,10 +391,13 @@ def evaluate_order_guard(order: dict | None = None, *, lease: dict | None = None
         "state": state,
         "underlying": (str(symbol).upper() if symbol else None),
         "lease_id": ld.get("lease_id"),
+        # Echoed from the NORMALIZED order, so the forensic record keeps what the reader
+        # actually evaluated (the 2026-08-06 incident event carried null for every field the
+        # raw row spelled with an alias).
         "order": {k: order.get(k) for k in
-                  ("status", "symbol", "option_id", "option_type", "strike_price",
-                   "expiration_date", "quantity", "limit_price", "submitted_at", "filled_at",
-                   "filled_quantity")
+                  ("order_id", "status", "symbol", "chain_symbol", "option_id", "option_type",
+                   "strike_price", "expiration_date", "quantity", "limit_price",
+                   "submitted_at", "filled_at", "filled_quantity")
                   if order.get(k) is not None},
         "cancel_required": cancel_required,
         "safety_incident": incident,

@@ -194,6 +194,10 @@ def _order_row_to_guard(row: Any, account_symbol: str | None = None) -> dict:
         "submitted_at": row.get("created_at"),
         "filled_at": filled_at,
         "order_id": row.get("id") or row.get("order_id"),
+        # Legs ride along so the guard's own normalization derives the FULL option identity
+        # (type/strike/expiration) — without them the daemon's identity coverage rested on
+        # option_id alone (2026-08-06 collision audit).
+        "legs": row.get("legs"),
     }
     avg = _num(row.get("average_price") or row.get("processed_premium"))
     if avg is not None:

@@ -397,3 +397,128 @@ def test_pending_cancelled_is_still_guarded_not_no_order():
                                 now=PROMOTION_AT + timedelta(seconds=5))
     assert r["state"] != og.NO_ORDER
     assert r["state"] == og.PENDING_FRESH
+
+
+# --- 2026-08-06 false-incident fixes: raw-row normalization, collision-proof identity ---------
+
+IWM_UUID = "72fd7d88-cd6d-4962-9987-d8d7620ac0d7"
+
+
+def _iwm_lease(now: datetime, **over) -> dict:
+    lease = {"lease_id": "4ee1cdfe14ea6740", "symbol": "IWM", "option_id": IWM_UUID,
+             "option_type": "call", "strike_price": 301.0, "expiration_date": "2026-08-06",
+             "quantity": 1, "max_limit_price": 0.86, "max_debit": 86.0,
+             "issued_at": _iso(now), "expires_at": _iso(now + timedelta(seconds=60))}
+    lease.update(over)
+    return lease
+
+
+def _raw_broker_row(now: datetime, **leg_over) -> dict:
+    """The VERBATIM get_option_orders row shape from the 2026-08-06 incident: order type at
+    `type`, identity inside legs[0], fill time inside legs[0].executions, state/price/
+    created_at aliases, NO top-level option fields."""
+    leg = {"option_id": IWM_UUID, "option_type": "call", "strike_price": "301.0000",
+           "expiration_date": "2026-08-06", "side": "buy", "position_effect": "open",
+           "ratio_quantity": 1,
+           "executions": [{"timestamp": _iso(now + timedelta(seconds=19)), "price": "0.75",
+                           "quantity": "1.00000"}]}
+    leg.update(leg_over)
+    return {"id": "6a7496c8-aaaa-bbbb-cccc-ddddeeee0001", "chain_id": "chain-1",
+            "chain_symbol": "IWM", "state": "filled", "type": "limit", "trigger": "immediate",
+            "direction": "debit", "quantity": "1.00000", "processed_quantity": "1.00000",
+            "pending_quantity": "0.00000", "canceled_quantity": "0.00000", "price": "0.75",
+            "premium": "75.00", "processed_premium": "75.00", "time_in_force": "gfd",
+            "placed_agent": "agent", "created_at": _iso(now + timedelta(seconds=19)),
+            "updated_at": _iso(now + timedelta(seconds=20)), "legs": [leg]}
+
+
+def test_aug6_verbatim_broker_row_is_filled_fresh():
+    # THE REPLAY: the exact raw-row shape that produced the false option_type_mismatch
+    # (type='limit' read as the option type) and flattened a +4.7% position. The normalized
+    # guard reads identity from legs, fill time from executions, and passes.
+    now = PROMOTION_AT
+    r = og.evaluate_order_guard(_raw_broker_row(now), lease=_iwm_lease(now),
+                                now=now + timedelta(seconds=22))
+    assert r["state"] == og.FILLED_FRESH, r["reasons"]
+    assert r["safety_incident"] is False
+    # The forensic echo now carries what was evaluated (the incident event had nulls).
+    assert r["order"]["status"] == "filled"
+    assert r["order"]["option_id"] == IWM_UUID
+    assert r["order"]["option_type"] == "call"
+    assert r["order"]["filled_at"] is not None
+    assert r["order"]["order_id"].startswith("6a7496c8")
+
+
+def test_order_type_limit_is_never_an_option_type():
+    for junk in ("limit", "market", "stop_limit", ""):
+        assert og._norm_option_type(junk) == ""
+    assert og._norm_option_type("Call") == "call" and og._norm_option_type("p") == "put"
+    # A dict with ONLY the order type and a matching leased call: no mismatch.
+    assert "option_type_mismatch" not in og._identity_mismatches(
+        {"type": "limit"}, _iwm_lease(PROMOTION_AT))
+
+
+def test_true_mismatches_in_legs_stay_red():
+    now = PROMOTION_AT
+    wrong_id = og.evaluate_order_guard(
+        _raw_broker_row(now, option_id="99999999-9999-9999-9999-999999999999"),
+        lease=_iwm_lease(now), now=now + timedelta(seconds=22))
+    assert wrong_id["state"] == og.BROKER_MISMATCH_BLOCKED
+    wrong_strike = og.evaluate_order_guard(
+        _raw_broker_row(now, strike_price="302.0000"),
+        lease=_iwm_lease(now), now=now + timedelta(seconds=22))
+    assert wrong_strike["state"] == og.BROKER_MISMATCH_BLOCKED
+    wrong_type = og.evaluate_order_guard(
+        _raw_broker_row(now, option_type="put"),
+        lease=_iwm_lease(now), now=now + timedelta(seconds=22))
+    assert wrong_type["state"] == og.BROKER_MISMATCH_BLOCKED
+
+
+def test_fill_after_expiry_from_leg_timestamp_is_still_an_incident():
+    # The true positive the guard exists for: the leg execution timestamp is the fill time,
+    # and one AFTER lease expiry is the 2026-07-23 incident path — normalization must not
+    # soften it.
+    now = PROMOTION_AT
+    row = _raw_broker_row(now)
+    row["legs"][0]["executions"][0]["timestamp"] = _iso(now + timedelta(seconds=90))
+    row["created_at"] = _iso(now + timedelta(seconds=5))
+    r = og.evaluate_order_guard(row, lease=_iwm_lease(now), now=now + timedelta(seconds=95))
+    assert r["state"] == og.FILLED_WITHOUT_VALID_LEASE
+    assert r["safety_incident"] is True
+
+
+def test_occ_symbol_never_false_mismatches_a_uuid_lease():
+    # An OCC symbol can never equal a UUID — comparing across formats guaranteed a false
+    # option_id_mismatch. Formats now compare like-with-like; leg identity carries the rest.
+    lease = _iwm_lease(PROMOTION_AT)
+    assert "option_id_mismatch" not in og._identity_mismatches(
+        {"occ_symbol": "IWM260806C00301000", "option_type": "call", "strike_price": 301.0},
+        lease)
+    # Same-format comparisons still bite both ways.
+    assert "option_id_mismatch" in og._identity_mismatches(
+        {"option_id": "99999999-9999-9999-9999-999999999999"}, lease)
+    occ_lease = _iwm_lease(PROMOTION_AT, option_id="IWM260806C00301000")
+    assert "option_id_mismatch" in og._identity_mismatches(
+        {"occ_symbol": "IWM260806C00302000"}, occ_lease)
+    assert "option_id_mismatch" not in og._identity_mismatches(
+        {"occ_symbol": "IWM260806C00301000"}, occ_lease)
+
+
+def test_occ_millis_strike_units_match():
+    lease = _iwm_lease(PROMOTION_AT)
+    assert "strike_mismatch" not in og._identity_mismatches({"strike": 301000}, lease)
+    assert "strike_mismatch" in og._identity_mismatches({"strike": 302000}, lease)
+    assert "strike_mismatch" in og._identity_mismatches({"strike_price": 302.0}, lease)
+
+
+def test_closing_order_is_out_of_scope_never_an_incident():
+    # Feeding the sell-to-close to the ENTRY guard read FILLED_WITHOUT_VALID_LEASE on
+    # 2026-08-06 10:20. Exits are never lease-gated: out of scope, no cancel, no incident.
+    now = PROMOTION_AT
+    close_row = _raw_broker_row(now)
+    close_row["legs"][0].update({"side": "sell", "position_effect": "close"})
+    close_row["direction"] = "credit"
+    r = og.evaluate_order_guard(close_row, lease=None, now=now + timedelta(seconds=200))
+    assert r["state"] == og.NO_ORDER
+    assert r["safety_incident"] is False and r["cancel_required"] is False
+    assert any("closing order" in reason for reason in r["reasons"])

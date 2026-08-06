@@ -316,21 +316,53 @@ def execution_safety_lockout(events: list[dict] | None, now: datetime | None = N
 
     2026-07-23 delayed-fill remediation: a fill outside a valid execution lease (or a broker/lease
     mismatch) is a SAFETY INCIDENT — once one is journaled, NO new entries are permitted for the
-    session (`odte_loop_status` consumes fresh gates/candidates/triggers). There is deliberately no
-    override flag: the lockout clears only with the ET calendar day. Reads only the supplied
-    events — no IO, no broker."""
+    session (`odte_loop_status` consumes fresh gates/candidates/triggers). There is no automatic
+    override: the lockout clears with the ET calendar day, or through EXACTLY ONE sanctioned
+    escape (2026-08-06, user-authorized after a proven-false incident flattened a healthy
+    position): a `execution_safety_incident_adjudicated` event that (a) is journaled the SAME ET
+    day, (b) NAMES the incident it clears (`incident_event_id`, fallback `incident_seq`), and
+    (c) carries `adjudicated_by` + `reason`. Adjudication is a HUMAN act journaled via
+    `odte-journal --event-json` after the underlying defect is fixed and test-pinned — the
+    controller is told nothing about this event type and must never emit it. An unmatched or
+    unattributed adjudication clears nothing. Reads only the supplied events — no IO, no broker."""
     now = now or datetime.now(timezone.utc)
     today = now.astimezone(ET).date().isoformat()
-    incidents = [
-        {"seq": e.get("seq"), "ts": e.get("ts"),
-         "underlying": (str(e.get("underlying") or e.get("symbol") or "").upper() or None),
-         "reason_codes": list(e.get("reason_codes") or []),
-         "guard_state": e.get("guard_state") or e.get("state")}
-        for e in (events or [])
-        if isinstance(e, dict) and e.get("event_type") == "execution_safety_incident"
+    adjudications = [
+        e for e in (events or [])
+        if isinstance(e, dict)
+        and e.get("event_type") == "execution_safety_incident_adjudicated"
         and _et_date(e.get("ts")) == today
+        and str(e.get("adjudicated_by") or "").strip()
+        and str(e.get("reason") or "").strip()
     ]
-    return {"locked": bool(incidents), "trade_date": today, "incidents": incidents}
+
+    def _cleared(incident: dict) -> dict | None:
+        for adj in adjudications:
+            if (incident.get("event_id") and adj.get("incident_event_id")
+                    and str(adj["incident_event_id"]) == str(incident["event_id"])):
+                return adj
+            if (adj.get("incident_seq") is not None and incident.get("seq") is not None
+                    and str(adj["incident_seq"]) == str(incident["seq"])):
+                return adj
+        return None
+
+    incidents, cleared = [], []
+    for e in (events or []):
+        if not (isinstance(e, dict) and e.get("event_type") == "execution_safety_incident"
+                and _et_date(e.get("ts")) == today):
+            continue
+        row = {"seq": e.get("seq"), "ts": e.get("ts"),
+               "underlying": (str(e.get("underlying") or e.get("symbol") or "").upper() or None),
+               "reason_codes": list(e.get("reason_codes") or []),
+               "guard_state": e.get("guard_state") or e.get("state")}
+        adj = _cleared(e)
+        if adj is None:
+            incidents.append(row)
+        else:
+            cleared.append({**row, "adjudicated_by": adj.get("adjudicated_by"),
+                            "adjudication_reason": adj.get("reason")})
+    return {"locked": bool(incidents), "trade_date": today, "incidents": incidents,
+            "adjudicated": cleared}
 
 
 # Confirmation-tier ranking (2026-08-03 green re-entry auto-arm). The tape-computed tiers order as

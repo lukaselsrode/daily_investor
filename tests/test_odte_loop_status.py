@@ -1666,3 +1666,20 @@ def test_prior_day_expired_lease_age_is_suppressed(tmp_path):
     assert p["artifact_ages"]["execution_lease"]["as_of"] is None       # inert audit trail
     # A SAME-day expired lease still shows (it is current work that just died) — pinned by
     # test_run_loop_status_reads_order_guard_and_lease_files above.
+
+
+def test_adjudicated_incident_reopens_the_entry_lane():
+    # 2026-08-06: a proven-false incident locked the day; the user-authorized adjudication
+    # (named, attributed, same ET day) must let a fresh candidate be actionable again.
+    incident = {"event_type": "execution_safety_incident", "event_id": "ev-abc", "seq": 5937,
+                "ts": _ts(minutes_ago=60), "underlying": "IWM",
+                "guard_state": "BROKER_MISMATCH_BLOCKED"}
+    trig = _candidate_triggers(alert=True)
+    locked = ls.derive_loop_state(triggers=trig, journal_events=[incident], now=NOW)
+    assert locked["state"] != "CANDIDATE"                      # lockout swallows the candidate
+    adjudication = {"event_type": "execution_safety_incident_adjudicated",
+                    "incident_event_id": "ev-abc", "ts": _ts(minutes_ago=5),
+                    "adjudicated_by": "lukas", "reason": "guard false positive, fix committed"}
+    unlocked = ls.derive_loop_state(triggers=trig, journal_events=[incident, adjudication],
+                                    now=NOW)
+    assert unlocked["state"] == "CANDIDATE"
