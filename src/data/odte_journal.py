@@ -447,6 +447,33 @@ def _dict_get(e: dict, key: str, sub: str):
     return v.get(sub) if isinstance(v, dict) else None
 
 
+_SAME_FILL_WINDOW_MINUTES = 10.0
+
+
+def _entry_fill_keys(fills: list[tuple[dict, int]]) -> set[str]:
+    """Canonical distinct-entry keys for fill events. Two events describe the SAME entry when
+    they share an option_id within a short window — the order guard journals `order_filled`
+    (often without a trade_id) seconds after the controller's `entry_fill` for the same order,
+    and the old `trade_id or option_id` key counted them as two trades (2026-08-06: one QQQ
+    fill read as trades_today=3 and would burn a phantom budget slot on any future day).
+    Legitimate same-contract re-entries are always separated by the post-close cooldown
+    (>= REENTRY_COOLDOWN_MINUTES), far outside the join window."""
+    keys: set[str] = set()
+    seen_opts: list[tuple[str, datetime]] = []
+    for e, i in fills:
+        opt = str(e.get("option_id") or "").strip()
+        ts = _parse_ts(e.get("ts"))
+        if opt and ts is not None:
+            if any(o == opt and abs((ts - t).total_seconds()) <= _SAME_FILL_WINDOW_MINUTES * 60
+                   for o, t in seen_opts):
+                continue                        # duplicate journaling of the same fill
+            seen_opts.append((opt, ts))
+            keys.add(f"{opt}@{ts.astimezone(ET).isoformat(timespec='minutes')}")
+            continue
+        keys.add(str(e.get("trade_id") or opt or f"event#{e.get('seq', i)}"))
+    return keys
+
+
 def daily_trade_budget(events: list[dict] | None, now: datetime | None = None) -> dict:
     """PURE: today's ET-day entry count vs the daily trade budget, plus the post-close cooldown.
 
@@ -460,19 +487,19 @@ def daily_trade_budget(events: list[dict] | None, now: datetime | None = None) -
     from data.odte_config import DAILY_TRADE_BUDGET, REENTRY_COOLDOWN_MINUTES
     now = now or datetime.now(timezone.utc)
     today = now.astimezone(ET).date().isoformat()
-    entry_keys: set[str] = set()
+    fills: list[tuple[dict, int]] = []
     last_close: datetime | None = None
     for i, e in enumerate(events or []):
         if not isinstance(e, dict) or _et_date(e.get("ts")) != today:
             continue
         et = e.get("event_type")
         if et in ENTRY_FILL_EVENTS:
-            entry_keys.add(str(e.get("trade_id") or e.get("option_id")
-                               or f"event#{e.get('seq', i)}"))
+            fills.append((e, i))
         elif et in _EXIT_EVENTS:
             ts = _parse_ts(e.get("ts"))
             if ts is not None and (last_close is None or ts > last_close):
                 last_close = ts
+    entry_keys = _entry_fill_keys(fills)
     cooldown_until = (last_close + timedelta(minutes=REENTRY_COOLDOWN_MINUTES)
                       if last_close is not None else None)
     trades_today = len(entry_keys)
@@ -507,7 +534,7 @@ def weekly_telemetry(events: list[dict] | None, now: datetime | None = None) -> 
     counts: Counter = Counter()
     refusals: Counter = Counter()
     stage_counts: Counter = Counter()
-    trade_keys: set[str] = set()
+    week_fills: list[tuple[dict, int]] = []
     for i, e in enumerate(events or []):
         if not isinstance(e, dict):
             continue
@@ -516,8 +543,7 @@ def weekly_telemetry(events: list[dict] | None, now: datetime | None = None) -> 
             continue
         et = e.get("event_type")
         if et in ENTRY_FILL_EVENTS:
-            trade_keys.add(str(e.get("trade_id") or e.get("option_id")
-                               or f"event#{e.get('seq', i)}"))
+            week_fills.append((e, i))
         elif et == "entry_decision":
             counts["entry_decisions"] += 1
             if e.get("execution_allowed") is True or e.get("decision") == "enter":
@@ -538,7 +564,7 @@ def weekly_telemetry(events: list[dict] | None, now: datetime | None = None) -> 
             stage_counts[stage] += 1
             for r in (e.get("reason_codes") or []):
                 refusals[f"{stage}:{r}"] += 1
-    trades = len(trade_keys)
+    trades = len(_entry_fill_keys(week_fills))
     budget = daily_trade_budget(events, now=now)
     armed = (iso_weekday - 1) >= ZERO_TRADE_TRIPWIRE_WEEKDAY   # isocalendar: 1=Mon
     return {

@@ -1058,3 +1058,31 @@ def test_adjudication_unlocks_only_the_named_same_day_incident():
                  "ts": "2026-08-06T15:40:00+00:00"}
     both = oj.execution_safety_lockout([incident, incident2, adjudication], now=now)
     assert both["locked"] is True and len(both["adjudicated"]) == 1
+
+
+def test_guard_and_controller_journaling_the_same_fill_counts_once():
+    # 2026-08-06 QQQ 720C: the guard journaled order_filled (no trade_id) and the controller
+    # journaled entry_fill (with trade_id) for the SAME fill 7 seconds apart — the old
+    # trade_id-or-option_id key counted trades_today=3 on a 2-trade day. Same option within the
+    # join window = one entry; a later same-contract re-entry still counts separately.
+    from datetime import datetime, timezone
+
+    import data.odte_config as oc
+    now = datetime(2026, 8, 6, 16, 0, tzinfo=timezone.utc)
+    events = [
+        {"event_type": "entry_fill", "trade_id": "iwm-20260806-301c", "option_id": "opt-iwm",
+         "ts": "2026-08-06T14:14:32+00:00"},
+        {"event_type": "order_filled", "trade_id": None, "option_id": "opt-qqq",
+         "ts": "2026-08-06T15:25:33+00:00"},                       # guard lane
+        {"event_type": "entry_fill", "trade_id": "qqq-20260806-720c", "option_id": "opt-qqq",
+         "ts": "2026-08-06T15:25:40+00:00"},                       # controller lane, same fill
+    ]
+    b = oj.daily_trade_budget(events, now=now)
+    assert b["trades_today"] == 2
+    assert b["exhausted"] is (2 >= oc.DAILY_TRADE_BUDGET)
+    wk = oj.weekly_telemetry(events, now=now)
+    assert wk["trades_this_week"] == 2
+    # A genuine re-entry on the SAME contract hours later (post-cooldown) counts as a new trade.
+    reentry = events + [{"event_type": "entry_fill", "trade_id": "qqq-2-20260806",
+                         "option_id": "opt-qqq", "ts": "2026-08-06T18:40:00+00:00"}]
+    assert oj.daily_trade_budget(reentry, now=now.replace(hour=19))["trades_today"] == 3
