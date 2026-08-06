@@ -913,7 +913,7 @@ def _resolve_loop_state(active_trade: dict | None = None,
         allowed, block_reason = _green_reentry_scan_allowed(events, now, candidate.get("tier"))
         if allowed:
             reasons.append("green_reentry_auto_arm: post-green scan candidate surfaced (budget "
-                           "slot open, cooldown clear) — tier/BP enforced at the gate via "
+                           "slot or a_plus-uncapped exception, cooldown clear) — tier/BP enforced at the gate via "
                            "odte-convert")
         else:
             trig_candidate = False
@@ -996,7 +996,7 @@ def _resolve_loop_state(active_trade: dict | None = None,
         allowed, block_reason = _green_reentry_scan_allowed(events, now, watched.get("tier"))
         if allowed:
             reasons.append("green_reentry_auto_arm: post-green candidate watch surfaced (budget "
-                           "slot open, cooldown clear) — tier/BP enforced at the gate via "
+                           "slot or a_plus-uncapped exception, cooldown clear) — tier/BP enforced at the gate via "
                            "odte-convert")
         else:
             watch_actionable = False

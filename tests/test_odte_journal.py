@@ -1086,3 +1086,41 @@ def test_guard_and_controller_journaling_the_same_fill_counts_once():
     reentry = events + [{"event_type": "entry_fill", "trade_id": "qqq-2-20260806",
                          "option_id": "opt-qqq", "ts": "2026-08-06T18:40:00+00:00"}]
     assert oj.daily_trade_budget(reentry, now=now.replace(hour=19))["trades_today"] == 3
+
+
+# --- 2026-08-06 EOD: ingest can never mint countable lifecycle events -------------------------
+
+def test_ingest_refuses_lifecycle_event_payloads(tmp_path):
+    # A loose artifact whose payload carries a fill event_type is a COPY of something the
+    # trading lane already journaled; re-ingesting it doubled the day packet to +$28 on a
+    # +$14 day. Ingest now refuses lifecycle types outright.
+    import json
+    jp = str(tmp_path / "decision_journal.jsonl")
+    state = tmp_path
+    (state / "event_entry_fill_copy.json").write_text(json.dumps(
+        {"event_type": "entry_fill", "trade_id": "t-dup", "option_id": "opt-x",
+         "fill_price": 0.64, "ts": "2026-08-06T15:25:40+00:00"}))
+    (state / "event_note.json").write_text(json.dumps(
+        {"event_type": "controller_event", "note": "benign", "ts": "2026-08-06T15:00:00+00:00"}))
+    s = oj.ingest_loose_artifacts(data_dir=str(state), journal_path=jp)
+    assert s.get("lifecycle_skipped", 0) == 1
+    events = oj.read_events(jp)
+    assert not any(e.get("event_type") == "entry_fill" for e in events)
+    assert any(e.get("event_type") == "controller_event" for e in events)
+
+
+def test_money_counters_ignore_ingest_sourced_fills():
+    # Belt and suspenders: even if a lifecycle event slips in under an ingest: source, the
+    # budget and green-day counters never count it.
+    from datetime import datetime, timezone
+    now = datetime(2026, 8, 6, 20, 0, tzinfo=timezone.utc)
+    real = [{"event_type": "entry_fill", "trade_id": "t1", "option_id": "opt-a",
+             "ts": "2026-08-06T15:25:40+00:00"},
+            {"event_type": "order_closed", "trade_id": "t1", "option_id": "opt-a",
+             "realized_pnl": 14.0, "ts": "2026-08-06T15:30:00+00:00"}]
+    dupes = [{**real[0], "source": "ingest:event", "seq": 900},
+             {**real[1], "trade_id": None, "source": "ingest:event", "seq": 901}]
+    b = oj.daily_trade_budget(real + dupes, now=now)
+    assert b["trades_today"] == 1
+    g = oj.green_day_preservation(real + dupes, now=now)
+    assert g["net_day_pnl"] == 14.0                             # not 28

@@ -279,6 +279,8 @@ def green_day_preservation(events: list[dict] | None, active_trade: dict | None 
     for i, e in enumerate(events or []):
         if not isinstance(e, dict) or e.get("event_type") not in _COMPLETED_EVENTS:
             continue
+        if str(e.get("source") or "").startswith("ingest:"):
+            continue        # an ingested completion is a record copy, never countable P/L
         if _et_date(e.get("ts")) != today:
             continue
         pnl = _realized(e)
@@ -447,6 +449,14 @@ def _dict_get(e: dict, key: str, sub: str):
     return v.get(sub) if isinstance(v, dict) else None
 
 
+# Event types ONLY the live trading lanes may write — ingest refuses them, and the money
+# counters ignore any that carry an ingest: source (belt and suspenders, 2026-08-06).
+_INGEST_PROTECTED_LIFECYCLE = frozenset({
+    *ENTRY_FILL_EVENTS, *EXIT_FILL_EVENTS, "entry_decision", "execution_lease_issued",
+    "execution_lease_consumed", "execution_safety_incident",
+    "execution_safety_incident_adjudicated", "no_trade_decision", "postmortem",
+})
+
 _SAME_FILL_WINDOW_MINUTES = 10.0
 
 
@@ -461,6 +471,8 @@ def _entry_fill_keys(fills: list[tuple[dict, int]]) -> set[str]:
     keys: set[str] = set()
     seen_opts: list[tuple[str, datetime]] = []
     for e, i in fills:
+        if str(e.get("source") or "").startswith("ingest:"):
+            continue        # an ingested fill is a record copy, never a countable trade
         opt = str(e.get("option_id") or "").strip()
         ts = _parse_ts(e.get("ts"))
         if opt and ts is not None:
@@ -902,6 +914,15 @@ def ingest_loose_artifacts(data_dir: str | None = None, journal_path: str | None
                 summary["error_files"].append(f"{fp.name}: {exc}")
                 continue
             ev_type = str(payload.get("event_type") or payload.get("type") or default_type)
+            # LIFECYCLE PROTECTION (2026-08-06 EOD incident): a loose artifact whose payload
+            # carries a trade-lifecycle event_type is a COPY of something the trading lane
+            # already journaled — re-appending it under an ingest: source mints a fresh
+            # event_id that dedupe cannot catch, and the money counters then double-count it
+            # (the day packet briefly read +$28 on a +$14 day). The trading lanes are the ONLY
+            # writers of lifecycle events; ingest refuses them outright.
+            if ev_type in _INGEST_PROTECTED_LIFECYCLE:
+                summary["lifecycle_skipped"] = summary.get("lifecycle_skipped", 0) + 1
+                continue
             tdate = artifact_trade_date(fp, payload)
             if trade_date and tdate != trade_date:
                 continue                                    # day filter: skip other days' artifacts
