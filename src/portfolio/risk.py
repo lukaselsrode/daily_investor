@@ -60,7 +60,9 @@ class RiskManager:
         min_order     = RISK_LIMITS["min_order_amount"]
         min_volume    = RISK_LIMITS["min_liquidity_volume"]
 
-        # Liquidity gate
+        # Liquidity gate: share ADV floor AND (when configured) dollar-volume floor.
+        # Share counts alone are price-skewed — sub-$1 names pass 500k shares on
+        # ~$1.6k/day of real turnover.
         if agg_df is not None and not agg_df.empty and "symbol" in agg_df.columns:
             row = agg_df[agg_df["symbol"] == symbol]
             if not row.empty:
@@ -71,6 +73,15 @@ class RiskManager:
                         reason=f"volume {vol:,.0f} < min {min_volume:,.0f}",
                         adjusted_allocation=0.0,
                     )
+                min_dollar = RISK_LIMITS.get("min_dollar_volume", 0.0)
+                if min_dollar > 0 and "dollar_vol_21d" in row.columns:
+                    dv = safe_float(row.iloc[0].get("dollar_vol_21d"), 0.0)
+                    if dv < min_dollar:
+                        return BuyDecision(
+                            approved=False,
+                            reason=f"dollar volume ${dv:,.0f}/day < min ${min_dollar:,.0f}",
+                            adjusted_allocation=0.0,
+                        )
 
         # Order size cap — raised to 1/n_remaining when few candidates remain so the stock
         # budget is fully deployed rather than swept to ETFs by the end-of-run cash sweep.

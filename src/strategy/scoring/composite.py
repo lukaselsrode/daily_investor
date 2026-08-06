@@ -54,12 +54,19 @@ def _regime_tilt_weights(sw: dict, regime: str | None) -> dict:
     }
 
 
+# Public alias: UI factor attribution must decompose value_metric with the SAME
+# effective weights the composite used (incl. the bull-regime momentum tilt).
+regime_tilted_weights = _regime_tilt_weights
+
+
 # Snapshot stamp written into every scored DataFrame so loaders know the
 # engine revision used. Bump when peer-relative math changes meaningfully.
-# peer-2: quality liquidity components move from share-ADV to multi-horizon dollar
-# volume + consistency (with market_cap / analyst-conviction extras), momentum gains
-# an optional rel_volume input, value gains an optional sector-benchmark blend.
-SCORING_MODEL_VERSION = "peer-2"
+# peer-3: quality rebuilt on FMP statement fundamentals (ROE, FCF/assets, accruals,
+# margins + trend, leverage, share-count discipline) — dividend, PE/PB, liquidity,
+# and 52w-position terms removed along with the legacy checklist anchor; income
+# de-saturated (no more max(peer, dy/threshold) cap) and extended with payout
+# coverage / growth / streak sustainability components.
+SCORING_MODEL_VERSION = "peer-3"
 
 
 def _apply_falling_knife_guard(df: pd.DataFrame) -> None:

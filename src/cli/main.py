@@ -941,9 +941,13 @@ def _cmd_snapshots(rest: list[str]) -> None:
             in_place_with_backup=in_place,
             overwrite_existing=overwrite,
         )
+    elif sub == "migrate-outcomes":
+        from cli.migrate_outcomes import cmd_migrate_outcomes
+        cmd_migrate_outcomes(dry_run="--dry-run" in sub_rest)
     else:
         print("Usage: snapshots rescore "
-              "[--dry-run] [--input PATH] [--output PATH] [--in-place-with-backup] [--overwrite-existing]")
+              "[--dry-run] [--input PATH] [--output PATH] [--in-place-with-backup] [--overwrite-existing]\n"
+              "       snapshots migrate-outcomes [--dry-run]")
         sys.exit(2)
 
 

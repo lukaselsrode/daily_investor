@@ -97,10 +97,12 @@ def test_pit_or_static_routing():
     from backtesting.simulator import _pit_or_static
     static = _mk_precomp(with_pit=False)
     pit = _mk_precomp(with_pit=True, static_quality=0.9, daily_quality=0.1)
-    # static path -> 1D static quality (0.9)
-    assert _pit_or_static(static, 5)[2][0] == 0.9
+    # tuple = (pe, pb, value_penalty, quality, income)
+    # static path -> 1D static quality (0.9); no separate penalty array
+    assert _pit_or_static(static, 5)[3][0] == 0.9
+    assert _pit_or_static(static, 5)[2] is None
     # PIT path -> day slice (0.1), NOT the static 0.9
-    assert _pit_or_static(pit, 5)[2][0] == 0.1
+    assert _pit_or_static(pit, 5)[3][0] == 0.1
 
 
 # ---------------------------------------------------------------------------
@@ -138,11 +140,20 @@ def test_select_candidates_gate_uses_pit_daily_quality():
 # 4. Precompute: neutral missing + causal (monkeypatched, no cache needed)
 # ---------------------------------------------------------------------------
 
+def _patch_timelines(monkeypatch, series: dict, dividends=None):
+    """Route FundamentalsCache reads to synthetic per-symbol timelines."""
+    import data.fundamental_features as ff
+    monkeypatch.setattr(ff, "_feature_timeline", lambda s: series.get(s))
+    monkeypatch.setattr(
+        ff.FundamentalsCache, "_load_dividends",
+        staticmethod(dividends if dividends is not None else (lambda s: None)),
+    )
+
+
 def test_pit_precompute_causal_cross_sectional(monkeypatch):
     """Two priced names, both with fundamentals: S0's EPS steps up mid-window (its PE drops
     from 20 to 10, matching S1's), so S0's value sub-score must IMPROVE after the filing —
     a causal, cross-sectional change driven only by data filed before each rebalance date."""
-    import data.pit_fundamentals as pf
     from backtesting.pit_precompute import build_pit_factor_panels
     from util import SCORING_PARAMS
 
@@ -156,8 +167,7 @@ def test_pit_precompute_causal_cross_sectional(monkeypatch):
             "ttm_eps": [10.0], "shares": [1e6], "book": [1e7],
         }),
     }
-    monkeypatch.setattr(pf, "causal_ttm_series", lambda s: series.get(s))
-    monkeypatch.setattr(pf, "dividend_records", lambda s: None)
+    _patch_timelines(monkeypatch, series)
 
     dates = pd.bdate_range("2023-02-01", "2023-12-29")  # spans the 2nd S0 filing
     nd = len(dates)
@@ -179,7 +189,6 @@ def test_pit_precompute_causal_cross_sectional(monkeypatch):
 def test_pit_precompute_missing_symbol_is_neutral_constant(monkeypatch):
     """A symbol with no cached fundamentals carries NO time-varying value signal (its value
     sub-score is constant across the window — the scorer's missing-data neutral, not leakage)."""
-    import data.pit_fundamentals as pf
     from backtesting.pit_precompute import build_pit_factor_panels
     from util import SCORING_PARAMS
 
@@ -187,8 +196,7 @@ def test_pit_precompute_missing_symbol_is_neutral_constant(monkeypatch):
         "_fd": pd.to_datetime(["2023-01-15", "2023-07-15"]),
         "ttm_eps": [5.0, 10.0], "shares": [1e6, 1e6], "book": [1e7, 1e7],
     })}
-    monkeypatch.setattr(pf, "causal_ttm_series", lambda s: series.get(s))
-    monkeypatch.setattr(pf, "dividend_records", lambda s: None)
+    _patch_timelines(monkeypatch, series)
     dates = pd.bdate_range("2023-02-01", "2023-12-29")
     prices = np.full((len(dates), 2), 100.0)
     out = build_pit_factor_panels(
@@ -203,7 +211,6 @@ def test_pit_precompute_missing_symbol_is_neutral_constant(monkeypatch):
 def test_pit_precompute_accepts_object_dtype_dates(monkeypatch):
     """Regression: the real loader passes an object/string-dtype date index; the precompute
     must coerce it to datetime64 so searchsorted against filing dates doesn't TypeError."""
-    import data.pit_fundamentals as pf
     from backtesting.pit_precompute import build_pit_factor_panels
     from util import SCORING_PARAMS
 
@@ -211,11 +218,12 @@ def test_pit_precompute_accepts_object_dtype_dates(monkeypatch):
         "_fd": pd.to_datetime(["2023-01-15", "2023-07-15"]),
         "ttm_eps": [5.0, 10.0], "shares": [1e6, 1e6], "book": [1e7, 1e7],
     })}
-    monkeypatch.setattr(pf, "causal_ttm_series", lambda s: series.get(s))
-    monkeypatch.setattr(
-        pf, "dividend_records",
-        lambda s: (np.array(["2023-03-01", "2023-09-01"], dtype="datetime64[ns]"),
-                   np.array([0.5, 0.5])) if s == "S0" else None,
+    _patch_timelines(
+        monkeypatch, series,
+        dividends=lambda s: (
+            (np.array(["2023-03-01", "2023-09-01"], dtype="datetime64[ns]"),
+             np.array([0.5, 0.5])) if s == "S0" else None
+        ),
     )
     dates = pd.Index([str(d.date()) for d in pd.bdate_range("2023-02-01", "2023-12-29")])
     prices = np.full((len(dates), 2), 100.0)
@@ -225,12 +233,10 @@ def test_pit_precompute_accepts_object_dtype_dates(monkeypatch):
 
 
 def test_pit_precompute_raises_when_no_fundamentals(monkeypatch):
-    import data.pit_fundamentals as pf
     from backtesting.pit_precompute import build_pit_factor_panels
     from util import SCORING_PARAMS
 
-    monkeypatch.setattr(pf, "causal_ttm_series", lambda s: None)
-    monkeypatch.setattr(pf, "dividend_records", lambda s: None)
+    _patch_timelines(monkeypatch, {})
     dates = pd.bdate_range("2023-01-02", "2023-06-30")
     prices = np.full((len(dates), 2), 100.0)
     import pytest

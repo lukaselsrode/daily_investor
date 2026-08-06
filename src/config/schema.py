@@ -17,6 +17,7 @@ class RiskConfig:
     max_order_pct_of_cash: float = 0.10
     min_order_amount: float = 5.0
     min_liquidity_volume: float = 500_000
+    min_dollar_volume: float = 0.0
     max_buys_per_rebalance: int = 7
     max_sentiment_candidates: int = 20
     minimum_hold_days: int = 0

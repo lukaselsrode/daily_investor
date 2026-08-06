@@ -41,6 +41,22 @@ _FACTOR_COLS_DEFAULT = ["value_score", "momentum_score", "quality_score", "incom
 # Stem formats, newest first — used for parsing existing files
 _STEM_FORMATS = ["%Y_%m_%d_%H_%M", "%Y_%m_%d"]
 
+# A real scored-universe frame has thousands of rows; degraded pipeline runs
+# (universe collapse, scoring skipped) produce tiny frames that must never
+# enter the store — they poison list_snapshots(), IC, and rescore loops.
+MIN_SNAPSHOT_ROWS = 50
+_REQUIRED_SNAPSHOT_COLUMNS = ("symbol", "value_metric")
+
+
+def _is_valid_snapshot(path: Path) -> bool:
+    """True when the parquet schema carries the scored-universe contract columns."""
+    try:
+        import pyarrow.parquet as pq
+        names = set(pq.read_schema(path).names)
+    except Exception:
+        return False
+    return all(col in names for col in _REQUIRED_SNAPSHOT_COLUMNS)
+
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -99,6 +115,15 @@ def save_snapshot(
     if not SNAPSHOT_PARAMS.get("enabled", True):
         return Path()
 
+    missing = [c for c in _REQUIRED_SNAPSHOT_COLUMNS if c not in df.columns]
+    if len(df) < MIN_SNAPSHOT_ROWS or missing:
+        logger.warning(
+            "Refusing snapshot save: %d rows (min %d), missing columns %s — "
+            "degraded pipeline frame (universe collapse or scoring skipped)",
+            len(df), MIN_SNAPSHOT_ROWS, missing or "none",
+        )
+        return Path()
+
     if date is None:
         dt = datetime.datetime.now()
     elif isinstance(date, datetime.datetime):
@@ -145,6 +170,9 @@ def list_snapshots() -> list[tuple[datetime.date, Path]]:
     """
     result: list[tuple[datetime.date, Path]] = []
     for f in sorted(_snapshot_dir().glob("*.parquet")):
+        if not _is_valid_snapshot(f):
+            logger.debug("list_snapshots: skipping malformed file %s", f.name)
+            continue
         try:
             result.append((_stem_to_date(f.stem), f))
         except ValueError:
@@ -413,6 +441,14 @@ class MigrationReport:
     errors: list[str] = field(default_factory=list)
     # peer-2 volume backfill: per-file fraction of rows with cache-backed dollar_vol_63d.
     volume_feature_coverage: dict[str, float] = field(default_factory=dict)
+    # peer-3 fundamental backfill: per-file fraction of rows with a cache-backed roe_ttm.
+    fundamental_feature_coverage: dict[str, float] = field(default_factory=dict)
+    # SPARSE-vintage rescue: per-file pe_ratio coverage after FMP valuation
+    # reconstruction, and return_3m coverage after price-feature reconstruction.
+    valuation_backfill_coverage: dict[str, float] = field(default_factory=dict)
+    price_backfill_coverage: dict[str, float] = field(default_factory=dict)
+    # income de-degeneracy: per-file max single-value mass among NONZERO income scores.
+    income_top_mass: dict[str, float] = field(default_factory=dict)
 
     def pretty(self) -> str:
         lines = [
@@ -437,6 +473,25 @@ class MigrationReport:
             )
             for f, c in sorted(low.items()):
                 lines.append(f"    LOW {f}: {c:.1%}")
+        for label, cov_map, warn_at in (
+            ("fundamental coverage:     ", self.fundamental_feature_coverage, 0.50),
+            ("SPARSE valuation rescue:  ", self.valuation_backfill_coverage, 0.60),
+            ("SPARSE price rescue:      ", self.price_backfill_coverage, 0.80),
+        ):
+            if cov_map:
+                covs = list(cov_map.values())
+                low = {f: c for f, c in cov_map.items() if c < warn_at}
+                lines.append(
+                    f"  {label}mean {sum(covs) / len(covs):.1%}, "
+                    f"min {min(covs):.1%} ({len(low)} file(s) < {warn_at:.0%})"
+                )
+                for f, c in sorted(low.items()):
+                    lines.append(f"    LOW {f}: {c:.1%}")
+        if self.income_top_mass:
+            worst = max(self.income_top_mass.items(), key=lambda kv: kv[1])
+            lines.append(
+                f"  income top-mass (nonzero): worst {worst[1]:.1%} ({worst[0]})"
+            )
         if self.fallback_usage:
             lines.append("  fallback usage:")
             for k, v in sorted(self.fallback_usage.items(), key=lambda kv: -kv[1]):
@@ -470,8 +525,16 @@ def rescore_snapshots(
     in_place_with_backup: bool = False,
     scoring_cfg: dict | None = None,
     backfill_volume: bool = True,
+    backfill_fundamentals: bool = True,
+    backfill_sparse: bool = True,
 ) -> MigrationReport:
     """Rescore snapshots under the unified peer engine. Writes canonical column names.
+
+    REGIME CONVENTION: rescoring is regime-NEUTRAL (compute_metric without a regime
+    argument), while live snapshots are scored with the day's regime tilt. A rescored
+    file is therefore not bit-comparable to the live snapshot from the same day; this
+    is the accepted convention (the tilt is a portfolio-construction overlay, not a
+    property of the factor scores).
 
     Behavior
     --------
@@ -490,7 +553,14 @@ def rescore_snapshots(
       features (data.volume_features) are merged from the FMP price cache using
       trailing windows ending at the snapshot's stem date; files that pre-date the
       volume column also get a synthesized share-ADV `volume` (dollar_vol_21d /
-      current_price) so the legacy checklist stays cross-sectional.
+      current_price).
+    - backfill_fundamentals=True (default, peer-3): PIT fundamental features
+      (data.fundamental_features — quality + income sustainability inputs) are
+      merged as-of the stem date for EVERY vintage (no historical file carries them).
+    - backfill_sparse=True (default, peer-3): vintages missing pe_ratio or the
+      momentum feature block entirely (2025 SPARSE files) get FMP-reconstructed
+      valuation ratios (fill-missing-only — Robinhood values are never overwritten)
+      and price/momentum features as-of the stem date.
     """
     from strategy.scoring.composite import (
         SCORING_MODEL_VERSION,
@@ -517,12 +587,23 @@ def rescore_snapshots(
     before_means: list[float] = []
     after_means: list[float] = []
     shifts: list[tuple[str, float, float]] = []
-    # One shared FMP-cache reader across all files — per-file construction would
-    # reread thousands of price parquets.
+    # One shared FMP-cache reader of each kind across all files — per-file
+    # construction would reread thousands of price/statement files.
     _volume_cache = None
+    _fund_cache = None
+    _price_cache = None
+
+    def _coverage(frame: pd.DataFrame, col: str) -> float:
+        if col not in frame.columns or not len(frame):
+            return 0.0
+        return float(pd.to_numeric(frame[col], errors="coerce").notna().mean())
 
     for snap_path in sorted(input_path.glob("*.parquet")):
         if snap_path.name.endswith(".bak.parquet"):
+            continue
+        if not _is_valid_snapshot(snap_path):
+            report.files_skipped_error += 1
+            report.errors.append(f"{snap_path.name}: malformed snapshot (missing contract columns) — skipped")
             continue
         report.files_processed += 1
 
@@ -558,6 +639,47 @@ def rescore_snapshots(
                     f"{snap_path.name}: unparseable stem date — volume backfill skipped"
                 )
 
+        try:
+            _stem_asof = _stem_to_date(snap_path.stem)
+        except ValueError:
+            _stem_asof = None
+
+        # SPARSE-vintage rescue (peer-3): 2025 files that never stored broker ratios
+        # or the yfinance momentum block get FMP reconstructions as-of the stem date.
+        if backfill_sparse and _stem_asof is not None:
+            if _coverage(df, "pe_ratio") < 0.30:
+                if _fund_cache is None:
+                    from data.fundamental_features import FundamentalsCache
+                    _fund_cache = FundamentalsCache()
+                from data.fundamental_features import add_valuation_ratios_asof
+                cov = add_valuation_ratios_asof(
+                    df, _stem_asof, _fund_cache, fill_missing_only=True
+                )
+                report.valuation_backfill_coverage[snap_path.name] = cov
+            # Top-up trigger is generous (< 0.95): PARTIAL vintages carry live
+            # yfinance momentum for most rows — fill_missing_only reconstructs
+            # only the gaps, never touching a live value.
+            if _coverage(df, "return_3m") < 0.95:
+                if _price_cache is None:
+                    from data.price_features import PriceSeriesCache
+                    _price_cache = PriceSeriesCache()
+                from data.price_features import add_price_momentum_features
+                cov = add_price_momentum_features(
+                    df, _stem_asof, _price_cache, fill_missing_only=True
+                )
+                report.price_backfill_coverage[snap_path.name] = cov
+
+        # peer-3 fundamental features for EVERY vintage (no historical file has them).
+        if backfill_fundamentals and _stem_asof is not None and (
+            "roe_ttm" not in df.columns or overwrite_existing
+        ):
+            if _fund_cache is None:
+                from data.fundamental_features import FundamentalsCache
+                _fund_cache = FundamentalsCache()
+            from data.fundamental_features import add_fundamental_features
+            cov = add_fundamental_features(df, _stem_asof, _fund_cache)
+            report.fundamental_feature_coverage[snap_path.name] = cov
+
         if "sector" not in df.columns:
             df["sector"] = pd.NA
         if "industry" not in df.columns:
@@ -586,6 +708,14 @@ def rescore_snapshots(
         report.nan_value_metric_rows += int(after_metric.isna().sum())
         report.rows_rescored += len(df)
         report.files_rescored += 1
+
+        if "income_score" in df.columns:
+            _inc = pd.to_numeric(df["income_score"], errors="coerce")
+            _nz = _inc[_inc.notna() & (_inc != 0.0)]
+            if len(_nz):
+                report.income_top_mass[snap_path.name] = float(
+                    _nz.round(4).value_counts().iloc[0] / len(_nz)
+                )
 
         for col in ("value_fallback_reason", "quality_fallback_reason",
                     "momentum_fallback_reason", "income_fallback_reason"):

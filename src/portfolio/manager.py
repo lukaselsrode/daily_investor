@@ -1102,6 +1102,24 @@ class PortfolioManager:
                 if df_eligible.empty:
                     logger.warning("No candidates remain after liquidity pre-filter")
                     return [], df["symbol"].tolist(), []
+        # Dollar-volume floor (2026-08-06), ANDed with the share gate: share counts
+        # are price-skewed — sub-$1 names can pass 500k shares on ~$1.6k/day of real
+        # turnover. Names missing dollar_vol_21d fail closed (the ETL's ADV×price
+        # fallback fills it for any name with volume + price, so absence means the
+        # liquidity picture is genuinely unknown).
+        _min_dv = RISK_LIMITS.get("min_dollar_volume", 0.0)
+        if _min_dv > 0 and "dollar_vol_21d" in df_eligible.columns:
+            _dvs = pd.to_numeric(df_eligible["dollar_vol_21d"], errors="coerce").fillna(0.0)
+            _thin = df_eligible.loc[_dvs < _min_dv, "symbol"].tolist()
+            if _thin:
+                df_eligible = df_eligible[_dvs >= _min_dv].copy()
+                logger.info(
+                    "Dollar-volume pre-filter: excluded %d symbols below $%s/day (e.g. %s)",
+                    len(_thin), f"{_min_dv:,.0f}", _thin[:8],
+                )
+                if df_eligible.empty:
+                    logger.warning("No candidates remain after dollar-volume pre-filter")
+                    return [], df["symbol"].tolist(), []
         if "strategy_bucket" in df_eligible.columns and CONTRARIAN_PENALTY_PARAMS["enabled"]:
             contrarian_mask = df_eligible["strategy_bucket"] == "contrarian_watchlist"
             contrarian_syms = df_eligible.loc[contrarian_mask, "symbol"].tolist()

@@ -41,7 +41,7 @@ def base_config() -> dict:
         "sell_sentiment_override_confidence": 85,
         "max_iterations": 10,
         "etfs": ["SPY", "VOO", "VTI", "QQQ", "SCHD"],
-        "score_weights": {"value": 0.08, "quality": 0.50, "income": 0.08, "momentum": 0.34},
+        "score_weights": {"value": 0.25, "quality": 0.40, "income": 0.25, "momentum": 0.10},
         "valuation_guardrails": {"max_pe_component": 5.0, "max_pb_component": 5.0, "min_pe_ratio": 1.0, "min_pb_ratio": 0.1},
         "risk": {
             "max_single_position_pct": 0.05,

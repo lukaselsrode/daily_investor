@@ -99,15 +99,14 @@ daily_investor/
 │   │   ├── momentum.py               # Momentum engine (multi-factor + warmup fallback)
 │   │   ├── factor_interactions.py    # Cross-factor interaction adjustments
 │   │   ├── snapshots.py              # Parquet snapshot store: save, load, prune, backfill, rescore
-│   │   ├── scoring/                  # Unified peer-relative factor scoring engine (peer-1)
+│   │   ├── scoring/                  # Unified peer-relative factor scoring engine (peer-3)
 │   │   │   ├── composite.py          # compute_metric: blends factors → value_metric
 │   │   │   ├── value.py              # Sector-relative winsorized percentile value scoring
-│   │   │   ├── quality.py            # Quality scoring (peer-relative + legacy checklist fallback)
-│   │   │   ├── income.py             # Income/yield scoring with trap detection
+│   │   │   ├── quality.py            # Fundamentals quality (ROE/FCF/accruals/margins/leverage, PIT)
+│   │   │   ├── income.py             # Dividend factor: yield + payout sustainability, trap detection
 │   │   │   ├── momentum.py           # Momentum factor scoring
 │   │   │   ├── growth.py             # Growth factor scoring
-│   │   │   ├── peer.py               # Peer-relative ranking + anchor blending
-│   │   │   └── _legacy_checklist.py  # Private legacy checklist scorers (fallback)
+│   │   │   └── peer.py               # Peer-relative ranking + anchor blending
 │   │   ├── regimes/
 │   │   │   ├── models.py             # RegimeState, RegimeHistoryEntry, RegimeLabel
 │   │   │   ├── detector.py           # RegimeDetector: live detect + historical replay
@@ -227,7 +226,7 @@ daily-investor COMMAND [OPTIONS]
 | `factor-map` | 3-D PCA/UMAP factor-space scatter of the scored universe |
 | `fmp <SUB>` | FMP cache operations: `status`, `validate-cache`, `backfill-prices`, `backfill-statements`, `backfill-delisted`, `build-dead-universe` |
 | `config <SUB>` | Config maintenance — sub: `migrate-scoring` (rewrite legacy YAML to unified scoring) |
-| `snapshots <SUB>` | Snapshot maintenance — sub: `rescore` (re-score on-disk snapshots to current model) |
+| `snapshots <SUB>` | Snapshot maintenance — sub: `rescore` (re-score on-disk snapshots to the current model, with FMP fundamental/valuation/price backfill as-of each stem date), `migrate-outcomes` (rewrite decision_outcomes.parquet + buy_context.csv score columns from rescored snapshots, with backups) |
 | `tune-etf-allocation` | Gated ETF/core sleeve allocation tournament (`--days`, `--mode regime\|defensive`, `--universe configured_only`, `--random-topk N`, `--apply`) — writes only the `etf_allocation` config section if all gates pass |
 | `report-etf-allocation` | Print ETF/core sleeve diagnostics for the current config (`--days`) |
 | `odte-social-report` (alias `options-social`) | **ANALYSIS / PAPER ONLY — places NO orders.** 0DTE social-sentiment watchlist from Reddit (official OAuth when `REDDIT_CLIENT_ID`/`REDDIT_CLIENT_SECRET` set → public JSON → Atom-feed fallback; no scraping) + X official API (only if `X_BEARER_TOKEN` set; no scraping). Counts posts as fresh by **market session** (`freshness_mode: market_window`, America/New_York): weekend → since the last Friday 16:00 ET close; weekday pre-open → since the previous close; weekday at/after open → since today 09:30 ET (so weekend-accumulated sentiment is retained for Monday prep), floored by `max_lookback_hours` (default 96). Applies **transparent spam/quality filtering** (no ML): drops promo/scam (Telegram/VIP/100X/“free signals”/WhatsApp), off-topic crypto, class-action/legal blasts, shotgun-cashtag spam, and near-duplicates; ODTE evidence additionally requires an allowed ticker **plus** an options/day-trading context token (0DTE, call/put, strike, scalp, FOMC…) so generic SPY/QQQ chatter doesn’t inflate mention counts. News enrichment applies the same spam/dedupe pass but **not** the options-context requirement. Attaches a **paper-only same-day option idea** (yfinance; bullish→calls / bearish→puts; budget-capped, liquidity-sorted; fails closed when market closed / no chain / `--no-fetch`). The CLI runs **on demand regardless of config** (gated by neither `enabled` nor network). Separately, `fetch-data`/`force-refresh` **always** enriches the news-sentiment substrate with social items for the active-sleeve LLM — **fail-closed** and independent of `options_social.enabled`; opt out with `options_social.disable_social_news_enrichment: true`. Social items are merged as **ordinary news articles** (title, source/`api_source`, link, date, raw text, engagement counts) so the LLM judges news and social **uniformly** — no precomputed bullish/bearish/net social score is injected into the active-sleeve prompt (the report keeps its own transparent heuristics, separately). Optional bounded **comments enrichment** (`reddit_comments_enrich: true`, default off) folds top comments of the top posts into the post text (OAuth → public JSON; cached). **Employer/compliance-restricted underlyings (NVDA by default; add more via `options_social.restricted_underlyings`) are hard-blocked in code** — never a candidate, contracts stripped, surfaced only as read-only `RESTRICTED_EMPLOYER` context (`restricted: true`, `restricted_reason: "employer"`). |
@@ -407,10 +406,16 @@ See `AGENTS.md` for the full architecture contract.
 
 | Score | What it measures |
 |-------|-----------------|
-| `value_score` | Sector-relative P/E and P/B cheapness (winsorized percentile ranking) |
-| `income_score` | Dividend yield quality (capped; 0 if yield trap or no yield) |
-| `quality_score` | Liquidity, earnings existence, dividend health |
+| `value_score` | Sector-relative P/E and P/B cheapness (winsorized percentile ranking, distress penalties) — sole owner of valuation |
+| `income_score` | Dividend factor: peer-ranked yield weighted with FMP payout sustainability (FCF coverage, growth, payment streak); 0 if yield trap or no yield |
+| `quality_score` | Statement fundamentals (peer-3): ROE, FCF/assets, accrual discipline, gross margin + trend, leverage, share-count discipline — PIT from the FMP cache |
 | `momentum_score` | Multi-factor: relative strength, risk-adjusted return, DMA trend, short-term momentum |
+
+The four factors are deliberately orthogonal (peer-3, 2026-08): dividends live only in
+income, valuation only in value, tradability only in the reliability layer, price
+geometry only in momentum. `scoring_model_version` stamps every snapshot; historical
+snapshots and the decision ledger were migrated with `snapshots rescore` +
+`snapshots migrate-outcomes` (verify: `scripts/verify_peer3_migration.py`).
 
 ### Composite Score
 

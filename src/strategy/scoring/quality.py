@@ -1,23 +1,30 @@
 """
-strategy/scoring/quality.py — Peer-relative quality scoring.
+strategy/scoring/quality.py — Peer-relative FUNDAMENTALS quality scoring (peer-3).
 
-The snapshot schema has no real fundamentals (no ROE/ROA/margins/FCF/debt), so
-we peer-rank the existing checklist components separately within
-industry/sector/market and recombine.
+Quality is built from real statement fundamentals (data.fundamental_features, PIT
+from the FMP cache): profitability, cash generation, accrual discipline, margins
+and their trend, leverage, and share-count discipline. Each component is
+peer-ranked separately within industry/sector/market and weight-combined;
+components with insufficient frame coverage are dropped and the remaining
+weights renormalize (old snapshot vintages).
 
 Components ranked:
-  volume                  (liquidity)               higher=better
-  has_positive_pe         (clean profitability)     higher=better
-  has_positive_pb         (clean book value)        higher=better
-  distress_pe_flag        (0 < PE < distress_max)   lower=better (inverted)
-  yield_in_healthy_band   (2-6% dividend band)      higher=better
-  position_52w            (where in 52w range)      higher=better (small weight)
+  roe_ttm                 (TTM net income / equity)          higher=better
+  fcf_to_assets           (TTM FCF / total assets)           higher=better
+  neg_accruals            (-(NI - CFO)/assets)               higher=better
+  gross_margin_ttm        (TTM gross profit / revenue)       higher=better
+  low_leverage            (-totalDebt/totalAssets)           higher=better
+  share_count_shrink_yoy  (-YoY diluted share growth)        higher=better
+  gm_trend_yoy            (TTM gross margin vs 4q ago)       higher=better
 
-Yield-trap penalty stays in income — quality doesn't double-penalize sectors
-that don't typically pay dividends.
+peer-3 removed (2026-08-05): dividend terms (income owns dividends), PE/PB terms
+(value owns valuation + distress), liquidity/size terms (the reliability layer
+and hard volume gates own tradability), position_52w (momentum owns price
+geometry), analyst_conviction (never cleared the coverage gate), and the legacy
+checklist anchor.
 
-Fallback: when group sizes too small at every level AND
-use_legacy_checklist_fallback=True, fall back to _checklist_quality.
+Rows with no fundamental inputs at all (symbol absent from the FMP cache) score
+neutral 0.0 with quality_fallback_reason="no_fundamentals".
 
 Output columns:
   quality_score
@@ -29,79 +36,41 @@ from __future__ import annotations
 
 import logging
 
-import numpy as np
 import pandas as pd
 
-from ._legacy_checklist import _checklist_quality
-from .peer import blend_with_anchor, compute_peer_relative, safe_col
+from .peer import _pct_rank_series, compute_peer_relative, safe_col
 
 logger = logging.getLogger(__name__)
 
 
-# Defaults when scoring.quality_components is absent from config. dollar_volume +
-# volume_consistency together carry the 0.20 mass the raw share-ADV component held
-# in peer-1, so sparse frames (which drop the new columns) score like a liquidity swap.
+# Defaults when scoring.quality_components is absent (or carries only pre-peer-3
+# component names). Config-fixed, NOT tuner slots — correlated DOF on a small
+# snapshot substrate is pure overfit surface.
 _COMPONENT_WEIGHTS = {
-    "dollar_volume":      0.12,
-    "volume_consistency": 0.08,
-    "has_positive_pe":    0.20,
-    "has_positive_pb":    0.10,
-    "no_distress_pe":     0.20,
-    "healthy_yield":      0.10,
-    "position_52w":       0.05,
-    "market_cap":         0.05,
-    "analyst_conviction": 0.05,
+    "roe_ttm":                0.22,
+    "fcf_to_assets":          0.20,
+    "neg_accruals":           0.15,
+    "gross_margin_ttm":       0.12,
+    "low_leverage":           0.12,
+    "share_count_shrink_yoy": 0.10,
+    "gm_trend_yoy":           0.09,
 }
 
-_DEFAULT_HORIZON_WEIGHTS = {"dv_5d": 0.20, "dv_21d": 0.30, "dv_63d": 0.50}
 _DEFAULT_MIN_COVERAGE = 0.30
-_DEFAULT_MIN_NUM_RATINGS = 5
+
+_NO_FUNDAMENTALS = "no_fundamentals"
 
 
-def _dollar_volume_series(df: pd.DataFrame, hw: dict) -> pd.Series:
-    """log1p of the horizon-weighted mean dollar volume, NaN-renormalized per row."""
-    parts = {
-        "dv_5d":  safe_col(df, "dollar_vol_5d"),
-        "dv_21d": safe_col(df, "dollar_vol_21d"),
-        "dv_63d": safe_col(df, "dollar_vol_63d"),
-    }
-    num = pd.Series(0.0, index=df.index)
-    den = pd.Series(0.0, index=df.index)
-    for key, vals in parts.items():
-        w = float(hw.get(key, _DEFAULT_HORIZON_WEIGHTS[key]))
-        num = num + vals.fillna(0.0).clip(lower=0.0) * w
-        den = den + vals.notna().astype(float) * w
-    combined = num.where(den > 0) / den.where(den > 0)
-    return np.log1p(combined)
-
-
-def _component_series(df: pd.DataFrame, cfg: dict) -> dict[str, pd.Series]:
-    qc = cfg["quality_checklist"]
-    ql = cfg.get("quality_liquidity", {})
-    qa = cfg.get("quality_analyst", {})
-    pe = safe_col(df, "pe_ratio")
-    pb = safe_col(df, "pb_ratio")
-    dy = safe_col(df, "dividend_yield").fillna(0.0)
-    pos52 = safe_col(df, "position_52w")
-
-    ratings = safe_col(df, "analyst_num_ratings")
-    buy_pct = safe_col(df, "analyst_buy_pct")
-    min_ratings = float(qa.get("min_num_ratings", _DEFAULT_MIN_NUM_RATINGS))
-
+def _component_series(df: pd.DataFrame) -> dict[str, pd.Series]:
     return {
-        "dollar_volume":      _dollar_volume_series(df, ql.get("horizon_weights", {})),
-        # Low variability of daily dollar volume = stable institutional participation;
-        # negated so the shared higher-is-better ranking orders it correctly.
-        "volume_consistency": -safe_col(df, "dollar_vol_cv_63d"),
-        "has_positive_pe":    (pe > 0).astype(float),
-        "has_positive_pb":    (pb > 0).astype(float),
-        "no_distress_pe":     (~((pe > 0) & (pe < qc["distress_pe_max"]))).astype(float),
-        "healthy_yield":      (
-            (dy >= qc["quality_dividend_min"]) & (dy <= qc["quality_dividend_max"])
-        ).astype(float),
-        "position_52w":       pos52,
-        "market_cap":         np.log1p(safe_col(df, "market_cap").clip(lower=0.0)),
-        "analyst_conviction": buy_pct.where(ratings >= min_ratings),
+        "roe_ttm":                safe_col(df, "roe_ttm"),
+        "fcf_to_assets":          safe_col(df, "fcf_to_assets"),
+        "neg_accruals":           safe_col(df, "neg_accruals"),
+        "gross_margin_ttm":       safe_col(df, "gross_margin_ttm"),
+        # Negated so the shared higher-is-better ranking orders low leverage first.
+        "low_leverage":           -safe_col(df, "debt_to_assets"),
+        "share_count_shrink_yoy": safe_col(df, "share_count_shrink_yoy"),
+        "gm_trend_yoy":           safe_col(df, "gm_trend_yoy"),
     }
 
 
@@ -119,21 +88,28 @@ def apply_quality(df: pd.DataFrame, scoring_cfg: dict | None = None) -> None:
     ps = cfg["peer_standardization"]
     clamp_lo = float(ps.get("clamp_low", -1.0))
     clamp_hi = float(ps.get("clamp_high", 1.5))
-    legacy_fallback = bool(factor.get("use_legacy_checklist_fallback", True))
 
-    if "quality_checklist" not in cfg:
-        cfg = {**cfg, "quality_checklist": SCORING_PARAMS["quality_checklist"]}
-    components = _component_series(df, cfg)
+    components = _component_series(df)
+
+    cfg_weights = {
+        str(k): float(v) for k, v in (cfg.get("quality_components") or {}).items()
+    }
+    weights_cfg = {k: v for k, v in cfg_weights.items() if k in components and v > 0.0}
+    if not weights_cfg:
+        if cfg_weights:
+            logger.warning(
+                "quality: config quality_components carries no peer-3 component names "
+                "(%s) — using code defaults; run `daily-investor config migrate-scoring`",
+                ", ".join(sorted(cfg_weights)),
+            )
+        weights_cfg = dict(_COMPONENT_WEIGHTS)
 
     # A component whose input column is (near-)absent in this frame — old snapshot
-    # vintages, stripped agg_data — is dropped and the remaining weights renormalize,
+    # vintages, unenriched frames — is dropped and the remaining weights renormalize,
     # instead of injecting a uniform mid-rank for every row.
-    weights_cfg = {
-        k: float(v)
-        for k, v in (cfg.get("quality_components") or _COMPONENT_WEIGHTS).items()
-        if k in components and float(v) > 0.0
-    }
-    min_coverage = float(cfg.get("quality_liquidity", {}).get("min_coverage", _DEFAULT_MIN_COVERAGE))
+    min_coverage = float(
+        cfg.get("quality_fundamentals", {}).get("min_coverage", _DEFAULT_MIN_COVERAGE)
+    )
     active = {
         name: w for name, w in weights_cfg.items()
         if float(components[name].notna().mean()) >= min_coverage
@@ -141,8 +117,18 @@ def apply_quality(df: pd.DataFrame, scoring_cfg: dict | None = None) -> None:
     dropped = sorted(set(weights_cfg) - set(active))
     if dropped:
         logger.info("quality: dropped low-coverage components: %s", ", ".join(dropped))
+
     if not active:
-        active = {"position_52w": 1.0}
+        logger.warning(
+            "quality: no fundamental component clears min_coverage=%.2f — "
+            "neutral-scoring the whole frame", min_coverage,
+        )
+        df["quality_score"] = 0.0
+        df["quality_industry_rank"] = 0.0
+        df["quality_sector_rank"] = 0.0
+        df["quality_market_rank"] = 0.0
+        df["quality_fallback_reason"] = _NO_FUNDAMENTALS
+        return
 
     ind_total = pd.Series(0.0, index=df.index)
     sec_total = pd.Series(0.0, index=df.index)
@@ -163,46 +149,29 @@ def apply_quality(df: pd.DataFrame, scoring_cfg: dict | None = None) -> None:
         mkt_total = mkt_total + w * mkt.fillna(0.0)
         fallback_reasons.append(reason)
 
-    score = blended_total.clip(clamp_lo, clamp_hi).round(3)
+    score = blended_total.clip(clamp_lo, clamp_hi)
 
     rank_order = {"industry": 0, "sector": 1, "market": 2, "missing": 3}
     inv = {v: k for k, v in rank_order.items()}
     coded = pd.concat([r.map(rank_order).fillna(3) for r in fallback_reasons], axis=1)
     worst = coded.max(axis=1).map(inv)
 
-    if legacy_fallback:
-        all_missing = (coded == 3).all(axis=1)
-        if all_missing.any():
-            for i in df.index[all_missing]:
-                score.loc[i] = _checklist_quality(
-                    pe_ratio=df.at[i, "pe_ratio"] if "pe_ratio" in df.columns else None,
-                    pb_ratio=df.at[i, "pb_ratio"] if "pb_ratio" in df.columns else None,
-                    volume=float(df.at[i, "volume"]) if "volume" in df.columns and pd.notna(df.at[i, "volume"]) else 0.0,
-                    dividend_yield=(
-                        float(df.at[i, "dividend_yield"])
-                        if "dividend_yield" in df.columns and pd.notna(df.at[i, "dividend_yield"])
-                        else 0.0
-                    ),
-                )
-            worst.loc[all_missing] = "legacy_checklist"
+    # Symbols absent from the fundamentals cache: every active input NaN → hard
+    # neutral, explicitly labeled so coverage is auditable per snapshot.
+    no_fund = pd.concat(
+        [components[name].isna() for name in active], axis=1
+    ).all(axis=1)
+    if no_fund.any():
+        score.loc[no_fund] = 0.0
+        worst.loc[no_fund] = _NO_FUNDAMENTALS
 
-    # Cross-sectional anchor: row-wise checklist score. A high anchor_blend
-    # keeps absolute quality signal alive when pure peer ranking would flatten it.
-    anchor_blend = float(factor.get("anchor_blend", 0.0))
-    if anchor_blend > 0.0:
-        anchor = pd.Series(0.0, index=df.index)
-        for i in df.index:
-            anchor.loc[i] = _checklist_quality(
-                pe_ratio=df.at[i, "pe_ratio"] if "pe_ratio" in df.columns else None,
-                pb_ratio=df.at[i, "pb_ratio"] if "pb_ratio" in df.columns else None,
-                volume=float(df.at[i, "volume"]) if "volume" in df.columns and pd.notna(df.at[i, "volume"]) else 0.0,
-                dividend_yield=(
-                    float(df.at[i, "dividend_yield"])
-                    if "dividend_yield" in df.columns and pd.notna(df.at[i, "dividend_yield"])
-                    else 0.0
-                ),
-            )
-        score = blend_with_anchor(score, anchor, anchor_blend, clamp=(clamp_lo, clamp_hi))
+    # Low-vol quality blend (param slot 48, frozen-by-default = 0.0): blends the
+    # cross-sectional low-volatility rank into quality — mirrors the simulator's
+    # _low_vol_score_at_day so a tuned nonzero value behaves identically live.
+    qlv = float(cfg.get("quality_low_vol_blend", 0.0))
+    if qlv > 0.0:
+        low_vol = _pct_rank_series(-safe_col(df, "realized_vol_3m"))
+        score = ((1.0 - qlv) * score + qlv * low_vol).clip(clamp_lo, clamp_hi)
 
     df["quality_score"] = score.round(3)
     df["quality_industry_rank"] = ind_total.round(4)
@@ -211,8 +180,10 @@ def apply_quality(df: pd.DataFrame, scoring_cfg: dict | None = None) -> None:
     df["quality_fallback_reason"] = worst
 
     logger.info(
-        "quality: n=%d | mean=%.3f std=%.3f | industry-rank: %d | legacy-fallback: %d",
+        "quality: n=%d | mean=%.3f std=%.3f | industry-rank: %d | no-fundamentals: %d | "
+        "active: %s",
         len(score), float(score.mean()), float(score.std()),
         int((df["quality_fallback_reason"] == "industry").sum()),
-        int((df["quality_fallback_reason"] == "legacy_checklist").sum()),
+        int((df["quality_fallback_reason"] == _NO_FUNDAMENTALS).sum()),
+        ",".join(sorted(active)),
     )

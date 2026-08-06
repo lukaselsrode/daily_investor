@@ -60,6 +60,7 @@ heatmaps = ["matplotlib>=3.5"]
 
 ui = [
     "streamlit>=1.35",
+    "watchdog>=4.0",
     "plotly>=5.0",
     "scikit-learn>=1.3",
     "umap-learn>=0.5",
@@ -69,6 +70,7 @@ dev = [
     "pytest>=7.0",
     "matplotlib>=3.5",
     "streamlit>=1.35",
+    "watchdog>=4.0",
     "plotly>=5.0",
     # hygiene tools
     "ruff>=0.6",

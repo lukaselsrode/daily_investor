@@ -72,12 +72,20 @@ _MARKET_STRUCTURE_COLS = {"instrument_type"}
 _VOLUME_FEATURE_COLS = {
     "dollar_vol_5d", "dollar_vol_21d", "dollar_vol_63d", "dollar_vol_cv_63d",
 }
+# PIT statement features are batch-merged by data.fundamental_features after the
+# per-stock rows are assembled, so they must not be part of that row schema.
+_FUNDAMENTAL_FEATURE_COLS = {
+    "roe_ttm", "gross_margin_ttm", "gm_trend_yoy", "debt_to_assets",
+    "neg_accruals", "fcf_to_assets", "share_count_shrink_yoy",
+    "div_fcf_coverage_ttm", "div_growth_1y", "div_streak_quarters",
+}
 _BASE_AGG_COLUMNS = [
     c for c in AGG_DATA_COLUMNS
     if c not in _RELIABILITY_COLS
     and c not in _PEER_DIAGNOSTIC_COLS
     and c not in _MARKET_STRUCTURE_COLS
     and c not in _VOLUME_FEATURE_COLS
+    and c not in _FUNDAMENTAL_FEATURE_COLS
 ]
 
 
@@ -628,6 +636,16 @@ def get_fundamentals_df(
         add_dollar_volume_features(df_raw, asof=datetime.date.today(), fallback_from_adv=True)
     except Exception as _dv_err:
         logger.warning("dollar-volume features failed (non-fatal): %s", _dv_err)
+
+    # PIT fundamental features for peer-3 quality/income scoring (ROE, FCF/assets,
+    # accruals, margins, leverage, share discipline, dividend sustainability).
+    # Cache-only over data/fmp_cache_adj/; uncovered symbols stay NaN and score
+    # neutral with quality_fallback_reason="no_fundamentals".
+    try:
+        from data.fundamental_features import add_fundamental_features
+        add_fundamental_features(df_raw, asof=datetime.date.today())
+    except Exception as _ff_err:
+        logger.warning("fundamental features failed (non-fatal): %s", _ff_err)
 
     # Regime-aware scoring: in confirmed-bull regime the composite tilts toward
     # momentum (alpha engine). Best-effort — if regime detection fails, score

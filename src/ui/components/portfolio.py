@@ -209,6 +209,12 @@ def _enrich_holdings(
     arch_drivers_col    = []
     arch_policy_col     = []
 
+    # Resolve the regime ONCE per render — factor attribution must use the same
+    # effective (regime-tilted) weights the composite used, and detection may
+    # hit the network.
+    from portfolio.position_rationale import detect_regime_for_attribution
+    _regime = detect_regime_for_attribution()
+
     # Build rationale for each row
     state_col = []
     state_reason_col = []
@@ -272,6 +278,7 @@ def _enrich_holdings(
                 peak_price=peak,
                 universe_rank_pct=rank,
                 stall_days=stall_days_for(sym, _last_progress, _today_oc),
+                regime=_regime,
             )
             # Archetype classification for active positions
             try:
@@ -788,8 +795,12 @@ def _factor_decomp_chart(contribs: dict[str, float], key_prefix: str = "") -> No
 
 
 def _tab_active_sleeve(df: pd.DataFrame) -> None:
-    from portfolio.position_rationale import factor_contributions
+    from portfolio.position_rationale import (
+        detect_regime_for_attribution,
+        factor_contributions,
+    )
 
+    _regime = detect_regime_for_attribution()
     active = df[df["sleeve"] == "active"].sort_values(
         "equity", ascending=False, na_position="last"
     )
@@ -944,7 +955,7 @@ def _tab_active_sleeve(df: pd.DataFrame) -> None:
                 if not r.empty:
                     metrics = r.iloc[0]
 
-            contribs = factor_contributions(metrics)
+            contribs = factor_contributions(metrics, regime=_regime)
             if contribs:
                 st.caption("Factor decomposition (contribution to composite score)")
                 _factor_decomp_chart(contribs, key_prefix=sym)

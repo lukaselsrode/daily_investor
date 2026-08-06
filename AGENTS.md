@@ -84,6 +84,18 @@ summary = run_random_windows(n_days=..., n_windows=..., window_days=..., mode=..
 
 ---
 
+## Scoring Model Conventions (peer-3, 2026-08)
+
+- **Factor ownership is exclusive:** dividends → income, valuation (PE/PB + distress) → value, statement fundamentals → quality, price geometry/trend → momentum, tradability → the reliability layer + hard volume gates. Do not add a raw input to a second factor — cross-factor correlation is the failure mode peer-3 removed.
+- **Rescore is regime-NEUTRAL.** `snapshots rescore` calls `compute_metric` without a regime, while live snapshots are regime-tilted. A rescored file is intentionally not bit-comparable to the live snapshot of the same day.
+- **Snapshot store guards.** `save_snapshot` refuses frames below `MIN_SNAPSHOT_ROWS` or missing `symbol`/`value_metric`; malformed parquets are skipped by `list_snapshots`/`rescore_snapshots` and belong in `data/snapshots_quarantine/`.
+- **Absolute score thresholds are scale-bound.** Any engine change that shifts score distributions must percentile-remap `metric_threshold`, `entry_threshold_override` (+fallbacks), the sell floors, DAE floors, and archetype floors (`scripts/recalibrate_peer3_thresholds.py` is the template) and re-verify tuner BOUNDS containment (`tests/test_bounds_containment.py`).
+- **Thresholds map on the population their gate filters.** Entry thresholds run AFTER the manager's liquidity pre-filter, so they must be percentile-matched on the liquidity-eligible subset — full-universe mapping starved the eligible pool 225 → 36 when peer-3 stopped burying illiquid ADRs inside quality (corrected 2026-08-06). Raw universe rankings (UI, snapshots) legitimately surface untradeable names; the "Tradeable only" view in the Scoring Explorer mirrors the buy path's gate.
+- **Liquidity gate = share ADV floor AND `risk.min_dollar_volume` (dollar_vol_21d).** Share counts alone are price-skewed (sub-$1 names pass 500k shares on ~$1.6k/day of turnover). Tradability stays a hard GATE, never a score input or a sizing tilt — `size_by_dollar_volume` remains off (market impact is irrelevant at this account's $5–40 orders, and cap-proxy sizing drags the experimental sleeve toward the SPY core).
+- **Sim/live parity:** the simulator's value factor reproduces live `apply_value` via the pit_precompute component panels + additive penalty panel (`tests/test_sim_live_value_parity.py`); `benchmark_blend` stays live-only (IC-validated). Param slot 49 (`momentum_residual_blend`) is sim-only and permanently frozen; slot 48 (`quality_low_vol_blend`) is implemented on both sides.
+
+---
+
 ## Service-Layer Guidance
 
 The service layer (`ui/services/`) is the preferred interface between UI/CLI and core engines. Use it when:

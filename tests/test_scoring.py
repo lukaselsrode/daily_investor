@@ -94,7 +94,8 @@ class TestScoringParamsShape:
 
     def test_top_level_keys(self):
         for key in ("enabled", "peer_standardization", "factors",
-                    "momentum_inputs", "momentum_warmup", "quality_checklist"):
+                    "momentum_inputs", "momentum_warmup",
+                    "quality_fundamentals", "income_inputs"):
             assert key in SCORING_PARAMS, f"missing scoring sub-block: {key!r}"
 
     def test_all_five_factors_present(self):

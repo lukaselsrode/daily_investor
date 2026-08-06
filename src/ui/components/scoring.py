@@ -20,7 +20,7 @@ _PEER_FALLBACK_COLS = [
     "value_fallback_reason", "quality_fallback_reason",
     "momentum_fallback_reason", "income_fallback_reason",
 ]
-_META_COLS  = ["symbol", "owned", "sector", "industry", "pe_ratio", "pb_ratio",
+_META_COLS  = ["symbol", "owned", "tradeable", "sector", "industry", "pe_ratio", "pb_ratio",
                "dividend_yield", "volume", "current_price", "yield_trap_flag"]
 _FRIENDLY   = {
     "value_metric":     "Composite Score",
@@ -71,6 +71,22 @@ def render() -> None:
             hide_yield_traps = st.checkbox("Hide yield traps", value=False)
             candidates_only  = st.checkbox("Buy candidates only", value=False)
             owned_only       = st.checkbox("Owned positions only", value=False)
+            # peer-3 removed liquidity from the quality factor, so thin OTC/ADR
+            # names with strong fundamentals rank high on RAW scores — but the
+            # buy path drops them at the min_liquidity_volume pre-filter before
+            # they can ever be bought. Default to the tradeable view so the
+            # explorer shows the same universe the manager actually selects from.
+            tradeable_only = st.checkbox("Tradeable only (ADV gate)", value=True)
+
+    from util import RISK_LIMITS
+    _min_vol = float(RISK_LIMITS["min_liquidity_volume"])
+    _min_dv = float(RISK_LIMITS.get("min_dollar_volume", 0.0))
+    _adv = pd.to_numeric(df.get("volume"), errors="coerce").fillna(0.0) \
+        if "volume" in df.columns else pd.Series(0.0, index=df.index)
+    df["tradeable"] = _adv >= _min_vol
+    if _min_dv > 0 and "dollar_vol_21d" in df.columns:
+        _dv = pd.to_numeric(df["dollar_vol_21d"], errors="coerce").fillna(0.0)
+        df["tradeable"] &= _dv >= _min_dv
 
     mask = pd.Series([True] * len(df), index=df.index)
     if sym_filter:
@@ -85,6 +101,17 @@ def render() -> None:
         mask &= df["value_metric"] >= thresh
     if owned_only and "owned" in df.columns:
         mask &= df["owned"]
+    if tradeable_only:
+        _excluded = int((mask & ~df["tradeable"]).sum())
+        mask &= df["tradeable"]
+        if _excluded:
+            _gate_desc = f"{_min_vol:,.0f}-share ADV"
+            if _min_dv > 0:
+                _gate_desc += f" / ${_min_dv:,.0f}-per-day dollar-volume"
+            st.caption(
+                f"Tradeable filter: {_excluded} symbols below the "
+                f"{_gate_desc} gate hidden (the buy path never sees them)."
+            )
 
     view = df[mask].copy()
     st.write(f"**{len(view)}** symbols match filters")

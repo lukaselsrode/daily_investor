@@ -566,22 +566,33 @@ def _regime_tilted_weights(raw_sw: np.ndarray, params: np.ndarray,
     return tilted
 
 
+_VALUE_CLAMP = (
+    float(SCORING_PARAMS["peer_standardization"].get("clamp_low", -1.0)),
+    float(SCORING_PARAMS["peer_standardization"].get("clamp_high", 1.5)),
+)
+
+
 def _pit_or_static(precomp: PrecomputedData, day: int):
-    """Return (pe_comp, pb_comp, quality, income) factor arrays for `day`.
+    """Return (pe_comp, pb_comp, value_penalty, quality, income) factor arrays for `day`.
 
     Uses the point-in-time DAILY panels when present (no static current-snapshot
-    look-ahead); otherwise the static 1D arrays — byte-identical to the pre-PIT path.
-    Consumed by BOTH composite scoring and the candidate gates so no look-ahead leaks
-    through the gate even when the composite is PIT.
+    look-ahead); otherwise the static 1D arrays. On the static path the loader sets
+    pe_comp == pb_comp == the live value_score (penalties/blends already inside), so
+    the penalty entry is None. Consumed by BOTH composite scoring and the candidate
+    gates so no look-ahead leaks through the gate even when the composite is PIT.
     """
     if precomp.pe_comp_daily is not None:
+        pen = (precomp.value_penalty_daily[day]
+               if precomp.value_penalty_daily is not None else None)
         return (
             precomp.pe_comp_daily[day],
             precomp.pb_comp_daily[day],
+            pen,
             precomp.quality_scores_daily[day],
             precomp.income_scores_daily[day],
         )
-    return (precomp.pe_comp, precomp.pb_comp, precomp.quality_scores, precomp.income_scores)
+    return (precomp.pe_comp, precomp.pb_comp, None,
+            precomp.quality_scores, precomp.income_scores)
 
 
 def score_stocks_at_day(precomp: PrecomputedData, params: np.ndarray, day: int) -> np.ndarray:
@@ -594,8 +605,12 @@ def score_stocks_at_day(precomp: PrecomputedData, params: np.ndarray, day: int) 
     raw_sw = params[:4]
     sw = _regime_tilted_weights(raw_sw, params, precomp, day)
     value_pe_w  = params[9]
-    _pe_c, _pb_c, _qual_c, _inc_c = _pit_or_static(precomp, day)
+    _pe_c, _pb_c, _val_pen, _qual_c, _inc_c = _pit_or_static(precomp, day)
     value_score = value_pe_w * _pe_c + (1.0 - value_pe_w) * _pb_c
+    if _val_pen is not None:
+        # Live-parity value factor: additive distress/negative-EPS/neither-ratio
+        # penalties then the factor clamp (mirrors strategy.scoring.value.apply_value).
+        value_score = np.clip(value_score - _val_pen, _VALUE_CLAMP[0], _VALUE_CLAMP[1])
 
     if precomp.ret_3m_daily is not None:
         momentum_score = _momentum_score_multifactor_vec(
@@ -721,7 +736,7 @@ def select_candidates(
 
     # PIT (or static) factor arrays for THIS day — the gate must use the same causal
     # quality/income the composite used, else look-ahead leaks through the gate.
-    _pe_c, _pb_c, _qual_c, _inc_c = _pit_or_static(precomp, day)
+    _pe_c, _pb_c, _val_pen, _qual_c, _inc_c = _pit_or_static(precomp, day)
 
     n            = len(composite_scores)
     mode         = cs_params["mode"]
@@ -1929,7 +1944,7 @@ def run_simulation(
             & (days_held >= _MIN_DAYS_HELD_BEFORE_VALUE_EXIT)
         )
         if _weak_cand.any():
-            _qual_d = _pit_or_static(precomp, d)[2]  # day-d quality (PIT or static)
+            _qual_d = _pit_or_static(precomp, d)[3]  # day-d quality (PIT or static)
             _rank01 = (_pct_rank_vec(current_scores) + 1.0) / 2.0
             _tis    = _thesis_intact_vec(_qual_d, current_mom, pct_from_avg, _rank01)
             weak_val_mask = _dae_soft_exit_full_exit(

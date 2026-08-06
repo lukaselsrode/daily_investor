@@ -1,19 +1,19 @@
 """
-tests/test_peer2_scoring.py — peer-2 scoring changes (dollar-volume quality,
-rel_volume momentum input, value sector-benchmark blend).
+tests/test_peer2_scoring.py — peer-2/peer-3 scoring mechanics (fundamentals
+quality, rel_volume momentum input, value sector-benchmark blend).
 
 Covers:
-  1. Quality graceful degradation: frames without dollar-volume/market-cap/analyst
-     columns (old snapshot vintages) still score — low-coverage components are
-     dropped and the remaining weights renormalize (exactly equivalent to a config
-     that never listed them).
-  2. Quality liquidity direction: deep + stable dollar volume ranks above thin +
-     erratic dollar volume, all else equal.
+  1. Quality graceful degradation: frames without fundamental columns (old
+     snapshot vintages) still score — low-coverage components are dropped and
+     the remaining weights renormalize (exactly equivalent to a config that
+     never listed them).
+  2. Quality direction: the fundamentally stronger of two same-industry twins
+     (higher ROE/FCF, lower leverage) ranks higher.
   3. Momentum rel_volume: weight 0.0 is byte-identical to a frame without the
      columns; weight > 0 lifts volume-confirmed names.
   4. Value benchmark_blend: 0.0 is a no-op; > 0 with pe_comp/pb_comp absent is a
      no-op; > 0 with the columns present moves scores.
-  5. compute_metric stamps SCORING_MODEL_VERSION ("peer-2").
+  5. compute_metric stamps SCORING_MODEL_VERSION.
 
 Weights/defaults are read from the live module constants (_COMPONENT_WEIGHTS,
 SCORING_MODEL_VERSION), never hardcoded copies.
@@ -33,10 +33,12 @@ from strategy.scoring.value import apply_value
 # Helpers
 # ---------------------------------------------------------------------------
 
-_SPARSE_ONLY_COMPONENTS = {"dollar_volume", "volume_consistency", "market_cap", "analyst_conviction"}
+_FUND_COLS = ("roe_ttm", "fcf_to_assets", "neg_accruals", "gross_margin_ttm",
+              "debt_to_assets", "share_count_shrink_yoy", "gm_trend_yoy")
 
 
-def _universe(n: int = 60, with_dollar_vol: bool = False, seed: int = 42) -> pd.DataFrame:
+def _universe(n: int = 60, with_dollar_vol: bool = False, seed: int = 42,
+              with_fundamentals: bool = False) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
     industries = (["banks"] * 20 + ["software"] * 20 + ["utilities"] * 20)
     sectors = (["financials"] * 20 + ["technology"] * 20 + ["utilities"] * 20)
@@ -66,6 +68,14 @@ def _universe(n: int = 60, with_dollar_vol: bool = False, seed: int = 42) -> pd.
         df["dollar_vol_21d"] = df["dollar_vol_5d"] * rng.uniform(0.8, 1.2, n)
         df["dollar_vol_63d"] = df["dollar_vol_5d"] * rng.uniform(0.8, 1.2, n)
         df["dollar_vol_cv_63d"] = rng.uniform(0.1, 2.0, n)
+    if with_fundamentals:
+        df["roe_ttm"] = rng.uniform(-0.10, 0.35, n)
+        df["fcf_to_assets"] = rng.uniform(-0.05, 0.20, n)
+        df["neg_accruals"] = rng.uniform(-0.10, 0.10, n)
+        df["gross_margin_ttm"] = rng.uniform(0.10, 0.80, n)
+        df["debt_to_assets"] = rng.uniform(0.0, 0.6, n)
+        df["share_count_shrink_yoy"] = rng.uniform(-0.05, 0.05, n)
+        df["gm_trend_yoy"] = rng.uniform(-0.05, 0.05, n)
     return df
 
 
@@ -98,29 +108,52 @@ def test_quality_scores_frame_without_new_columns():
 
 def test_quality_coverage_drop_equals_restricted_config():
     """Dropping absent components must equal a config that never listed them."""
-    base_components = {
-        k: v for k, v in _COMPONENT_WEIGHTS.items() if k not in _SPARSE_ONLY_COMPONENTS
-    }
-    df_a = _universe(with_dollar_vol=False)
+    present = ("roe_ttm", "low_leverage")
+    base_components = {k: v for k, v in _COMPONENT_WEIGHTS.items() if k in present}
+
+    def _partial_universe(seed: int = 7) -> pd.DataFrame:
+        rng = np.random.default_rng(seed)
+        df = _universe(with_fundamentals=False)
+        df["roe_ttm"] = rng.uniform(-0.10, 0.35, len(df))
+        df["debt_to_assets"] = rng.uniform(0.0, 0.6, len(df))
+        return df
+
+    df_a = _partial_universe()
     apply_quality(df_a, _cfg())
 
-    df_b = _universe(with_dollar_vol=False)
+    df_b = _partial_universe()
     apply_quality(df_b, _cfg(quality_components=base_components))
 
     pd.testing.assert_series_equal(df_a["quality_score"], df_b["quality_score"])
 
 
-def test_quality_prefers_deep_stable_dollar_volume():
-    df = _universe(with_dollar_vol=True, seed=3)
-    # Force two same-industry twins apart only on liquidity depth/stability.
-    for col in ("pe_ratio", "pb_ratio", "dividend_yield", "position_52w"):
-        df.loc[0, col] = df.loc[1, col]
-    df.loc[0, ["dollar_vol_5d", "dollar_vol_21d", "dollar_vol_63d"]] = 5e9
-    df.loc[0, "dollar_vol_cv_63d"] = 0.1
-    df.loc[1, ["dollar_vol_5d", "dollar_vol_21d", "dollar_vol_63d"]] = 2e6
-    df.loc[1, "dollar_vol_cv_63d"] = 1.9
+def test_quality_prefers_strong_fundamentals():
+    df = _universe(seed=3, with_fundamentals=True)
+    # Two same-industry twins split ONLY on fundamentals strength.
+    df.loc[0, ["roe_ttm", "fcf_to_assets", "neg_accruals", "gross_margin_ttm",
+               "share_count_shrink_yoy", "gm_trend_yoy"]] = [0.35, 0.20, 0.08, 0.75, 0.04, 0.04]
+    df.loc[0, "debt_to_assets"] = 0.05
+    df.loc[1, ["roe_ttm", "fcf_to_assets", "neg_accruals", "gross_margin_ttm",
+               "share_count_shrink_yoy", "gm_trend_yoy"]] = [-0.08, -0.04, -0.08, 0.12, -0.04, -0.04]
+    df.loc[1, "debt_to_assets"] = 0.58
     apply_quality(df, _cfg())
     assert df.loc[0, "quality_score"] > df.loc[1, "quality_score"]
+
+
+def test_quality_ignores_dividends_pe_pb_and_liquidity():
+    """peer-3 orthogonality contract: dividend/PE/PB/volume changes must not move quality."""
+    df_a = _universe(seed=11, with_fundamentals=True, with_dollar_vol=True)
+    df_b = df_a.copy()
+    rng = np.random.default_rng(99)
+    df_b["dividend_yield"] = rng.uniform(0.0, 0.12, len(df_b))     # incl. trap zone
+    df_b["pe_ratio"] = rng.uniform(1.0, 60.0, len(df_b))           # incl. distress zone
+    df_b["pb_ratio"] = rng.uniform(0.2, 12.0, len(df_b))
+    df_b["dollar_vol_5d"] = rng.uniform(1e5, 1e10, len(df_b))
+    df_b["dollar_vol_63d"] = rng.uniform(1e5, 1e10, len(df_b))
+    df_b["position_52w"] = rng.uniform(0.0, 1.0, len(df_b))
+    apply_quality(df_a, _cfg())
+    apply_quality(df_b, _cfg())
+    pd.testing.assert_series_equal(df_a["quality_score"], df_b["quality_score"])
 
 
 # ---------------------------------------------------------------------------
@@ -211,9 +244,9 @@ def test_value_benchmark_blend_moves_scores_when_columns_present():
 # 5. Version stamp
 # ---------------------------------------------------------------------------
 
-def test_compute_metric_stamps_peer2():
-    assert SCORING_MODEL_VERSION == "peer-2"
-    df = _universe(with_dollar_vol=True)
+def test_compute_metric_stamps_current_version():
+    assert SCORING_MODEL_VERSION == "peer-3"
+    df = _universe(with_dollar_vol=True, with_fundamentals=True)
     from util import SCORE_WEIGHTS
     compute_metric(df, SCORE_WEIGHTS, _cfg(), None)
     assert (df["scoring_model_version"] == SCORING_MODEL_VERSION).all()

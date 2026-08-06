@@ -1,3 +1,4 @@
+# peer-3 cutover 2026-08-05 — scoring model peer-3 + percentile-matched thresholds applied.
 ignore_negative_pe: false
 ignore_negative_pb: false
 dividend_threshold: 0.03
@@ -13,7 +14,9 @@ dividend_threshold: 0.03
 # passing the full symmetric gate chain + stress gauntlet (exit anchor now:
 # trim ~0.76, TP floor ~1.07). Live entry still decoupled via
 # candidate_selection.entry_threshold_override.
-metric_threshold: 0.8947
+# 2026-08-05 peer-3 cutover: 0.8947 -> 0.716, percentile-matched (99.5th pct
+# of the universe composite) to the peer-3 score distribution.
+metric_threshold: 0.716
 selloff_threshold: 30
 weekly_investment: 400
 # 2026-06-11: 0.8465 -> 0.9486 (same gate-passed candidate) — the bear-aware
@@ -261,6 +264,11 @@ risk:
   max_order_pct_of_cash: 0.5
   min_order_amount: 30.0
   min_liquidity_volume: 500000
+  # 2026-08-06: dollar-volume floor ANDed with the share gate. The share-count
+  # gate is price-skewed — 182 names passed 500k shares while trading under $2M/day
+  # in dollars (incl. sub-$0.01 stocks at ~$1.6k/day). dollar_vol_21d is the
+  # principled liquidity measure (peer-3 computes it universe-wide). 0 = off.
+  min_dollar_volume: 2000000
   # 2026-06: 3 -> 8 (breadth). Pairs with the quality-momentum score_weights + candidate_selection
   # widening below; the combination lifts worst-regime info ratio (see score_weights note).
   max_buys_per_rebalance: 8
@@ -299,10 +307,13 @@ sell_rules:
   # (take_profit/trailing/stop_loss) optimized to ~unchanged (noise) and left as-is.
   # 2026-06-11: -0.18 -> -0.0852 (bear-validated candidate; slightly stricter
   # weak-score exit than -0.18, still far looser than the old +0.37).
-  sell_weak_value_below: -0.0852
+  # 2026-08-05 peer-3 cutover: -0.0852 -> -0.048 (percentile-matched, 28th pct).
+  sell_weak_value_below: -0.048
   minimum_days_before_take_profit: 10
   sell_yield_trap: true
-  sell_low_quality_below: -0.25
+  # 2026-08-05 peer-3 cutover: -0.25 -> -0.288 (percentile-matched, 3.8th pct
+  # of the fundamentals-based quality distribution).
+  sell_low_quality_below: -0.288
   min_days_held_before_value_exit: 21
 archetype_management:
   enabled: true
@@ -377,8 +388,11 @@ archetype_classifier:
     medium_min: 0.45
   defensive_income:
     require_yield: true                    # ON — strict gate disqualifies low-quality DI
-    min_income_score: 0.30
-    min_quality_score: 0.40
+    # 2026-08-05 peer-3 cutover: income 0.30 -> 0.05 (percentile mapping is
+    # degenerate at the non-payer point mass; any positive floor expresses the
+    # old gate's 'is a ranked payer' semantic), quality 0.40 -> 0.163 (50th pct).
+    min_income_score: 0.05
+    min_quality_score: 0.163
     min_momentum_score: -0.10
     max_volatility_percentile: 0.75
     reject_falling_knife: true
@@ -535,34 +549,26 @@ scoring:
   #   stripped) into the MOMENTUM factor. Strongest single-factor fwd-IC on the
   #   substrate but fails the robust multi-seed backtest (above).
   momentum_residual_blend: 0.0
-  # ── peer-2 quality liquidity (2026-07-03) ─────────────────────────────────
-  # Quality's liquidity input moved from raw share-ADV to multi-horizon DOLLAR
-  # volume (close×volume from the FMP price cache) + consistency (low CV of daily
-  # dollar volume = stable institutional participation). Share volume favored
-  # cheap low-priced names and double-counted the hard 500k-share gates.
-  quality_liquidity:
-    horizon_weights:
-      dv_5d: 0.20
-      dv_21d: 0.30
-      dv_63d: 0.50
-    # Components whose input column is (near-)absent in a frame are dropped and
-    # the remaining component weights renormalize (old snapshot vintages).
+  # ── peer-3 quality (2026-08-05) ───────────────────────────────────────────
+  # Quality rebuilt on real statement fundamentals (data.fundamental_features,
+  # PIT from the FMP cache). Dividend terms moved out (income owns dividends —
+  # they drove corr(quality, income) 0.53), PE/PB terms moved out (value owns
+  # valuation + distress), liquidity/size moved out (the reliability layer and
+  # hard volume gates own tradability), position_52w moved out (momentum owns
+  # price geometry), analyst_conviction removed (never cleared its coverage
+  # gate). Weights config-fixed, NOT tuner slots (overfit surface).
+  quality_fundamentals:
+    # A component whose column is (near-)absent in a frame drops and the
+    # remaining weights renormalize (old snapshot vintages).
     min_coverage: 0.30
-  quality_analyst:
-    min_num_ratings: 5
-  # Peer-quality component weights (config-fixed, NOT tuner slots — 9 correlated
-  # DOF on a ~160-snapshot substrate is pure overfit surface). dollar_volume +
-  # volume_consistency together carry the 0.20 mass share-ADV held in peer-1.
   quality_components:
-    dollar_volume: 0.12
-    volume_consistency: 0.08
-    has_positive_pe: 0.20
-    has_positive_pb: 0.10
-    no_distress_pe: 0.20
-    healthy_yield: 0.10
-    position_52w: 0.05
-    market_cap: 0.05
-    analyst_conviction: 0.05
+    roe_ttm: 0.22
+    fcf_to_assets: 0.20
+    neg_accruals: 0.15
+    gross_margin_ttm: 0.12
+    low_leverage: 0.12
+    share_count_shrink_yoy: 0.10
+    gm_trend_yoy: 0.09
   peer_standardization:
     group_by: industry
     fallback_group_by: sector
@@ -599,8 +605,10 @@ scoring:
     quality:
       enabled: true
       peer_relative: true
-      use_legacy_checklist_fallback: true
-      anchor_blend: 0.7
+      # 2026-08-05 peer-3: the legacy checklist anchor (0.7 weight on a 4-input
+      # PE/PB/volume/dividend checklist) is retired — it carried the dividend
+      # and valuation overlap the peer-3 rework removes.
+      anchor_blend: 0.0
     momentum:
       # 2026-07-03 (peer-2): false silently routed momentum through the non-peer
       # anchor path despite its composite weight. Peer-relative momentum enabled;
@@ -665,21 +673,18 @@ scoring:
     return_1m_falling_knife_threshold: -0.1
     return_1m_recovery_bonus: 0.15
     return_1m_falling_knife_penalty: 0.2
-  quality_checklist:
-    income_score_cap: 1.5
+  # ── peer-3 income (2026-08-05) ────────────────────────────────────────────
+  # Income de-saturated: the max(peer_rank, yield/threshold) cap that pinned
+  # every yield >= 4.5% at 1.500 (305 names) is gone; yield is weighted with
+  # FMP payout sustainability (coverage/growth/streak). Yield-trap semantics
+  # unchanged (moved here from the retired quality_checklist block).
+  income_inputs:
     yield_trap_threshold: 0.1
-    distress_pe_max: 5.0
-    quality_volume_high: 1000000
-    quality_volume_low: 100000
-    quality_dividend_min: 0.02
-    quality_dividend_max: 0.06
-    quality_weight_has_positive_pe: 0.5
-    quality_weight_distress_pe: -0.4
-    quality_weight_has_positive_pb: 0.2
-    quality_weight_high_volume: 0.3
-    quality_weight_low_volume: -0.3
-    quality_weight_yield_trap: -0.6
-    quality_weight_healthy_dividend: 0.2
+    weights:
+      dividend_yield: 0.50
+      div_fcf_coverage: 0.20
+      div_growth: 0.15
+      div_streak: 0.15
 analyst_ratings:
   strong_buy_ratio: 5.0
   net_sell_ratio: 1.0
@@ -853,11 +858,12 @@ backtest:
     min_history: 63
     switch_bps: 20.0
 tuning:
-  # frozen_parameters intentionally empty: presets define the tunable surface
-  # per-run, and OOS validation gates catch overfitting. A no-preset tune now
-  # optimizes the full base param space (slots 0-15); archetype/regime/cs/sizing
-  # tail slots remain frozen-by-default until their preset unfreezes them.
-  frozen_parameters: []
+  # frozen_parameters near-empty: presets define the tunable surface per-run,
+  # and OOS validation gates catch overfitting. momentum_residual_blend is
+  # PERMANENTLY frozen: slot 49 is implemented only in the simulator — a tuned
+  # nonzero value would change sim results but never live scoring.
+  frozen_parameters:
+  - scoring.momentum_residual_blend
 reliability:
   enabled: false
   min_reliability_score: 0.7
@@ -926,11 +932,15 @@ exit_decision:
   # validation warned on every load and the forced-collapse zone was empty; the
   # score-collapse leg of the DAE confirmed-breakdown check had become vacuous).
   # -0.35 restores the original ~0.17 gap below the thesis-exit threshold.
-  hard_exit_score_below: -0.35
-  review_score_below: 0.45
+  # 2026-08-05 peer-3 cutover: -0.35 -> -0.149 (percentile-matched; still
+  # below sell_weak_value_below -0.048, preserving the ladder ordering).
+  hard_exit_score_below: -0.149
+  # 2026-08-05 peer-3 cutover: 0.45 -> 0.236 (percentile-matched, 69th pct).
+  review_score_below: 0.236
   positive_pnl_review_floor: 0.0
   positive_momentum_review_floor: 0.1
-  strong_quality_review_floor: 0.7
+  # 2026-08-05 peer-3 cutover: 0.7 -> 0.463 (percentile-matched, 77th pct).
+  strong_quality_review_floor: 0.463
   trim_profit_threshold: 0.2
   # harvest at +50% (2026-05): full-universe temporal-holdout sweep showed
   # harvest +50% outperforms +30% baseline on holdout: pct-beating 50% vs 56%
@@ -948,7 +958,8 @@ exit_decision:
   trim_enabled: false
   trim_fraction: 0.33
   trim_min_gain_pct: 0.08
-  trim_score_below: 0.74
+  # 2026-08-05 peer-3 cutover: 0.74 -> 0.515 (percentile-matched, 94th pct).
+  trim_score_below: 0.515
   # Momentum veto on trimming: skip trim for winners still trending up. Frozen OFF
   # (false preserves current behavior — the key was previously inert). Validated
   # marginal (raises rolling-window hit-rate vs SPY but Wilcoxon-neutral); not live.
@@ -981,19 +992,31 @@ candidate_selection:
   max_candidates: 12
   min_candidates: 4
   use_absolute_score_floor: false
-  absolute_score_floor: 0.45
-  min_quality_score: 0.38
+  absolute_score_floor: 0.339  # peer-3 percentile-matched (floor unused: use_absolute_score_floor false)
+  # 2026-08-05 peer-3 cutover, corrected 2026-08-06: entry gates must be
+  # percentile-matched on the LIQUIDITY-ELIGIBLE population (volume >= risk.
+  # min_liquidity_volume), not the full universe — peer-3 stopped burying
+  # illiquid ADRs in quality, so full-universe percentiles starve the eligible
+  # pool. 0.01 preserves the old liquid-name pass count (~2050) and keeps
+  # no-fundamentals neutrals (quality exactly 0.0) out of the candidate pool.
+  min_quality_score: 0.01
   min_momentum_score: 0.0
   min_conditional_momentum_score: 0.0
   allow_income_defensive_exception: false
   # Live entry gate, decoupled from metric_threshold (which anchors the EXIT ladder
   # at 1.15 and is unreachable as an entry gate — every run previously logged
   # "pre-filter 6947 -> 0" then fell back here anyway). null = use metric_threshold.
-  entry_threshold_override: 0.75
+  # 2026-08-05 peer-3 cutover, corrected 2026-08-06: mapped on the
+  # LIQUIDITY-ELIGIBLE population (the ladder runs after the manager's ADV
+  # pre-filter). Full-universe mapping (0.623/0.596/0.575) passed only 36
+  # liquid names vs the old 225 — illiquid ADRs had absorbed the top
+  # percentiles. 0.475/0.439/0.421 preserves the old eligible pass counts
+  # (225/280/321).
+  entry_threshold_override: 0.475
   fallback_thresholds:
-  - 0.75
-  - 0.72
-  - 0.7
+  - 0.475
+  - 0.439
+  - 0.421
   min_post_cooldown_candidates: 5
 ui:
   allow_config_writes: true

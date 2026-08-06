@@ -89,6 +89,11 @@ class PrecomputedData(NamedTuple):
     pb_comp_daily: np.ndarray | None = None
     quality_scores_daily: np.ndarray | None = None
     income_scores_daily: np.ndarray | None = None
+    # (n_days, n_stocks) additive value penalties (distress / negative-EPS /
+    # neither-ratio), emitted by pit_precompute so the simulator's value factor
+    # reproduces live apply_value for any tuned pe_weight. None → no penalties
+    # (static path folds them into value_score directly).
+    value_penalty_daily: np.ndarray | None = None
     # (n_days, n_stocks) causal relative volume — trailing-5d mean dollar volume /
     # trailing-63d mean (peer-2 momentum confirmation input). Built from
     # dollar_volume_daily by the survivorship-free loader; None → the rel_volume

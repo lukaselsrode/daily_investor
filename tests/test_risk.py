@@ -42,6 +42,25 @@ class TestRiskManagerCanBuy:
         assert not d.approved
         assert "volume" in d.reason.lower()
 
+    def test_rejects_low_dollar_volume_despite_share_volume(self):
+        """Share gate is price-skewed: a penny stock can pass 500k shares on ~$1.6k/day
+        of real turnover. The min_dollar_volume floor (ANDed) must catch it."""
+        min_dv = RISK_LIMITS["min_dollar_volume"]
+        if min_dv <= 0:
+            pytest.skip("min_dollar_volume disabled in live config")
+        agg = self._agg("PNNY", volume=RISK_LIMITS["min_liquidity_volume"] * 2)
+        agg["dollar_vol_21d"] = min_dv * 0.5
+        d = self._rm().can_buy("PNNY", 100.0, {}, agg, 10_000.0, 500.0)
+        assert not d.approved
+        assert "dollar volume" in d.reason.lower()
+
+    def test_approves_when_dollar_volume_clears_floor(self):
+        min_dv = RISK_LIMITS["min_dollar_volume"]
+        agg = self._agg("AAPL")
+        agg["dollar_vol_21d"] = max(min_dv, 1.0) * 10
+        d = self._rm().can_buy("AAPL", 100.0, {}, agg, 10_000.0, 500.0)
+        assert d.approved
+
     def test_caps_to_max_order_pct(self):
         max_pct = RISK_LIMITS["max_order_pct_of_cash"]
         cash = 1_000.0

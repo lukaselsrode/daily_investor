@@ -218,6 +218,7 @@ class ConfigManager:
             max_order_pct_of_cash=float(r.get("max_order_pct_of_cash", 0.10)),
             min_order_amount=float(r.get("min_order_amount", 5.0)),
             min_liquidity_volume=float(r.get("min_liquidity_volume", 500_000)),
+            min_dollar_volume=float(r.get("min_dollar_volume", 0.0)),
             max_buys_per_rebalance=int(r.get("max_buys_per_rebalance", 7)),
             max_sentiment_candidates=int(r.get("max_sentiment_candidates", 20)),
             minimum_hold_days=int(r.get("minimum_hold_days", 0)),

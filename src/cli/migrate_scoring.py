@@ -27,6 +27,61 @@ def _is_already_unified(scoring: dict) -> bool:
     )
 
 
+_PEER3_LEGACY_KEYS = ("quality_checklist", "quality_liquidity", "quality_analyst")
+
+
+def _migrate_to_peer3(scoring: dict) -> bool:
+    """Convert a unified pre-peer-3 `scoring:` block to the peer-3 shape in place.
+
+    - quality_components with pre-peer-3 names → fundamentals component defaults
+    - quality_liquidity.min_coverage → quality_fundamentals.min_coverage
+    - quality_checklist.yield_trap_threshold → income_inputs.yield_trap_threshold
+      (with the income component-weight defaults); the rest of the checklist,
+      quality_liquidity, and quality_analyst blocks are dropped
+    - factors.quality: anchor_blend → 0.0, use_legacy_checklist_fallback removed
+
+    Returns True when anything changed. Idempotent.
+    """
+    from strategy.scoring.income import _DEFAULT_WEIGHTS as _INCOME_WEIGHTS
+    from strategy.scoring.quality import _COMPONENT_WEIGHTS as _QUALITY_COMPONENTS
+
+    changed = False
+
+    comps = scoring.get("quality_components") or {}
+    if comps and not any(k in _QUALITY_COMPONENTS for k in comps):
+        scoring["quality_components"] = {k: float(v) for k, v in _QUALITY_COMPONENTS.items()}
+        changed = True
+
+    if "quality_fundamentals" not in scoring:
+        min_cov = (scoring.get("quality_liquidity") or {}).get("min_coverage", 0.30)
+        scoring["quality_fundamentals"] = {"min_coverage": float(min_cov)}
+        changed = True
+
+    if "income_inputs" not in scoring:
+        trap = (scoring.get("quality_checklist") or {}).get("yield_trap_threshold", 0.10)
+        scoring["income_inputs"] = {
+            "yield_trap_threshold": float(trap),
+            "weights": {k: float(v) for k, v in _INCOME_WEIGHTS.items()},
+        }
+        changed = True
+
+    for key in _PEER3_LEGACY_KEYS:
+        if key in scoring:
+            del scoring[key]
+            changed = True
+
+    quality_factor = (scoring.get("factors") or {}).get("quality")
+    if isinstance(quality_factor, dict):
+        if quality_factor.get("anchor_blend", 0.0) not in (0, 0.0):
+            quality_factor["anchor_blend"] = 0.0
+            changed = True
+        if "use_legacy_checklist_fallback" in quality_factor:
+            del quality_factor["use_legacy_checklist_fallback"]
+            changed = True
+
+    return changed
+
+
 def _rename_v2_blend_in_factors(factors: dict) -> bool:
     """Rename `v2_blend` → `anchor_blend` in each factor entry. Returns True if any change."""
     changed = False
@@ -52,20 +107,23 @@ def migrate_yaml(path: Path, *, dry_run: bool = False, backup: bool = True) -> s
 
     old_scoring = cfg.get("scoring", {}) or {}
     if _is_already_unified(old_scoring):
-        # Even already-unified files may still carry the legacy `v2_blend` factor key.
+        # Even already-unified files may still carry the legacy `v2_blend` factor
+        # key or the pre-peer-3 quality/income blocks.
         factors = old_scoring.get("factors", {}) or {}
         renamed = _rename_v2_blend_in_factors(factors)
-        if not renamed:
+        peer3 = _migrate_to_peer3(old_scoring)
+        if not (renamed or peer3):
             return "already-unified"
+        status = "peer-3 migrated" if peer3 else "v2_blend renamed"
         if dry_run:
-            return "v2_blend renamed (dry-run)"
+            return f"{status} (dry-run)"
         if backup:
             bak = path.with_suffix(path.suffix + ".bak")
             if not bak.exists():
                 shutil.copy2(path, bak)
         with open(path, "w") as f:
             yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
-        return "v2_blend renamed"
+        return status
 
     momentum_v1 = cfg.pop("momentum", None) or {}
     momentum_v2 = cfg.pop("momentum_v2", None) or {}
@@ -125,9 +183,11 @@ def migrate_yaml(path: Path, *, dry_run: bool = False, backup: bool = True) -> s
     if momentum_v1:
         new_scoring["momentum_warmup"] = momentum_v1
 
-    # quality_checklist (from old flat scoring:)
+    # Old flat scoring: carried the checklist knobs — route through the peer-3
+    # converter so yield_trap_threshold lands in income_inputs.
     if old_scoring:
         new_scoring["quality_checklist"] = old_scoring
+    _migrate_to_peer3(new_scoring)
 
     cfg["scoring"] = new_scoring
 

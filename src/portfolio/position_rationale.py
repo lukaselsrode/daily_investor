@@ -12,10 +12,13 @@ All logic is deterministic — no LLM, no randomness.
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # ETF role map
@@ -324,21 +327,44 @@ def classify_state(
 # Factor decomposition
 # ---------------------------------------------------------------------------
 
-def factor_contributions(metrics: pd.Series | None) -> dict[str, float]:
-    """Return {factor_label: contribution} from current agg_data row."""
+def detect_regime_for_attribution() -> str | None:
+    """Best-effort current regime for factor attribution. Resolve ONCE per render
+    and pass into factor_contributions — detection may hit the network. None means
+    regime-neutral attribution (no tilt)."""
+    try:
+        from strategy.regimes.detector import get_current_regime
+        return get_current_regime()
+    except Exception:
+        return None
+
+
+def factor_contributions(
+    metrics: pd.Series | None, regime: str | None = None
+) -> dict[str, float]:
+    """Return {factor_label: contribution} from current agg_data row.
+
+    Decomposes with the SAME effective weights the composite used: live config
+    SCORE_WEIGHTS plus the bull-regime momentum tilt when `regime` is bullish.
+    """
     if metrics is None:
         return {}
     try:
+        from strategy.scoring.composite import regime_tilted_weights
         from util import SCORE_WEIGHTS
+        weights = regime_tilted_weights(SCORE_WEIGHTS, regime)
     except Exception:
-        SCORE_WEIGHTS = {"value": 0.05, "quality": 0.45, "income": 0.05, "momentum": 0.45}
+        logger.warning(
+            "factor_contributions: live score weights unavailable — "
+            "falling back to equal weights (attribution approximate)"
+        )
+        weights = {"value": 0.25, "quality": 0.25, "income": 0.25, "momentum": 0.25}
 
     result: dict[str, float] = {}
     mapping = [
-        ("Quality",  "quality_score",  SCORE_WEIGHTS.get("quality",  0.45)),
-        ("Momentum", "momentum_score", SCORE_WEIGHTS.get("momentum", 0.45)),
-        ("Value",    "value_score",    SCORE_WEIGHTS.get("value",    0.05)),
-        ("Income",   "income_score",   SCORE_WEIGHTS.get("income",   0.05)),
+        ("Quality",  "quality_score",  weights.get("quality",  0.0)),
+        ("Momentum", "momentum_score", weights.get("momentum", 0.0)),
+        ("Value",    "value_score",    weights.get("value",    0.0)),
+        ("Income",   "income_score",   weights.get("income",   0.0)),
     ]
     for label, col, weight in mapping:
         v = _safe_float(metrics.get(col))
@@ -491,6 +517,7 @@ def build_position_rationale(
     peak_price: float | None,
     universe_rank_pct: float | None,
     stall_days: int | None = None,
+    regime: str | None = None,
 ) -> PositionRationale:
     """
     Build a complete PositionRationale for one holding.
@@ -518,7 +545,7 @@ def build_position_rationale(
         symbol, holding, metrics, buy_context, peak_price, universe_rank_pct, stall_days
     )
 
-    contribs = factor_contributions(metrics)
+    contribs = factor_contributions(metrics, regime=regime)
     risk_flags = build_risk_flags(metrics, holding, pct_change, peak_price)
 
     score_now    = _safe_float(metrics.get("value_metric")) if metrics is not None else None

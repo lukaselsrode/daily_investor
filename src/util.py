@@ -144,6 +144,9 @@ RISK_LIMITS: dict = {
     "max_order_pct_of_cash":                float(_rl.get("max_order_pct_of_cash",                0.10)),
     "min_order_amount":                     float(_rl.get("min_order_amount",                     5.00)),
     "min_liquidity_volume":                 float(_rl.get("min_liquidity_volume",                 500_000)),
+    # Dollar-volume floor ANDed with the share gate (share counts are price-skewed;
+    # dollar_vol_21d is the principled measure). 0.0 = off.
+    "min_dollar_volume":                    float(_rl.get("min_dollar_volume",                    0.0)),
     "max_buys_per_rebalance":               int(_rl.get("max_buys_per_rebalance",                 10)),
     "max_sentiment_candidates":             int(_rl.get("max_sentiment_candidates",               20)),
     "minimum_hold_days":                    int(_rl.get("minimum_hold_days",                      0)),
@@ -275,23 +278,40 @@ SCORING_PARAMS: dict = {
     # Price-derived factor blend overlays (param slots 48/49, 0.0 = off). Passed
     # through so config edits reach tuning.constants._current_params — previously
     # the curated dict dropped them and the param vector always seeded 0.0.
+    # Slot 48 (quality_low_vol_blend) is implemented BOTH live (strategy.scoring.
+    # quality) and in the simulator; slot 49 (momentum_residual_blend) is SIM-ONLY.
     "quality_low_vol_blend":   float(_sc.get("quality_low_vol_blend",   0.0)),
     "momentum_residual_blend": float(_sc.get("momentum_residual_blend", 0.0)),
-    # peer-2 quality liquidity: multi-horizon dollar-volume level + consistency.
-    "quality_liquidity": {
-        "horizon_weights": {
-            "dv_5d":  float(_sc.get("quality_liquidity", {}).get("horizon_weights", {}).get("dv_5d",  0.20)),
-            "dv_21d": float(_sc.get("quality_liquidity", {}).get("horizon_weights", {}).get("dv_21d", 0.30)),
-            "dv_63d": float(_sc.get("quality_liquidity", {}).get("horizon_weights", {}).get("dv_63d", 0.50)),
-        },
-        "min_coverage": float(_sc.get("quality_liquidity", {}).get("min_coverage", 0.30)),
-    },
-    "quality_analyst": {
-        "min_num_ratings": int(_sc.get("quality_analyst", {}).get("min_num_ratings", 5)),
+    # peer-3 quality: fundamentals-only components from the FMP statement cache.
+    # min_coverage: a component whose column is (near-)absent in a frame drops and
+    # the remaining weights renormalize (old snapshot vintages, unenriched frames).
+    "quality_fundamentals": {
+        "min_coverage": float(
+            _sc.get("quality_fundamentals", {}).get(
+                "min_coverage",
+                _sc.get("quality_liquidity", {}).get("min_coverage", 0.30),
+            )
+        ),
     },
     # Peer-quality component weights (empty = code defaults in strategy.scoring.quality).
     "quality_components": {
         str(k): float(v) for k, v in (_sc.get("quality_components") or {}).items()
+    },
+    # peer-3 income: yield-trap threshold + sustainability component weights.
+    # yield_trap_threshold falls back to the pre-peer-3 quality_checklist location
+    # so an unmigrated config keeps its tuned trap level.
+    "income_inputs": {
+        "yield_trap_threshold": float(
+            _sc.get("income_inputs", {}).get(
+                "yield_trap_threshold", _sc_qc.get("yield_trap_threshold", 0.10)
+            )
+        ),
+        "weights": {
+            "dividend_yield":   float(_sc.get("income_inputs", {}).get("weights", {}).get("dividend_yield",   0.50)),
+            "div_fcf_coverage": float(_sc.get("income_inputs", {}).get("weights", {}).get("div_fcf_coverage", 0.20)),
+            "div_growth":       float(_sc.get("income_inputs", {}).get("weights", {}).get("div_growth",       0.15)),
+            "div_streak":       float(_sc.get("income_inputs", {}).get("weights", {}).get("div_streak",       0.15)),
+        },
     },
     "peer_standardization": {
         "group_by":          str(_sc_ps.get("group_by",          "industry")),
@@ -342,22 +362,6 @@ SCORING_PARAMS: dict = {
         "return_1m_recovery_bonus":          float(_sc_mw.get("return_1m_recovery_bonus",           0.15)),
         "return_1m_falling_knife_penalty":   float(_sc_mw.get("return_1m_falling_knife_penalty",    0.20)),
     },
-    "quality_checklist": {
-        "income_score_cap":               float(_sc_qc.get("income_score_cap",               1.5)),
-        "yield_trap_threshold":           float(_sc_qc.get("yield_trap_threshold",           0.10)),
-        "distress_pe_max":                float(_sc_qc.get("distress_pe_max",                5.0)),
-        "quality_volume_high":            float(_sc_qc.get("quality_volume_high",            1_000_000)),
-        "quality_volume_low":             float(_sc_qc.get("quality_volume_low",             100_000)),
-        "quality_dividend_min":           float(_sc_qc.get("quality_dividend_min",           0.02)),
-        "quality_dividend_max":           float(_sc_qc.get("quality_dividend_max",           0.06)),
-        "quality_weight_has_positive_pe": float(_sc_qc.get("quality_weight_has_positive_pe", 0.5)),
-        "quality_weight_distress_pe":     float(_sc_qc.get("quality_weight_distress_pe",     -0.4)),
-        "quality_weight_has_positive_pb": float(_sc_qc.get("quality_weight_has_positive_pb", 0.2)),
-        "quality_weight_high_volume":     float(_sc_qc.get("quality_weight_high_volume",     0.3)),
-        "quality_weight_low_volume":      float(_sc_qc.get("quality_weight_low_volume",      -0.3)),
-        "quality_weight_yield_trap":      float(_sc_qc.get("quality_weight_yield_trap",      -0.6)),
-        "quality_weight_healthy_dividend":float(_sc_qc.get("quality_weight_healthy_dividend", 0.2)),
-    },
 }
 
 
@@ -372,6 +376,14 @@ SNAPSHOT_PARAMS: dict = {
     "retention_days": int(_snap.get("retention_days",  365)),
     "compression":    str(_snap.get("compression",     "snappy")),
 }
+
+if SCORING_PARAMS["momentum_residual_blend"] > 0.0:
+    logger.warning(
+        "scoring.momentum_residual_blend=%.3f has NO effect on live scoring — "
+        "residual momentum is implemented only in the backtest simulator (slot 49). "
+        "A tuned nonzero value changes sim results but not live trades.",
+        SCORING_PARAMS["momentum_residual_blend"],
+    )
 
 # ---------------------------------------------------------------------------
 # Dividend tracking parameters
@@ -962,6 +974,18 @@ METRIC_KEYS: list[str] = [
     "dollar_vol_21d",
     "dollar_vol_63d",
     "dollar_vol_cv_63d",
+    # peer-3 fundamental features (populated by data.fundamental_features from the
+    # FMP statement cache; quality + income sustainability inputs)
+    "roe_ttm",
+    "gross_margin_ttm",
+    "gm_trend_yoy",
+    "debt_to_assets",
+    "neg_accruals",
+    "fcf_to_assets",
+    "share_count_shrink_yoy",
+    "div_fcf_coverage_ttm",
+    "div_growth_1y",
+    "div_streak_quarters",
     "pe_ratio",
     "pb_ratio",
     "dividend_yield",

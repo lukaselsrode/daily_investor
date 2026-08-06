@@ -66,6 +66,18 @@ def _make_universe(n: int = 60) -> pd.DataFrame:
         "realized_vol_3m": rng.uniform(0.15, 0.40, n),
         "above_50dma":     rng.choice([True, False], n),
         "above_200dma":    rng.choice([True, False], n),
+        # peer-3 fundamental quality inputs (data.fundamental_features).
+        "roe_ttm":                rng.uniform(-0.10, 0.35, n),
+        "fcf_to_assets":          rng.uniform(-0.05, 0.20, n),
+        "neg_accruals":           rng.uniform(-0.10, 0.10, n),
+        "gross_margin_ttm":       rng.uniform(0.10, 0.80, n),
+        "debt_to_assets":         rng.uniform(0.0, 0.6, n),
+        "share_count_shrink_yoy": rng.uniform(-0.05, 0.05, n),
+        "gm_trend_yoy":           rng.uniform(-0.05, 0.05, n),
+        # peer-3 income sustainability inputs.
+        "div_fcf_coverage_ttm":   rng.uniform(0.5, 5.0, n),
+        "div_growth_1y":          rng.uniform(-0.1, 0.2, n),
+        "div_streak_quarters":    rng.integers(0, 20, n).astype(float),
         # Pre-seed legacy score columns so the legacy → peer pipeline test can compare.
         "value_score":     rng.uniform(-0.5, 0.8, n),
         "quality_score":   rng.uniform(-0.4, 0.9, n),
@@ -111,14 +123,13 @@ def _peer_cfg(**overrides) -> dict:
                           "high_vol_annual_threshold": 0.50, "high_vol_penalty": 0.15},
             "clamp_low": -1.0, "clamp_high": 1.5, "winsorize_pct": 0.05,
         },
-        "quality_checklist": {
-            "income_score_cap": 1.5, "yield_trap_threshold": 0.10, "distress_pe_max": 5.0,
-            "quality_volume_high": 1_000_000, "quality_volume_low": 100_000,
-            "quality_dividend_min": 0.02, "quality_dividend_max": 0.06,
-            "quality_weight_has_positive_pe": 0.5, "quality_weight_distress_pe": -0.4,
-            "quality_weight_has_positive_pb": 0.2, "quality_weight_high_volume": 0.3,
-            "quality_weight_low_volume": -0.3, "quality_weight_yield_trap": -0.6,
-            "quality_weight_healthy_dividend": 0.2,
+        "quality_fundamentals": {"min_coverage": 0.30},
+        "income_inputs": {
+            "yield_trap_threshold": 0.10,
+            "weights": {
+                "dividend_yield": 0.50, "div_fcf_coverage": 0.20,
+                "div_growth": 0.15, "div_streak": 0.15,
+            },
         },
     }
     cfg.update(overrides)
@@ -290,22 +301,24 @@ def test_apply_quality_small_groups_fall_back_to_market():
     cfg = _peer_cfg()
     cfg["peer_standardization"]["min_group_size"] = 999  # force every group too small
     apply_quality(df, cfg)
-    # Industry-level rank not possible → reason is market (or legacy if market also too small).
-    assert (df["quality_fallback_reason"].isin(["market", "legacy_checklist"])).all()
+    assert (df["quality_fallback_reason"] == "market").all()
     # Scores still finite — fallback path works end-to-end.
     assert df["quality_score"].notna().all()
 
 
-def test_apply_quality_legacy_fallback_when_no_peers_at_all():
-    """If a row has no peer rank at any tier (single-row universe), legacy fallback fires."""
+def test_apply_quality_no_fundamentals_scores_neutral():
+    """Rows with every fundamental input missing score hard 0.0, explicitly labeled."""
     from strategy.scoring.quality import apply_quality
 
-    df = _make_universe().head(1).reset_index(drop=True)
-    cfg = _peer_cfg()
-    apply_quality(df, cfg)
-    # With one row there's no meaningful market rank either → legacy fallback path.
-    assert df["quality_fallback_reason"].iloc[0] in ("legacy_checklist", "market")
-    assert df["quality_score"].notna().all()
+    df = _make_universe()
+    fund_cols = ["roe_ttm", "fcf_to_assets", "neg_accruals", "gross_margin_ttm",
+                 "debt_to_assets", "share_count_shrink_yoy", "gm_trend_yoy"]
+    df.loc[df.index[:3], fund_cols] = np.nan
+    apply_quality(df, _peer_cfg())
+    assert (df.loc[df.index[:3], "quality_score"] == 0.0).all()
+    assert (df.loc[df.index[:3], "quality_fallback_reason"] == "no_fundamentals").all()
+    # Covered rows still get real peer ranks.
+    assert (df.loc[df.index[3:], "quality_fallback_reason"] == "industry").any()
 
 
 def test_apply_momentum_penalties_fire():

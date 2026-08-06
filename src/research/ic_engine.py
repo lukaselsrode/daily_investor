@@ -16,15 +16,50 @@ from __future__ import annotations
 import datetime
 import logging
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import pandas as pd
+from numpy.typing import ArrayLike
 from scipy import stats
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_FACTORS  = ["value_score", "quality_score", "income_score", "momentum_score", "value_metric"]
 DEFAULT_HORIZONS = [5, 20, 60, 120, 252]
+
+
+def _compute_correlation(
+    factor_values: ArrayLike,
+    return_values: ArrayLike,
+    ic_type: str,
+) -> tuple[float, float] | None:
+    """Return a valid IC result, or None when either input cannot be correlated."""
+    factor_array = np.asarray(factor_values, dtype=float).ravel()
+    return_array = np.asarray(return_values, dtype=float).ravel()
+    if (
+        len(factor_array) < 2
+        or len(factor_array) != len(return_array)
+        or not np.isfinite(factor_array).all()
+        or not np.isfinite(return_array).all()
+        or np.ptp(factor_array) == 0
+        or np.ptp(return_array) == 0
+    ):
+        return None
+
+    try:
+        if ic_type == "spearman":
+            ic_val, p_value = stats.spearmanr(factor_array, return_array)
+        else:
+            ic_val, p_value = stats.pearsonr(factor_array, return_array)
+    except Exception:
+        return None
+
+    ic_float = float(cast(float, ic_val))
+    p_float = float(cast(float, p_value))
+    if not np.isfinite(ic_float):
+        return None
+    return ic_float, p_float
 
 
 class FactorResearchEngine:
@@ -180,19 +215,13 @@ class FactorResearchEngine:
                     if len(merged) < self.min_overlap:
                         continue
 
-                    fv_arr = merged["factor_val"].values
-                    rv_arr = merged["forward_return"].values
+                    fv_arr = merged["factor_val"].to_numpy(dtype=float)
+                    rv_arr = merged["forward_return"].to_numpy(dtype=float)
 
-                    try:
-                        if ic_type == "spearman":
-                            ic_val, pv = stats.spearmanr(fv_arr, rv_arr)
-                        else:
-                            ic_val, pv = stats.pearsonr(fv_arr, rv_arr)
-                    except Exception:
+                    correlation = _compute_correlation(fv_arr, rv_arr, ic_type)
+                    if correlation is None:
                         continue
-
-                    if np.isnan(ic_val):
-                        continue
+                    ic_val, pv = correlation
 
                     rows.append({
                         "date":                t_date,
@@ -485,20 +514,14 @@ class FactorResearchEngine:
                 if len(merged) < self.min_overlap:
                     continue
 
-                try:
-                    if ic_type == "spearman":
-                        ic_val, _ = stats.spearmanr(
-                            merged["factor_val"].values, merged["forward_return"].values
-                        )
-                    else:
-                        ic_val, _ = stats.pearsonr(
-                            merged["factor_val"].values, merged["forward_return"].values
-                        )
-                except Exception:
+                correlation = _compute_correlation(
+                    merged["factor_val"].to_numpy(dtype=float),
+                    merged["forward_return"].to_numpy(dtype=float),
+                    ic_type,
+                )
+                if correlation is None:
                     continue
-
-                if np.isnan(ic_val):
-                    continue
+                ic_val, _ = correlation
 
                 key = (regime, factor)
                 bucket.setdefault(key, []).append(float(ic_val))
@@ -597,19 +620,15 @@ class FactorResearchEngine:
                 merged = pd.DataFrame({"factor_val": fv, "forward_return": fr}).dropna()
                 if len(merged) < self.min_overlap:
                     continue
-                try:
-                    if ic_type == "spearman":
-                        ic_val, _ = stats.spearmanr(
-                            merged["factor_val"].values, merged["forward_return"].values
-                        )
-                    else:
-                        ic_val, _ = stats.pearsonr(
-                            merged["factor_val"].values, merged["forward_return"].values
-                        )
-                except Exception:
+                correlation = _compute_correlation(
+                    merged["factor_val"].to_numpy(dtype=float),
+                    merged["forward_return"].to_numpy(dtype=float),
+                    ic_type,
+                )
+                if correlation is None:
                     continue
-                if not np.isnan(ic_val):
-                    bucket[factor].append(float(ic_val))
+                ic_val, _ = correlation
+                bucket[factor].append(ic_val)
 
         feat_meta = {f["name"]: f for f in INTERACTION_FEATURES}
         rows: list[dict] = []
@@ -711,23 +730,19 @@ class FactorResearchEngine:
                 merged = pd.DataFrame({"factor_val": fv, "forward_return": fr}).dropna()
                 if len(merged) < self.min_overlap:
                     continue
-                try:
-                    if ic_type == "spearman":
-                        ic_val, _ = stats.spearmanr(
-                            merged["factor_val"].values, merged["forward_return"].values
-                        )
-                    else:
-                        ic_val, _ = stats.pearsonr(
-                            merged["factor_val"].values, merged["forward_return"].values
-                        )
-                except Exception:
+                correlation = _compute_correlation(
+                    merged["factor_val"].to_numpy(dtype=float),
+                    merged["forward_return"].to_numpy(dtype=float),
+                    ic_type,
+                )
+                if correlation is None:
                     continue
-                if not np.isnan(ic_val):
-                    rows.append({
-                        "date":    t_date,
-                        "feature": factor,
-                        "ic":      round(float(ic_val), 4),
-                    })
+                ic_val, _ = correlation
+                rows.append({
+                    "date":    t_date,
+                    "feature": factor,
+                    "ic":      round(ic_val, 4),
+                })
 
         return pd.DataFrame(rows)
 

@@ -397,11 +397,22 @@ def load_and_precompute(
     from strategy.scoring.composite import compute_metric
     compute_metric(agg_df, SCORE_WEIGHTS, SCORING_PARAMS)
 
-    pe_comp        = _col_arr(agg_df, "pe_comp")
-    pb_comp        = _col_arr(agg_df, "pb_comp")
+    # Static value = the LIVE value_score (peer ranks + anchor blend + distress
+    # penalties, on the same [-1, 1.5] scale as quality/income). The raw 0-5-scale
+    # pe_comp/pb_comp ratios.yaml columns previously used here silently dominated
+    # the composite by ~3x and skipped every penalty/blend. Both static components
+    # carry the same array, so param slot 9 (value_pe_weight) is INERT on this
+    # path — tuning must use the survivorship-free PIT path, where it stays live.
+    value_scores   = _col_arr(agg_df, "value_score")
+    pe_comp        = value_scores
+    pb_comp        = value_scores
     quality_scores = _col_arr(agg_df, "quality_score")
     income_scores  = _col_arr(agg_df, "income_score")
     volume_arr     = _col_arr(agg_df, "volume")
+    logger.info(
+        "static value path: pe_comp/pb_comp = live value_score (slot 9 inert; "
+        "PIT path keeps per-ratio tunability)"
+    )
 
     sector_labels = (
         agg_df["sector"].fillna("Unknown").tolist()
@@ -642,6 +653,7 @@ def load_and_precompute(
             precomp = precomp._replace(
                 pe_comp_daily=_panels["pe_comp_daily"],
                 pb_comp_daily=_panels["pb_comp_daily"],
+                value_penalty_daily=_panels["value_penalty_daily"],
                 quality_scores_daily=_panels["quality_scores_daily"],
                 income_scores_daily=_panels["income_scores_daily"],
             )

@@ -36,12 +36,13 @@ class TestConfigManagerScalars:
 
 class TestScoreWeights:
 
-    def test_weights_load(self, cfg):
+    def test_weights_load(self, cfg, base_config):
         w = cfg.score_weights
-        assert w.value == pytest.approx(0.08)
-        assert w.quality == pytest.approx(0.50)
-        assert w.income == pytest.approx(0.08)
-        assert w.momentum == pytest.approx(0.34)
+        src = base_config["score_weights"]
+        assert w.value == pytest.approx(src["value"])
+        assert w.quality == pytest.approx(src["quality"])
+        assert w.income == pytest.approx(src["income"])
+        assert w.momentum == pytest.approx(src["momentum"])
 
     def test_weights_sum_to_one(self, cfg):
         w = cfg.score_weights
