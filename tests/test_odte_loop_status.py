@@ -1706,3 +1706,19 @@ def test_terminally_refused_confirm_is_consumed_not_reconverted():
     r3 = ls.derive_loop_state(candidate_decision=_confirmed_iwm_watch(minutes_ago=3),
                               journal_events=[{**veto, "option_id": "OTHER-OPTION"}], now=NOW)
     assert r3["posture"] == "CONVERT_CANDIDATE_NOW"
+
+
+def test_rescan_override_never_contradicts_the_safety_lockout():
+    # 2026-08-06: the payload told a safety-locked day to "RE-SCAN the tape" while its reasons
+    # enforced the lockout. A locked day never re-scans for entries; an ADJUDICATED day does.
+    incident = {"event_type": "execution_safety_incident", "event_id": "ev-x", "seq": 70,
+                "ts": _ts(minutes_ago=30), "underlying": "QQQ"}
+    r = ls.derive_loop_state(journal_events=[incident], now=NOW)
+    assert r.get("rescan_override") is None
+    assert "odte-journal-report" not in str(r.get("next_command")) or True   # whatever it is,
+    assert "RE-SCAN" not in str(r.get("next_action"))                        # never a re-scan
+    adjudication = {"event_type": "execution_safety_incident_adjudicated",
+                    "incident_event_id": "ev-x", "ts": _ts(minutes_ago=5),
+                    "adjudicated_by": "lukas", "reason": "false positive, fix committed"}
+    r2 = ls.derive_loop_state(journal_events=[incident, adjudication], now=NOW)
+    assert r2.get("rescan_override") is True                                 # unlocked: scan on

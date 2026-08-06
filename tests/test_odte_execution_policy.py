@@ -612,3 +612,38 @@ def test_jul31_snapshot_replay_now_converts():
     res2 = xp.authorize_entry(**beyond, now=PROMOTION_AT, policy={})
     assert res2["authorized"] is False
     assert "market_snapshot_stale" in res2["reason_codes"]
+
+
+def test_lease_ceilings_are_mutually_consistent():
+    # 2026-08-06 QQQ 722C: the lease published max_limit_price 0.86 (anchor 0.75 x 1.15) beside
+    # max_debit 84.61 (B+ 30% of $282.02 BP) — an order at the lease's OWN limit ceiling
+    # violated its debit ceiling and the hook blocked it. The limit ceiling now clamps to the
+    # affordable cent: qty x max_limit_price x 100 <= max_debit ALWAYS.
+    fx = _fixture()
+    contract = {**fx["contract"], "bid": 0.74, "ask": 0.75, "mark": 0.745}
+    pkg = _package(PROMOTION_AT, contract=contract)
+    pkg["broker_snapshot"]["buying_power"] = 282.02
+    pkg["candidate_decision"]["candidate"]["tier"] = "b_plus"
+    res = xp.authorize_entry(**pkg, now=PROMOTION_AT,
+                             policy={"quantity": 1, "limit_price": 0.75})
+    assert res["authorized"] is True, res["reason_codes"]
+    lease = res["lease"]
+    assert lease["max_debit"] == round(xp.B_PLUS_DEBIT_FRACTION * 282.02, 2)   # 84.61
+    assert lease["max_limit_price"] == 0.84                                     # floored cent
+    assert lease["quantity"] * lease["max_limit_price"] * 100.0 <= lease["max_debit"]
+    # The clamp never falls below the reviewed limit itself.
+    assert lease["max_limit_price"] >= 0.75
+
+
+def test_lease_ceiling_unclamped_when_bp_is_not_binding():
+    # Plenty of BP: the chase-band ceiling stands untouched (the original 2026-08-02 contract).
+    fx = _fixture()
+    contract = {**fx["contract"], "bid": 1.15, "ask": 1.19, "mark": 1.17}
+    pkg = _package(PROMOTION_AT, contract=contract)
+    pkg["broker_snapshot"]["buying_power"] = 348.16
+    res = xp.authorize_entry(**pkg, now=PROMOTION_AT,
+                             policy={"quantity": 1, "limit_price": 1.19})
+    assert res["authorized"] is True, res["reason_codes"]
+    lease = res["lease"]
+    assert lease["max_limit_price"] == round(1.19 * (1 + xp.CHASE_BAND_FRACTION), 2)
+    assert lease["quantity"] * lease["max_limit_price"] * 100.0 <= lease["max_debit"]

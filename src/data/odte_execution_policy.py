@@ -663,6 +663,14 @@ def authorize_entry(*, gate: dict, candidate_decision: dict, vehicle_score: dict
     if chase_ceiling is not None and partial_frac is not None and bp is not None:
         max_limit_val = float(chase_ceiling)
         max_debit_val = round(min(quantity * max_limit_val * 100.0, partial_frac * bp), 2)
+        # MUTUAL CONSISTENCY (2026-08-06): when the BP fraction caps the debit below the chase
+        # ceiling's worth, the published limit ceiling clamps DOWN (floored to the cent) so an
+        # order at (quantity, max_limit_price) can NEVER violate max_debit. The QQQ 722C lease
+        # published 0.86 x 100 = $86 against an $84.61 debit cap — internally contradictory
+        # ceilings that the hook then (correctly) blocked. The clamp can never fall below the
+        # reviewed limit_price: that debit already passed the fraction check above.
+        affordable = int(max_debit_val / (quantity * 100.0) * 100.0) / 100.0
+        max_limit_val = min(max_limit_val, affordable)
     else:
         max_limit_val = float(limit_price)
         max_debit_val = float(debit)

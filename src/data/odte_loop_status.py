@@ -452,7 +452,13 @@ def _rescan_override(payload: dict, events: list[dict], now: datetime) -> None:
     rescan_cutoff = et_now.replace(hour=15, minute=15, second=0, microsecond=0)  # >45m to close
     if not (session_open <= et_now < rescan_cutoff):
         return
-    from data.odte_journal import daily_trade_budget
+    from data.odte_journal import daily_trade_budget, execution_safety_lockout
+    # 2026-08-06: the override once told a SAFETY-LOCKED day to re-scan while the reasons
+    # enforced the lockout — contradictory instructions in one payload. A locked day never
+    # re-scans for entries. (Green-day preservation deliberately does NOT suppress this: the
+    # post-green scan lane stays alive by design, tier/BP enforced at the gate.)
+    if execution_safety_lockout(events, now=now).get("locked"):
+        return
     budget = daily_trade_budget(events, now=now)
     try:
         remaining = int(budget.get("remaining") or 0)
