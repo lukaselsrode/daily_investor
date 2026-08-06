@@ -985,6 +985,19 @@ def _resolve_loop_state(active_trade: dict | None = None,
         watch_actionable = False
         reasons.append("execution_safety_lockout: ignored candidate watch — an "
                        "execution_safety_incident is journaled today; NO new entries this session")
+    if watch_actionable and watch_decision == "CONFIRM_ENTRY":
+        # A FRESH confirm whose exact identity was already TERMINALLY REFUSED after the confirm
+        # was written is CONSUMED — 2026-08-06: odte-convert journaled the identity-bound budget
+        # veto twice while this branch kept re-commanding CONVERT_CANDIDATE_NOW for the same
+        # dead contract, pinning the loop (the stale-confirm path had this check; the fresh path
+        # did not). A NEW confirm cycle (newer than the refusal) re-arms conversion normally.
+        terminal = _confirm_conversion_evidence(watched, watch_payload, events)
+        if terminal == "no_trade_decision":
+            watch_actionable = False
+            reasons.append(
+                "confirmed candidate already terminally refused (identity-bound "
+                "no_trade_decision at/after the confirm) — conversion consumed; do NOT "
+                "re-convert this contract; rotate to a BP-fitting vehicle or rescan the tape")
     if watch_actionable:
         if watch_decision == "CONFIRM_ENTRY":
             option_id, fingerprint = _confirm_identity(watched)

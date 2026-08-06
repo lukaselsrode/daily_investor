@@ -1683,3 +1683,26 @@ def test_adjudicated_incident_reopens_the_entry_lane():
     unlocked = ls.derive_loop_state(triggers=trig, journal_events=[incident, adjudication],
                                     now=NOW)
     assert unlocked["state"] == "CANDIDATE"
+
+
+def test_terminally_refused_confirm_is_consumed_not_reconverted():
+    # 2026-08-06 QQQ 720C: odte-convert journaled the identity-bound budget veto twice while
+    # loop-status kept commanding CONVERT_CANDIDATE_NOW for the same dead contract — the
+    # terminal-evidence check existed only on the STALE-confirm path. A fresh confirm whose
+    # identity was terminally refused AT/AFTER the confirm is consumed; the loop re-scans.
+    confirm = _confirmed_iwm_watch(minutes_ago=3)
+    veto = {"event_type": "no_trade_decision", "seq": 50, "ts": _ts(minutes_ago=2),
+            "underlying": "IWM", "option_id": IWM_OPTION_ID, "stage": "entry_gate",
+            "reason_codes": ["final_confirmation_budget_check_failed"]}
+    r = ls.derive_loop_state(candidate_decision=confirm, journal_events=[veto], now=NOW)
+    assert r["posture"] != "CONVERT_CANDIDATE_NOW"
+    assert any("terminally refused" in x for x in r["reasons"])
+    assert r.get("rescan_override") is True        # session open + budget: go re-scan the tape
+    # A veto OLDER than the confirm never consumes it — a NEW confirm cycle re-arms normally.
+    r2 = ls.derive_loop_state(candidate_decision=_confirmed_iwm_watch(minutes_ago=3),
+                              journal_events=[{**veto, "ts": _ts(minutes_ago=10)}], now=NOW)
+    assert r2["posture"] == "CONVERT_CANDIDATE_NOW"
+    # A different contract's veto never absolves this identity.
+    r3 = ls.derive_loop_state(candidate_decision=_confirmed_iwm_watch(minutes_ago=3),
+                              journal_events=[{**veto, "option_id": "OTHER-OPTION"}], now=NOW)
+    assert r3["posture"] == "CONVERT_CANDIDATE_NOW"
