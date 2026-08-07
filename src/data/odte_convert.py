@@ -22,6 +22,41 @@ journal-append error withholds the lease (fail closed), same rule as the entry-g
 Execution-safety invariants are UNCHANGED: the lease is still minted only by
 `odte_execution_policy.authorize_entry` (single-use, exact identity, 60s hard cap, chase band,
 tiered BP-proportional sizing) and the broker order still runs the pending-order guard.
+
+----------------------------------------------------------------------------------------------------
+EVERY PATH THAT CAN REACH AN ORDER  (enumerated 2026-08-07 — keep this current)
+----------------------------------------------------------------------------------------------------
+1. CONTROLLER SCAN LANE — the only one that has ever traded.
+     odte-watchdog -> triggers.json -> controller -> odte-candidate-watch -> CONFIRM_ENTRY
+     -> odte-convert (preflight -> day_score -> vehicle_score -> candidate re-check -> entry gate
+        -> authorize_entry mints the lease)
+     -> agent: ONE review_option_order + place_option_order inside the 60s lease
+     -> odte-order-guard poll -> entry_fill -> odte-position HAWK -> exit.
+2. CONTROLLER POST-GREEN RE-ENTRY — same path, re-armed by `green_reentry` when the budget has a
+   slot, the cooldown passed, tier ranks >= the winner's and BP covers the multiple.
+3. WATCHDOG LANE — CANNOT reach an order. `scan_only=True` / `execution_allowed=False` at every
+   return, no order/broker/lease imports at all, and a `market_scorecard` candidate is refused by
+   candidate-watch even on a perfect tape. Verified by assertion, not by reading.
+4. FAST LANE (`execution/odte_fast_lane.py`) — armed intents -> in-process convert -> direct MCP
+   place. Dormant (stage `shadow`, no process/plist/cron). It SHARES `consumed_leases.json` with
+   this lane, which is why the ledger claim is an atomic test-and-set.
+5. EOD / close-bell jobs — read-only reporting; they place nothing.
+
+STATE OWNERSHIP AND THE ONE INTENTIONAL DUAL WRITER
+  `active_candidate.json` and `candidate_decision.json` are written by BOTH `odte_candidate_watch`
+  and this module, sequentially within one controller tick. That is the atomic re-check working as
+  designed, not a race: on 2026-08-07 candidate-watch wrote CONFIRM_ENTRY at 15:29:14 and convert
+  correctly overwrote it with KEEP_WATCHING at 15:30:03 when the tape decayed 49 seconds later.
+  TREAT BOTH FILES AS PER-TICK SNAPSHOTS, NEVER AS STABLE STATE — a reader that assumes stability
+  is the bug. Everything else is single-owner: the watchdog owns triggers/watchdog_state, position
+  owns position_state/position_decision/active_trade, order_guard owns order_guard_decision.
+  `decision_journal.jsonl` has many writers and is safe: appends take an advisory file lock.
+
+RESIDUAL, ACCEPTED
+  Controller ticks are serialised by the cron lock, so a long tick SKIPS the next rather than
+  overlapping (2026-08-07: the 14:00 tick ran to 14:10:57 and 14:05/14:10 never fired — that tick
+  was the position management, not a gap). If a tick dies while a position is open, management
+  resumes at the next tick, so the unmanaged window is bounded by the 5-minute schedule.
 """
 from __future__ import annotations
 

@@ -38,6 +38,12 @@ from data.odte_config import (
 
 SCHEMA_VERSION = 1
 DEFAULT_STATE_DIR = ODTE_DATA_DIR
+# PER-TICK SNAPSHOTS, NEVER STABLE STATE (2026-08-07). Both files are written by THIS module and
+# by `odte_convert`, sequentially within one controller tick. That is the atomic re-check working
+# as designed, not a race: on 2026-08-07 this lane wrote CONFIRM_ENTRY at 15:29:14 and convert
+# correctly overwrote it with KEEP_WATCHING at 15:30:03 once the tape had decayed 49 seconds later.
+# Any reader that treats these as durable state — rather than as "what the last evaluation
+# concluded" — is the bug. `odte_convert`'s module docstring carries the full order-flow map.
 ACTIVE_CANDIDATE_FILENAME = "active_candidate.json"
 CANDIDATE_DECISION_FILENAME = "candidate_decision.json"
 
