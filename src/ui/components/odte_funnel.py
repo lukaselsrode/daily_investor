@@ -101,12 +101,16 @@ def _render_pareto(pareto: list, by_stage: dict) -> None:
 def _render_orb(orb: dict) -> None:
     st.markdown("#### ORB near-misses")
     st.caption(
-        "A candidate confirms on: correct VWAP side **and** ORB broken **and** ≥2 ETF confirmers "
-        "**and** the VIXY read agreeing. A *near miss* satisfied everything **except** the ORB "
-        "clause — these are the setups the ORB requirement is costing.")
+        "A candidate confirms on: correct VWAP side **and** its own ORB broken **and** a breadth "
+        "score at or above the required level **and** the VIXY read agreeing. Breadth grades each "
+        "index 2 for VWAP-side *and* ORB-side, 1 for VWAP side alone — so a leader-led tape with "
+        "rangebound laggards can reach the bar. A *near miss* satisfied everything **except** the "
+        "candidate's own ORB clause — these are the setups the ORB requirement is costing. "
+        "Evaluations before 2026-08-07 are scored by the ≥2-full-confirmer rule that applied then.")
 
     if orb.get("collecting"):
-        st.info("**Collecting.** Per-tick candidate evaluations began 2026-08-06; before that the "
+        st.info("**Collecting.** Per-tick candidate evaluations began 2026-08-06 (convert lane) "
+                "and 2026-08-07 (scanning lane); before that the "
                 "clause-level checks were computed and discarded. An empty result here means the "
                 "data is not in yet — never that no near-misses occurred.")
         return
