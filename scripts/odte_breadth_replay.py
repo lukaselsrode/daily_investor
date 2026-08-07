@@ -141,6 +141,7 @@ def main() -> int:
     unreadable_by_old_reader: set[tuple[str, str]] = set()
     confirmed_by_date: dict[str, dict[str, bool]] = defaultdict(
         lambda: {"old": False, "new": False})
+    tier_of_opens: Counter = Counter()
     considered = 0
 
     for trade_date, as_of, market in snapshots:
@@ -180,6 +181,14 @@ def main() -> int:
                 was, now = pairs["combined"]
                 confirmed_by_date[trade_date]["old"] |= was
                 confirmed_by_date[trade_date]["new"] |= now
+                if now and not was:
+                    # Every newly opened entry also carries a TIER, and the tier decides the debit
+                    # fraction. Half-derived breadth (fewer than B_PLUS_MIN_CONFIRMATIONS fully
+                    # aligned indices) sizes at the B+ rail, so counting opens without counting
+                    # tiers overstates the added exposure by 2x on exactly the tapes this change
+                    # admits. Report the split rather than leaving it to be assumed.
+                    full_n = len(breadth.breadth(market, direction)["full"])
+                    tier_of_opens["b_plus" if full_n < B_PLUS_MIN_CONFIRMATIONS else "full"] += 1
                 if was != now:
                     by_date[trade_date]["opens" if now else "closes"] += 1
                     if len(examples) < 12:
@@ -216,6 +225,10 @@ def main() -> int:
     print(f"  sessions losing every confirm {len(lost)}  {', '.join(lost) if lost else ''}")
     print(f"  at the {DAILY_BUDGET}/day budget cap that is at most "
           f"{len(gained) * DAILY_BUDGET} added trades across the replayed history.")
+    if tier_of_opens:
+        half, whole = tier_of_opens.get("b_plus", 0), tier_of_opens.get("full", 0)
+        print(f"  newly opened entries by sizing tier: b_plus(half) {half}  ·  full {whole}"
+              + ("  — every added entry sizes at the HALF rail" if not whole else ""))
 
     if examples:
         print("\n  examples:")
