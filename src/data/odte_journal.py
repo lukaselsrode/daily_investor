@@ -131,6 +131,41 @@ def _last_num(events: list[dict], key: str) -> float | None:
     return out
 
 
+# The 2026-08-03 postmortem schema moved the self-eval fields into typed sub-objects
+# (`excursion`, `rails`, `process_review`) instead of the flat top-level keys the pre-08-03 events
+# used. These read the nested form; every caller falls back to the legacy key so both eras stay
+# measurable in one series. `_get` deliberately does NOT know these containers — it walks
+# outcome/decision/thesis, which are a different (older) nesting convention.
+
+def _sub(event: dict, container: str, key: str):
+    sub = event.get(container)
+    return sub.get(key) if isinstance(sub, dict) else None
+
+
+def _last_sub_num(events: list[dict], container: str, key: str) -> float | None:
+    out = None
+    for e in events:
+        v = _num(_sub(e, container, key))
+        if v is not None:
+            out = v
+    return out
+
+
+def _first_sub(events: list[dict], container: str, key: str):
+    for e in events:
+        v = _sub(e, container, key)
+        if v not in (None, ""):
+            return v
+    return None
+
+
+def _sub_list(event: dict, container: str, key: str) -> list:
+    v = _sub(event, container, key)
+    if v is None:
+        return []
+    return list(v) if isinstance(v, (list, tuple)) else [v]
+
+
 def _parse_ts(s) -> datetime | None:
     if not s:
         return None
@@ -1513,15 +1548,21 @@ LOSS_CATEGORIES = ("execution", "thesis", "timing", "vehicle", "risk", "regime")
 
 
 def _process_outcome(t: dict) -> str | None:
-    """One of the four process×outcome cells for a CLOSED trade, from rule_violations + win only.
-    'Process' = followed the plan (no rule violations). Distinguishes a good process that still lost
-    (variance) from a bad process that happened to win (lucky — the dangerous one)."""
+    """One of the four process×outcome cells for a CLOSED trade. Modern postmortems (2026-08-03+)
+    STATE `process_quality`/`outcome_quality` explicitly — use them; older ones only recorded rule
+    violations, so derive from rule_violations + win. Either way the answer lands in the same four
+    cells, which distinguishes a good process that still lost (variance) from a bad process that
+    happened to win (lucky — the dangerous one)."""
     if not t["closed"]:
         return None
-    good_process = not t["rule_violations"]
+    pq, oq = str(t.get("process_quality") or ""), str(t.get("outcome_quality") or "")
+    if pq and oq:
+        good_process, win = pq.startswith("good"), oq.startswith("good")
+    else:
+        good_process, win = (not t["rule_violations"]), t["win"]
     if good_process:
-        return "good_process_good_outcome" if t["win"] else "good_process_bad_outcome"
-    return "bad_process_lucky_outcome" if t["win"] else "bad_process_bad_outcome"
+        return "good_process_good_outcome" if win else "good_process_bad_outcome"
+    return "bad_process_lucky_outcome" if win else "bad_process_bad_outcome"
 
 
 def _execution_diagnosis(t: dict) -> str:
@@ -1557,11 +1598,20 @@ def _process_quality(trade_rows: list[dict]) -> dict:
     process_outcome: Counter = Counter()
     diagnosis: Counter = Counter()
     loss_categories: Counter = Counter()
+    failure_layers: Counter = Counter()
     for t in measurable:
         po = _process_outcome(t)
         if po:
             process_outcome[po] += 1
         diagnosis[_execution_diagnosis(t)] += 1
+        # `failure_layer` (2026-08-03 postmortems) names WHICH layer failed — a different axis from
+        # the entry/exit/thesis diagnosis above, so it is counted separately rather than folded in
+        # and mixing two vocabularies in one histogram.
+        # "none" and its qualified spellings ("none_normal_execution_slippage") are the author
+        # saying nothing failed — counting them would invent failures out of clean trades.
+        layer = str(t.get("failure_layer") or "").strip().lower()
+        if layer and not layer.startswith("none"):
+            failure_layers[layer] += 1
         if t["realized_pnl"] is not None and t["realized_pnl"] < 0:
             lc = t.get("loss_category")
             loss_categories[lc if lc in LOSS_CATEGORIES else "uncategorized"] += 1
@@ -1569,6 +1619,7 @@ def _process_quality(trade_rows: list[dict]) -> dict:
         "n_diagnosed": len(measurable),
         "process_outcome": dict(process_outcome),
         "execution_diagnosis": dict(diagnosis),
+        "failure_layers": dict(failure_layers),
         "loss_categories": dict(loss_categories),
     }
 
@@ -1593,15 +1644,24 @@ def summarize(events: list[dict]) -> dict:
         if restricted and underlying:
             restricted_flags.append(underlying)
         realized = _last_num(evs, "realized_pnl")
-        mfe = _last_num(evs, "mfe")
+        # Modern (2026-08-03+) postmortems carry excursion.{mfe,mae}_dollars + mfe_capture_pct;
+        # older ones carry flat mfe/mae. Read modern first, fall back to legacy — reading only the
+        # legacy keys is what made avg_mfe_capture report 7.7% on a 100%-capture trade.
+        mfe = _last_sub_num(evs, "excursion", "mfe_dollars")
+        if mfe is None:
+            mfe = _last_num(evs, "mfe")
+        mae = _last_sub_num(evs, "excursion", "mae_dollars")
+        if mae is None:
+            mae = _last_num(evs, "mae")
         violations = [v for e in evs for v in _list(e, "rule_violations")]
+        violations += [v for e in evs for v in _sub_list(e, "process_review", "rule_violations")]
         if restricted:
             violations.append(f"RESTRICTED_EMPLOYER: {underlying or 'restricted'} must never be traded")
         entry_ts = next((_parse_ts(e.get("ts")) for e in evs if e.get("event_type") in _ENTRY_EVENTS), None)
         trade_rows.append({
             "trade_id": tid, "mode": str(_first(evs, "mode") or "unknown"),
             "underlying": underlying, "restricted": restricted,
-            "realized_pnl": realized, "mfe": mfe, "mae": _last_num(evs, "mae"),
+            "realized_pnl": realized, "mfe": mfe, "mae": mae,
             "closed": realized is not None, "win": realized is not None and realized > 0,
             "rule_violations": violations, "held_minutes": _held_minutes(evs),
             "entry_ts": entry_ts.isoformat() if entry_ts else None,
@@ -1609,6 +1669,13 @@ def summarize(events: list[dict]) -> dict:
             # explicit self-eval fields (used as-is when present; never fabricated):
             "loss_category": _first(evs, "loss_category"),
             "diagnosis": _first(evs, "diagnosis"),
+            # 2026-08-03 schema: the postmortem states capture and its own grades outright.
+            "mfe_capture_pct": _last_sub_num(evs, "excursion", "mfe_capture_pct"),
+            "process_quality": _first(evs, "process_quality"),
+            "outcome_quality": _first(evs, "outcome_quality"),
+            "failure_layer": _first(evs, "failure_layer"),
+            "rail_fired": _first(evs, "rail_fired"),
+            "tier": _first(evs, "tier") or _first_sub(evs, "entry", "tier"),
         })
 
     # Restricted trades are excluded from performance metrics (they should never exist) but the flag
@@ -1616,8 +1683,15 @@ def summarize(events: list[dict]) -> dict:
     measurable = [t for t in trade_rows if not t["restricted"]]
     closed = [t for t in measurable if t["closed"]]
     wins = [t for t in closed if t["win"]]
-    caps = [t["realized_pnl"] / t["mfe"] for t in closed
-            if t["mfe"] and t["mfe"] > 0 and t["realized_pnl"] is not None]
+    # MFE capture: the postmortem's own `excursion.mfe_capture_pct` is authoritative when present
+    # (it is computed against the best bid actually seen, not against a P/L ratio); older trades
+    # only allow the realized/MFE derivation.
+    caps = []
+    for t in closed:
+        if t["mfe_capture_pct"] is not None:
+            caps.append(t["mfe_capture_pct"] / 100.0)
+        elif t["mfe"] and t["mfe"] > 0 and t["realized_pnl"] is not None:
+            caps.append(t["realized_pnl"] / t["mfe"])
     held = [t["held_minutes"] for t in closed if t["held_minutes"] is not None]
 
     by_mode: dict[str, dict] = {}
@@ -1644,6 +1718,7 @@ def summarize(events: list[dict]) -> dict:
     for e in events:   # standalone (non-trade) violations
         if e.get("trade_id") is None:
             violation_counts.update(_list(e, "rule_violations"))
+            violation_counts.update(_sub_list(e, "process_review", "rule_violations"))
 
     experiments = []
     seen_experiments: set[tuple] = set()

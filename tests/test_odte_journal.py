@@ -645,6 +645,97 @@ def test_explicit_diagnosis_field_is_respected(tmp_path):
     assert diag.get("good_signal_bad_vehicle") == 1   # explicit overrides the mfe heuristic
 
 
+# --- 2026-08-03 postmortem schema (excursion / process_review / explicit grades) ---------------
+# The modern postmortem moved the self-eval fields into typed sub-objects. Reading only the legacy
+# top-level keys made avg_mfe_capture report 7.7% on a day whose trade captured 100% of its MFE,
+# and silently graded a rule-violating trade as good process.
+
+def _modern_postmortem(jp, trade_id, *, realized, capture_pct, mfe_dollars,
+                       process_quality="good_process", outcome_quality="good_outcome",
+                       failure_layer="none", violations=None, rail="TAKE_PROFIT"):
+    """Verbatim shape of the 2026-08-06 QQQ postmortem (structured entry/exit/pnl/excursion/rails)."""
+    oj.append_event({"event_type": "entry_fill", "trade_id": trade_id, "mode": "scalp",
+                     "underlying": "QQQ", "ts": "2026-08-06T14:10:00-04:00"}, journal_path=jp)
+    oj.append_event({"event_type": "exit_fill", "trade_id": trade_id, "mode": "scalp",
+                     "underlying": "QQQ", "ts": "2026-08-06T14:16:00-04:00",
+                     "rail_fired": rail}, journal_path=jp)
+    oj.append_event({"event_type": "postmortem", "trade_id": trade_id, "mode": "scalp",
+                     "underlying": "QQQ", "ts": "2026-08-06T14:18:00-04:00",
+                     "realized_pnl": realized,
+                     "process_quality": process_quality,
+                     "outcome_quality": outcome_quality,
+                     "failure_layer": failure_layer,
+                     "entry": {"tier": "b_plus", "day_regime": "CHOP"},
+                     "exit": {"rail_fired": rail},
+                     "pnl": {"gross": realized, "estimated_net": realized},
+                     "excursion": {"mfe_dollars": mfe_dollars, "mfe_pct": 23.0,
+                                   "mae_dollars": -2.0, "mae_pct": -3.0,
+                                   "mfe_capture_pct": capture_pct},
+                     "rails": {"take_profit_fired": rail == "TAKE_PROFIT",
+                               "framework_honored": True},
+                     "process_review": {"worked": "rails held",
+                                        "rule_violations": list(violations or []),
+                                        "lessons": []}},
+                    journal_path=jp)
+
+
+def test_modern_postmortem_excursion_drives_mfe_capture(tmp_path):
+    jp = _journal(tmp_path)
+    _modern_postmortem(jp, "qqq_720c", realized=13.9, capture_pct=100.0, mfe_dollars=14.0)
+    s = oj.summarize(oj.read_events(jp))
+    # The postmortem's own capture figure wins: it is measured against the best bid actually seen,
+    # not re-derived from a realized/MFE ratio.
+    assert s["avg_mfe_capture"] == 1.0
+    assert s["n_closed"] == 1 and s["hit_rate"] == 1.0
+
+
+def test_modern_postmortem_grades_are_used_verbatim(tmp_path):
+    jp = _journal(tmp_path)
+    _modern_postmortem(jp, "iwm_301c", realized=-0.1, capture_pct=0.0, mfe_dollars=3.0,
+                       process_quality="bad_process", outcome_quality="bad_outcome",
+                       failure_layer="execution_order_guard_artifact_mapping",
+                       violations=["order-guard input omitted top-level option_type"],
+                       rail="execution_safety_incident")
+    pq = oj.summarize(oj.read_events(jp))["process_quality"]
+    assert pq["process_outcome"]["bad_process_bad_outcome"] == 1
+    assert pq["failure_layers"] == {"execution_order_guard_artifact_mapping": 1}
+
+
+def test_nested_rule_violations_are_counted(tmp_path):
+    jp = _journal(tmp_path)
+    _modern_postmortem(jp, "t1", realized=-1.0, capture_pct=0.0, mfe_dollars=2.0,
+                       process_quality="bad_process", outcome_quality="bad_outcome",
+                       violations=["no_stop"])
+    s = oj.summarize(oj.read_events(jp))
+    assert s["n_rule_violations"] == 1 and "no_stop" in s["rule_violations"]
+
+
+def test_clean_failure_layer_is_not_counted_as_a_failure(tmp_path):
+    jp = _journal(tmp_path)
+    # "none_normal_execution_slippage" is the author saying nothing failed — a qualified "none".
+    _modern_postmortem(jp, "spy_ok", realized=9.0, capture_pct=60.0, mfe_dollars=15.0,
+                       failure_layer="none_normal_execution_slippage")
+    pq = oj.summarize(oj.read_events(jp))["process_quality"]
+    assert pq["failure_layers"] == {}
+    assert pq["process_outcome"]["good_process_good_outcome"] == 1
+
+
+def test_legacy_postmortem_capture_still_derived(tmp_path):
+    jp = _journal(tmp_path)
+    _closed(jp, "old", 6.0, mfe=12.0)          # pre-08-03 shape: flat mfe, no excursion block
+    s = oj.summarize(oj.read_events(jp))
+    assert s["avg_mfe_capture"] == 0.5         # realized/MFE fallback intact
+
+
+def test_both_eras_average_together(tmp_path):
+    jp = _journal(tmp_path)
+    _closed(jp, "old", 6.0, mfe=12.0)                                            # 0.50 derived
+    _modern_postmortem(jp, "new", realized=13.9, capture_pct=100.0, mfe_dollars=14.0)  # 1.00 stated
+    s = oj.summarize(oj.read_events(jp))
+    assert s["avg_mfe_capture"] == 0.75
+    assert s["n_closed"] == 2
+
+
 def test_process_quality_renders_in_markdown_report(tmp_path):
     jp = _journal(tmp_path)
     _closed(jp, "lucky", 10.0, mfe=12.0, violations=["no_stop"])
