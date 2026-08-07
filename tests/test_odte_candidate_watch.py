@@ -3,6 +3,7 @@
 Pure/offline: no broker, network, LLM, or orders. Candidate watch may confirm that a fresh entry gate
 should be built, but it must never set execution_allowed=True by itself.
 """
+import json
 import os
 import sys
 from datetime import datetime, timezone
@@ -552,3 +553,71 @@ def test_bearish_side_is_symmetric():
     assert payload["checks"]["half_confirmers"] == ["QQQ", "IWM"]
     assert payload["checks"]["breadth_score"] == oc.BREADTH_MIN_SCORE
     assert payload["decision"] == cw.CONFIRM_ENTRY
+
+
+# --- 2026-08-07: the scanning lane journals its evaluations ------------------------------------
+# candidate_evaluation previously fired only from odte_convert, which the controller runs only on
+# the fast path — 3 events against ~78 scanning ticks on 2026-08-07. The near-miss population lives
+# in the ticks that never convert, so the scanning lane has to record them too. That means BOTH
+# lanes journal on a converting tick, which is exactly how a counter defect gets born (the fill
+# double-count and the ingest P/L doubling both started this way). Every counter gets an assertion.
+
+def _journaled(tmp_path, **kw):
+    jp = str(tmp_path / "decision_journal.jsonl")
+    cw.run_candidate_watch(candidate_json=json.dumps({"ticker": "SPY", "direction": "bullish"}),
+                           market_json=json.dumps(_market()),
+                           journal=True, journal_path=jp, **kw)
+    return jp
+
+
+def test_scanning_lane_journals_a_candidate_evaluation(tmp_path):
+    import data.odte_journal as oj
+    jp = _journaled(tmp_path)
+    events = [e for e in oj.read_events(jp) if e.get("event_type") == "candidate_evaluation"]
+    assert len(events) == 1
+    ev = events[0]
+    assert ev["source"] == "odte_candidate_watch"
+    assert ev["scan_only"] is True and ev["execution_allowed"] is False
+    assert ev.get("trade_id") is None                     # never joins a trade row
+    assert ev["checks"]["breadth_score"] >= 0             # the near-miss payload rides along
+    assert "confirmers" in ev["checks"] and "half_confirmers" in ev["checks"]
+
+
+def test_scanning_lane_does_not_journal_by_default(tmp_path):
+    import data.odte_journal as oj
+    jp = str(tmp_path / "decision_journal.jsonl")
+    cw.run_candidate_watch(candidate_json=json.dumps({"ticker": "SPY", "direction": "bullish"}),
+                           market_json=json.dumps(_market()), journal_path=jp)
+    assert oj.read_events(jp) == []
+
+
+def test_both_lanes_journaling_moves_no_counter(tmp_path):
+    # The converting-tick case: odte_convert and odte_candidate_watch each append their own
+    # evaluation for the same tick. Neither creates a trade row, a refusal, or a budget slot.
+    import data.odte_journal as oj
+    jp = _journaled(tmp_path)
+    before_events = oj.read_events(jp)
+    before = (oj.summarize(before_events), oj.weekly_telemetry(before_events),
+              oj.daily_trade_budget(before_events))
+    # a second lane journaling the same evaluation, verbatim
+    payload = cw.evaluate_candidate_watch({"ticker": "SPY", "direction": "bullish"},
+                                          market=_market(), now=NOW)
+    oj.append_decision_journal(oj.event_from_candidate_evaluation(payload),
+                              source="odte_convert", event_type="candidate_evaluation",
+                              journal_path=jp)
+    after_events = oj.read_events(jp)
+    after = (oj.summarize(after_events), oj.weekly_telemetry(after_events),
+             oj.daily_trade_budget(after_events))
+    assert len(after_events) == len(before_events) + 1     # the event IS recorded
+    for name, b, a in zip(("summarize", "weekly_telemetry", "daily_trade_budget"), before, after):
+        for key in ("n_trades", "n_closed", "total_realized_pnl", "no_trade_decisions",
+                    "lease_refusals", "entry_decisions", "trades_today", "budget", "remaining"):
+            if key in b:
+                assert a[key] == b[key], f"{name}.{key} moved: {b[key]} -> {a[key]}"
+
+
+def test_ingest_never_synthesizes_a_second_candidate_evaluation():
+    # First-party at computation time in BOTH lanes now, so an EOD artifact sweep must never
+    # re-add the same decision under its own dedupe key.
+    import data.odte_journal as oj
+    assert "candidate_evaluation" in oj._INGEST_PROTECTED_LIFECYCLE

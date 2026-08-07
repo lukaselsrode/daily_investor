@@ -800,6 +800,8 @@ def _cmd_odte_candidate_watch(rest: list[str]) -> None:
             broker_health_json=_flag_value(rest, "--broker-health-json"),
             state_dir=_flag_value(rest, "--state-dir"),
             write="--write" in rest,
+            journal="--journal" in rest,
+            journal_path=_flag_value(rest, "--journal-path"),
         )
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"odte-candidate-watch: could not read/parse input: {exc}")

@@ -554,7 +554,8 @@ def run_candidate_watch(candidate_json: str | None = None, candidate_path: str |
                         vehicle_score_json: str | None = None, vehicle_score_path: str | None = None,
                         gamma_json: str | None = None, gamma_path: str | None = None,
                         broker_health_json: str | None = None, broker_health_path: str | None = None,
-                        state_dir: str | None = None, write: bool = False) -> dict:
+                        state_dir: str | None = None, write: bool = False,
+                        journal: bool = False, journal_path: str | None = None) -> dict:
     candidate = _load_json(candidate_path, candidate_json)
     market = _load_json(market_path, market_json)
     day_score = _load_json(day_score_path, day_score_json)
@@ -564,6 +565,17 @@ def run_candidate_watch(candidate_json: str | None = None, candidate_path: str |
     payload = evaluate_candidate_watch(candidate, market=market, day_score=day_score,
                                        vehicle_score=vehicle, gamma_map=gamma,
                                        broker_health=broker)
+    if journal:
+        # THE SCANNING LANE IS WHERE THE NEAR-MISS POPULATION LIVES (2026-08-07). odte_convert
+        # already journals candidate_evaluation, but loop-status routes the scanning posture to
+        # `odte-candidate-watch`, and convert only runs on the fast path — so on 2026-08-07 the
+        # entire session produced 3 evaluation events against ~78 scanning ticks. The ticks that
+        # do NOT convert are exactly the ones that answer "how many setups did the gate cost us?".
+        # Telemetry only: scan_only, no trade_id, never a gate input; append never raises.
+        from data.odte_journal import append_decision_journal, event_from_candidate_evaluation
+        append_decision_journal(event_from_candidate_evaluation(payload),
+                                source="odte_candidate_watch", event_type="candidate_evaluation",
+                                journal_path=journal_path)
     if write:
         base = Path(os.path.expanduser(state_dir or DEFAULT_STATE_DIR))
         base.mkdir(parents=True, exist_ok=True)
