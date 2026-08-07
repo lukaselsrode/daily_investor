@@ -490,10 +490,17 @@ _INGEST_PROTECTED_LIFECYCLE = frozenset({
     *ENTRY_FILL_EVENTS, *EXIT_FILL_EVENTS, "entry_decision", "execution_lease_issued",
     "execution_lease_consumed", "execution_safety_incident",
     "execution_safety_incident_adjudicated", "no_trade_decision", "postmortem",
-    # First-party at computation time (odte_convert / odte-day-score). An EOD artifact sweep would
-    # re-add the same decision under a different dedupe key and double-count it.
-    "candidate_evaluation", "day_score",
+    # First-party at computation time (odte_convert). An EOD artifact sweep would re-add the same
+    # decision under a different dedupe key and double-count it.
+    "candidate_evaluation",
 })
+# `day_score` is deliberately NOT protected (2026-08-06). It is first-party journaled from
+# odte_convert, but that call sits AFTER the preflight refusal — so on a session where every
+# convert tick dies on a stale snapshot (the 2026-08-05 blind-day shape) there is no first-party
+# event at all, and the controller's own top-level day_score drops are the only record. Those are
+# exactly the days the headroom telemetry exists to explain. day_score touches no money or volume
+# counter (not a fill, not a refusal, not keyed by trade_id), so an overlapping ingest costs a
+# duplicate point on a chart, while protecting it costs the whole day.
 
 _SAME_FILL_WINDOW_MINUTES = 10.0
 

@@ -193,12 +193,15 @@ def test_run_day_score_does_not_journal_by_default(tmp_path):
     assert oj.read_events(jp) == []
 
 
-def test_written_artifact_is_not_re_ingested_after_first_party_journaling(tmp_path):
-    # Both paths active at once must not double-count: ingest refuses the day_score type.
+def test_written_artifact_lives_under_reports_where_ingest_never_looks(tmp_path):
+    # ingest_loose_artifacts globs the TOP level of data/odte/ only. run_day_score --write puts
+    # its artifact in reports/, so the two paths cannot collide: the first-party event is the
+    # only record of a --journal run, and the controller's top-level drops remain ingestable.
     import data.odte_journal as oj
     jp = str(tmp_path / "decision_journal.jsonl")
-    run_day_score(market_json=json.dumps({"gap_pct": 0.5}), out_dir=str(tmp_path),
-                  write=True, journal=True, journal_path=jp)
-    assert len([e for e in oj.read_events(jp) if e.get("event_type") == "day_score"]) == 1
+    payload = run_day_score(market_json=json.dumps({"gap_pct": 0.5}),
+                            out_dir=str(tmp_path / "reports"),
+                            write=True, journal=True, journal_path=jp)
+    assert "reports" in payload["artifact"]
     oj.ingest_loose_artifacts(data_dir=str(tmp_path), journal_path=jp)
     assert len([e for e in oj.read_events(jp) if e.get("event_type") == "day_score"]) == 1

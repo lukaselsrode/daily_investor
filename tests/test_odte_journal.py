@@ -1260,8 +1260,8 @@ def test_ingest_refuses_lifecycle_event_payloads(tmp_path):
     assert any(e.get("event_type") == "controller_event" for e in events)
 
 
-def test_ingest_refuses_first_party_telemetry_types(tmp_path):
-    # candidate_evaluation and day_score are written first-party at COMPUTATION time. An EOD
+def test_ingest_refuses_first_party_candidate_evaluations(tmp_path):
+    # candidate_evaluation is written first-party at COMPUTATION time on every tick. An EOD
     # artifact sweep re-appending the same decision would mint a fresh event_id that dedupe
     # cannot catch, so the series would double-count.
     import json
@@ -1269,11 +1269,39 @@ def test_ingest_refuses_first_party_telemetry_types(tmp_path):
     (tmp_path / "candidate_decision_copy.json").write_text(json.dumps(
         {"event_type": "candidate_evaluation", "state": "WATCHING_CONFIRMATION",
          "ts": "2026-08-06T15:00:00+00:00"}))
-    (tmp_path / "odte_day_score.json").write_text(json.dumps(
-        {"verdict": "CHOP", "score": 1, "ts": "2026-08-06T15:00:00+00:00"}))
     s = oj.ingest_loose_artifacts(data_dir=str(tmp_path), journal_path=jp)
-    assert s.get("lifecycle_skipped", 0) == 2
+    assert s.get("lifecycle_skipped", 0) == 1
     assert oj.read_events(jp) == []
+
+
+def test_ingest_still_folds_controller_day_score_drops(tmp_path):
+    # day_score is first-party journaled from odte_convert — but that call sits AFTER the
+    # preflight refusal, so a session whose every convert tick dies on a stale snapshot produces
+    # NO first-party event. The controller's own top-level drops are then the only record of the
+    # day's regime, and they are exactly the days the headroom telemetry exists to explain.
+    import json
+    jp = str(tmp_path / "decision_journal.jsonl")
+    (tmp_path / "controller_day_score_20260805T140000Z.json").write_text(json.dumps(
+        {"verdict": "CHOP", "score": 1, "components_supplied": 4,
+         "components_missing": ["expected_move"], "max_possible_score": 4,
+         "ts": "2026-08-05T14:00:00+00:00"}))
+    oj.ingest_loose_artifacts(data_dir=str(tmp_path), journal_path=jp)
+    events = [e for e in oj.read_events(jp) if e.get("event_type") == "day_score"]
+    assert len(events) == 1, "a blind day must not lose its day-score record"
+    assert events[0]["max_possible_score"] == 4
+
+
+def test_day_score_ingest_touches_no_money_or_volume_counter(tmp_path):
+    # Why the overlap above is acceptable: day_score is not a fill, not a refusal, and carries no
+    # trade_id, so an ingested duplicate costs a chart point, never a counted trade or dollar.
+    from datetime import datetime, timezone
+    now = datetime(2026, 8, 5, 20, 0, tzinfo=timezone.utc)
+    events = [{"event_type": "day_score", "score": 1, "verdict": "CHOP",
+               "source": "ingest:day_score", "ts": "2026-08-05T14:00:00+00:00"}] * 3
+    s = oj.summarize(events)
+    assert s["n_trades"] == 0 and s["total_realized_pnl"] == 0
+    assert oj.daily_trade_budget(events, now=now)["trades_today"] == 0
+    assert oj.weekly_telemetry(events, now=now)["lease_refusals"] == 0
 
 
 def test_candidate_evaluation_routes_to_the_candidates_stream(tmp_path):
