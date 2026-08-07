@@ -34,7 +34,7 @@ import logging
 import os
 import re
 from collections import Counter, defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 try:                                   # POSIX advisory file lock (mac/linux). Best-effort.
@@ -577,6 +577,91 @@ def daily_trade_budget(events: list[dict] | None, now: datetime | None = None) -
     }
 
 
+def _funnel_tally(events: list[dict] | None, keep) -> tuple[Counter, Counter, Counter, list]:
+    """PURE: tally the conversion funnel over the events `keep(dt, event)` accepts.
+
+    Shared by `weekly_telemetry` (ISO-week window) and `funnel_counts` (arbitrary window) so the
+    two can never disagree about what a gate pass or a refusal is. Returns
+    (counts, refusals, stage_counts, fills) — fills as (event, index) pairs for `_entry_fill_keys`.
+
+    Event types not named here (watchdog ticks, snapshots, candidate_evaluation, day_score…) are
+    deliberately inert: telemetry must never move a funnel counter.
+    """
+    counts: Counter = Counter()
+    refusals: Counter = Counter()
+    stage_counts: Counter = Counter()
+    fills: list[tuple[dict, int]] = []
+    for i, e in enumerate(events or []):
+        if not isinstance(e, dict):
+            continue
+        dt = _parse_ts(e.get("ts"))
+        if dt is None or not keep(dt, e):
+            continue
+        et = e.get("event_type")
+        if et in ENTRY_FILL_EVENTS:
+            fills.append((e, i))
+        elif et == "entry_decision":
+            counts["entry_decisions"] += 1
+            if e.get("execution_allowed") is True or e.get("decision") == "enter":
+                counts["gates_passed"] += 1
+        elif et == "execution_lease_issued":
+            # `decision` reads "issue" on the pre-2026-08-06 convert path and "allow" once both
+            # paths moved to the canonical builder; `authorized` is the field that never moved.
+            if e.get("authorized") is True or e.get("decision") in ("issue", "allow"):
+                counts["leases_issued"] += 1
+            else:
+                counts["lease_refusals"] += 1
+                for r in (e.get("reason_codes") or []):
+                    refusals[f"authorize:{r}"] += 1
+        elif et == "no_trade_decision":
+            counts["no_trade_decisions"] += 1
+            # v5 refusals happen at preflight/candidate_watch/entry_gate — BEFORE any lease event
+            # exists. 2026-08-04: an 18-refusal day read `top_refusal_reasons: []` because only
+            # lease refusals were tallied. Stage-prefix every terminal reason.
+            stage = str(e.get("stage") or "unknown")
+            stage_counts[stage] += 1
+            for r in (e.get("reason_codes") or []):
+                refusals[f"{stage}:{r}"] += 1
+        elif et == "candidate_evaluation":
+            # Not a funnel STAGE — recorded alongside so a window can report how many evaluations
+            # produced how few conversions without a second pass over the events.
+            counts["candidate_evaluations"] += 1
+            if str(e.get("decision") or "").upper() == "CONFIRM_ENTRY":
+                counts["candidate_confirms"] += 1
+        elif et == "watchdog_trigger":
+            counts["watchdog_ticks"] += 1
+            if e.get("alert") is True:
+                counts["watchdog_alerts"] += 1
+    return counts, refusals, stage_counts, fills
+
+
+def funnel_counts(events: list[dict] | None, *, start: date, end: date) -> dict:
+    """PURE: conversion-funnel counts over an inclusive ET date range [start, end].
+
+    The same tally `weekly_telemetry` runs, but over an arbitrary window, so the UI can chart the
+    funnel per day / per week without re-deriving what counts as a gate pass or a refusal.
+    Trades are deduped with `_entry_fill_keys` (one fill journaled by two lanes counts once).
+    """
+    counts, refusals, stage_counts, fills = _funnel_tally(
+        events, lambda dt, _e: start <= dt.astimezone(ET).date() <= end)
+    return {
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "watchdog_ticks": counts["watchdog_ticks"],
+        "watchdog_alerts": counts["watchdog_alerts"],
+        "candidate_evaluations": counts["candidate_evaluations"],
+        "candidate_confirms": counts["candidate_confirms"],
+        "entry_decisions": counts["entry_decisions"],
+        "gates_passed": counts["gates_passed"],
+        "leases_issued": counts["leases_issued"],
+        "fills": len(_entry_fill_keys(fills)),
+        "no_trade_decisions": counts["no_trade_decisions"],
+        "lease_refusals": counts["lease_refusals"] + sum(stage_counts.values()),
+        "top_refusal_reasons": refusals.most_common(10),
+        "refusals_by_stage": dict(stage_counts),
+    }
+
+
 def weekly_telemetry(events: list[dict] | None, now: datetime | None = None) -> dict:
     """PURE: ISO-week (ET) conversion-funnel counts + the zero-trade tripwire.
 
@@ -593,39 +678,8 @@ def weekly_telemetry(events: list[dict] | None, now: datetime | None = None) -> 
     )
     now = now or datetime.now(timezone.utc)
     year, week, iso_weekday = now.astimezone(ET).isocalendar()
-    counts: Counter = Counter()
-    refusals: Counter = Counter()
-    stage_counts: Counter = Counter()
-    week_fills: list[tuple[dict, int]] = []
-    for i, e in enumerate(events or []):
-        if not isinstance(e, dict):
-            continue
-        dt = _parse_ts(e.get("ts"))
-        if dt is None or dt.astimezone(ET).isocalendar()[:2] != (year, week):
-            continue
-        et = e.get("event_type")
-        if et in ENTRY_FILL_EVENTS:
-            week_fills.append((e, i))
-        elif et == "entry_decision":
-            counts["entry_decisions"] += 1
-            if e.get("execution_allowed") is True or e.get("decision") == "enter":
-                counts["gates_passed"] += 1
-        elif et == "execution_lease_issued":
-            if e.get("authorized") is True or e.get("decision") == "issue":
-                counts["leases_issued"] += 1
-            else:
-                counts["lease_refusals"] += 1
-                for r in (e.get("reason_codes") or []):
-                    refusals[f"authorize:{r}"] += 1
-        elif et == "no_trade_decision":
-            counts["no_trade_decisions"] += 1
-            # v5 refusals happen at preflight/candidate_watch/entry_gate — BEFORE any lease event
-            # exists. 2026-08-04: an 18-refusal day read `top_refusal_reasons: []` because only
-            # lease refusals were tallied. Stage-prefix every terminal reason.
-            stage = str(e.get("stage") or "unknown")
-            stage_counts[stage] += 1
-            for r in (e.get("reason_codes") or []):
-                refusals[f"{stage}:{r}"] += 1
+    counts, refusals, stage_counts, week_fills = _funnel_tally(
+        events, lambda dt, _e: dt.astimezone(ET).isocalendar()[:2] == (year, week))
     trades = len(_entry_fill_keys(week_fills))
     budget = daily_trade_budget(events, now=now)
     armed = (iso_weekday - 1) >= ZERO_TRADE_TRIPWIRE_WEEKDAY   # isocalendar: 1=Mon

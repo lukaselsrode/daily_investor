@@ -975,6 +975,66 @@ def test_weekly_telemetry_counts_funnel_and_fires_tripwire():
     assert wk["tripwire"]["fired"] is True, "a Friday with zero trades must fire the tripwire"
 
 
+def test_funnel_counts_over_a_date_range():
+    # Same tally as weekly_telemetry, arbitrary window — so a per-day funnel chart cannot disagree
+    # with the weekly numbers about what a gate pass or a refusal is.
+    from datetime import date
+    events = [
+        {"event_type": "watchdog_trigger", "alert": False, "ts": "2026-08-06T14:00:00+00:00"},
+        {"event_type": "watchdog_trigger", "alert": True, "ts": "2026-08-06T14:05:00+00:00"},
+        {"event_type": "candidate_evaluation", "decision": "keep_watching",
+         "ts": "2026-08-06T14:06:00+00:00"},
+        {"event_type": "candidate_evaluation", "decision": "CONFIRM_ENTRY",
+         "ts": "2026-08-06T14:07:00+00:00"},
+        {"event_type": "entry_decision", "decision": "enter", "execution_allowed": True,
+         "ts": "2026-08-06T14:08:00+00:00"},
+        {"event_type": "execution_lease_issued", "authorized": True, "decision": "allow",
+         "ts": "2026-08-06T14:08:00+00:00"},
+        {"event_type": "entry_fill", "trade_id": "t1", "option_id": "opt-a",
+         "ts": "2026-08-06T14:09:00+00:00"},
+        {"event_type": "no_trade_decision", "stage": "entry_gate",
+         "reason_codes": ["budget_check:fail"], "ts": "2026-08-06T15:00:00+00:00"},
+        # outside the window
+        {"event_type": "entry_fill", "trade_id": "t9", "option_id": "opt-z",
+         "ts": "2026-08-05T14:09:00+00:00"},
+    ]
+    f = oj.funnel_counts(events, start=date(2026, 8, 6), end=date(2026, 8, 6))
+    assert f["watchdog_ticks"] == 2 and f["watchdog_alerts"] == 1
+    assert f["candidate_evaluations"] == 2 and f["candidate_confirms"] == 1
+    assert f["entry_decisions"] == 1 and f["gates_passed"] == 1
+    assert f["leases_issued"] == 1 and f["fills"] == 1
+    assert f["refusals_by_stage"] == {"entry_gate": 1}
+    assert ("entry_gate:budget_check:fail", 1) in f["top_refusal_reasons"]
+
+
+def test_funnel_counts_dedupes_a_fill_journaled_by_two_lanes():
+    # The order guard journals order_filled seconds after the controller's entry_fill for the SAME
+    # order; counting both is how trades_today read 3 on a 2-trade day.
+    from datetime import date
+    events = [
+        {"event_type": "entry_fill", "trade_id": "t1", "option_id": "opt-a",
+         "ts": "2026-08-06T14:09:00+00:00"},
+        {"event_type": "order_filled", "option_id": "opt-a", "ts": "2026-08-06T14:09:20+00:00"},
+    ]
+    assert oj.funnel_counts(events, start=date(2026, 8, 6), end=date(2026, 8, 6))["fills"] == 1
+
+
+def test_funnel_counts_and_weekly_telemetry_agree_on_the_same_window():
+    from datetime import date, datetime, timezone
+    now = datetime(2026, 8, 7, 20, 0, tzinfo=timezone.utc)     # Friday of ISO week 2026-W32
+    events = [
+        {"event_type": "entry_decision", "decision": "enter", "execution_allowed": True,
+         "ts": "2026-08-06T14:08:00+00:00"},
+        {"event_type": "no_trade_decision", "stage": "preflight",
+         "reason_codes": ["market_snapshot_stale"], "ts": "2026-08-04T14:00:00+00:00"},
+    ]
+    wk = oj.weekly_telemetry(events, now=now)
+    f = oj.funnel_counts(events, start=date(2026, 8, 3), end=date(2026, 8, 7))
+    for key in ("entry_decisions", "gates_passed", "leases_issued", "no_trade_decisions",
+                "lease_refusals", "refusals_by_stage"):
+        assert wk[key] == f[key], key
+
+
 def test_weekly_telemetry_tripwire_quiet_early_week_or_with_trades():
     from datetime import datetime, timedelta, timezone
     monday = datetime(2026, 7, 27, 15, 0, tzinfo=timezone.utc)
