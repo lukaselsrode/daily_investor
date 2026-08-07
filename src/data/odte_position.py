@@ -115,6 +115,15 @@ DEFAULT_BID_FLOOR = 0.05         # per-share bid at/under which an option is tre
 # Overridable per plan via `max_loss_pct` / `risk_rules.max_loss_pct`.
 DEFAULT_MAX_LOSS_PCT = -0.40
 
+# CLOCK BACKSTOP (2026-08-07). Same defect on the time axis, and worse: `_time_risk` returned None
+# on an absent `time_rules`, so a plan declaring none had no clock exit whatsoever. A WINNING 0DTE
+# position at 15:59 ET read HOLD and rode into expiry — where an out-of-the-money contract is worth
+# zero. The max-loss backstop cannot catch that (it is a winner) and neither can BID_FLOOR (the bid
+# is healthy). Measured the same way: no exit in the journal has ever occurred after 15:30 ET
+# (latest 14:20, n=12), so a 15:45 flatten has never bound a real trade.
+# Overridable per plan via `time_rules.flat_before`.
+DEFAULT_FLAT_BEFORE_ET = "15:45"
+
 # Bid-memory / giveback protection (the rule that closed the 2026-08-03 winner, prose-only until
 # now): once the best-seen bid prints a meaningful gain over entry, never let it round-trip — fire
 # a harvest when the live bid has given back a large share of the best-seen gain.
@@ -291,7 +300,23 @@ def _thesis_breaches(option_type: str, thesis: dict, snapshot: dict) -> list[str
     return out
 
 
-def _time_risk(time_rules: dict, snapshot: dict, now: datetime | None) -> dict | None:
+def _time_risk(time_rules: dict | None, snapshot: dict, now: datetime | None) -> dict | None:
+    """Clock-based exits. An ABSENT `time_rules` key falls back to DEFAULT_FLAT_BEFORE_ET.
+
+    2026-08-07: this returned None whenever `time_rules` was falsy, so a plan that never mentioned
+    the key had NO clock exit at all — a WINNING 0DTE position at 15:59 ET read HOLD and rode into
+    expiry, where an out-of-the-money contract is worth zero. Neither the max-loss backstop (it is a
+    winner) nor BID_FLOOR (the bid is healthy) covers that. The default is measured, not chosen: no
+    exit in the journal has ever occurred after 15:30 ET (latest 14:20, n=12), so a 15:45 flatten
+    has never bound a real trade.
+
+    ABSENT and EXPLICITLY-EMPTY are treated differently on purpose. `time_rules` missing means the
+    author never considered the clock, and gets the backstop. `time_rules: {}` is a deliberate
+    declaration that this position has no clock exit, and is honoured — that is the contract the
+    existing suite pins by passing `time_rules={}` to isolate the profit and bid-memory axes.
+    """
+    if time_rules is None:
+        time_rules = {"flat_before": DEFAULT_FLAT_BEFORE_ET}
     if not time_rules:
         return None
     et = _now_et(snapshot, now)
@@ -421,7 +446,7 @@ def evaluate_position(plan: dict | None, snapshot: dict | None,
                          "detail": f"bid {bid:.2f} <= floor {bid_floor:.2f}"})
 
     # 5) Time risk.
-    t = _time_risk(plan.get("time_rules") or {}, snapshot, now)
+    t = _time_risk(plan.get("time_rules"), snapshot, now)
     if t:
         triggers.append(t)
 

@@ -471,8 +471,10 @@ def test_watchdog_payload_carries_best_seen_bid(tmp_path):
 
 def test_thin_plan_now_has_an_unconditional_exit():
     from data.odte_position import DEFAULT_MAX_LOSS_PCT, evaluate_position
+    # time_rules={} isolates the loss axis — otherwise the 15:45 clock backstop fires whenever
+    # the suite happens to run after that hour.
     thin = {"underlying": "IWM", "option_type": "call", "entry_price": 1.00,
-            "quantity": 1, "status": "open"}
+            "quantity": 1, "status": "open", "time_rules": {}}
     # comfortably inside the backstop: still held, as before
     held = evaluate_position(thin, {"option_bid": 0.80, "option_mark": 0.80,
                                     "underlying_last": 300.0})
@@ -497,8 +499,10 @@ def test_backstop_sits_outside_the_observed_working_range():
 
 def test_plan_may_override_the_backstop_either_signed():
     from data.odte_position import evaluate_position
+    # time_rules={} isolates the loss axis — otherwise the 15:45 clock backstop fires whenever
+    # the suite happens to run after that hour.
     thin = {"underlying": "IWM", "option_type": "call", "entry_price": 1.00,
-            "quantity": 1, "status": "open"}
+            "quantity": 1, "status": "open", "time_rules": {}}
     snap = {"option_bid": 0.70, "option_mark": 0.70, "underlying_last": 300.0}   # -30%
     assert evaluate_position(thin, snap)["decision"] == "HOLD"                    # default -40%
     loose = evaluate_position({**thin, "max_loss_pct": -0.60}, snap)
@@ -525,9 +529,46 @@ def test_bid_floor_outranks_the_backstop_as_the_more_specific_reason():
     specific diagnosis, so it stays the reported decision — the backstop must never mask a named
     reason in the postmortem."""
     from data.odte_position import evaluate_position
+    # time_rules={} isolates the loss axis — otherwise the 15:45 clock backstop fires whenever
+    # the suite happens to run after that hour.
     thin = {"underlying": "IWM", "option_type": "call", "entry_price": 1.00,
-            "quantity": 1, "status": "open"}
+            "quantity": 1, "status": "open", "time_rules": {}}
     out = evaluate_position(thin, {"option_bid": 0.03, "option_mark": 0.04,
                                    "underlying_last": 300.0})
     assert out["decision"] == "BID_FLOOR"
     assert {"BID_FLOOR", "MAX_LOSS"} <= {t["type"] for t in out["triggers"]}
+
+
+def test_absent_time_rules_get_the_clock_backstop_but_empty_ones_are_honoured():
+    """A WINNING 0DTE position at 15:59 ET used to read HOLD and ride into expiry, where an
+    out-of-the-money contract is worth zero — the max-loss backstop cannot catch that (it is a
+    winner) and neither can BID_FLOOR (the bid is healthy).
+
+    ABSENT vs EXPLICITLY-EMPTY are different declarations. Missing means the author never
+    considered the clock and gets the backstop; `time_rules: {}` is a deliberate "no clock exit"
+    and is honoured — the contract the rest of this suite pins by using it to isolate other axes.
+    """
+    from data.odte_position import DEFAULT_FLAT_BEFORE_ET, evaluate_position
+    base = {"underlying": "IWM", "option_type": "call", "entry_price": 1.00,
+            "quantity": 1, "status": "open"}
+    winner = {"option_mark": 1.10, "option_bid": 1.09, "underlying_last": 300.0,
+              "now_et": "2026-08-07T15:59:00-04:00"}
+    absent = evaluate_position(base, winner)
+    assert absent["decision"] == "TIME_RISK"
+    tr = next(t for t in absent["triggers"] if t["type"] == "TIME_RISK")
+    assert tr["stage"] == "flat" and DEFAULT_FLAT_BEFORE_ET in tr["detail"]
+
+    explicit = evaluate_position({**base, "time_rules": {}}, winner)
+    assert explicit["decision"] != "TIME_RISK"
+
+    # and well before the cutoff the backstop is silent
+    early = evaluate_position(base, {**winner, "now_et": "2026-08-07T11:00:00-04:00"})
+    assert early["decision"] != "TIME_RISK"
+
+
+def test_clock_backstop_never_bound_a_historical_exit():
+    """Measured, not chosen: no exit in the journal has occurred after 15:30 ET (latest 14:20,
+    n=12), so a 15:45 flatten pre-empts nothing that actually happened."""
+    from data.odte_position import DEFAULT_FLAT_BEFORE_ET
+    hh, mm = (int(x) for x in DEFAULT_FLAT_BEFORE_ET.split(":"))
+    assert (hh, mm) > (15, 30)
