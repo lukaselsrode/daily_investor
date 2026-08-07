@@ -232,7 +232,10 @@ def run_convert(candidate_json: str | dict | None = None, candidate_path: str | 
     from data.odte_journal import (
         DEFAULT_JOURNAL_PATH,
         append_decision_journal,
+        event_from_candidate_evaluation,
+        event_from_day_score,
         event_from_entry_gate,
+        event_from_execution_lease,
         read_events,
     )
     from data.odte_vehicle_score import score_vehicle
@@ -365,6 +368,13 @@ def run_convert(candidate_json: str | dict | None = None, candidate_path: str | 
     # VISIBLE, never a silent re-tiering.
     payload["day_score"] = {"verdict": day_score.get("verdict"), "score": day_score.get("score"),
                             "components": day_score.get("components")}
+    # Journal the score where it is COMPUTED. The artifact under reports/ is overwritten every
+    # tick, so before this the only day_score events in the journal were whatever the EOD artifact
+    # sweep happened to catch — 2 events on one day, which cannot show whether GOOD_DAY was ever
+    # structurally reachable (max_possible_score vs the threshold) as the session progressed.
+    if journal:
+        append_decision_journal(event_from_day_score(day_score), source="odte_convert",
+                                event_type="day_score", journal_path=journal_path, now=now)
     payload["gap_pct_backfilled"] = gap_backfilled
     if gap_backfilled:
         payload["session_constants"] = session_constants
@@ -377,6 +387,14 @@ def run_convert(candidate_json: str | dict | None = None, candidate_path: str | 
                                   broker_health=broker, now=now)
     payload["candidate_decision"] = cd
     payload["candidate"] = _dict(cd.get("candidate"))
+    # Journal the evaluation on EVERY tick, before the refusal branch below — the near-miss
+    # population (tape confirmed, one clause short) lives entirely in the ticks that do NOT
+    # convert, and until now those checks reached only an overwritten artifact. Telemetry only:
+    # scan_only, never gate input. append_decision_journal never raises.
+    if journal:
+        append_decision_journal(event_from_candidate_evaluation(cd),
+                                source="odte_convert", event_type="candidate_evaluation",
+                                journal_path=journal_path, now=now)
     if write:
         base_dir.mkdir(parents=True, exist_ok=True)
         atomic_write_text(base_dir / CANDIDATE_DECISION_FILENAME,
@@ -436,17 +454,17 @@ def run_convert(candidate_json: str | dict | None = None, candidate_path: str | 
     payload["authorization"] = auth
     if journal:
         lease = _dict(auth.get("lease"))
-        lease_event = {
-            "event_type": "execution_lease_issued",
-            "decision": "issue" if auth.get("authorized") else "deny",
-            "authorized": bool(auth.get("authorized")),
-            "lease_id": lease.get("lease_id"),
+        # Use the canonical builder rather than a hand-rolled subset: the atomic path was dropping
+        # issued_at/expires_at/max_limit_price/max_debit/max_premium_loss/quantity/risk_mode, all of
+        # which the direct-CLI path recorded and all of which are already in `auth` here. Without
+        # them a lease's TTL and its price/debit ceilings are unreadable after the fact, so "expired"
+        # has to be inferred from the absence of a fill instead of read.
+        lease_event = event_from_execution_lease(auth, extra={
             "tier": lease.get("tier") or locked.get("tier"),
             "anchor_quote": lease.get("anchor_quote"),
-            "reason_codes": list(auth.get("reason_codes") or []),
             "ts": now.isoformat(timespec="seconds"),
             **_identity(locked),
-        }
+        })
         append_decision_journal(lease_event, source="odte_convert",
                                 event_type="execution_lease_issued",
                                 journal_path=journal_path, now=now)

@@ -490,6 +490,9 @@ _INGEST_PROTECTED_LIFECYCLE = frozenset({
     *ENTRY_FILL_EVENTS, *EXIT_FILL_EVENTS, "entry_decision", "execution_lease_issued",
     "execution_lease_consumed", "execution_safety_incident",
     "execution_safety_incident_adjudicated", "no_trade_decision", "postmortem",
+    # First-party at computation time (odte_convert / odte-day-score). An EOD artifact sweep would
+    # re-add the same decision under a different dedupe key and double-count it.
+    "candidate_evaluation", "day_score",
 })
 
 _SAME_FILL_WINDOW_MINUTES = 10.0
@@ -1022,7 +1025,7 @@ def _classify_day_stream(e: dict) -> str:
     src = str(e.get("source") or "")
     if et == "market_snapshot" or "market_snapshot" in src:
         return "market_snapshots"
-    if et == "candidate" or src == "ingest:candidate":
+    if et in ("candidate", "candidate_evaluation") or src == "ingest:candidate":
         return "candidates"
     if et == "vehicle_score" or "vehicle_score" in src or e.get("vehicle_score"):
         return "vehicle_scores"
@@ -1223,6 +1226,72 @@ def event_from_entry_gate(gate_decision: dict, trade_id: str | None = None,
         e["allow_reentry_after_green"] = True
     if g.get("green_day_preservation"):
         e["green_day_preservation"] = g.get("green_day_preservation")
+    if extra:
+        e.update(extra)
+    return e
+
+
+def event_from_candidate_evaluation(cd_payload: dict, trade_id: str | None = None,
+                                    extra: dict | None = None) -> dict:
+    """Convert an `evaluate_candidate_watch` payload into a `candidate_evaluation` journal event.
+
+    The candidate watch computes a full `checks` dict on EVERY tick — VWAP side, ORB state,
+    confirmer/dissenter counts, the VIXY read, the tier it would have minted, minutes to close —
+    and then discards everything except the verdict. Only the last tick of the day survived, in an
+    overwritten artifact, so questions of the form "how many setups had the tape but failed one
+    clause?" were unanswerable and every gate-loosening decision stayed a judgment call.
+
+    Recording the checks makes the near-miss population countable. It is TELEMETRY: the event is
+    `scan_only` with `execution_allowed=False` by construction and never feeds a gate. Does NOT
+    auto-append — the seam stays explicit, as with `event_from_entry_gate`."""
+    p = cd_payload or {}
+    cand = p.get("candidate") if isinstance(p.get("candidate"), dict) else {}
+    checks = p.get("checks") if isinstance(p.get("checks"), dict) else {}
+    e = {
+        "event_type": "candidate_evaluation",
+        "trade_id": trade_id or p.get("trade_id"),
+        "underlying": cand.get("ticker") or cand.get("underlying") or cand.get("symbol"),
+        "direction": cand.get("direction"),
+        "state": p.get("state"),
+        "decision": p.get("decision"),
+        "reasons": list(p.get("reasons") or []),
+        # Verbatim — the whole point is that the individual clause results survive.
+        "checks": dict(checks),
+        "tier": checks.get("tier") or cand.get("tier"),
+        "candidate_fingerprint": cand.get("candidate_fingerprint"),
+        "option_id": cand.get("option_id") or cand.get("id") or cand.get("occ_symbol"),
+        "expiration_date": cand.get("expiration_date"),
+        "strike_price": cand.get("strike_price"),
+        "option_type": cand.get("option_type"),
+        "generated_at": p.get("generated_at"),
+        "scan_only": True,
+        "execution_allowed": False,
+    }
+    if extra:
+        e.update(extra)
+    return e
+
+
+def event_from_day_score(score_payload: dict, extra: dict | None = None) -> dict:
+    """Convert an `odte-day-score` payload into a `day_score` journal event, including the headroom
+    telemetry (`components_supplied`/`components_missing`/`max_possible_score`) that says whether a
+    GOOD_DAY was even reachable. Does NOT auto-append."""
+    p = score_payload or {}
+    e = {
+        "event_type": "day_score",
+        "decision": p.get("verdict"),
+        "score": p.get("score"),
+        "verdict": p.get("verdict"),
+        "components": dict(p.get("components") or {}),
+        "components_supplied": p.get("components_supplied"),
+        "components_missing": list(p.get("components_missing") or []),
+        "max_possible_score": p.get("max_possible_score"),
+        "reasons": list(p.get("reasons") or []),
+        "basis": p.get("basis"),
+        "generated_at": p.get("generated_at"),
+        "scan_only": True,
+        "execution_allowed": False,
+    }
     if extra:
         e.update(extra)
     return e

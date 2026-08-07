@@ -497,6 +497,8 @@ def _cmd_odte_day_score(rest: list[str]) -> None:
             gamma_json=_flag_value(rest, "--gamma-json"),
             out_dir=_flag_value(rest, "--out-dir"),
             write="--write" in rest,
+            journal="--journal" in rest,
+            journal_path=_flag_value(rest, "--journal-path"),
         )
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"odte-day-score: could not read/parse input: {exc}")

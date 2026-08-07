@@ -146,6 +146,79 @@ def test_degraded_candidate_watch_journals_identity_bound_no_trade(tmp_path):
     assert last.get("candidate_fingerprint")
 
 
+# --- telemetry recorded at computation time (2026-08-06) ---------------------------------------
+# The checks the candidate watch computes and the day score it derives were both discarded every
+# tick, surviving only in overwritten artifacts. They are journaled now so the near-miss population
+# and the day-score headroom become countable. Both are scan_only telemetry — never gate inputs.
+
+def test_candidate_evaluation_journaled_on_every_tick_including_non_converting(tmp_path):
+    # A tick that does NOT convert is exactly the one carrying near-miss evidence.
+    payload = _convert(tmp_path, market=_market(**{"QQQ": {"last": 724.2, "above_vwap": True,
+                                                          "orb_state": "inside"}}))
+    assert payload["converted"] is False
+    events = oj.read_events(str(tmp_path / "decision_journal.jsonl"))
+    evals = [e for e in events if e.get("event_type") == "candidate_evaluation"]
+    assert evals, "the evaluation must be recorded even when the candidate does not convert"
+    checks = evals[-1]["checks"]
+    # the clause-level results that make an ORB near-miss countable
+    assert checks["underlying_orb_state"] == "inside"
+    assert checks["underlying_above_vwap"] is True
+    assert "confirmations" in checks and "vixy_weak" in checks
+    assert evals[-1]["scan_only"] is True and evals[-1]["execution_allowed"] is False
+
+
+def test_candidate_evaluation_journaled_on_converting_tick(tmp_path):
+    payload = _convert(tmp_path)
+    assert payload["converted"] is True, payload["reason_codes"]
+    events = oj.read_events(str(tmp_path / "decision_journal.jsonl"))
+    evals = [e for e in events if e.get("event_type") == "candidate_evaluation"]
+    assert evals and evals[-1]["checks"].get("tier")
+
+
+def test_telemetry_events_do_not_disturb_trade_or_refusal_counters(tmp_path):
+    # The 2026-08-06 lesson: a new event type reaching the aggregators is how a money/volume
+    # counter silently drifts. Telemetry must be inert to every one of them.
+    _convert(tmp_path)
+    events = oj.read_events(str(tmp_path / "decision_journal.jsonl"))
+    assert any(e.get("event_type") == "candidate_evaluation" for e in events)
+    assert any(e.get("event_type") == "day_score" for e in events)
+    s = oj.summarize(events)
+    assert s["n_trades"] == 0 and s["n_closed"] == 0 and s["total_realized_pnl"] == 0
+    wt = oj.weekly_telemetry(events, now=NOW)
+    assert wt["trades_this_week"] == 0
+    assert wt["no_trade_decisions"] == 0 and wt["lease_refusals"] == 0
+    assert oj.daily_trade_budget(events, now=NOW)["trades_today"] == 0
+
+
+def test_day_score_journaled_with_headroom_telemetry(tmp_path):
+    _convert(tmp_path)
+    events = oj.read_events(str(tmp_path / "decision_journal.jsonl"))
+    scores = [e for e in events if e.get("event_type") == "day_score"]
+    assert scores
+    last = scores[-1]
+    assert last["verdict"] and isinstance(last["components"], dict)
+    # headroom: was a GOOD_DAY even reachable with the components actually supplied?
+    assert last["components_supplied"] is not None
+    assert last["max_possible_score"] is not None
+    assert isinstance(last["components_missing"], list)
+
+
+def test_lease_event_carries_ttl_and_ceilings(tmp_path):
+    # The atomic path used to journal a 7-key subset, so a lease's expiry and its price/debit
+    # ceilings were unreadable after the fact and "expired" had to be inferred.
+    payload = _convert(tmp_path)
+    assert payload["converted"] is True, payload["reason_codes"]
+    events = oj.read_events(str(tmp_path / "decision_journal.jsonl"))
+    lease_ev = [e for e in events if e.get("event_type") == "execution_lease_issued"][-1]
+    for key in ("issued_at", "expires_at", "max_limit_price", "max_debit", "quantity",
+                "risk_mode", "lease_id"):
+        assert lease_ev.get(key) is not None, f"lease event missing {key}"
+    assert lease_ev["authorized"] is True
+    assert lease_ev["tier"] and lease_ev["option_id"]
+    # mutual consistency: the recorded ceilings can never contradict each other
+    assert lease_ev["max_limit_price"] * lease_ev["quantity"] * 100.0 <= lease_ev["max_debit"] + 1e-9
+
+
 def test_journal_append_failure_withholds_lease(tmp_path):
     # journal_path pointing at a DIRECTORY makes the append fail → the gate cannot be recorded →
     # no lease is minted (fail closed), even though every input would otherwise authorize.

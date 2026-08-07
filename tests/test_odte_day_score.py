@@ -163,3 +163,42 @@ def test_minutes_to_close_derived_from_wall_clock_during_rth():
     # A snapshot that DOES carry the key always wins over the clock.
     p4 = ods.score_day(market={**market, "minutes_to_close": 300}, now=late)
     assert p4["verdict"] != "AVOID"
+
+
+# --- first-party journaling (2026-08-06) --------------------------------------------------------
+# The artifact under reports/ is overwritten every tick, so before this the journal only held
+# whatever the EOD sweep caught — 2 events on one day, which cannot show whether GOOD_DAY was ever
+# structurally reachable as the session wore on.
+
+def test_run_day_score_journals_when_asked(tmp_path):
+    import data.odte_journal as oj
+    jp = str(tmp_path / "decision_journal.jsonl")
+    market = {"spy_above_vwap": True, "spy_orb_state": "above",
+              "qqq_above_vwap": True, "qqq_orb_state": "above",
+              "iwm_above_vwap": True, "iwm_orb_state": "above", "gap_pct": 0.5}
+    payload = run_day_score(market_json=json.dumps(market), journal=True, journal_path=jp)
+    events = [e for e in oj.read_events(jp) if e.get("event_type") == "day_score"]
+    assert len(events) == 1
+    ev = events[0]
+    assert ev["verdict"] == payload["verdict"] and ev["score"] == payload["score"]
+    assert ev["components_supplied"] == payload["components_supplied"]
+    assert ev["max_possible_score"] == payload["max_possible_score"]
+    assert ev["components_missing"] == payload["components_missing"]
+
+
+def test_run_day_score_does_not_journal_by_default(tmp_path):
+    import data.odte_journal as oj
+    jp = str(tmp_path / "decision_journal.jsonl")
+    run_day_score(market_json=json.dumps({"gap_pct": 0.5}), journal_path=jp)
+    assert oj.read_events(jp) == []
+
+
+def test_written_artifact_is_not_re_ingested_after_first_party_journaling(tmp_path):
+    # Both paths active at once must not double-count: ingest refuses the day_score type.
+    import data.odte_journal as oj
+    jp = str(tmp_path / "decision_journal.jsonl")
+    run_day_score(market_json=json.dumps({"gap_pct": 0.5}), out_dir=str(tmp_path),
+                  write=True, journal=True, journal_path=jp)
+    assert len([e for e in oj.read_events(jp) if e.get("event_type") == "day_score"]) == 1
+    oj.ingest_loose_artifacts(data_dir=str(tmp_path), journal_path=jp)
+    assert len([e for e in oj.read_events(jp) if e.get("event_type") == "day_score"]) == 1

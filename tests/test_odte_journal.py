@@ -1200,6 +1200,77 @@ def test_ingest_refuses_lifecycle_event_payloads(tmp_path):
     assert any(e.get("event_type") == "controller_event" for e in events)
 
 
+def test_ingest_refuses_first_party_telemetry_types(tmp_path):
+    # candidate_evaluation and day_score are written first-party at COMPUTATION time. An EOD
+    # artifact sweep re-appending the same decision would mint a fresh event_id that dedupe
+    # cannot catch, so the series would double-count.
+    import json
+    jp = str(tmp_path / "decision_journal.jsonl")
+    (tmp_path / "candidate_decision_copy.json").write_text(json.dumps(
+        {"event_type": "candidate_evaluation", "state": "WATCHING_CONFIRMATION",
+         "ts": "2026-08-06T15:00:00+00:00"}))
+    (tmp_path / "odte_day_score.json").write_text(json.dumps(
+        {"verdict": "CHOP", "score": 1, "ts": "2026-08-06T15:00:00+00:00"}))
+    s = oj.ingest_loose_artifacts(data_dir=str(tmp_path), journal_path=jp)
+    assert s.get("lifecycle_skipped", 0) == 2
+    assert oj.read_events(jp) == []
+
+
+def test_candidate_evaluation_routes_to_the_candidates_stream(tmp_path):
+    # Left unrouted it would land in controller_events and be buried among ~470 rows/day.
+    td = "2026-08-06"
+    oj.append_event({"event_type": "candidate_evaluation", "trade_date": td, "underlying": "SPY",
+                     "ts": f"{td}T14:00:00+00:00", "state": "WATCHING_CONFIRMATION",
+                     "checks": {"underlying_orb_state": "inside"}},
+                    journal_path=str(tmp_path / "decision_journal.jsonl"))
+    s = oj.build_day_packet(td, journal_path=str(tmp_path / "decision_journal.jsonl"),
+                            out_root=str(tmp_path / "days"))
+    assert s["files"]["candidates.jsonl"] == 1
+    assert s["files"].get("controller_events.jsonl", 0) == 0
+
+
+def test_event_from_candidate_evaluation_carries_checks_verbatim():
+    cd = {"state": "WATCHING_CONFIRMATION", "decision": "keep_watching",
+          "generated_at": "2026-08-06T14:00:00+00:00",
+          "reasons": ["CHOP requires at least B+ ETF confirmation"],
+          "candidate": {"ticker": "SPY", "direction": "bullish", "option_id": "SPY-C",
+                        "candidate_fingerprint": "fp-1", "tier": "full"},
+          "checks": {"underlying_above_vwap": True, "underlying_orb_state": "inside",
+                     "confirmations": 2, "confirmers": ["QQQ", "IWM"], "dissenters": [],
+                     "vixy_weak": True, "vixy_firming": False, "tier": "b_plus",
+                     "minutes_to_close": 180}}
+    ev = oj.event_from_candidate_evaluation(cd)
+    assert ev["event_type"] == "candidate_evaluation"
+    assert ev["checks"] == cd["checks"]           # verbatim — the clause results are the point
+    assert ev["underlying"] == "SPY" and ev["candidate_fingerprint"] == "fp-1"
+    assert ev["tier"] == "b_plus"                 # the tier the watch would have minted
+    assert ev["scan_only"] is True and ev["execution_allowed"] is False
+
+
+def test_event_from_day_score_carries_headroom():
+    payload = {"verdict": "AVOID", "score": -1,
+               "components": {"trend": 3, "volatility": 0, "gap": 0, "expected_move": 0, "time": -4},
+               "components_supplied": 4, "components_missing": ["expected_move"],
+               "max_possible_score": 4, "reasons": ["late session"], "basis": "scorecard",
+               "generated_at": "2026-08-06T19:00:00+00:00"}
+    ev = oj.event_from_day_score(payload)
+    assert ev["event_type"] == "day_score" and ev["verdict"] == "AVOID"
+    assert ev["components_supplied"] == 4 and ev["max_possible_score"] == 4
+    assert ev["components_missing"] == ["expected_move"]
+    assert ev["execution_allowed"] is False
+
+
+def test_telemetry_events_are_inert_to_summarize():
+    # summarize() keys trades on trade_id; telemetry carries none, so it can only ever show up
+    # in by_type. Pinned because a countable telemetry event is how P/L drifts.
+    events = [{"event_type": "candidate_evaluation", "ts": "2026-08-06T14:00:00+00:00",
+               "checks": {"confirmations": 3}},
+              {"event_type": "day_score", "ts": "2026-08-06T14:00:00+00:00", "score": 2}]
+    s = oj.summarize(events)
+    assert s["n_trades"] == 0 and s["n_closed"] == 0 and s["total_realized_pnl"] == 0
+    assert s["by_type"]["candidate_evaluation"] == 1 and s["by_type"]["day_score"] == 1
+
+
 def test_money_counters_ignore_ingest_sourced_fills():
     # Belt and suspenders: even if a lifecycle event slips in under an ingest: source, the
     # budget and green-day counters never count it.

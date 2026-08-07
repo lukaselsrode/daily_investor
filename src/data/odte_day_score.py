@@ -302,7 +302,17 @@ def score_day(market: dict | None = None, gamma: dict | None = None,
 
 def run_day_score(market_json: str | None = None, market_path: str | None = None,
                   gamma_json: str | None = None, gamma_path: str | None = None,
-                  out_dir: str | None = None, write: bool = False) -> dict:
+                  out_dir: str | None = None, write: bool = False,
+                  journal: bool = False, journal_path: str | None = None) -> dict:
+    """Score the day. `write` persists the artifact; `journal` records the score as a first-party
+    `day_score` event.
+
+    The score is recomputed all session, but the artifact is overwritten each time — so before
+    first-party journaling the only trace that survived was whatever the EOD artifact sweep happened
+    to catch (2 events on a single day), which is not a series. Journaling at computation time is
+    what makes the headroom telemetry — components_supplied / components_missing /
+    max_possible_score, i.e. whether a GOOD_DAY was even reachable — chartable over time.
+    Default off so existing callers are unaffected."""
     market = _load_json(market_path, market_json, default={})
     gamma = _load_json(gamma_path, gamma_json, default={})
     payload = score_day(market=market, gamma=gamma, now=datetime.now(timezone.utc))
@@ -312,6 +322,10 @@ def run_day_score(market_json: str | None = None, market_path: str | None = None
         path = out / "odte_day_score.json"
         path.write_text(json.dumps(payload, indent=2, default=str))
         payload["artifact"] = str(path)
+    if journal:
+        from data.odte_journal import append_decision_journal, event_from_day_score
+        append_decision_journal(event_from_day_score(payload), source="odte_day_score",
+                                event_type="day_score", journal_path=journal_path)
     return payload
 
 
