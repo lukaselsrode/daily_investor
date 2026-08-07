@@ -55,8 +55,11 @@ KEEP_FILES: frozenset[str] = frozenset({
 })
 
 # Canonical subdirectories — never entered, never moved.
+# `research` joined 2026-08-06: the 2026-08-04 sweep archived the August forecast artifacts the
+# 2026-09-01 audit job loads by path. Long-lived analysis output is not per-tick exhaust, and
+# `data/odte/` is gitignored, so the swept copy was the ONLY copy.
 KEEP_DIRS: frozenset[str] = frozenset({
-    "days", "reports", "scrape", "swarm", "precompute", "archive", "shadow",
+    "days", "reports", "scrape", "swarm", "precompute", "archive", "shadow", "research",
 })
 
 # Scrape snapshot kinds (data/odte/scrape/<kind>_text_YYYY_MM_DD_HH_MM.txt + stable pointer).
@@ -87,7 +90,7 @@ def run_cleanup(state_dir: str | None = None, *, apply: bool = False,
             elif name == "__pycache__":
                 swept.append(name + "/")
             else:
-                # Unknown top-level dir: sweep it whole (events/, research/, experiments/ class).
+                # Unknown top-level dir: sweep it whole (events/, experiments/ class).
                 swept.append(name + "/")
             continue
         if name in KEEP_FILES:

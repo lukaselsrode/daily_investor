@@ -76,6 +76,21 @@ def test_keep_list_covers_the_loop_state_contract():
         assert d in cl.KEEP_DIRS, d
 
 
+def test_research_artifacts_survive_the_sweep(tmp_path):
+    # 2026-08-04 swept data/odte/research/ whole, archiving the August forecast artifacts the
+    # 2026-09-01 audit job loads BY PATH. data/odte/ is gitignored, so that was the only copy.
+    _seed(tmp_path)
+    research = tmp_path / "research"
+    research.mkdir()
+    (research / "august_2026_profit_simulation.json").write_text("{}")
+    (research / "august_2026_profit_improvement_research.md").write_text("#")
+    payload = cl.run_cleanup(str(tmp_path), apply=True)
+    assert "research/" in payload["kept"]
+    assert "research/" not in payload["swept"]
+    assert (research / "august_2026_profit_simulation.json").exists()
+    assert (research / "august_2026_profit_improvement_research.md").exists()
+
+
 def test_prune_scrape_keeps_newest_and_stable_pointer(tmp_path):
     _seed(tmp_path)
     scrape = tmp_path / "scrape"
