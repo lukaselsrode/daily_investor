@@ -126,13 +126,21 @@ def _order_status(order: dict) -> str:
 
 
 def _symbol_block(market: dict, symbol: str | None) -> dict:
-    if not symbol:
-        return {}
-    for key in (symbol.upper(), symbol.lower()):
-        block = market.get(key)
-        if isinstance(block, dict):
-            return block
-    return {}
+    """Resolve a symbol's tape fields from EITHER snapshot shape.
+
+    2026-08-07: this used to check nested blocks ONLY, with no fallback to the flat
+    `{sym}_above_vwap` keys. `_thesis_invalidated` below is a safety rail on the order path — it
+    cancels a working order when the underlying flips VWAP against the position — and on a
+    flat-shaped snapshot it read an empty block and returned None. The rail simply did not fire.
+    That is FAIL-OPEN, unlike the fail-closed blindness in vehicle_score, and flat-only snapshots
+    demonstrably exist here: every ingested `market_snapshot` journal event is flat-shaped.
+    Masked in practice only because the live controller emits both shapes.
+
+    Routed through odte_breadth so this lane, candidate_watch, day_score and vehicle_score all
+    resolve a snapshot identically.
+    """
+    from data import odte_breadth as breadth
+    return breadth.symbol_block(market, symbol)
 
 
 def _norm_option_type(value: Any) -> str:

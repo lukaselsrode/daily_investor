@@ -522,3 +522,27 @@ def test_closing_order_is_out_of_scope_never_an_incident():
     assert r["state"] == og.NO_ORDER
     assert r["safety_incident"] is False and r["cancel_required"] is False
     assert any("closing order" in reason for reason in r["reasons"])
+
+
+def test_thesis_rail_reads_both_snapshot_shapes():
+    """`_thesis_invalidated` is a safety rail on the order path — it cancels a working order when
+    the underlying flips VWAP against the position. `_symbol_block` used to check nested blocks
+    ONLY, so on a flat-shaped snapshot it read an empty block and returned None: the rail did not
+    fire. FAIL-OPEN, and flat-only snapshots demonstrably exist here — every ingested
+    `market_snapshot` journal event is flat-shaped. Replay: the fix makes the rail fire on 156
+    previously-blind rows across 7 dates and silences it on zero.
+    """
+    import data.odte_order_guard as og
+    nested = {"SPY": {"above_vwap": False, "last": 770.0}}
+    flat = {"spy_above_vwap": False, "spy_last": 770.0}
+    both = {**flat, **nested}
+    expected = "SPY lost VWAP against the bullish thesis"
+    for name, market in (("nested", nested), ("flat", flat), ("both", both)):
+        assert og._thesis_invalidated("bullish", "SPY", market) == expected, name
+
+
+def test_thesis_rail_still_silent_when_the_thesis_holds():
+    import data.odte_order_guard as og
+    for market in ({"SPY": {"above_vwap": True, "last": 775.0}},
+                   {"spy_above_vwap": True, "spy_last": 775.0}):
+        assert og._thesis_invalidated("bullish", "SPY", market) is None
