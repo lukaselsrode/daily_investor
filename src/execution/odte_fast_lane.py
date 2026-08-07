@@ -289,7 +289,26 @@ class FastLaneDaemon:
                           json.dumps(status, indent=2, default=str))
 
     def _plan_path(self) -> Path:
+        """The plan we READ — always the canonical one. Observing the real position is the point."""
         return self.base_dir / DEFAULT_PLAN_FILENAME
+
+    def _plan_write_path(self) -> Path:
+        """The plan we WRITE — the shadow copy unless this lane actually owns the position.
+
+        SHADOW MUST NOT MUTATE SHARED STATE (2026-08-07). `MODE_SHADOW` wraps the broker client
+        (`ShadowClient`) so no order can escape, but the plan writes were ungated by mode: a shadow
+        daemon started while the CONTROLLER held a position would read the controller's
+        `active_trade.json`, recompute, and write its own version back — clobbering `thesis` (the
+        pre-entry invalidation) and `management.best_seen_bid` (the entire state of the bid-memory
+        rail). Wrapping the broker is not enough when two lanes share a state file.
+
+        This mirrors what the daemon already does for its journal: `shadow_journal_path` beside
+        `journal_path`, selected per event at `_journal`. Same idea, same directory.
+        """
+        if self.mode == MODE_LIVE:
+            return self._plan_path()
+        self.shadow_dir.mkdir(parents=True, exist_ok=True)
+        return self.shadow_dir / DEFAULT_PLAN_FILENAME
 
     # ── startup reconciliation ──────────────────────────────────────────────────────────────
 
@@ -621,7 +640,7 @@ class FastLaneDaemon:
             "management": {"cadence_seconds": 3, "best_seen_bid": None},
         }
         self.base_dir.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(self._plan_path(), json.dumps(plan, indent=2, default=str))
+        atomic_write_text(self._plan_write_path(), json.dumps(plan, indent=2, default=str))
         self._journal({"trade_id": trade_id, "underlying": lease.get("symbol"),
                        "option_id": lease.get("option_id"), "quantity": qty,
                        "fill_price": fill_price, "order_id": order.get("order_id")},
@@ -673,7 +692,7 @@ class FastLaneDaemon:
         if best_seen is not None and best_seen != (plan.get("management") or {}).get(
                 "best_seen_bid"):
             plan.setdefault("management", {})["best_seen_bid"] = best_seen
-            atomic_write_text(self._plan_path(), json.dumps(plan, indent=2, default=str))
+            atomic_write_text(self._plan_write_path(), json.dumps(plan, indent=2, default=str))
         decision = result["decision"]
         trigger = next((t for t in result["triggers"] if t["type"] == decision), {})
         exit_needed = str(trigger.get("action") or "").lower() in _EXIT_ACTIONS
@@ -732,7 +751,7 @@ class FastLaneDaemon:
                          "exit_price": exit_price, "exit_order_id": info.get("order_id"),
                          "realized_pnl": pnl,
                          "close_reason": f"{info.get('trigger_type')} (fast lane)"})
-            atomic_write_text(self._plan_path(), json.dumps(plan, indent=2, default=str))
+            atomic_write_text(self._plan_write_path(), json.dumps(plan, indent=2, default=str))
             self._journal({"trade_id": plan.get("trade_id"),
                            "underlying": plan.get("underlying"),
                            "option_id": plan.get("option_id"),

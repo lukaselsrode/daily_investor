@@ -306,3 +306,49 @@ def test_startup_unexplained_order_locks_entries(tmp_path):
     status = _tick(daemon)
     assert daemon.entries_locked is True and status["counts"]["incidents"] == 1
     assert any(e["event_type"] == "shadow_incident" for e in _shadow_events(tmp_path))
+
+
+# --- 2026-08-07: shadow must not mutate the controller's shared position plan ------------------
+
+def test_shadow_writes_the_plan_to_the_shadow_dir_not_the_shared_one(tmp_path):
+    """`MODE_SHADOW` wraps the broker client so no order can escape, but the plan WRITES were
+    ungated by mode. A shadow daemon started while the CONTROLLER holds a position would read the
+    controller's active_trade.json, recompute, and write its own version back — clobbering `thesis`
+    (the pre-entry invalidation) and `management.best_seen_bid` (the whole state of the bid-memory
+    rail). Wrapping the broker is not enough when two lanes share a state file.
+    """
+    daemon, session = _setup(tmp_path, stage="shadow")
+    canonical = tmp_path / "active_trade.json"
+    controller_plan = {"status": "open", "underlying": "SPY", "option_id": "opt-756c",
+                       "entry_price": 0.61, "quantity": 1, "mode": "scalp",
+                       "thesis": {"underlying_stop": 755.0},
+                       "management": {"best_seen_bid": 0.80}}
+    canonical.write_text(json.dumps(controller_plan))
+
+    # reads still come from the CANONICAL plan — observing the real position is the point
+    assert daemon._plan_path() == canonical
+    assert daemon._plan_write_path() != canonical
+    assert daemon._plan_write_path().parent.name == fl.SHADOW_DIRNAME
+
+    _queue_tape(session)
+    session.queue("get_option_quotes", _option_quote_payload(bid=0.62, ask=0.64))
+    _tick(daemon)
+
+    # the controller's plan is byte-identical: thesis and bid-memory survived
+    assert json.loads(canonical.read_text()) == controller_plan
+
+
+def test_live_mode_still_owns_the_canonical_plan(tmp_path):
+    """In `entries_live` the fast lane IS the owner, so it writes the real plan — otherwise the
+    controller and the guard would manage a position the daemon alone knows about."""
+    daemon, _ = _setup(tmp_path, stage="entries_live", mode="live")
+    assert daemon.mode == fl.MODE_LIVE
+    assert daemon._plan_write_path() == daemon._plan_path() == tmp_path / "active_trade.json"
+
+
+def test_exits_mode_also_keeps_off_the_shared_plan(tmp_path):
+    """`exits` may place real sell-to-close orders but does not own the ENTRY, so the controller
+    is still the plan's author — only MODE_LIVE writes the canonical copy."""
+    daemon, _ = _setup(tmp_path, stage="exits_live", mode="exits")
+    assert daemon.mode == fl.MODE_EXITS
+    assert daemon._plan_write_path().parent.name == fl.SHADOW_DIRNAME
