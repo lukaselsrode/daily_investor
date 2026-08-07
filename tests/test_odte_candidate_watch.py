@@ -825,3 +825,25 @@ def test_missing_opening_range_emits_no_invalidation_rather_than_a_zero_stop():
         {"ticker": "QQQ", "direction": "bullish"}, market=m, now=NOW)
     assert payload["decision"] == cw.CONFIRM_ENTRY
     assert "invalidation" not in payload["candidate"]
+
+
+def test_invalidation_survives_the_convert_round_trip():
+    """The lane that CAN compute the stop is not the lane that converts.
+
+    The scanning snapshot carries orb_high; the convert-time snapshot ships orb_state without it
+    (verified on the 2026-08-07 convert_market_* artifacts). odte_convert re-runs candidate-watch
+    with its own snapshot, so if the second pass overwrote `invalidation` with None the machine-read
+    plan would be lost at exactly the moment it is needed.
+    """
+    scan = _market()
+    scan["SPY"] = {"last": 773.0, "above_vwap": True, "orb_state": "above", "orb_high": 772.35}
+    first = cw.evaluate_candidate_watch({"ticker": "SPY", "direction": "bullish"},
+                                        market=scan, now=NOW)
+    inv = first["candidate"]["invalidation"]
+    assert inv["underlying_stop"] < inv["orb_level"]
+
+    convert_tape = _market()
+    convert_tape["SPY"] = {"last": 773.0, "above_vwap": True, "orb_state": "above"}  # no orb_high
+    second = cw.evaluate_candidate_watch(first["candidate"], market=convert_tape, now=NOW)
+    assert second["decision"] == cw.CONFIRM_ENTRY
+    assert second["candidate"]["invalidation"] == inv      # carried, never recomputed to None
