@@ -176,11 +176,27 @@ def _candidate_age_minutes(candidate: dict, now: datetime) -> float | None:
     return (now - created).total_seconds() / 60.0
 
 
+def _is_synthetic_scorecard(candidate: dict) -> bool:
+    """The watchdog's market-scorecard placeholder: a direction hint with no executable contract."""
+    return (str(candidate.get("source") or "").lower() == "market_scorecard"
+            or candidate.get("synthetic_market_scorecard") is True)
+
+
 def _extract_candidate(candidate: dict, market: dict) -> dict:
     """Return an explicit candidate or a simple ETF tape candidate from market-only inputs."""
     cand = dict(candidate or {})
     sym = _norm_symbol(cand.get("ticker") or cand.get("underlying") or cand.get("symbol"))
     direction = _norm_direction(cand.get("direction") or cand.get("option_type"))
+    # NOTE (2026-08-07, investigated and deliberately NOT changed): a synthetic market_scorecard
+    # candidate carries ticker+direction, so it early-returns here and holds the vehicle slot while
+    # the tape lane never runs behind it — measured live, the same tape read KEEP_WATCHING with the
+    # placeholder in the slot and CONFIRM_ENTRY with the slot empty. Letting it fall through to the
+    # tape lane looks like the fix and is NOT: the tape lane mints `{ticker, direction, source}`
+    # with no option_id (that arrives from the vehicle-score contract), so the candidate would
+    # confirm into precisely the `option_id=—` conversion posture the scan-only guard downstream
+    # exists to prevent. The real fix is to give the placeholder an exact contract before it can
+    # hold the slot, which belongs to the scan/vehicle lane. Until then the cost is bounded to one
+    # watch TTL by the expiry ordering fix (290d01d), which is the safe half of the problem.
     if sym and direction:
         cand["ticker"] = sym
         cand["direction"] = direction
@@ -324,6 +340,12 @@ def _lock_vehicle(cand: dict, symbol: str, direction: str, market: dict, now: da
     out.setdefault("selection_reason",
                    str(out.get("source") or "explicit_candidate"))
     out["relative_strength_rank"] = _relative_strength_rank(market, direction, symbol)
+    # BIRTH TIMESTAMP (2026-08-07). Only the expiry fall-through stamped `created_at`, so a
+    # candidate the tape lane minted from an empty slot carried none — `_candidate_age_minutes`
+    # returned None for it and the watch TTL never applied. It would have sat in the slot until
+    # something else displaced it. Stamp it here, where every candidate is locked, and BEFORE the
+    # selection_timestamp default below so the two agree and the fingerprint is unchanged.
+    out.setdefault("created_at", now.isoformat(timespec="seconds"))
     out.setdefault("selection_timestamp",
                    str(out.get("created_at") or out.get("ts") or out.get("generated_at")
                        or now.isoformat(timespec="seconds")))
@@ -394,8 +416,7 @@ def evaluate_candidate_watch(candidate: dict | None = None, *, market: dict | No
     # The watchdog's synthetic market scorecard exists only to keep the tape loop warm. It is not
     # an identity-bound vehicle candidate and must never be promoted to CONFIRM_ENTRY merely because
     # ETF breadth happens to align; doing so creates a conversion posture with option_id=—.
-    if (str(cand.get("source") or "").lower() == "market_scorecard"
-            or cand.get("synthetic_market_scorecard") is True):
+    if _is_synthetic_scorecard(cand):
         reasons.append("synthetic market_scorecard is scan-only; executable contract candidate required")
         return _payload(KEEP_WATCHING, cand, reasons, checks, now)
 

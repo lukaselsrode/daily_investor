@@ -739,3 +739,35 @@ def test_late_day_window_still_demands_a_plus_under_the_count_rule():
         {"ticker": "SPY", "direction": "bullish"}, market=m, now=NOW)
     assert payload["decision"] == cw.KEEP_WATCHING
     assert any("late-day" in r for r in payload["reasons"])
+
+
+def test_tape_minted_candidate_carries_a_birth_timestamp_so_it_can_expire():
+    # Only the expiry fall-through stamped `created_at`. A candidate the tape lane minted from an
+    # EMPTY slot carried none, so _candidate_age_minutes returned None and the watch TTL never
+    # applied to it — it would hold the slot until something else displaced it. Every locked
+    # candidate now gets a birth timestamp.
+    from datetime import timedelta
+    payload = cw.evaluate_candidate_watch({}, market=_market(), now=NOW)
+    cand = payload["candidate"]
+    assert cand["source"] == "etf_momentum_tape"
+    assert cand.get("created_at"), "tape-minted candidate has no birth timestamp"
+    assert cw._candidate_age_minutes(cand, NOW) == 0.0
+
+    # ...and it ages out on a later tick rather than living forever.
+    later = NOW + timedelta(minutes=25)
+    assert cw._candidate_age_minutes(cand, later) == 25.0
+    aged = cw.evaluate_candidate_watch(cand, market=_market(), now=later)
+    assert aged.get("prior_candidate_expired") is True or \
+        aged["decision"] == cw.EXPIRED_NO_CONFIRMATION
+
+
+def test_birth_timestamp_does_not_change_the_candidate_fingerprint():
+    # candidate_fingerprint hashes selection_timestamp (falling back to created_at), and
+    # selection_timestamp is defaulted from created_at immediately after. Stamping created_at must
+    # therefore be identity-neutral — a changed fingerprint would invalidate any bound lease.
+    import data.odte_execution_policy as xp
+    payload = cw.evaluate_candidate_watch({}, market=_market(), now=NOW)
+    cand = payload["candidate"]
+    assert cand["candidate_fingerprint"] == xp.candidate_fingerprint(cand)
+    without = {k: v for k, v in cand.items() if k != "created_at"}
+    assert xp.candidate_fingerprint(without) == cand["candidate_fingerprint"]
