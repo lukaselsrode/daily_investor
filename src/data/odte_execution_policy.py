@@ -33,6 +33,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+try:                                   # POSIX advisory locking; absent on some platforms
+    import fcntl
+except ImportError:                     # pragma: no cover - non-POSIX
+    fcntl = None                        # type: ignore[assignment]
+
 from core.paths import ODTE_DATA_DIR, atomic_write_text
 from data.odte_config import (
     B_PLUS_DEBIT_FRACTION,
@@ -307,15 +312,43 @@ def seed_consumed_ledger(path: str | Path) -> None:
     atomic_write_text(p, "[]")
 
 
-def record_consumed(path: str | Path, lease_id: str) -> None:
-    """Append one lease id to the ledger atomically (idempotent)."""
+def record_consumed(path: str | Path, lease_id: str) -> bool:
+    """Atomically claim `lease_id` in the single-use ledger. True if WE claimed it, False if it
+    was already there.
+
+    The return value is the point (2026-08-07). This was a bare read-modify-write —
+    load -> membership check -> add -> atomic_write_text — with no lock, so two consumers could
+    both pass their check before either recorded, and both place against ONE single-use lease.
+    Callers must treat False as "someone else consumed this lease" and refuse; see `consume_then`.
+
+    The lock is a SIDECAR file, not the ledger itself: `atomic_write_text` finishes with
+    `os.replace`, so a lock held on the ledger inode would be released to a stale inode and a
+    second process could lock the replacement independently. The sidecar is never replaced.
+    Best-effort, mirroring `odte_journal._append_jsonl_locked`: if flock is unavailable the
+    behaviour degrades to the previous read-modify-write rather than failing the place.
+    """
     p = Path(os.path.expanduser(str(path)))
-    ids = load_consumed_ids(p)
-    if lease_id in ids:
-        return
-    ids.add(lease_id)
     p.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(p, json.dumps(sorted(ids), indent=2))
+    lock_path = p.with_name(f".{p.name}.lock")
+    try:
+        lock = open(lock_path, "a+")
+    except OSError:
+        lock = None
+    try:
+        if lock is not None and fcntl is not None:
+            try:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            except OSError:
+                pass                      # best-effort; single-writer deployments are unaffected
+        ids = load_consumed_ids(p)
+        if lease_id in ids:
+            return False
+        ids.add(lease_id)
+        atomic_write_text(p, json.dumps(sorted(ids), indent=2))
+        return True
+    finally:
+        if lock is not None:
+            lock.close()
 
 
 # --- authorization core ---------------------------------------------------------------------

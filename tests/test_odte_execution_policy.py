@@ -647,3 +647,29 @@ def test_lease_ceiling_unclamped_when_bp_is_not_binding():
     lease = res["lease"]
     assert lease["max_limit_price"] == round(1.19 * (1 + xp.CHASE_BAND_FRACTION), 2)
     assert lease["quantity"] * lease["max_limit_price"] * 100.0 <= lease["max_debit"]
+
+
+# --- 2026-08-07: the single-use ledger is an atomic test-and-set ------------------------------
+
+def test_record_consumed_reports_whether_it_claimed_the_lease(tmp_path):
+    """This was a bare read-modify-write — load, membership check, add, atomic_write_text — with no
+    lock, so two consumers could both pass their check before either recorded and both place
+    against ONE single-use lease. The return value is what makes the claim atomic; callers treat
+    False as "someone else consumed this"."""
+    from data.odte_execution_policy import load_consumed_ids, record_consumed
+    ledger = tmp_path / "consumed_leases.json"
+    assert record_consumed(ledger, "L1") is True         # we claimed it
+    assert record_consumed(ledger, "L1") is False        # someone (us) already had it
+    assert record_consumed(ledger, "L2") is True
+    assert load_consumed_ids(ledger) == {"L1", "L2"}
+
+
+def test_ledger_lock_is_a_sidecar_not_the_ledger_itself(tmp_path):
+    """`atomic_write_text` ends in `os.replace`, so a lock held on the ledger inode would be
+    released to a stale inode and a second process could lock the replacement independently. The
+    sidecar is never replaced."""
+    from data.odte_execution_policy import record_consumed
+    ledger = tmp_path / "consumed_leases.json"
+    record_consumed(ledger, "L1")
+    assert (tmp_path / ".consumed_leases.json.lock").exists()
+    assert ledger.exists()

@@ -192,3 +192,37 @@ def test_closing_consume_then_places_without_burning(tmp_path):
                                                  now=NOW, place=place))
     assert check["allowed"] is True and result == {"order_id": "close-1"}
     assert "lease-abc123" not in xp.load_consumed_ids(ledger)  # closes never burn entry leases
+
+
+def test_two_consumers_racing_one_lease_place_exactly_once(tmp_path):
+    """`pre_place_check` READS the ledger to verify the lease is unconsumed; recording it is a
+    separate WRITE. Between the two, a second lane — the fast-lane daemon shares this exact ledger
+    path (`odte_fast_lane.ledger_path`) — could pass its own check and place against the SAME
+    single-use lease. Losing the claim is now a refusal, never a place."""
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+
+    from execution.odte_pre_place_guard import consume_then
+    now = datetime.now(timezone.utc)
+    ledger = str(tmp_path / "consumed_leases.json")
+    lease = {"lease_id": "L2", "option_id": "opt", "symbol": "IWM", "direction": "bullish",
+             "quantity": 1, "max_limit_price": 1.0, "max_debit": 100.0,
+             "issued_at": now.isoformat(),
+             "expires_at": (now + timedelta(seconds=40)).isoformat()}
+    order = {"option_id": "opt", "symbol": "IWM", "quantity": 1, "price": 0.9,
+             "position_effect": "open", "type": "limit", "direction": "debit"}
+    placed = []
+
+    async def place():
+        placed.append(1)
+        return {"ok": True}
+
+    async def both():
+        return (await consume_then(order, lease, ledger_path=ledger, now=now, place=place),
+                await consume_then(order, lease, ledger_path=ledger, now=now, place=place))
+
+    first, second = asyncio.run(both())
+    assert first[0]["allowed"] is True and first[1] is not None
+    assert second[0]["allowed"] is False
+    assert "lease_already_consumed" in second[0]["reasons"]
+    assert len(placed) == 1, "one single-use lease produced more than one placement"

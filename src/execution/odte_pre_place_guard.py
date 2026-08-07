@@ -131,6 +131,16 @@ async def consume_then(order: dict | None, lease: dict | None, *, ledger_path: s
     if not check["allowed"]:
         return check, None
     if not check["closing"] and check["lease_id"]:
-        record_consumed(ledger_path, check["lease_id"])
+        # ATOMIC TEST-AND-SET, not a bare record (2026-08-07). `pre_place_check` READ the ledger to
+        # verify the lease was unconsumed; recording it is a separate WRITE. Between the two, a
+        # second lane — the fast-lane daemon shares this exact ledger path — could pass its own
+        # check and place against the SAME single-use lease. `record_consumed` now claims the id
+        # under a lock and returns False if someone else already had it; losing that race is a
+        # refusal, never a place.
+        if not record_consumed(ledger_path, check["lease_id"]):
+            lost = dict(check)
+            lost["allowed"] = False
+            lost["reasons"] = [*check.get("reasons", []), "lease_already_consumed"]
+            return lost, None
     result = await place()
     return check, result
