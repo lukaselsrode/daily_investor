@@ -621,3 +621,54 @@ def test_ingest_never_synthesizes_a_second_candidate_evaluation():
     # re-add the same decision under its own dedupe key.
     import data.odte_journal as oj
     assert "candidate_evaluation" in oj._INGEST_PROTECTED_LIFECYCLE
+
+
+def test_synthetic_scorecard_candidate_can_expire(tmp_path):
+    # 2026-08-07 zombie: the scan-only refusal sat ABOVE the expiry check, so a synthetic
+    # market_scorecard candidate returned KEEP_WATCHING forever. Because _extract_candidate
+    # early-returns on anything carrying ticker+direction, that immortal identity also kept the
+    # tape lane from minting an executable candidate. Observed live at 24m against a 20m TTL and
+    # still KEEP_WATCHING when evaluated three hours forward.
+    from datetime import timedelta
+    synthetic = {"ticker": "SPY", "direction": "bullish", "source": "market_scorecard",
+                 "synthetic_market_scorecard": True,
+                 "created_at": (NOW - timedelta(minutes=25)).isoformat()}
+    flat = {"day_verdict": "CHOP", "minutes_to_close": 240,
+            "SPY": {"last": 741.0, "above_vwap": True, "orb_state": "inside"},
+            "QQQ": {"last": 724.2, "above_vwap": True, "orb_state": "inside"},
+            "IWM": {"last": 299.0, "above_vwap": True, "orb_state": "inside"},
+            "VIXY": {"above_vwap": False, "change_pct": -2.0}}
+    payload = cw.evaluate_candidate_watch(synthetic, market=flat, now=NOW)
+    assert payload["decision"] == cw.EXPIRED_NO_CONFIRMATION
+    assert payload["checks"]["age_minutes"] == 25.0
+
+    # ...and expiry re-seeds from the live tape in the SAME run when the tape qualifies, so the
+    # slot is never left occupied by a dead synthetic.
+    reseeded = cw.evaluate_candidate_watch(synthetic, market=_market(), now=NOW)
+    assert reseeded.get("prior_candidate_expired") is True
+    assert reseeded["candidate"]["source"] == "etf_momentum_tape"
+    assert reseeded["candidate"]["ticker"] in cw.EXECUTABLE_UNIVERSE
+
+
+def test_fresh_synthetic_scorecard_is_still_scan_only():
+    # The guarantee that matters is unchanged: within its TTL a synthetic candidate is refused,
+    # and it can never reach CONFIRM_ENTRY however well ETF breadth aligns.
+    synthetic = {"ticker": "SPY", "direction": "bullish", "source": "market_scorecard",
+                 "created_at": NOW.isoformat()}
+    payload = cw.evaluate_candidate_watch(synthetic, market=_market(), now=NOW)
+    assert payload["decision"] == cw.KEEP_WATCHING
+    assert any("scan-only" in r for r in payload["reasons"])
+    assert payload["execution_allowed"] is False
+
+
+def test_expiry_precedes_every_other_disposition():
+    # Pin the ordering itself: whatever else is wrong with a candidate, an aged-out one expires
+    # (and re-seeds) rather than returning some other terminal state that strands the slot.
+    from datetime import timedelta
+    old = (NOW - timedelta(minutes=25)).isoformat()
+    for extra in ({"source": "market_scorecard"},
+                  {"synthetic_market_scorecard": True},
+                  {}):
+        cand = {"ticker": "SPY", "direction": "bullish", "created_at": old, **extra}
+        payload = cw.evaluate_candidate_watch(cand, market=_market(), now=NOW)
+        assert payload.get("prior_candidate_expired") is True, extra

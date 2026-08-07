@@ -360,6 +360,35 @@ def evaluate_candidate_watch(candidate: dict | None = None, *, market: dict | No
     if not direction:
         reasons.append("candidate direction missing")
         return _payload(KEEP_WATCHING, cand, reasons, checks, now)
+    # EXPIRY IS CHECKED BEFORE EVERY OTHER DISPOSITION (2026-08-07). It used to sit below the
+    # synthetic-scorecard refusal, so a synthetic candidate could never age out: it returned
+    # KEEP_WATCHING forever, and because `_extract_candidate` early-returns on anything carrying
+    # ticker+direction, its immortal identity kept the tape lane from ever minting an executable
+    # candidate. Same failure the 2026-08-05 fall-through below was written to cure — this path
+    # simply never reached it. Observed live: a 12:45 ET scorecard candidate still KEEP_WATCHING
+    # at 13:08 (24m against a 20m TTL) and unchanged when evaluated three hours forward.
+    age = _candidate_age_minutes(cand, now)
+    if age is not None and age > max_watch_minutes:
+        checks["age_minutes"] = round(age, 1)
+        reasons.append(f"candidate expired ({age:.0f}m > {max_watch_minutes}m)")
+        # EXPIRY FALL-THROUGH (2026-08-05): the old short-circuit returned EXPIRED without ever
+        # reading the tape, and the expired identity then blocked the tape-only ETF lane for the
+        # rest of the session (68 blind ticks). Expiry now closes the OLD cycle and, in the SAME
+        # run, lets the live tape manufacture a FRESH candidate (new identity, new clock).
+        fresh = _extract_candidate({}, market)
+        if fresh.get("ticker") and _norm_direction(fresh.get("direction")):
+            fresh.setdefault("created_at", now.isoformat(timespec="seconds"))
+            payload = evaluate_candidate_watch(
+                fresh, market=market, day_score=day_score, vehicle_score=None,
+                gamma_map=gamma_map, broker_health=broker_health, now=now,
+                max_watch_minutes=max_watch_minutes)
+            payload["reasons"] = [
+                f"prior candidate {sym} {direction} expired ({age:.0f}m > {max_watch_minutes}m)"
+                " — tape lane re-seeded a fresh cycle", *payload.get("reasons", [])]
+            payload["prior_candidate_expired"] = True
+            return payload
+        return _payload(EXPIRED_NO_CONFIRMATION, cand, reasons, checks, now)
+
     # The watchdog's synthetic market scorecard exists only to keep the tape loop warm. It is not
     # an identity-bound vehicle candidate and must never be promoted to CONFIRM_ENTRY merely because
     # ETF breadth happens to align; doing so creates a conversion posture with option_id=—.
@@ -387,28 +416,6 @@ def evaluate_candidate_watch(candidate: dict | None = None, *, market: dict | No
                        f"{sym} — hard mismatch; a vehicle switch requires a fresh "
                        "watch/score/gate/lease cycle")
         return _payload(DEGRADED_NO_TRADE, cand, reasons, checks, now)
-
-    age = _candidate_age_minutes(cand, now)
-    if age is not None and age > max_watch_minutes:
-        checks["age_minutes"] = round(age, 1)
-        reasons.append(f"candidate expired ({age:.0f}m > {max_watch_minutes}m)")
-        # EXPIRY FALL-THROUGH (2026-08-05): the old short-circuit returned EXPIRED without ever
-        # reading the tape, and the expired identity then blocked the tape-only ETF lane for the
-        # rest of the session (68 blind ticks). Expiry now closes the OLD cycle and, in the SAME
-        # run, lets the live tape manufacture a FRESH candidate (new identity, new clock).
-        fresh = _extract_candidate({}, market)
-        if fresh.get("ticker") and _norm_direction(fresh.get("direction")):
-            fresh.setdefault("created_at", now.isoformat(timespec="seconds"))
-            payload = evaluate_candidate_watch(
-                fresh, market=market, day_score=day_score, vehicle_score=None,
-                gamma_map=gamma_map, broker_health=broker_health, now=now,
-                max_watch_minutes=max_watch_minutes)
-            payload["reasons"] = [
-                f"prior candidate {sym} {direction} expired ({age:.0f}m > {max_watch_minutes}m)"
-                " — tape lane re-seeded a fresh cycle", *payload.get("reasons", [])]
-            payload["prior_candidate_expired"] = True
-            return payload
-        return _payload(EXPIRED_NO_CONFIRMATION, cand, reasons, checks, now)
 
     if broker.get("blocked") is True or broker.get("execution_lane") == "blocked":
         reasons.append("broker/review lane blocked")
