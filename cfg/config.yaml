@@ -1132,6 +1132,11 @@ odte:
   b_plus_min_vehicle_score: 3     # WATCH verdict acceptable for B+ at/above this score
   good_day_min_score: 4           # unchanged default; tune only on telemetry evidence
   daily_trade_budget: 2           # hard cap on entries per ET day
+  daily_budget_aplus_uncapped: true   # a_plus setups bypass the cap WHILE the day is net-green
+                                  # (a net-red day hard-stops at the cap — anti-tilt survives).
+                                  # NOTE: absent OR wrong-typed falls back to the code default,
+                                  # which is True — a quoted "false" leaves this ON. Use a bare
+                                  # false to disable.
   reentry_cooldown_minutes: 20    # min gap between a close and the next entry
   green_reentry_min_bp_multiple: 1.5  # re-entry after green armed when BP >= mult*cost
   green_reentry_auto_arm: true    # post-green re-entry auto-arms on same-or-better tier
