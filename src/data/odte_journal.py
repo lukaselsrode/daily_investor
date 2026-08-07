@@ -493,6 +493,14 @@ _INGEST_PROTECTED_LIFECYCLE = frozenset({
     # First-party at computation time (odte_convert). An EOD artifact sweep would re-add the same
     # decision under a different dedupe key and double-count it.
     "candidate_evaluation",
+    # `vehicle_score` is protected for a DIFFERENT reason than candidate_evaluation, and NOT by
+    # analogy to day_score below — its ingest lane has been DRY since the v5 port. The 21 historic
+    # events all carry `source: ingest:vehicle_score` from loose top-level artifacts the
+    # controller stopped writing on 2026-08-04, and `run_vehicle_score --write` lands in reports/,
+    # which the top-level-only ingest glob never reaches. So there is no live drop for the
+    # protection to suppress and no blind window to open: unlike day_score, protecting this
+    # forfeits nothing.
+    "vehicle_score",
 })
 # `day_score` is deliberately NOT protected (2026-08-06). It is first-party journaled from
 # odte_convert, but that call sits AFTER the preflight refusal — so on a session where every
@@ -1360,24 +1368,42 @@ def event_from_day_score(score_payload: dict, extra: dict | None = None) -> dict
 
 def event_from_vehicle_score(score_payload: dict, trade_id: str | None = None,
                              extra: dict | None = None) -> dict:
-    """Convert an `odte-vehicle-score` payload into a `pre_trade_thesis` journal event (a plain dict
-    the caller can pass to append_event). Records the non-sentiment GOOD_BET/WATCH/BAD_BET verdict,
-    its components/score, and the reasons so the live controller can journal *why* a candidate
-    vehicle looked good or bad. Does NOT auto-append — keeps the seam explicit (parallel to
-    `event_from_position_decision`). The underlying is normalized/restriction-tagged at append."""
+    """Convert a `score_vehicle` payload into a `vehicle_score` journal event (a plain dict the
+    caller can pass to append_event). Records the non-sentiment GOOD_BET/WATCH/BAD_BET verdict,
+    its components/score, the reasons, and the ADDITIVE `bp_fit` block — the gate's own budget
+    arithmetic (tier fraction x BP, max affordable ask, fits) surfaced at SELECTION time. Does
+    NOT auto-append — keeps the seam explicit. The underlying is restriction-tagged at append.
+
+    Emits `vehicle_score`, NOT `pre_trade_thesis`: the old label was wrong (that type belongs to
+    hand-authored thesis notes), and it meant the scorer's own stream was unqueryable.
+
+    NO `trade_id` unless one is explicitly passed, and the key is OMITTED rather than set None:
+    `summarize()` opens a trade row for ANY event whose trade_id `is not None`, so a scan-time
+    score carrying one would inflate n_trades and every rate derived from it. Omitting also
+    guards the `""` case, which is not None and would open a row keyed on the empty string."""
     p = score_payload or {}
     c = p.get("contract") if isinstance(p.get("contract"), dict) else {}
     e = {
-        "event_type": "pre_trade_thesis",
-        "trade_id": trade_id or p.get("trade_id"),
+        "event_type": "vehicle_score",
         "underlying": c.get("underlying") or c.get("symbol"),
         "option_type": c.get("option_type") or c.get("type"),
         "strike": c.get("strike") or c.get("strike_price"),
+        "option_id": c.get("option_id") or c.get("id"),
+        "verdict": p.get("verdict"),
+        "score": p.get("score"),
         "decision": {"action": p.get("verdict"),
                      "reasons": list(p.get("reasons") or [])},
         "vehicle_score": {"verdict": p.get("verdict"), "score": p.get("score"),
                           "components": p.get("components"), "direction": p.get("direction")},
+        "bp_fit": p.get("bp_fit"),
+        "reasons": list(p.get("reasons") or []),
+        "generated_at": p.get("generated_at"),
+        "scan_only": True,
+        "execution_allowed": False,
     }
+    tid = trade_id or p.get("trade_id")
+    if tid:
+        e["trade_id"] = tid
     if extra:
         e.update(extra)
     return e

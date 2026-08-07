@@ -325,14 +325,42 @@ def test_event_from_vehicle_score(tmp_path):
                "components": {"market": 3, "gamma": 2, "liquidity": 1},
                "contract": {"underlying": "QQQ", "option_type": "call", "strike": 718},
                "reasons": ["market: VWAP confirms calls on SPY,QQQ", "gamma: low pin risk"]}
+    payload["bp_fit"] = {"tier": "b_plus", "fraction": 0.30, "cap": 84.61,
+                         "max_affordable_ask": 0.85, "debit": 74.0, "fits": True}
     ev = oj.event_from_vehicle_score(payload, trade_id="t7")
-    assert ev["event_type"] == "pre_trade_thesis" and ev["trade_id"] == "t7"
+    assert ev["event_type"] == "vehicle_score" and ev["trade_id"] == "t7"
     assert ev["underlying"] == "QQQ" and ev["option_type"] == "call" and ev["strike"] == 718
     assert ev["decision"]["action"] == "GOOD_BET"
     assert ev["decision"]["reasons"] == payload["reasons"]
     assert ev["vehicle_score"]["score"] == 6 and ev["vehicle_score"]["direction"] == "bullish"
+    # bp_fit is the whole point of journaling this — it shipped 2026-08-05 and recorded nothing.
+    assert ev["bp_fit"]["tier"] == "b_plus" and ev["bp_fit"]["max_affordable_ask"] == 0.85
+    assert ev["scan_only"] is True and ev["execution_allowed"] is False
     stored = oj.append_event(ev, journal_path=_journal(tmp_path))   # round-trips through append
     assert stored["seq"] == 0 and stored["underlying"] == "QQQ"
+
+
+def test_vehicle_score_event_carries_no_trade_id_and_cannot_inflate_n_trades():
+    # summarize() opens a trade row for ANY event whose trade_id `is not None`. A scan-time score
+    # carrying one would inflate n_trades and every rate built on it — the same defect class as
+    # the 2026-08-06 fill double-count. The key must be ABSENT, not None (`""` is not None).
+    payload = {"verdict": "WATCH", "score": 3, "contract": {"underlying": "IWM"},
+               "bp_fit": {"tier": "full", "fits": False}}
+    ev = oj.event_from_vehicle_score(payload)
+    assert "trade_id" not in ev
+    for empty in ("", None):
+        assert "trade_id" not in oj.event_from_vehicle_score({**payload, "trade_id": empty})
+    assert oj.summarize([oj.normalize_event(ev)])["n_trades"] == 0
+    # ...and the guard is real: the same event WITH a trade_id does open a row.
+    with_tid = oj.event_from_vehicle_score(payload, trade_id="t9")
+    assert oj.summarize([oj.normalize_event(with_tid)])["n_trades"] == 1
+
+
+def test_vehicle_score_is_ingest_protected():
+    # Its ingest lane has been dry since the v5 port, so first-party journaling is the only
+    # writer; an EOD sweep of a stale loose artifact must not mint a duplicate.
+    assert "vehicle_score" in oj._INGEST_PROTECTED_LIFECYCLE
+    assert "day_score" not in oj._INGEST_PROTECTED_LIFECYCLE   # deliberately unprotected
 
 
 def test_event_from_vehicle_score_nvda_tagged_on_append(tmp_path):
@@ -341,7 +369,7 @@ def test_event_from_vehicle_score_nvda_tagged_on_append(tmp_path):
                "contract": {"underlying": "NVDA", "option_type": "put", "strike": 130},
                "reasons": ["gamma: high pin risk"]}
     ev = oj.event_from_vehicle_score(payload, trade_id="bad", extra={"mode": "scalp"})
-    assert ev["mode"] == "scalp"
+    assert ev["mode"] == "scalp" and ev["event_type"] == "vehicle_score"
     stored = oj.append_event(ev, journal_path=_journal(tmp_path))
     assert stored["restricted"] is True and stored["restricted_reason"] == "employer"
 

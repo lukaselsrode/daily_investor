@@ -182,12 +182,32 @@ def test_telemetry_events_do_not_disturb_trade_or_refusal_counters(tmp_path):
     events = oj.read_events(str(tmp_path / "decision_journal.jsonl"))
     assert any(e.get("event_type") == "candidate_evaluation" for e in events)
     assert any(e.get("event_type") == "day_score" for e in events)
+    assert any(e.get("event_type") == "vehicle_score" for e in events)
     s = oj.summarize(events)
     assert s["n_trades"] == 0 and s["n_closed"] == 0 and s["total_realized_pnl"] == 0
     wt = oj.weekly_telemetry(events, now=NOW)
     assert wt["trades_this_week"] == 0
     assert wt["no_trade_decisions"] == 0 and wt["lease_refusals"] == 0
     assert oj.daily_trade_budget(events, now=NOW)["trades_today"] == 0
+
+
+def test_vehicle_score_journaled_with_bp_fit_at_computation_time(tmp_path):
+    # bp_fit shipped 2026-08-05 into a stream that had already stopped flowing: the ingest lane
+    # (loose top-level artifacts) went dry at the v5 port, and odte_convert — the only live caller
+    # of score_vehicle — kept {verdict, score} and dropped the rest. Result: zero bp_fit events
+    # ever recorded, while 2026-08-06 scored 14 gate ticks.
+    _convert(tmp_path)
+    events = oj.read_events(str(tmp_path / "decision_journal.jsonl"))
+    scores = [e for e in events if e.get("event_type") == "vehicle_score"]
+    assert scores
+    last = scores[-1]
+    assert last["verdict"] and last["score"] is not None
+    assert isinstance(last["bp_fit"], dict) and last["bp_fit"].get("tier")
+    assert last["bp_fit"].get("max_affordable_ask") is not None
+    assert last["scan_only"] is True and last["execution_allowed"] is False
+    # No trade_id: summarize() would open a trade row for it and inflate n_trades.
+    assert last.get("trade_id") is None
+    assert last["source"] == "odte_convert"
 
 
 def test_day_score_journaled_with_headroom_telemetry(tmp_path):

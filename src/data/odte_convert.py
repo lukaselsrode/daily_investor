@@ -236,6 +236,7 @@ def run_convert(candidate_json: str | dict | None = None, candidate_path: str | 
         event_from_day_score,
         event_from_entry_gate,
         event_from_execution_lease,
+        event_from_vehicle_score,
         read_events,
     )
     from data.odte_vehicle_score import score_vehicle
@@ -380,6 +381,15 @@ def run_convert(candidate_json: str | dict | None = None, candidate_path: str | 
         payload["session_constants"] = session_constants
     payload["vehicle_score"] = {"verdict": vehicle_score.get("verdict"),
                                  "score": vehicle_score.get("score")}
+    # Journal the vehicle score where it is COMPUTED. This is the only live caller of
+    # score_vehicle, and until now it kept two keys and dropped the rest — so `bp_fit` (shipped
+    # 2026-08-05 to explain the 2026-08-04 refusals: a $288 contract certified GOOD_BET against
+    # raw BP while the gate refused it against the 60%-tier cap 12x) recorded ZERO events. On
+    # 2026-08-06 this line ran on 14 gate ticks and journaled none of them. Telemetry only:
+    # scan_only, no trade_id, never a gate input.
+    if journal:
+        append_decision_journal(event_from_vehicle_score(vehicle_score), source="odte_convert",
+                                event_type="vehicle_score", journal_path=journal_path, now=now)
 
     # ── fresh tape re-check + re-anchor (candidate watch) ─────────────────────────────────────
     cd = evaluate_candidate_watch(candidate, market=market, day_score=day_score,
