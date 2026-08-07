@@ -462,3 +462,72 @@ def test_watchdog_payload_carries_best_seen_bid(tmp_path):
                                        snapshot={"option_bid": 1.12, "option_mark": 1.12},
                                        state_dir=str(tmp_path))
     assert payload["best_seen_bid"] == 1.12
+
+
+# --- 2026-08-07: unconditional max-loss backstop ----------------------------------------------
+# THESIS_DEAD and TIME_RISK only exist when the CONTROLLER wrote a thesis / time_rules block:
+# _thesis_breaches returns [] on an absent thesis, _time_risk returns None on absent rules. So a
+# thin plan had exactly one unconditional exit — BID_FLOOR, which on a $1.00 entry waits for -95%.
+
+def test_thin_plan_now_has_an_unconditional_exit():
+    from data.odte_position import DEFAULT_MAX_LOSS_PCT, evaluate_position
+    thin = {"underlying": "IWM", "option_type": "call", "entry_price": 1.00,
+            "quantity": 1, "status": "open"}
+    # comfortably inside the backstop: still held, as before
+    held = evaluate_position(thin, {"option_bid": 0.80, "option_mark": 0.80,
+                                    "underlying_last": 300.0})
+    assert held["decision"] == "HOLD"
+    # at the backstop: fires even though the plan declares no thesis at all
+    hit = evaluate_position(thin, {"option_bid": 0.60, "option_mark": 0.60,
+                                   "underlying_last": 300.0})
+    assert hit["decision"] == "MAX_LOSS"
+    assert abs(hit["pnl_pct"] - DEFAULT_MAX_LOSS_PCT) < 1e-9
+    assert any(t["type"] == "MAX_LOSS" and t["action"] == "exit" for t in hit["triggers"])
+
+
+def test_backstop_sits_outside_the_observed_working_range():
+    """Sized from the journal, not taste: across 150 management_check observations the worst
+    open-position excursion is -33.8%. A -40% backstop has never fired, so it cuts no winner and
+    changes no historical trade. Tightening toward -20%/-30% would start cutting live trades
+    (20% / 2.7% of observations) and needs its own measurement first."""
+    from data.odte_position import DEFAULT_MAX_LOSS_PCT
+    worst_observed = -0.338
+    assert DEFAULT_MAX_LOSS_PCT < worst_observed, DEFAULT_MAX_LOSS_PCT
+
+
+def test_plan_may_override_the_backstop_either_signed():
+    from data.odte_position import evaluate_position
+    thin = {"underlying": "IWM", "option_type": "call", "entry_price": 1.00,
+            "quantity": 1, "status": "open"}
+    snap = {"option_bid": 0.70, "option_mark": 0.70, "underlying_last": 300.0}   # -30%
+    assert evaluate_position(thin, snap)["decision"] == "HOLD"                    # default -40%
+    loose = evaluate_position({**thin, "max_loss_pct": -0.60}, snap)
+    assert loose["decision"] == "HOLD"
+    # live plans put risk keys under risk_rules, and may write the magnitude unsigned
+    tight = evaluate_position({**thin, "risk_rules": {"max_loss_pct": 0.25}}, snap)
+    assert tight["decision"] == "MAX_LOSS"
+
+
+def test_thesis_death_still_outranks_the_backstop():
+    """The backstop is a floor, not a replacement: a named tape invalidation stays the reported
+    reason so the postmortem attributes the exit to the thesis, not to the catch-all."""
+    from data.odte_position import evaluate_position
+    plan = {"underlying": "IWM", "option_type": "call", "entry_price": 1.00, "quantity": 1,
+            "status": "open", "thesis": {"underlying_stop": 305.0}}
+    out = evaluate_position(plan, {"option_bid": 0.50, "option_mark": 0.50,
+                                   "underlying_last": 300.0})
+    assert out["decision"] == "THESIS_DEAD"
+    assert {"MAX_LOSS", "THESIS_DEAD"} <= {t["type"] for t in out["triggers"]}
+
+
+def test_bid_floor_outranks_the_backstop_as_the_more_specific_reason():
+    """A near-worthless option is BOTH past the backstop and at the floor. The floor is the
+    specific diagnosis, so it stays the reported decision — the backstop must never mask a named
+    reason in the postmortem."""
+    from data.odte_position import evaluate_position
+    thin = {"underlying": "IWM", "option_type": "call", "entry_price": 1.00,
+            "quantity": 1, "status": "open"}
+    out = evaluate_position(thin, {"option_bid": 0.03, "option_mark": 0.04,
+                                   "underlying_last": 300.0})
+    assert out["decision"] == "BID_FLOOR"
+    assert {"BID_FLOOR", "MAX_LOSS"} <= {t["type"] for t in out["triggers"]}

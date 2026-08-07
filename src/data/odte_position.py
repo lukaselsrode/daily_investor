@@ -98,6 +98,23 @@ DEFAULT_TAKE_PROFIT_PCT = 0.35         # +35% — legacy/non-scalp take-profit t
 DEFAULT_STRONG_EXIT_PCT = 0.60         # +60% — legacy/non-scalp strong-profit trigger
 DEFAULT_BID_FLOOR = 0.05         # per-share bid at/under which an option is treated near-worthless
 
+# MAX-LOSS BACKSTOP (2026-08-07). THESIS_DEAD and TIME_RISK only exist when the CONTROLLER wrote a
+# `thesis` / `time_rules` block into the plan — `_thesis_breaches` returns [] on an absent thesis and
+# `_time_risk` returns None on absent rules. So a thin plan had exactly one unconditional exit,
+# BID_FLOOR, which on a $1.00 entry does not fire until -95%. The 2026-08-07 IWM trade exited at -16%
+# only because the agent happened to write a thesis; had it written none, the position rides to the
+# floor. That is a rail whose existence depends on agent prose, which is the failure this whole class
+# keeps producing.
+#
+# Sized from the record, not from taste: across all 150 `management_check` observations in the
+# journal the worst open-position excursion is -33.8% (p5 -27.9%, median -5.6%). A -40% backstop has
+# therefore NEVER fired — it cuts no winner and changes no historical trade — while replacing the
+# -95% cliff. It is a catastrophe backstop, deliberately far outside the working range, NOT a
+# strategy stop; tightening it toward the -20%/-30% band would start cutting live trades (20% / 2.7%
+# of observations respectively) and must be measured separately if ever wanted.
+# Overridable per plan via `max_loss_pct` / `risk_rules.max_loss_pct`.
+DEFAULT_MAX_LOSS_PCT = -0.40
+
 # Bid-memory / giveback protection (the rule that closed the 2026-08-03 winner, prose-only until
 # now): once the best-seen bid prints a meaningful gain over entry, never let it round-trip — fire
 # a harvest when the live bid has given back a large share of the best-seen gain.
@@ -132,8 +149,13 @@ _DEFAULT_PROFIT_PROFILE = _MODE_PROFIT_PROFILES["scalp"]   # backward-compatible
 # Primary-decision priority (most urgent first). HOLD is the implicit default. BID_MEMORY_PROTECT
 # outranks TAKE_PROFIT (a fading winner is harvested before a plain profit scale) but yields to the
 # death/floor/time triggers.
-_PRIORITY = ["RESTRICTED", "THESIS_DEAD", "BID_FLOOR", "TIME_RISK", "BID_MEMORY_PROTECT",
-             "TAKE_PROFIT", "MONITORING_DEGRADED"]
+# MAX_LOSS sits BELOW the named reasons deliberately. It is a catch-all backstop, so whenever a
+# specific diagnosis also fired — the tape invalidated the thesis, or the option is near-worthless —
+# that is the reason the postmortem should attribute the exit to. The backstop only ever surfaces as
+# the primary decision when nothing more specific explains the loss, which is precisely the
+# thin-plan case it exists for.
+_PRIORITY = ["RESTRICTED", "THESIS_DEAD", "BID_FLOOR", "MAX_LOSS", "TIME_RISK",
+             "BID_MEMORY_PROTECT", "TAKE_PROFIT", "MONITORING_DEGRADED"]
 
 _INACTIVE_STATUS = {"closed", "exited", "flat", "done"}
 
@@ -331,6 +353,20 @@ def evaluate_position(plan: dict | None, snapshot: dict | None,
     if _floor is None:
         _floor = _num((plan.get("risk_rules") or {}).get("initial_bid_floor"))
     bid_floor = float(_floor) if _floor is not None else DEFAULT_BID_FLOOR
+
+    # 0) MAX-LOSS BACKSTOP — unconditional, so it survives a plan that declared no thesis. Mirrors
+    #    the bid_floor fallback above, including reading `risk_rules` where live plans put risk keys.
+    _mx = _num(plan.get("max_loss_pct"))
+    if _mx is None:
+        _mx = _num((plan.get("risk_rules") or {}).get("max_loss_pct"))
+    max_loss = float(_mx) if _mx is not None else DEFAULT_MAX_LOSS_PCT
+    if max_loss > 0:                      # accept 0.40 or -0.40 from a plan; normalise to a loss
+        max_loss = -max_loss
+    if pnl_pct is not None and pnl_pct <= max_loss:
+        triggers.append({"type": "MAX_LOSS", "action": "exit",
+                         "reason": "max_loss_backstop",
+                         "detail": f"P/L {pnl_pct:.1%} at/through the {max_loss:.0%} backstop "
+                                   f"— unconditional, independent of any plan-declared thesis"})
 
     # 1) Take-profit. Scalp mode uses the earlier +20% / +25% harvest band; non-scalp modes keep the
     #    legacy +35% / +60% alert/trail bands unless overridden. The recommended ACTION is mode-aware
