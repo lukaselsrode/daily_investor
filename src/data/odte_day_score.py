@@ -21,6 +21,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from core.paths import ODTE_REPORT_DIR
+from data.odte_breadth import alignment
 from data.odte_config import GOOD_DAY_MIN_SCORE
 
 _ET = ZoneInfo("America/New_York")
@@ -77,22 +78,13 @@ def _trend_score(market: dict) -> tuple[int, list[str]]:
     """
     ups = dns = inside = 0
     for sym in _INDICES:
-        vwap = _bool(market.get(f"{sym}_above_vwap"))
-        orb = str(market.get(f"{sym}_orb_state") or "").strip().lower()
-        signals: list[int] = []
-        if vwap is True:
-            signals.append(1)
-        elif vwap is False:
-            signals.append(-1)
-        if orb == "above":
-            signals.append(1)
-        elif orb == "below":
-            signals.append(-1)
-        elif orb == "inside":
-            signals.append(0)
-        if not signals:
+        # `require_vwap=False` keeps this lane's long-standing behaviour: the day-regime vote scores
+        # whatever fields the snapshot carries, where the confirmation lane treats a missing VWAP
+        # side as "no opinion". That difference in strictness is legitimate and deliberate — it is
+        # the only one the two lanes keep, now that they share one reader (see odte_breadth).
+        total = alignment(market, sym, "bullish", require_vwap=False)
+        if total is None:
             continue
-        total = sum(signals)
         if total > 0:
             ups += 1
         elif total < 0:
