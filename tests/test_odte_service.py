@@ -10,6 +10,7 @@ lanes read as two trades, and one exit journaled by two lanes doubled every rail
 import json
 import os
 import sys
+from datetime import datetime, timezone
 
 import pytest
 
@@ -315,3 +316,64 @@ def test_module_places_no_orders_and_calls_no_broker():
     for forbidden in ("place_order", "submit_order", "cancel_order", "requests.", "httpx.",
                       "anthropic", "openai"):
         assert forbidden not in src, f"0DTE UI service must never reference {forbidden}"
+
+
+def test_orb_near_miss_reads_the_breadth_score_not_the_retired_count(tmp_path, monkeypatch):
+    """The confirmation clause became a graded breadth score on 2026-08-07.
+
+    This panel exists to count the tapes the ORB requirement is costing, and after that change
+    those tapes carry ONE fully aligned index plus halves. Measuring them against the retired
+    `confirmations >= 2` binary reports near_miss 0 forever — precisely blind to its own subject.
+    """
+    import json as _json
+
+    import ui.services.odte_service as svc
+    jp = tmp_path / "decision_journal.jsonl"
+    # A real 2026-08-07 shape: breadth met, VWAP side and vol satisfied, but the candidate's own
+    # underlying is still inside its opening range. One full confirmer, two halves.
+    modern = {"schema": "odte_decision_v1", "event_type": "candidate_evaluation",
+              "event_id": "m1", "ts": "2026-08-07T17:32:07+00:00", "decision": "keep_watching",
+              "underlying": "SPY", "direction": "bullish",
+              "checks": {"underlying_above_vwap": True, "underlying_orb_state": "inside",
+                         "confirmations": 1, "confirmers": ["IWM"],
+                         "half_confirmers": ["SPY", "QQQ"],
+                         "breadth_score": 4, "breadth_required": 4,
+                         "dissenters": [], "vixy_weak": True, "tier": "b_plus"}}
+    # A legacy event with no breadth fields still uses the old count.
+    legacy = {"schema": "odte_decision_v1", "event_type": "candidate_evaluation",
+              "event_id": "l1", "ts": "2026-08-07T15:30:03+00:00", "decision": "keep_watching",
+              "underlying": "SPY", "direction": "bullish",
+              "checks": {"underlying_above_vwap": True, "underlying_orb_state": "inside",
+                         "confirmations": 2, "confirmers": ["SPY", "QQQ"],
+                         "dissenters": [], "vixy_weak": True}}
+    jp.write_text("\n".join(_json.dumps(e) for e in (modern, legacy)) + "\n")
+    monkeypatch.setattr(svc, "_journal_path", lambda: str(jp))
+    svc._MEM_CACHE.clear()
+
+    out = svc.orb_near_misses(days=3650, now=datetime(2026, 8, 7, 22, 0, tzinfo=timezone.utc))
+    assert out["collecting"] is False
+    assert out["evaluated"] == 2
+    assert out["near_miss"] == 2, out          # BOTH eras counted, each by its own rule
+    sample = next(s for s in out["samples"] if s["breadth_score"] == 4)
+    assert sample["half_confirmers"] == ["SPY", "QQQ"]
+    assert sample["breadth_required"] == 4
+
+
+def test_orb_near_miss_does_not_count_a_tape_short_of_the_breadth_bar(tmp_path, monkeypatch):
+    import json as _json
+
+    import ui.services.odte_service as svc
+    jp = tmp_path / "decision_journal.jsonl"
+    short = {"schema": "odte_decision_v1", "event_type": "candidate_evaluation",
+             "event_id": "s1", "ts": "2026-08-07T17:14:37+00:00", "decision": "keep_watching",
+             "underlying": "SPY", "direction": "bullish",
+             "checks": {"underlying_above_vwap": True, "underlying_orb_state": "inside",
+                        "confirmations": 0, "confirmers": [],
+                        "half_confirmers": ["SPY", "IWM"],
+                        "breadth_score": 2, "breadth_required": 4,
+                        "dissenters": [], "vixy_weak": True}}
+    jp.write_text(_json.dumps(short) + "\n")
+    monkeypatch.setattr(svc, "_journal_path", lambda: str(jp))
+    svc._MEM_CACHE.clear()
+    out = svc.orb_near_misses(days=3650, now=datetime(2026, 8, 7, 22, 0, tzinfo=timezone.utc))
+    assert out["evaluated"] == 1 and out["near_miss"] == 0   # breadth short: ORB is not the blocker

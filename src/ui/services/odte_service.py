@@ -268,7 +268,17 @@ def _orb(path: str, days: int, now: datetime | None) -> dict:
         bullish = direction != "bearish"
         vwap_ok = checks.get("underlying_above_vwap") is (True if bullish else False)
         vol_ok = bool(checks.get("vixy_weak") if bullish else checks.get("vixy_firming"))
-        confirmers_ok = (_num(checks.get("confirmations")) or 0) >= 2
+        # BREADTH-ERA AWARE (2026-08-07). The confirmation clause became a graded breadth score
+        # that day; measuring "everything except ORB" against the retired `confirmations >= 2`
+        # binary reports near_miss 0 forever, because the very tapes this panel exists to count
+        # are the ones carrying ONE full confirmer plus halves. Read the score the gate actually
+        # used, with its own required level, and fall back to the old count only for events that
+        # predate the field.
+        score = _num(checks.get("breadth_score"))
+        if score is not None:
+            confirmers_ok = score >= (_num(checks.get("breadth_required")) or score + 1)
+        else:
+            confirmers_ok = (_num(checks.get("confirmations")) or 0) >= 2
         orb = str(checks.get("underlying_orb_state") or "")
         orb_ok = orb == ("above" if bullish else "below")
         if vwap_ok and vol_ok and confirmers_ok and not orb_ok:
@@ -279,6 +289,9 @@ def _orb(path: str, days: int, now: datetime | None) -> dict:
                                 "direction": direction, "orb_state": orb,
                                 "confirmations": checks.get("confirmations"),
                                 "confirmers": checks.get("confirmers"),
+                                "half_confirmers": checks.get("half_confirmers"),
+                                "breadth_score": checks.get("breadth_score"),
+                                "breadth_required": checks.get("breadth_required"),
                                 "dissenters": checks.get("dissenters"),
                                 "tier": checks.get("tier"),
                                 "minutes_to_close": checks.get("minutes_to_close")})
