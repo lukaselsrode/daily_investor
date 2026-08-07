@@ -1762,3 +1762,51 @@ def test_scanning_next_commands_carry_journal_so_the_lane_records():
     for line in src.splitlines():
         if "odte-candidate-watch" in line and "make " in line and "WRITE=1" in line:
             assert "JOURNAL=1" in line or "JOURNAL=1" in src[src.find(line):src.find(line) + 400], line
+
+
+def test_undated_broker_health_fails_closed():
+    """A NON-EMPTY health payload carrying no parseable timestamp used to skip the staleness branch
+    entirely (`age is not None and age > TTL`) and fall through to "live orders permitted" — the
+    same treatment as a one-minute-old probe, with no way to tell how old the truth was.
+
+    Every other staleness check on the money path already fails closed on an undated artifact:
+    odte_convert's preflight emits `_undated`, odte_execution_policy states "undated fails closed",
+    and odte_order_guard cancels on an undated lease and raises a safety incident.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from data.odte_loop_status import BROKER_STALE_MINUTES, classify_broker_lane
+    now = datetime.now(timezone.utc)
+    healthy = {"parent_robinhood_mcp": "OK", "live_review_place_allowed": True, "place_lane": "ok"}
+
+    undated = classify_broker_lane(healthy, now=now)
+    assert undated["lane"] == "stale"
+    assert undated["orders_ok"] is False
+    assert "UNDATED" in undated["note"]
+    # a stale probe is an outdated FILE, not a broker fault — the last known permission is kept so
+    # the controller refreshes rather than concluding live orders are impossible
+    assert undated["last_known_place_allowed"] is True
+    assert undated.get("refresh_command")
+
+    # an EMPTY payload is still `unknown`, not stale — pure offline mode, behaviour unchanged
+    assert classify_broker_lane({}, now=now)["lane"] == "unknown"
+    assert classify_broker_lane(None, now=now)["orders_ok"] is None
+
+    fresh = classify_broker_lane({**healthy, "as_of": now.isoformat()}, now=now)
+    assert fresh["lane"] == "ok" and fresh["orders_ok"] is True
+    old = {**healthy, "as_of": (now - timedelta(minutes=BROKER_STALE_MINUTES + 1)).isoformat()}
+    assert classify_broker_lane(old, now=now)["lane"] == "stale"
+
+
+def test_broker_health_accepts_every_timestamp_spelling_the_writers_use():
+    """The controller drifts between spellings — on 2026-08-07 it wrote market_snapshot_live.json
+    with `generated_at` and no `as_of` at all. Reading only a subset turns a fresh probe into a
+    stale one (or, before the fix, an undated one into a fresh one)."""
+    from datetime import datetime, timezone
+
+    from data.odte_loop_status import classify_broker_lane
+    now = datetime.now(timezone.utc)
+    healthy = {"parent_robinhood_mcp": "OK", "live_review_place_allowed": True, "place_lane": "ok"}
+    for field in ("as_of", "ts", "checked_at", "generated_at", "updated_at"):
+        out = classify_broker_lane({**healthy, field: now.isoformat()}, now=now)
+        assert out["lane"] == "ok", f"{field} not accepted: {out}"

@@ -308,7 +308,12 @@ def classify_broker_lane(broker_health: dict | None, now: datetime | None = None
     An absent/empty payload is ``unknown`` — pure offline mode, behavior unchanged (``orders_ok`` None).
     """
     b = _dict(broker_health)
-    as_of = b.get("as_of") or b.get("ts") or b.get("checked_at")
+    # Accept every timestamp spelling the writers actually use. `odte_convert._payload_ts` and
+    # `odte_execution_policy._payload_ts` already read this wider set, and the controller
+    # demonstrably drifts between them — on 2026-08-07 it wrote market_snapshot_live.json with
+    # `generated_at` and no `as_of` at all.
+    as_of = (b.get("as_of") or b.get("ts") or b.get("checked_at")
+             or b.get("generated_at") or b.get("updated_at"))
     age = _age_minutes(as_of, now)
     source = b.get("source")
     truth = _broker_truth(b)
@@ -366,9 +371,19 @@ def classify_broker_lane(broker_health: dict | None, now: datetime | None = None
     # BUT a stale probe is an outdated FILE, not a confirmed broker fault: keep what the last probe
     # said (`last_known_place_allowed`) and the exact refresh command, so the controller refreshes
     # the file instead of concluding live orders are impossible.
-    if age is not None and age > BROKER_STALE_MINUTES:
+    # UNDATED FAILS CLOSED (2026-08-07). This used to be `age is not None and age > TTL`, so a
+    # NON-EMPTY health payload carrying no parseable timestamp skipped the staleness branch entirely
+    # and fell through to "live orders permitted" — identical treatment to a one-minute-old probe,
+    # with no way to tell how old the truth actually was. An empty payload is still `unknown`
+    # (offline mode, handled above); this only covers a payload that claims health without saying
+    # when. Every other staleness check on the money path already fails closed on an undated
+    # artifact — odte_convert's preflight emits `_undated`, odte_execution_policy states "undated
+    # fails closed", and odte_order_guard cancels on an undated lease and raises a safety incident.
+    if age is None or age > BROKER_STALE_MINUTES:
+        how_old = (f"{age:.0f}m old (> {BROKER_STALE_MINUTES}m)" if age is not None
+                   else "UNDATED (no as_of/ts/checked_at/generated_at/updated_at)")
         stale = out("stale", False,
-                    f"broker-health probe {age:.0f}m old (> {BROKER_STALE_MINUTES}m) — outdated "
+                    f"broker-health probe {how_old} — outdated "
                     "probe FILE, not a confirmed broker fault; refresh it before any live order")
         stale["last_known_place_allowed"] = bool(place_allowed)
         stale["refresh_command"] = BROKER_HEALTH_REFRESH_COMMAND
