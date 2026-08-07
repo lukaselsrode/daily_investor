@@ -672,3 +672,70 @@ def test_expiry_precedes_every_other_disposition():
         cand = {"ticker": "SPY", "direction": "bullish", "created_at": old, **extra}
         payload = cw.evaluate_candidate_watch(cand, market=_market(), now=NOW)
         assert payload.get("prior_candidate_expired") is True, extra
+
+
+# --- 2026-08-07: tier evidence is counted in FULLY aligned indices, not breadth points ---------
+# Grading half-alignment was meant to change WHETHER a leader-led tape converts. Scoring the tiers
+# off the breadth number alone also changed how large it trades and what escapes the daily cap.
+
+def _leader_led_good_day():
+    m = _leader_led_market()
+    m["day_verdict"] = "GOOD_DAY"
+    return m
+
+
+def test_half_derived_breadth_sizes_at_the_b_plus_rail_even_on_a_good_day():
+    # 1 full confirmer + 2 halves scores the same 4 as 2 full confirmers, but it is weaker evidence
+    # than the two fully aligned indices that used to be the price of admission. It converts (that
+    # is the intended change) at HALF size (that is the part that must not have moved).
+    payload = cw.evaluate_candidate_watch(
+        {"ticker": "SPY", "direction": "bullish"}, market=_leader_led_good_day(), now=NOW)
+    checks = payload["checks"]
+    assert payload["decision"] == cw.CONFIRM_ENTRY
+    assert checks["breadth_score"] == oc.BREADTH_MIN_SCORE
+    assert checks["tier_basis"]["full_confirmers"] < oc.B_PLUS_MIN_CONFIRMATIONS
+    assert checks["tier_basis"]["half_derived"] is True
+    assert payload["candidate"]["tier"] == "b_plus"
+
+
+def test_two_fully_aligned_indices_still_size_full_on_a_good_day():
+    # The pre-change configuration keeps the pre-change tier — this is the control.
+    m = _leader_led_good_day()
+    m["QQQ"] = {"last": 723.0, "above_vwap": True, "orb_state": "above"}
+    payload = cw.evaluate_candidate_watch(
+        {"ticker": "SPY", "direction": "bullish"}, market=m, now=NOW)
+    assert payload["checks"]["tier_basis"]["full_confirmers"] >= oc.B_PLUS_MIN_CONFIRMATIONS
+    assert payload["checks"]["tier_basis"]["half_derived"] is False
+    assert payload["candidate"]["tier"] == "full"
+
+
+def test_a_plus_still_requires_three_fully_aligned_indices():
+    # A+ carries the daily_budget_aplus_uncapped exemption, so it is the tier that must NOT be
+    # reachable on arithmetic alone: 2 full + 2 half scores A_PLUS_MIN_BREADTH but has never
+    # satisfied the 3-confirmer bar.
+    m = _leader_led_good_day()
+    m["QQQ"] = {"last": 723.0, "above_vwap": True, "orb_state": "above"}   # 2nd full confirmer
+    m["XSP"] = {"last": 741.0, "above_vwap": True, "orb_state": "inside"}  # a half
+    payload = cw.evaluate_candidate_watch(
+        {"ticker": "SPY", "direction": "bullish"}, market=m, now=NOW)
+    checks = payload["checks"]
+    assert checks["breadth_score"] >= oc.A_PLUS_MIN_BREADTH          # arithmetic says A+
+    assert checks["tier_basis"]["full_confirmers"] < oc.A_PLUS_MIN_CONFIRMATIONS
+    assert payload["candidate"]["tier"] != "a_plus"                   # the count says no
+
+    # ...and a genuinely A+ tape still reaches it.
+    full = _market()
+    payload2 = cw.evaluate_candidate_watch(
+        {"ticker": "QQQ", "direction": "bullish"}, market=full, now=NOW)
+    assert payload2["checks"]["tier_basis"]["full_confirmers"] >= oc.A_PLUS_MIN_CONFIRMATIONS
+    assert payload2["candidate"]["tier"] == "a_plus"
+
+
+def test_late_day_window_still_demands_a_plus_under_the_count_rule():
+    # mtc < 45 requires a_plus; half-derived breadth must not sneak through it.
+    m = _leader_led_good_day()
+    m["minutes_to_close"] = 20
+    payload = cw.evaluate_candidate_watch(
+        {"ticker": "SPY", "direction": "bullish"}, market=m, now=NOW)
+    assert payload["decision"] == cw.KEEP_WATCHING
+    assert any("late-day" in r for r in payload["reasons"])

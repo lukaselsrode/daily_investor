@@ -28,7 +28,9 @@ from core.paths import ODTE_DATA_DIR, atomic_write_text
 from data import odte_breadth as breadth
 from data.odte_config import (
     A_PLUS_MIN_BREADTH,
+    A_PLUS_MIN_CONFIRMATIONS,
     B_PLUS_MAX_DISSENTERS,
+    B_PLUS_MIN_CONFIRMATIONS,
     BREADTH_MIN_SCORE,
     EXECUTABLE_UNIVERSE,
     SCAN_UNIVERSE,
@@ -475,13 +477,32 @@ def evaluate_candidate_watch(candidate: dict | None = None, *, market: dict | No
     # the base breadth score and at most 1 definitive dissenter — tradeable on CHOP days at HALF size
     # (the 2026-07-27..31 zero-trade week showed CHOP-with-directional-tape days are the modal setup;
     # A+-or-nothing left them all unconverted). The tier rides the candidate into gate/lease, where
-    # it halves the debit fraction. Thresholds are in breadth points (2x the old confirmer counts),
-    # so "3 fully aligned indices" and "2 fully aligned" keep exactly their previous meaning.
-    a_plus = confirmed and breadth_score >= A_PLUS_MIN_BREADTH and not dissenters
+    # it halves the debit fraction.
+    #
+    # TIER EVIDENCE IS COUNTED IN FULLY ALIGNED INDICES, NOT BREADTH POINTS (2026-08-07). Grading
+    # half-alignment was meant to change WHETHER a leader-led tape converts — not how large it
+    # trades, and not what escapes the daily cap. Scoring the tiers off breadth alone did both by
+    # accident: a lone full confirmer plus two halves scores the same 4 as two full confirmers, so
+    # it inherited the 60% debit fraction that previously required two; and 2 full + 2 halves
+    # reaches 6, which would have handed A+ — and with it the `daily_budget_aplus_uncapped`
+    # exemption — to a tape that has never satisfied the 3-confirmer bar. Both tiers therefore
+    # require the breadth score AND the original count of FULLY aligned indices. Entry loosens;
+    # size and the budget exemption do not.
+    full_confirmers = len(confirmers)
+    a_plus = (confirmed and breadth_score >= A_PLUS_MIN_BREADTH
+              and full_confirmers >= A_PLUS_MIN_CONFIRMATIONS and not dissenters)
     b_plus = (confirmed and breadth_score >= BREADTH_MIN_SCORE
               and len(dissenters) <= B_PLUS_MAX_DISSENTERS)
-    tier = "a_plus" if a_plus else ("b_plus" if (day == "CHOP" and b_plus) else "full")
+    # Half-alignment-derived breadth sizes at the B+ rail even on a GOOD_DAY: it is genuinely
+    # weaker evidence than the two fully aligned indices that used to be the price of admission.
+    half_derived = full_confirmers < B_PLUS_MIN_CONFIRMATIONS
+    tier = ("a_plus" if a_plus
+            else "b_plus" if (b_plus and (day == "CHOP" or half_derived))
+            else "full")
     checks["tier"] = tier
+    checks["tier_basis"] = {"full_confirmers": full_confirmers,
+                            "breadth_score": breadth_score,
+                            "half_derived": half_derived}
 
     mtc = _minutes_to_close(market, now)
     if mtc is not None and mtc < 45 and not a_plus:
