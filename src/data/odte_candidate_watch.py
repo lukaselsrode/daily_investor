@@ -245,6 +245,37 @@ def _breadth(market: dict, direction: str) -> dict:
     return breadth.breadth(market, direction, ETF_UNIVERSE)
 
 
+def _invalidation(market: dict, symbol: str, direction: str) -> dict | None:
+    """The level that kills the thesis, with an ACCEPTANCE BUFFER, computed at confirmation.
+
+    2026-08-07, from the loop's own postmortem of iwm-20260807-301c-scalp-6a761e01: "Post-fill
+    invalidation was hand-derived at the exact ORB boundary instead of being carried from a
+    pre-entry machine-readable plan." Candidate-watch emitted no stop at all, so the agent invented
+    one after the fill and picked the breakout level itself — making the entry trigger and the exit
+    stop the SAME price. IWM entered at 301.205 (1.5c through a 301.19 opening-range high) and
+    stopped at 301.18 (1c under it): the whole trade lived and died inside 2.5 cents, never traded
+    green, and realized -$8.
+
+    The buffer mirrors `_accepted_wall`, which already refuses to treat a bare level crossing as
+    acceptance. A thesis is dead when price gives back the breakout AND the buffer — not when it
+    ticks across the line. Returns None when the snapshot carries no opening range, so a missing
+    field can never masquerade as a stop at 0.
+    """
+    block = _symbol_block(market, symbol)
+    level = _num(block.get("orb_high") if direction == "bullish" else block.get("orb_low"))
+    if level is None or level <= 0:
+        return None
+    buffer = max(0.03, level * 0.0002)
+    stop = level - buffer if direction == "bullish" else level + buffer
+    return {"underlying_stop": round(stop, 4),
+            f"{symbol.lower()}_stop": round(stop, 4),
+            "orb_level": level,
+            "acceptance_buffer": round(buffer, 4),
+            "basis": ("thesis dies when the underlying gives back the opening-range breakout PLUS "
+                      "an acceptance buffer — never on a bare touch of the level that triggered "
+                      "entry (2026-08-07 whipsaw remediation)")}
+
+
 def _pin_wall(candidate: dict, gamma: dict) -> float | None:
     contract = _dict(candidate.get("contract"))
     strike = _num(candidate.get("strike") or candidate.get("strike_price") or contract.get("strike") or
@@ -548,6 +579,12 @@ def evaluate_candidate_watch(candidate: dict | None = None, *, market: dict | No
         # BECAUSE the thesis confirmed. Deliberately NOT part of the identity fingerprint: a
         # re-confirm re-anchors the same contract cycle without invalidating identity.
         cand["tier"] = tier
+        # Carry the invalidation level INTO the candidate so the post-fill management plan is
+        # machine-read, not hand-derived after the fill (see `_invalidation`).
+        invalidation = _invalidation(market, sym, direction)
+        if invalidation:
+            cand["invalidation"] = invalidation
+            checks["invalidation"] = invalidation
         anchor = _num(contract.get("ask") or contract.get("ask_price")
                       or contract.get("mark") or contract.get("mark_price"))
         if anchor is not None and anchor > 0:

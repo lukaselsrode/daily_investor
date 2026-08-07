@@ -771,3 +771,57 @@ def test_birth_timestamp_does_not_change_the_candidate_fingerprint():
     assert cand["candidate_fingerprint"] == xp.candidate_fingerprint(cand)
     without = {k: v for k, v in cand.items() if k != "created_at"}
     assert xp.candidate_fingerprint(without) == cand["candidate_fingerprint"]
+
+
+# --- 2026-08-07: the confirmed candidate carries its own invalidation level -------------------
+# From the loop's postmortem of iwm-20260807-301c-scalp-6a761e01, logged as a rule violation:
+# "Post-fill invalidation was hand-derived at the exact ORB boundary instead of being carried from
+# a pre-entry machine-readable plan." Entry trigger and exit stop were the same price; the trade
+# lived and died inside 2.5 cents and realized -$8.
+
+def test_confirmed_candidate_carries_a_machine_read_invalidation_level():
+    m = _market()
+    m["QQQ"] = {"last": 724.2, "above_vwap": True, "orb_state": "above", "orb_high": 723.0}
+    payload = cw.evaluate_candidate_watch(
+        {"ticker": "QQQ", "direction": "bullish"}, market=m, now=NOW)
+    assert payload["decision"] == cw.CONFIRM_ENTRY
+    inv = payload["candidate"]["invalidation"]
+    assert inv["orb_level"] == 723.0
+    # the stop sits BELOW the breakout level by the acceptance buffer — never ON it
+    assert inv["underlying_stop"] < inv["orb_level"]
+    assert inv["acceptance_buffer"] == max(0.03, 723.0 * 0.0002)
+    assert inv["qqq_stop"] == inv["underlying_stop"]      # odte_position reads {sym}_stop too
+    assert payload["checks"]["invalidation"] == inv
+
+
+def test_invalidation_would_have_survived_the_iwm_whipsaw():
+    # The real numbers: ORB high 301.19, entry at 301.205, the hand-derived stop fired at 301.18.
+    # With the acceptance buffer the thesis is still alive at 301.18.
+    m = _market()
+    m["IWM"] = {"last": 301.205, "above_vwap": True, "orb_state": "above", "orb_high": 301.19}
+    payload = cw.evaluate_candidate_watch(
+        {"ticker": "IWM", "direction": "bullish"}, market=m, now=NOW)
+    inv = payload["candidate"]["invalidation"]
+    assert inv["underlying_stop"] < 301.18, inv       # 301.18 would NOT have killed the thesis
+    assert inv["underlying_stop"] < inv["orb_level"]
+
+
+def test_invalidation_is_direction_symmetric():
+    m = _bearish_market()
+    m["QQQ"] = {"last": 718.6, "above_vwap": False, "orb_state": "below", "orb_low": 719.0}
+    payload = cw.evaluate_candidate_watch(
+        {"ticker": "QQQ", "direction": "bearish"}, market=m, now=NOW)
+    inv = payload["candidate"]["invalidation"]
+    assert inv["orb_level"] == 719.0
+    assert inv["underlying_stop"] > inv["orb_level"]   # a bearish thesis dies ABOVE the level
+
+
+def test_missing_opening_range_emits_no_invalidation_rather_than_a_zero_stop():
+    # The convert-time snapshot ships orb_state without orb_high. A missing level must never
+    # masquerade as a stop at 0, which would read as "thesis dead" on every tick.
+    m = _market()
+    m["QQQ"] = {"last": 724.2, "above_vwap": True, "orb_state": "above"}   # no orb_high
+    payload = cw.evaluate_candidate_watch(
+        {"ticker": "QQQ", "direction": "bullish"}, market=m, now=NOW)
+    assert payload["decision"] == cw.CONFIRM_ENTRY
+    assert "invalidation" not in payload["candidate"]
