@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from core.paths import ODTE_REPORT_DIR
+from data import odte_breadth as breadth
 from data.odte_config import B_PLUS_DEBIT_FRACTION, MAX_DEBIT_FRACTION
 
 GOOD_BET = "GOOD_BET"
@@ -134,7 +135,15 @@ def _market_score(direction: str, market: dict) -> tuple[int, list[str]]:
     above = []
     below = []
     for sym in ("spy", "qqq", "iwm"):
-        v = _bool(market.get(f"{sym}_above_vwap") if f"{sym}_above_vwap" in market else market.get(sym, {}).get("above_vwap") if isinstance(market.get(sym), dict) else None)
+        # SHARED SNAPSHOT READER (2026-08-07). This used to hand-roll the lookup as
+        # `market.get(f"{sym}_above_vwap") ... else market.get(sym, {}).get("above_vwap")`, which
+        # never reached a nested block: `sym` is lowercase here and snapshots write UPPERCASE
+        # per-symbol blocks, so `market.get("spy")` was always None and only the flat keys were
+        # ever read. On a nested-only snapshot the whole market component scored 0 and the verdict
+        # fell to WATCH/2 — below B_PLUS_MIN_VEHICLE_SCORE, so it blocked entry outright while
+        # odte_breadth read the same tape as fully aligned. Fail-closed, and masked only because
+        # the controller happens to emit both shapes.
+        v = breadth.above_vwap(market, sym)
         if v is True:
             above.append(sym.upper())
         elif v is False:
@@ -152,10 +161,15 @@ def _market_score(direction: str, market: dict) -> tuple[int, list[str]]:
         if len(above) >= 2:
             reasons.append(f"VWAP conflicts with puts on {','.join(above)}")
     # VIXY confirmation: lower/below VWAP helps calls; higher/above helps puts.
-    raw_vixy = market.get("vixy")
-    vixy_obj: dict = raw_vixy if isinstance(raw_vixy, dict) else {}
+    # Same reader for VIXY — the old lookup used the lowercase key `market.get("vixy")` against
+    # snapshots that write "VIXY", so the nested arm never fired here either.
+    vixy_obj: dict = breadth.symbol_block(market, "VIXY")
     vixy_above = _bool(market.get("vixy_above_vwap") if "vixy_above_vwap" in market
                        else vixy_obj.get("above_vwap"))
+    # NOTE: the nested arm reads `day_change_pct` only, while live snapshots write `change_pct` on
+    # the VIXY block — so this arm is still blind to a nested-only VIXY. Deliberately NOT fixed in
+    # the same commit: adding `change_pct` here moves 39 of 1194 replayed verdicts, so it is a
+    # behaviour change requiring its own measurement, not part of a reader swap.
     vixy_chg = _num(market.get("vixy_change_pct") if "vixy_change_pct" in market
                     else vixy_obj.get("day_change_pct"))
     if bullish:

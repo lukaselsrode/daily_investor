@@ -103,3 +103,43 @@ def test_bp_fit_tier_selects_fraction_and_fitting_contract_passes():
 def test_bp_fit_absent_without_buying_power():
     p = score_vehicle({"underlying": "SPY", "ask": 1.0}, direction="bullish")
     assert p["bp_fit"] is None
+
+
+# --- 2026-08-07: the market component reads BOTH snapshot shapes ------------------------------
+
+def test_market_component_reads_a_nested_only_snapshot():
+    """The nested arm never fired: it looked up `market.get(sym)` with a LOWERCASE sym while
+    snapshots write UPPERCASE per-symbol blocks, so only flat keys were ever read. On a
+    nested-only snapshot the whole market component scored 0 and the verdict fell to WATCH — below
+    B_PLUS_MIN_VEHICLE_SCORE, blocking entry, while odte_breadth read the same tape as fully
+    aligned. Fail-closed, and masked only because the live controller emits both shapes.
+    """
+    from data.odte_vehicle_score import score_vehicle
+    contract = {"underlying": "SPY", "option_type": "call", "ask": 0.50, "bid": 0.48,
+                "option_id": "x", "strike_price": 100.0, "expiration_date": "2026-08-07"}
+    nested = {"SPY": {"above_vwap": True, "orb_state": "above"},
+              "QQQ": {"above_vwap": True, "orb_state": "above"},
+              "IWM": {"above_vwap": True, "orb_state": "above"},
+              "VIXY": {"above_vwap": False, "change_pct": -2.0}}
+    flat = {**nested, "spy_above_vwap": True, "qqq_above_vwap": True, "iwm_above_vwap": True,
+            "vixy_above_vwap": False, "vixy_change_pct": -2.0}
+    a = score_vehicle(contract, direction="bullish", market=nested, buying_power=370.86)
+    b = score_vehicle(contract, direction="bullish", market=flat, buying_power=370.86)
+    assert a["components"]["market"] == b["components"]["market"], (a["components"], b["components"])
+    assert a["verdict"] == b["verdict"] == "GOOD_BET"
+    assert any("VWAP confirms calls" in r for r in a["reasons"])
+
+
+def test_scalar_vixy_key_does_not_hide_the_nested_vixy_block():
+    """Real 2026-07-27 shape: `market["vixy"]` is a SCALAR price (21.445) and the flat
+    `vixy_above_vwap` key is absent, so the old `isinstance(raw_vixy, dict)` guard fell through to
+    None and VIXY read as no-signal. The uppercase VIXY block carried above_vwap all along.
+    """
+    from data.odte_vehicle_score import score_vehicle
+    contract = {"underlying": "SPY", "option_type": "put", "ask": 0.50, "bid": 0.48,
+                "option_id": "x", "strike_price": 100.0, "expiration_date": "2026-08-07"}
+    market = {"spy_above_vwap": False, "qqq_above_vwap": False, "iwm_above_vwap": False,
+              "vixy": 21.445,                       # scalar, not a block
+              "VIXY": {"last": 21.445, "above_vwap": True, "change_pct": 0.0233}}
+    out = score_vehicle(contract, direction="bearish", market=market, buying_power=370.86)
+    assert any("VIXY" in r for r in out["reasons"]), out["reasons"]
