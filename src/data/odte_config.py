@@ -67,6 +67,19 @@ B_PLUS_DEBIT_FRACTION: float = _num("b_plus_debit_fraction", 0.30)
 A_PLUS_MIN_CONFIRMATIONS: int = _int("a_plus_min_confirmations", 3)
 B_PLUS_MIN_CONFIRMATIONS: int = _int("b_plus_min_confirmations", 2)
 B_PLUS_MAX_DISSENTERS: int = _int("b_plus_max_dissenters", 1)
+# Breadth score (2026-08-07): confirmation is graded, not counted. Each index contributes its VWAP
+# side plus its opening-range side (odte_tape.FULL_ALIGNMENT == 2 for a fully aligned index), so an
+# index above VWAP but still inside its opening range finally counts for something instead of
+# nothing. The defaults are exactly 2x the confirmer counts above, so "two full confirmers" keeps
+# its meaning and "one full plus two halves" becomes its equal.
+#
+# Why: on 2026-08-07 a SPY-led breakout sat un-convertible at confirmations=1 for 45 minutes while
+# day_score graded the same tape GOOD_DAY off "3 indices trend-aligned" — the two modules scored
+# breadth by different rules. Replay over the snapshot history (scripts/odte_breadth_replay.py):
+# 51 tick-level opens, 0 closes, but only 2 of 10 replayable sessions gain a confirm they did not
+# already have, so the daily budget bounds this at ~4 added trades across the replayed history.
+BREADTH_MIN_SCORE: int = _int("breadth_min_score", B_PLUS_MIN_CONFIRMATIONS * 2)
+A_PLUS_MIN_BREADTH: int = _int("a_plus_min_breadth", A_PLUS_MIN_CONFIRMATIONS * 2)
 B_PLUS_MIN_VEHICLE_SCORE: int = _int("b_plus_min_vehicle_score", 3)
 GOOD_DAY_MIN_SCORE: int = _int("good_day_min_score", 4)
 

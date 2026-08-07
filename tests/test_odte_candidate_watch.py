@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+import data.odte_breadth as breadth
 import data.odte_candidate_watch as cw
 import data.odte_config as oc
 import data.odte_execution_policy as xp
@@ -171,6 +172,18 @@ def test_scan_only_symbol_never_becomes_executable_candidate():
     )
     assert payload["decision"] == cw.DEGRADED_NO_TRADE
     assert payload["execution_allowed"] is False
+
+
+def test_synthetic_market_scorecard_never_confirms_entry():
+    payload = cw.evaluate_candidate_watch(
+        {"ticker": "SPY", "direction": "bullish", "source": "market_scorecard",
+         "synthetic_market_scorecard": True, "scan_only": True,
+         "execution_allowed": False},
+        market=_market(), now=NOW,
+    )
+    assert payload["decision"] == cw.KEEP_WATCHING
+    assert payload["execution_allowed"] is False
+    assert any("synthetic market_scorecard" in reason for reason in payload["reasons"])
 
 
 def test_pin_wall_blocks_confirmation_until_acceptance_above_wall():
@@ -353,19 +366,43 @@ def test_relative_strength_rank_is_deterministic_selection_context():
     assert qqq["candidate"]["relative_strength_rank"] == 2
 
 
-def test_vixy_conflict_flag_when_both_directions_confirmed(monkeypatch):
-    # The real Aug-4 VIXY block: above VWAP (firming short-circuit) but down on the day (weak
-    # fallback) -> BOTH helpers True, a free vol confirmation for either direction. Flag it.
+def test_vixy_divergence_is_recorded_but_the_helpers_are_mutually_exclusive():
+    # SUPERSEDES test_vixy_conflict_flag_when_both_directions_confirmed (2026-08-07). That test
+    # pinned the BUG: _vixy_weak short-circuited on above_vwap=False and _vixy_firming on
+    # above_vwap=True, both falling through to change_pct otherwise, so a VIXY that disagreed with
+    # itself satisfied BOTH and handed a free vol confirmation to either direction. The flag was
+    # predicted 2026-08-05 and fired live 2026-08-07 15:54:42. vol_bias() now resolves it: the VWAP
+    # side wins, change_pct is only a tiebreak. The disagreement is still recorded, as divergence.
+    for block, weak, firming in (
+        ({"above_vwap": True, "change_pct": -0.7371, "last": 20.2}, False, True),   # 2026-08-04
+        ({"above_vwap": False, "change_pct": 0.0512, "last": 19.54}, True, False),  # 2026-08-07
+    ):
+        market = {
+            "SPY": {"last": 770.0, "above_vwap": True, "orb_state": "above"},
+            "QQQ": {"last": 700.0, "above_vwap": True, "orb_state": "above"},
+            "IWM": {"last": 300.0, "above_vwap": True, "orb_state": "above"},
+            "VIXY": block,
+        }
+        assert cw._vixy_weak(market) is weak
+        assert cw._vixy_firming(market) is firming
+        assert not (cw._vixy_weak(market) and cw._vixy_firming(market))
+        result = cw.evaluate_candidate_watch({"ticker": "SPY", "direction": "bullish"},
+                                             market=market, now=NOW)
+        assert result["checks"].get("vixy_divergence") is True
+        assert "vixy_conflict" not in result["checks"]      # unreachable by construction now
+
+
+def test_agreeing_vixy_is_not_flagged_as_divergent():
     market = {
         "SPY": {"last": 770.0, "above_vwap": True, "orb_state": "above"},
         "QQQ": {"last": 700.0, "above_vwap": True, "orb_state": "above"},
         "IWM": {"last": 300.0, "above_vwap": True, "orb_state": "above"},
-        "VIXY": {"above_vwap": True, "change_pct": -0.7371, "last": 20.2},
+        "VIXY": {"above_vwap": False, "change_pct": -0.7371, "last": 20.2},
     }
-    assert cw._vixy_weak(market) and cw._vixy_firming(market)  # the underlying contradiction
     result = cw.evaluate_candidate_watch({"ticker": "SPY", "direction": "bullish"},
                                          market=market, now=NOW)
-    assert result["checks"].get("vixy_conflict") is True
+    assert "vixy_divergence" not in result["checks"]
+    assert cw._vixy_weak(market) is True and cw._vixy_firming(market) is False
 
 
 # --- 2026-08-05 zombie-trap fixes: session anchor, tombstone, expiry fall-through -------------
@@ -432,3 +469,86 @@ def test_aug5_zombie_replay_expires_with_session_anchored_age():
                                      max_watch_minutes=20)
     assert r2.get("prior_candidate_expired") is True
     assert r2["candidate"]["ticker"] in ("SPY", "QQQ", "IWM")
+
+
+# --- 2026-08-07: graded breadth replaces the binary confirmer count ----------------------------
+# The session that motivated this: a SPY 773C candidate sat in WATCHING_CONFIRMATION for 45 minutes
+# at confirmations=1 while day_score graded the SAME snapshot GOOD_DAY off "3 indices trend-aligned
+# on ORB/VWAP". QQQ and IWM were above VWAP but pinned inside their opening ranges (QQQ 722.66 vs an
+# ORB high of 722.71; IWM 301.17 vs 301.19), which the binary count discarded entirely.
+
+def _leader_led_market(**over):
+    """Verbatim shape of the tape odte-convert refused at 2026-08-07T15:29:34Z."""
+    m = {
+        "day_verdict": "GOOD_DAY",
+        "minutes_to_close": 270,
+        "SPY": {"last": 773.655, "above_vwap": True, "orb_state": "above"},
+        "QQQ": {"last": 722.66, "above_vwap": True, "orb_state": "inside"},
+        "IWM": {"last": 301.17, "above_vwap": True, "orb_state": "inside"},
+        "VIXY": {"last": 19.48, "above_vwap": False, "orb_state": "below"},
+    }
+    m.update(over)
+    return m
+
+
+def test_leader_led_breakout_with_rangebound_laggards_now_confirms():
+    payload = cw.evaluate_candidate_watch(
+        {"ticker": "SPY", "direction": "bullish"}, market=_leader_led_market(), now=NOW)
+    checks = payload["checks"]
+    assert checks["confirmations"] == 1                      # still honestly 1 fully aligned
+    assert checks["half_confirmers"] == ["QQQ", "IWM"]       # the population the old count dropped
+    assert checks["breadth_score"] == oc.BREADTH_MIN_SCORE   # exactly at the bar, not past it
+    assert checks["breadth_required"] == oc.BREADTH_MIN_SCORE
+    assert payload["decision"] == cw.CONFIRM_ENTRY
+
+
+def test_one_index_alone_still_refuses():
+    # The change must not let a single index convert by itself — that is the failure mode a graded
+    # score could introduce if the threshold were set at FULL_ALIGNMENT.
+    solo = _leader_led_market()
+    for sym in ("QQQ", "IWM"):
+        solo.pop(sym)
+    payload = cw.evaluate_candidate_watch(
+        {"ticker": "SPY", "direction": "bullish"}, market=solo, now=NOW)
+    assert payload["checks"]["breadth_score"] < oc.BREADTH_MIN_SCORE
+    assert payload["decision"] == cw.KEEP_WATCHING
+
+
+def test_breadth_thresholds_are_expressed_in_full_alignment_units():
+    # The defaults must keep the old confirmer counts' meaning: N fully aligned indices is worth
+    # N * FULL_ALIGNMENT points. Pinned so a config edit cannot silently change what a tier means.
+    assert oc.BREADTH_MIN_SCORE == oc.B_PLUS_MIN_CONFIRMATIONS * breadth.FULL_ALIGNMENT
+    assert oc.A_PLUS_MIN_BREADTH == oc.A_PLUS_MIN_CONFIRMATIONS * breadth.FULL_ALIGNMENT
+
+
+def test_full_alignment_still_reaches_a_plus_under_the_score():
+    payload = cw.evaluate_candidate_watch(
+        {"ticker": "QQQ", "direction": "bullish"}, market=_market(), now=NOW)
+    assert payload["checks"]["breadth_score"] >= oc.A_PLUS_MIN_BREADTH
+    assert payload["candidate"]["tier"] == "a_plus"
+
+
+def test_half_alignment_alone_cannot_reach_a_plus():
+    # Four half-aligned indices score the A+ bar arithmetically but none is fully aligned; the
+    # candidate's own underlying must still clear its opening range, so this refuses upstream.
+    halves = {"day_verdict": "GOOD_DAY", "minutes_to_close": 270,
+              "VIXY": {"above_vwap": False, "change_pct": -2.0}}
+    for sym in ("SPY", "QQQ", "IWM", "XSP"):
+        halves[sym] = {"last": 100.0, "above_vwap": True, "orb_state": "inside"}
+    payload = cw.evaluate_candidate_watch(
+        {"ticker": "SPY", "direction": "bullish"}, market=halves, now=NOW)
+    assert payload["decision"] != cw.CONFIRM_ENTRY
+    assert payload["candidate"].get("tier") != "a_plus"
+
+
+def test_bearish_side_is_symmetric():
+    # Mirror of the 2026-08-07 leader-led tape: SPY through its range, the laggards below VWAP but
+    # still inside theirs. XSP is dropped so the score is the exact 2+1+1 mirror of the bullish case.
+    market = _bearish_market(QQQ={"last": 718.6, "above_vwap": False, "orb_state": "inside"},
+                             IWM={"last": 296.0, "above_vwap": False, "orb_state": "inside"})
+    market.pop("XSP")
+    payload = cw.evaluate_candidate_watch(
+        {"ticker": "SPY", "direction": "bearish"}, market=market, now=NOW)
+    assert payload["checks"]["half_confirmers"] == ["QQQ", "IWM"]
+    assert payload["checks"]["breadth_score"] == oc.BREADTH_MIN_SCORE
+    assert payload["decision"] == cw.CONFIRM_ENTRY

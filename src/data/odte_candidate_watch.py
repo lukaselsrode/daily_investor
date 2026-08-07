@@ -25,10 +25,11 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from core.paths import ODTE_DATA_DIR, atomic_write_text
+from data import odte_breadth as breadth
 from data.odte_config import (
-    A_PLUS_MIN_CONFIRMATIONS,
+    A_PLUS_MIN_BREADTH,
     B_PLUS_MAX_DISSENTERS,
-    B_PLUS_MIN_CONFIRMATIONS,
+    BREADTH_MIN_SCORE,
     EXECUTABLE_UNIVERSE,
     SCAN_UNIVERSE,
 )
@@ -105,27 +106,11 @@ def _norm_symbol(value: Any) -> str | None:
     return str(value).strip().upper()
 
 
-def _symbol_block(market: dict, symbol: str | None) -> dict:
-    if not symbol:
-        return {}
-    sym = symbol.upper()
-    for key in (sym, sym.lower(), "underlying"):
-        block = market.get(key)
-        if isinstance(block, dict):
-            return block
-    return {}
-
-
-def _bool_field(block: dict, name: str) -> bool | None:
-    value = block.get(name)
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        if value.lower() in {"true", "yes", "1", "above"}:
-            return True
-        if value.lower() in {"false", "no", "0", "below"}:
-            return False
-    return None
+# Snapshot reading now lives in odte_breadth so this lane and the day-regime lane cannot drift apart
+# again (2026-08-07). These stay as thin adapters because the call sites below pass a resolved block
+# around rather than a (market, symbol) pair.
+_symbol_block = breadth.symbol_block
+_bool_field = breadth._bool_field
 
 
 def _orb_state(block: dict) -> str:
@@ -147,25 +132,13 @@ def _spot(market: dict, symbol: str | None) -> float | None:
 
 
 def _vixy_weak(market: dict) -> bool:
-    block = _symbol_block(market, "VIXY") or _symbol_block(market, "VIX")
-    if not block:
-        return False
-    above = _bool_field(block, "above_vwap")
-    change = _num(block.get("change_pct") or block.get("pct_change"))
-    if above is False:
-        return True
-    return bool(change is not None and change < 0)
+    """Volatility supports calls. Mutually exclusive with `_vixy_firming` since 2026-08-07."""
+    return breadth.vol_bias(market) < 0
 
 
 def _vixy_firming(market: dict) -> bool:
-    block = _symbol_block(market, "VIXY") or _symbol_block(market, "VIX")
-    if not block:
-        return False
-    above = _bool_field(block, "above_vwap")
-    change = _num(block.get("change_pct") or block.get("pct_change"))
-    if above is True:
-        return True
-    return bool(change is not None and change > 0)
+    """Volatility supports puts. Mutually exclusive with `_vixy_weak` since 2026-08-07."""
+    return breadth.vol_bias(market) > 0
 
 
 def _day_verdict(market: dict, day_score: dict) -> str:
@@ -232,26 +205,26 @@ def _confirmation_counts(market: dict, direction: str) -> tuple[int, list[str], 
     """Count ETF tape confirmers and DISSENTERS for `direction`. A confirmer is above VWAP + above ORB
     (bullish) / below + below (bearish). A dissenter must carry a DEFINITIVE opposite read — its VWAP
     side must be present; missing/partial tape (XSP snapshots routinely lack VWAP/ORB fields) is
-    neutral, never a silent veto. A+ confirmation (CHOP / late-day) requires zero dissenters."""
-    hits: list[str] = []
-    dissents: list[str] = []
-    for etf in ETF_UNIVERSE:
-        block = _symbol_block(market, etf)
-        if not block:
-            continue
-        above = _above_vwap(market, etf)
-        orb = _orb_state(block)
-        if direction == "bullish":
-            if above is True and orb == "above":
-                hits.append(etf)
-            elif above is not None and (above is False or orb == "below"):
-                dissents.append(etf)
-        else:
-            if above is False and orb == "below":
-                hits.append(etf)
-            elif above is not None and (above is True or orb == "above"):
-                dissents.append(etf)
-    return len(hits), hits, dissents
+    neutral, never a silent veto. A+ confirmation (CHOP / late-day) requires zero dissenters.
+
+    Kept as-is for every existing caller; `_breadth` below carries the graded view that the
+    confirmation threshold now reads. The two are the same bucketing — `hits` is the fully aligned
+    set, `dissents` the opposed set — so this remains the honest "how many indices fully agree".
+    """
+    buckets = breadth.breadth(market, direction, ETF_UNIVERSE)
+    return len(buckets["full"]), list(buckets["full"]), list(buckets["opposed"])
+
+
+def _breadth(market: dict, direction: str) -> dict:
+    """Graded tape breadth: VWAP side + opening-range side, summed over the scan universe.
+
+    The binary confirmer count discarded the half-aligned case entirely — an index above VWAP but
+    still inside its opening range counted neither for nor against. On a gap-and-range day that is
+    the modal state of the laggards, so a leader-led breakout stalled at 1-of-3 forever while the
+    day-regime lane graded the very same tape a clean trend day (2026-08-07, SPY 773C, 45 minutes
+    in WATCHING_CONFIRMATION). Grading the halves lets those two lanes agree.
+    """
+    return breadth.breadth(market, direction, ETF_UNIVERSE)
 
 
 def _pin_wall(candidate: dict, gamma: dict) -> float | None:
@@ -387,6 +360,13 @@ def evaluate_candidate_watch(candidate: dict | None = None, *, market: dict | No
     if not direction:
         reasons.append("candidate direction missing")
         return _payload(KEEP_WATCHING, cand, reasons, checks, now)
+    # The watchdog's synthetic market scorecard exists only to keep the tape loop warm. It is not
+    # an identity-bound vehicle candidate and must never be promoted to CONFIRM_ENTRY merely because
+    # ETF breadth happens to align; doing so creates a conversion posture with option_id=—.
+    if (str(cand.get("source") or "").lower() == "market_scorecard"
+            or cand.get("synthetic_market_scorecard") is True):
+        reasons.append("synthetic market_scorecard is scan-only; executable contract candidate required")
+        return _payload(KEEP_WATCHING, cand, reasons, checks, now)
 
     # VEHICLE LOCK: pin the selected vehicle + fingerprint on the candidate the moment identity is
     # known, so every downstream artifact (active_candidate.json, gate, lease) binds to ONE vehicle.
@@ -447,40 +427,51 @@ def evaluate_candidate_watch(candidate: dict | None = None, *, market: dict | No
 
     underlying_above = _above_vwap(market, sym)
     underlying_orb = _orb_state(_symbol_block(market, sym))
-    confirmations, confirmers, dissenters = _confirmation_counts(market, direction)
+    buckets = _breadth(market, direction)
+    confirmations, confirmers, dissenters = (len(buckets["full"]), list(buckets["full"]),
+                                             list(buckets["opposed"]))
+    breadth_score = buckets["score"]
     checks.update({"underlying_above_vwap": underlying_above,
                    "underlying_orb_state": underlying_orb,
                    "confirmations": confirmations,
                    "confirmers": confirmers,
+                   "half_confirmers": list(buckets["half"]),
+                   "breadth_score": breadth_score,
+                   "breadth_required": BREADTH_MIN_SCORE,
                    "dissenters": dissenters,
                    "vixy_weak": _vixy_weak(market),
                    "vixy_firming": _vixy_firming(market),
                    "minutes_to_close": _minutes_to_close(market, now)})
-    # Telemetry (2026-08-05): _vixy_weak short-circuits on above_vwap=False, _vixy_firming on
-    # above_vwap=True — an above-VWAP-but-down-on-day VIXY satisfies BOTH, silently handing a
-    # free vol confirmation to EITHER direction. Flag it; the mutual-exclusion fix waits for a
-    # clean session of this telemetry.
-    if checks["vixy_weak"] and checks["vixy_firming"]:
-        checks["vixy_conflict"] = True
+    # 2026-08-07: the mutual-exclusion fix landed (odte_breadth.vol_bias — the VWAP side wins, day
+    # change is only a tiebreak), so `vixy_weak` and `vixy_firming` can no longer both be true and
+    # `vixy_conflict` is unreachable by construction. The information it carried is kept: when the
+    # VWAP side and the day change disagree, that is now recorded as `vixy_divergence`. First
+    # observed live 2026-08-07 15:54:42, one tick after the flag was predicted on 2026-08-05.
+    if breadth.vol_divergence(market):
+        checks["vixy_divergence"] = True
 
     if direction == "bullish":
         invalidated = underlying_above is False or underlying_orb == "below"
-        confirmed = underlying_above is True and underlying_orb == "above" and confirmations >= 2 and _vixy_weak(market)
+        confirmed = (underlying_above is True and underlying_orb == "above"
+                     and breadth_score >= BREADTH_MIN_SCORE and _vixy_weak(market))
     else:
         invalidated = underlying_above is True and underlying_orb == "above"
-        confirmed = underlying_above is False and underlying_orb == "below" and confirmations >= 2 and _vixy_firming(market)
+        confirmed = (underlying_above is False and underlying_orb == "below"
+                     and breadth_score >= BREADTH_MIN_SCORE and _vixy_firming(market))
 
     if invalidated:
         reasons.append(f"{sym} tape invalidated {direction} candidate")
         return _payload(DEGRADED_NO_TRADE, cand, reasons, checks, now)
 
-    # Confirmation tiers. A+ = confirmed underlying, >=3 ETF confirmers, ZERO dissenters — demanded
-    # in the late-day window, where a marginal read fails. B+ = confirmed with >=2 confirmers and at
-    # most 1 definitive dissenter — tradeable on CHOP days at HALF size (the 2026-07-27..31 zero-trade
-    # week showed CHOP-with-directional-tape days are the modal setup; A+-or-nothing left them all
-    # unconverted). The tier rides the candidate into gate/lease, where it halves the debit fraction.
-    a_plus = confirmed and confirmations >= A_PLUS_MIN_CONFIRMATIONS and not dissenters
-    b_plus = (confirmed and confirmations >= B_PLUS_MIN_CONFIRMATIONS
+    # Confirmation tiers. A+ = confirmed underlying, a full-alignment-grade breadth score, ZERO
+    # dissenters — demanded in the late-day window, where a marginal read fails. B+ = confirmed with
+    # the base breadth score and at most 1 definitive dissenter — tradeable on CHOP days at HALF size
+    # (the 2026-07-27..31 zero-trade week showed CHOP-with-directional-tape days are the modal setup;
+    # A+-or-nothing left them all unconverted). The tier rides the candidate into gate/lease, where
+    # it halves the debit fraction. Thresholds are in breadth points (2x the old confirmer counts),
+    # so "3 fully aligned indices" and "2 fully aligned" keep exactly their previous meaning.
+    a_plus = confirmed and breadth_score >= A_PLUS_MIN_BREADTH and not dissenters
+    b_plus = (confirmed and breadth_score >= BREADTH_MIN_SCORE
               and len(dissenters) <= B_PLUS_MAX_DISSENTERS)
     tier = "a_plus" if a_plus else ("b_plus" if (day == "CHOP" and b_plus) else "full")
     checks["tier"] = tier
