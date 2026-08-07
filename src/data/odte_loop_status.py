@@ -405,7 +405,7 @@ def _next_for(state: str, *, live: bool) -> tuple[str, str]:
                 "invocation scans nothing and returns 'no candidate yet'); on CONFIRM_ENTRY "
                 "fetch fresh snapshots and run the atomic conversion",
                 "make odte-candidate-watch CANDIDATE=<triggers.json candidate> "
-                "MARKET=<fresh market.json> JSON=1 WRITE=1 → odte-convert (on CONFIRM_ENTRY)")
+                "MARKET=<fresh market.json> JSON=1 WRITE=1 JOURNAL=1 → odte-convert (on CONFIRM_ENTRY)")
     if state == "GATED":
         return ("gate not execution-allowed — refresh the failing/missing inputs and re-run the "
                 "atomic conversion (it re-confirms + re-gates + mints the lease under one clock); "
@@ -481,9 +481,9 @@ def _rescan_override(payload: dict, events: list[dict], now: datetime) -> None:
         "manufacture/confirm a candidate (a bare invocation without MARKET= scans nothing)"
         + (" — BUDGET BASE EXHAUSTED on a net-green day: A_PLUS-TIER SETUPS ONLY (the gate "
            "enforces the tier; a net-red day ends entries)" if aplus_only else ""))
-    payload["next_command"] = ("make odte-day-score MARKET=<fresh market.json> JSON=1 → "
+    payload["next_command"] = ("make odte-day-score MARKET=<fresh market.json> JSON=1 JOURNAL=1 → "
                                "make odte-candidate-watch MARKET=<fresh market.json> JSON=1 "
-                               "WRITE=1")
+                               "WRITE=1 JOURNAL=1")
     payload["rescan_override"] = True
 
 

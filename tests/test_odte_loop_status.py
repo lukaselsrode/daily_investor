@@ -1741,3 +1741,24 @@ def test_rescan_override_never_contradicts_the_safety_lockout():
                     "adjudicated_by": "lukas", "reason": "false positive, fix committed"}
     r2 = ls.derive_loop_state(journal_events=[incident, adjudication], now=NOW)
     assert r2.get("rescan_override") is True                                 # unlocked: scan on
+
+
+def test_scanning_next_commands_carry_journal_so_the_lane_records():
+    """The controller treats loop-status `next_command` as authoritative, so the JOURNAL=1 that
+    makes the scanning lane record its evaluations has to live HERE, not only in the agent prompt.
+
+    2026-08-07: run_candidate_watch gained --journal and the Makefile gained the passthrough, but
+    loop-status kept emitting the command without it — so the near-miss population would still have
+    gone unrecorded on every tick that followed next_command verbatim.
+    """
+    import inspect
+
+    import data.odte_loop_status as mod
+    src = inspect.getsource(mod)
+    for fragment in ("make odte-candidate-watch CANDIDATE=", "make odte-candidate-watch MARKET="):
+        idx = src.find(fragment)
+        assert idx != -1, f"missing suggested command: {fragment}"
+    # every emitted odte-candidate-watch invocation asks for journaling
+    for line in src.splitlines():
+        if "odte-candidate-watch" in line and "make " in line and "WRITE=1" in line:
+            assert "JOURNAL=1" in line or "JOURNAL=1" in src[src.find(line):src.find(line) + 400], line
