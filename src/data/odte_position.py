@@ -517,8 +517,53 @@ def run_position_watchdog(plan_path: str | None = None, snapshot: dict | None = 
     decision_text = json.dumps(payload, indent=2, default=str)
     atomic_write_text(sdir / STATE_FILENAME, json.dumps(state, indent=2, default=str))
     atomic_write_text(sdir / DECISION_FILENAME, decision_text)
+    _persist_best_seen_bid(ppath, result.get("best_seen_bid"),
+                           active=bool(result.get("active")))
     _journal_position_decision(payload, decision_text, sdir / DECISION_FILENAME)
     return payload
+
+
+def _persist_best_seen_bid(plan_path: Path, best_seen: float | None, *, active: bool) -> None:
+    """Write the updated bid-memory peak back into the plan.
+
+    BID_MEMORY_PROTECT's entire state is ``management.best_seen_bid``, and ``evaluate_position``
+    is a pure evaluator that RETURNS the updated peak without storing it — so the runner has to.
+    Until 2026-08-10 nothing did, and the docstring's "caller-persisted" meant the LLM controller
+    was expected to hand-write it between polls. It did not: on the 14:19 SPY 774C trade the plan
+    went unwritten across 7+ management checks while the bid moved. The rail that exists to stop a
+    winner round-tripping was reading a peak that only advanced when the agent remembered to
+    advance it. A rail whose state the agent maintains is not a rail — same lesson as the
+    hand-derived stop (2026-08-07), third occurrence.
+
+    Deliberately narrow, because the controller also owns this file (it writes the post-fill plan
+    and the thesis):
+
+    * re-reads immediately before writing and merges ONE key, so a concurrent controller write
+      loses at most this field instead of the thesis;
+    * refuses to act unless the plan already reads ``ok`` — this never creates or repairs a plan;
+    * monotonic, so a stale-low evaluation can never walk the recorded peak back down;
+    * fail-safe — any error leaves the plan untouched and never changes the decision.
+    """
+    if not active or best_seen is None:
+        return
+    try:
+        from data.odte_watchdog import _read_json  # shared JSON reader (status-aware)
+
+        fresh, status = _read_json(plan_path)
+        if status != "ok" or not isinstance(fresh, dict):
+            return
+        management = dict(fresh.get("management") or {})
+        prior = management.get("best_seen_bid")
+        try:
+            if prior is not None and float(prior) >= float(best_seen):
+                return                                 # the peak only ever ratchets up
+        except (TypeError, ValueError):
+            pass                                       # unparseable prior: overwrite with a number
+        management["best_seen_bid"] = best_seen
+        fresh["management"] = management
+        atomic_write_text(plan_path, json.dumps(fresh, indent=2, default=str))
+    except Exception as exc:                           # never let persistence affect the decision
+        logger.debug("bid-memory persistence skipped (%s)", exc)
 
 
 def _journal_position_decision(payload: dict, decision_text: str, decision_path: Path) -> None:

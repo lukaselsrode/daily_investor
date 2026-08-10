@@ -244,6 +244,89 @@ def test_run_position_watchdog_no_plan_is_quiet(tmp_path):
     assert payload["plan_status"] == "missing"
 
 
+# --- bid-memory persistence (2026-08-10) -----------------------------------------------------
+# evaluate_position RETURNS the updated peak but stays pure; until now nothing wrote it back, so
+# BID_MEMORY_PROTECT's entire state depended on the LLM controller hand-persisting it between
+# polls. On the live 14:19 SPY 774C trade the plan went unwritten across 7+ management checks.
+
+def _poll(tmp_path, snapshot, **plan_over):
+    plan_path = tmp_path / "active_trade.json"
+    if not plan_path.exists():
+        plan_path.write_text(json.dumps(_scalp_plan(thesis={}, time_rules={}, **plan_over)))
+    return op.run_position_watchdog(plan_path=str(plan_path), snapshot=snapshot,
+                                    state_dir=str(tmp_path)), plan_path
+
+
+def test_best_seen_bid_is_persisted_into_the_plan(tmp_path):
+    _, plan_path = _poll(tmp_path, {"option_mark": 1.10, "option_bid": 1.20})
+    assert json.loads(plan_path.read_text())["management"]["best_seen_bid"] == 1.20
+
+
+def test_persisted_peak_only_ratchets_up(tmp_path):
+    _, plan_path = _poll(tmp_path, {"option_mark": 1.10, "option_bid": 1.20})
+    _poll(tmp_path, {"option_mark": 1.05, "option_bid": 1.02})     # bid fell
+    assert json.loads(plan_path.read_text())["management"]["best_seen_bid"] == 1.20, \
+        "a later, lower bid must never walk the recorded peak down"
+
+
+def test_persistence_preserves_the_thesis_the_controller_owns(tmp_path):
+    plan_path = tmp_path / "active_trade.json"
+    plan_path.write_text(json.dumps(_scalp_plan(
+        time_rules={}, thesis={"underlying_stop": 773.4753, "orb_level": 773.63},
+        entry_order_id="abc123")))
+    op.run_position_watchdog(plan_path=str(plan_path),
+                             snapshot={"option_mark": 1.10, "option_bid": 1.20},
+                             state_dir=str(tmp_path))
+    plan = json.loads(plan_path.read_text())
+    assert plan["thesis"] == {"underlying_stop": 773.4753, "orb_level": 773.63}
+    assert plan["entry_order_id"] == "abc123"
+    assert plan["management"]["best_seen_bid"] == 1.20
+
+
+def test_no_position_never_writes_a_plan(tmp_path):
+    op.run_position_watchdog(plan_path=str(tmp_path / "nope.json"), snapshot={"option_bid": 9.0},
+                             state_dir=str(tmp_path))
+    assert not (tmp_path / "nope.json").exists(), "must never create or repair a plan"
+
+
+def test_invalid_plan_is_left_untouched(tmp_path):
+    plan_path = tmp_path / "active_trade.json"
+    plan_path.write_text("{not json")
+    op.run_position_watchdog(plan_path=str(plan_path), snapshot={"option_bid": 9.0},
+                             state_dir=str(tmp_path))
+    assert plan_path.read_text() == "{not json"
+
+
+def test_bid_memory_rail_now_fires_across_polls(tmp_path):
+    """The point of the whole change: the rail is stateful, so it needs state that survives.
+
+    Poll 1 lifts the bid past the arm threshold; poll 2 fades it through the giveback floor.
+    Without persistence poll 2 starts from no peak, never arms, and the winner round-trips —
+    which is exactly the scenario BID_MEMORY_PROTECT was written for.
+    """
+    entry = 1.00
+    armed_bid = entry * (1.0 + op.BID_MEMORY_ARM_GAIN_PCT) + 0.05          # comfortably armed
+    floor = entry + (armed_bid - entry) * (1.0 - op.BID_MEMORY_GIVEBACK_FRACTION)
+
+    first, plan_path = _poll(tmp_path, {"option_mark": 1.10, "option_bid": armed_bid})
+    assert first["best_seen_bid"] == armed_bid
+    assert json.loads(plan_path.read_text())["management"]["best_seen_bid"] == armed_bid
+
+    second, _ = _poll(tmp_path, {"option_mark": 1.10, "option_bid": floor - 0.01})
+    assert second["decision"] == "BID_MEMORY_PROTECT"
+    assert "BID_MEMORY_PROTECT" in {t["type"] for t in second["triggers"]}
+
+
+def test_without_the_peak_the_rail_cannot_arm(tmp_path):
+    """Control for the test above — same second poll, no persisted peak, no trigger."""
+    entry = 1.00
+    armed_bid = entry * (1.0 + op.BID_MEMORY_ARM_GAIN_PCT) + 0.05
+    floor = entry + (armed_bid - entry) * (1.0 - op.BID_MEMORY_GIVEBACK_FRACTION)
+    r = op.evaluate_position(_scalp_plan(thesis={}, time_rules={}),
+                             {"option_mark": 1.10, "option_bid": floor - 0.01})
+    assert "BID_MEMORY_PROTECT" not in _types(r)
+
+
 # --- standardized journal wiring (fail-safe) -------------------------------------------------
 
 def _read_journal(tmp_path):
