@@ -80,8 +80,10 @@ def test_end_to_end_reproduces_the_live_tape_read(tmp_path):
     from data import odte_breadth as breadth
     from data import odte_snapshot_build as sb
 
-    hist = tmp_path / "h.json"; hist.write_text(json.dumps(REAL_HISTORICALS))
-    quotes = tmp_path / "q.json"; quotes.write_text(json.dumps(REAL_QUOTES))
+    hist = tmp_path / "h.json"
+    hist.write_text(json.dumps(REAL_HISTORICALS))
+    quotes = tmp_path / "q.json"
+    quotes.write_text(json.dumps(REAL_QUOTES))
     out = tmp_path / "market.json"
     rc = bs.main(["--historicals", str(hist), "--quotes", str(quotes),
                   "--gap-pct", "-0.0787", "--out", str(out)])
@@ -98,8 +100,10 @@ def test_end_to_end_reproduces_the_live_tape_read(tmp_path):
 
 def test_missing_prices_still_fails_loudly(tmp_path):
     """The original live failure mode must stay a clean exit 2, not a silent empty snapshot."""
-    hist = tmp_path / "h.json"; hist.write_text(json.dumps(REAL_HISTORICALS))
-    empty = tmp_path / "q.json"; empty.write_text(json.dumps({"result": json.dumps({"data": {"results": []}})}))
+    hist = tmp_path / "h.json"
+    hist.write_text(json.dumps(REAL_HISTORICALS))
+    empty = tmp_path / "q.json"
+    empty.write_text(json.dumps({"result": json.dumps({"data": {"results": []}})}))
     assert bs.main(["--historicals", str(hist), "--quotes", str(empty)]) == 2
 
 
