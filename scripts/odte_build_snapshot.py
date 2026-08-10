@@ -40,10 +40,35 @@ _PREV_KEYS = ("previous_close", "prev_close", "adjusted_previous_close",
               "last_non_reg_trade_price", "close")
 
 
+def _unwrap(value, _depth: int = 0):
+    """Peel the MCP envelope: {"result": "<json string>"} -> {"data": {"results": [...]}}.
+
+    Verified against production 2026-08-10: both get_equity_quotes and get_equity_historicals
+    return the payload DOUBLE-ENCODED — a JSON string under `result`. Guessing this shape from a
+    hand-written fixture is what made the first version of this script fail live with
+    "no last prices" on its very first real invocation.
+    """
+    if _depth > 6:
+        return value
+    if isinstance(value, str):
+        s = value.strip()
+        if s.startswith(("{", "[")):
+            try:
+                return _unwrap(json.loads(s), _depth + 1)
+            except ValueError:
+                return value
+        return value
+    if isinstance(value, dict):
+        for key in ("result", "content", "payload"):
+            if key in value and len(value) <= 2:
+                return _unwrap(value[key], _depth + 1)
+    return value
+
+
 def _load(path: str | None) -> object:
-    if not path or path == "-":
-        return json.load(sys.stdin)
-    return json.loads(Path(path).expanduser().read_text())
+    raw = json.load(sys.stdin) if (not path or path == "-") \
+        else json.loads(Path(path).expanduser().read_text())
+    return _unwrap(raw)
 
 
 def _as_bar_list(value):
@@ -123,10 +148,22 @@ def extract_quotes(payload) -> tuple[dict, dict]:
                 take(sym, block)
     elif isinstance(payload, list):
         for entry in payload:
-            if isinstance(entry, dict):
-                sym = next((entry[k] for k in _SYMBOL_KEYS if entry.get(k)), None)
-                if sym:
-                    take(sym, entry)
+            if not isinstance(entry, dict):
+                continue
+            # Production shape is {"quote": {"symbol": ..., ...}, "close": {...}} — the symbol
+            # lives INSIDE the quote block, not on the entry. Looking only at the entry level
+            # found nothing and silently produced zero prices (2026-08-10 live failure).
+            inner = entry.get("quote") if isinstance(entry.get("quote"), dict) else entry
+            sym = (next((entry[k] for k in _SYMBOL_KEYS if entry.get(k)), None)
+                   or next((inner[k] for k in _SYMBOL_KEYS if inner.get(k)), None))
+            if sym:
+                take(sym, entry)
+                if not prev.get(str(sym).upper()):
+                    close = entry.get("close")
+                    if isinstance(close, dict):
+                        pc = _first_num(close, ("price", *_PREV_KEYS))
+                        if pc is not None:
+                            prev[str(sym).upper()] = pc
     return last, prev
 
 
