@@ -206,9 +206,20 @@ def _parse_ts(value: Any) -> datetime | None:
 
 
 def _age_minutes(ts: Any, now: datetime | None) -> float | None:
+    """Age of `ts` in minutes, or None only when `ts` itself is absent/unparseable.
+
+    `now` defaults to the wall clock rather than collapsing to None (2026-08-10). It used to
+    return None when `now` was omitted, which was harmless until `classify_broker_lane` grew a
+    fail-closed `age is None -> stale` branch: from then on any caller that dropped `now` got a
+    confident "UNDATED / stale" verdict on a perfectly well-dated payload. Production always
+    passes `now`, so the live loop was never wrong — but it made the function lie under manual
+    diagnosis, which is precisely when a broker-health verdict is being trusted by a human.
+    A missing clock is not evidence about the data."""
     dt = _parse_ts(ts)
-    if dt is None or now is None:
+    if dt is None:
         return None
+    if now is None:
+        now = datetime.now(timezone.utc)
     return (now - dt).total_seconds() / 60.0
 
 
