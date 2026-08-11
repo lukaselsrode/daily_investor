@@ -30,8 +30,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from data.odte_snapshot_build import (  # noqa: E402
-    audit_orb_vocabulary, build_market_snapshot,
+    audit_orb_vocabulary, build_contract_snapshot, build_market_snapshot, select_contract,
 )
+
+_INSTRUMENT_LIST_KEYS = ("instruments", "results", "data")
 
 _BAR_LIST_KEYS = ("historicals", "bars", "results", "data", "candles")
 _SYMBOL_KEYS = ("symbol", "chain_symbol", "underlying", "instrument_symbol")
@@ -167,18 +169,80 @@ def extract_quotes(payload) -> tuple[dict, dict]:
     return last, prev
 
 
+def extract_list(payload, keys=_INSTRUMENT_LIST_KEYS) -> list:
+    """Pull a list of dicts out of the MCP envelope, wherever it hid it.
+
+    Real shapes seen in production: instruments arrive under `data.instruments`, option quotes
+    under `data.results` (each entry wrapping the real record in `quote`). Both sit inside the
+    double-encoded `{"result": "<json>"}` envelope that `_load` has already peeled.
+    """
+    payload = _unwrap(payload)
+    if isinstance(payload, list):
+        return [x for x in payload if isinstance(x, dict)]
+    if isinstance(payload, dict):
+        for k in keys:
+            inner = payload.get(k)
+            if isinstance(inner, list):
+                return [x for x in inner if isinstance(x, dict)]
+            if isinstance(inner, dict):
+                got = extract_list(inner, keys)
+                if got:
+                    return got
+    return []
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--historicals", required=True, help="get_equity_historicals payload ('-' = stdin)")
+    ap.add_argument("--historicals", help="get_equity_historicals payload ('-' = stdin); required for tape mode")
     ap.add_argument("--quotes", help="get_equity_quotes payload; omit to pass --last")
     ap.add_argument("--last", help='JSON {"SPY": 773.86, ...} when quotes are unavailable')
     ap.add_argument("--prev-close", help='JSON {"VIXY": 19.56, ...}')
     ap.add_argument("--gap-pct", type=float, help="session constant; include it EVERY tick")
     ap.add_argument("--spot-symbol", default="SPY")
     ap.add_argument("--out", help="write here as well as stdout")
+    ap.add_argument("--instruments", help="get_option_instruments payload (with --option-quotes)")
+    ap.add_argument("--option-quotes", help="get_option_quotes payload (with --instruments)")
+    ap.add_argument("--out-contract", help="write the joined contract.json here")
+    ap.add_argument("--contract-option-id", help="pick this exact option uuid")
+    ap.add_argument("--contract-strike", help="pick this strike (e.g. 301.0)")
+    ap.add_argument("--contract-type", help="'call' or 'put'")
     args = ap.parse_args(argv)
 
+    # --- contract mode: join instruments to quotes, no tape needed -----------------------------
+    if args.instruments or args.option_quotes:
+        if not (args.instruments and args.option_quotes):
+            print("contract mode needs BOTH --instruments and --option-quotes", file=sys.stderr)
+            return 3
+        try:
+            insts = extract_list(_load(args.instruments))
+            quotes = extract_list(_load(args.option_quotes), ("results", "quotes", "data"))
+        except (OSError, ValueError) as exc:
+            print(f"could not read contract inputs: {exc}", file=sys.stderr)
+            return 3
+        if not insts:
+            # The FIRST get_option_instruments call reliably returns [] and a retry ~10s later
+            # succeeds (14/14 across 2026-08-10..11, identical arguments). Say so plainly rather
+            # than emitting a contract we cannot describe.
+            print("no instruments in payload — cold read? re-fetch and retry", file=sys.stderr)
+            return 2
+        picked = select_contract(insts, quotes, option_id=args.contract_option_id,
+                                 strike_price=args.contract_strike,
+                                 option_type=args.contract_type)
+        if not picked:
+            print("no tradable instrument matched a quote", file=sys.stderr)
+            return 2
+        contract = build_contract_snapshot(picked[0], picked[1], now=datetime.now(timezone.utc))
+        text = json.dumps(contract, indent=2) + "\n"
+        if args.out_contract:
+            Path(args.out_contract).expanduser().write_text(text)
+        sys.stdout.write(text)
+        return 0
+
+    if not args.historicals:
+        print("tape mode needs --historicals (or use --instruments/--option-quotes)",
+              file=sys.stderr)
+        return 3
     try:
         bars = extract_bars(_load(args.historicals))
     except (OSError, ValueError) as exc:

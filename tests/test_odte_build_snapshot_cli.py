@@ -24,6 +24,9 @@ _SPEC = importlib.util.spec_from_file_location(
 bs = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(bs)
 
+sb_select = bs.select_contract
+sb_build = bs.build_contract_snapshot
+
 
 def _bar(ts, o, c, h, low, v):
     return {"begins_at": ts, "open_price": o, "close_price": c,
@@ -111,3 +114,100 @@ def test_plain_unwrapped_payloads_still_work(tmp_path):
     """Not every caller double-encodes — the unwrap must be tolerant, not mandatory."""
     plain = json.loads(REAL_HISTORICALS["result"])
     assert set(bs.extract_bars(bs._unwrap(plain))) == {"SPY"}
+
+
+# ── contract mode: instruments x quotes, real 2026-08-11 shapes ─────────────────────────────
+# Instruments live under data.instruments; quotes under data.results[].quote, and the SAME uuid
+# is `id` in one and `instrument_id` in the other. Both inside the double-encoded envelope.
+
+_OPT_ID = "acaa59c9-1fa1-404e-bb18-ea292a0cafa5"
+
+REAL_INSTRUMENTS = {"result": json.dumps({"data": {"instruments": [
+    {"id": _OPT_ID, "chain_symbol": "IWM", "strike_price": "301.0000", "type": "call",
+     "expiration_date": "2026-08-11", "state": "active", "tradability": "tradable",
+     "chain_id": "c0ffee", "underlying_type": "equity"},
+]}})}
+
+REAL_OPT_QUOTES = {"result": json.dumps({"data": {"results": [
+    {"quote": {"instrument_id": _OPT_ID, "ask_price": "0.860000", "bid_price": "0.850000",
+               "mark_price": "0.855000", "adjusted_mark_price": "0.860000",
+               "break_even_price": "301.860000", "delta": "0.654895", "gamma": "0.268876",
+               "implied_volatility": "0.175908", "open_interest": 1698, "volume": 14589,
+               "bid_size": 6, "ask_size": 5},
+     "close": {"price": "0.90"}},
+]}})}
+
+
+def test_instruments_and_quotes_join_on_the_same_uuid():
+    insts = bs.extract_list(bs._unwrap(REAL_INSTRUMENTS))
+    quotes = bs.extract_list(bs._unwrap(REAL_OPT_QUOTES), ("results", "quotes", "data"))
+    picked = sb_select(insts, quotes)
+    assert picked is not None
+    inst, quote = picked
+    assert inst["id"] == quote["instrument_id"] == _OPT_ID
+
+
+def test_contract_always_carries_generated_at():
+    """The 2026-08-10 `contract_quote_undated` refusal: convert cannot age an undated quote."""
+    import sys as _s
+    _s.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+    import data.odte_convert as oc
+    insts = bs.extract_list(bs._unwrap(REAL_INSTRUMENTS))
+    quotes = bs.extract_list(bs._unwrap(REAL_OPT_QUOTES), ("results", "quotes", "data"))
+    inst, quote = sb_select(insts, quotes)
+    c = sb_build(inst, quote)
+    assert oc._payload_ts(c) is not None, "convert must be able to age this quote"
+    assert c["option_id"] == _OPT_ID
+    assert c["strike_price"] == pytest.approx(301.0)
+    assert c["option_type"] == "call" and c["type"] == "call"
+    assert c["bid_price"] == pytest.approx(0.85) and c["ask_price"] == pytest.approx(0.86)
+
+
+@pytest.mark.parametrize("field,bad", [("state", "inactive"), ("tradability", "untradable")])
+def test_untradable_instruments_are_refused(field, bad):
+    insts = bs.extract_list(bs._unwrap(REAL_INSTRUMENTS))
+    insts[0][field] = bad
+    quotes = bs.extract_list(bs._unwrap(REAL_OPT_QUOTES), ("results", "quotes", "data"))
+    assert sb_select(insts, quotes) is None, "a contract we cannot trade must never be emitted"
+
+
+def test_instrument_without_a_quote_is_refused():
+    insts = bs.extract_list(bs._unwrap(REAL_INSTRUMENTS))
+    assert sb_select(insts, []) is None
+
+
+def test_strike_and_type_filters_select():
+    insts = bs.extract_list(bs._unwrap(REAL_INSTRUMENTS))
+    quotes = bs.extract_list(bs._unwrap(REAL_OPT_QUOTES), ("results", "quotes", "data"))
+    assert sb_select(insts, quotes, strike_price="301.0", option_type="call") is not None
+    assert sb_select(insts, quotes, strike_price="999.0") is None
+    assert sb_select(insts, quotes, option_type="put") is None
+
+
+def test_cli_contract_mode_end_to_end(tmp_path):
+    i = tmp_path / "i.json"
+    i.write_text(json.dumps(REAL_INSTRUMENTS))
+    q = tmp_path / "q.json"
+    q.write_text(json.dumps(REAL_OPT_QUOTES))
+    out = tmp_path / "contract.json"
+    assert bs.main(["--instruments", str(i), "--option-quotes", str(q),
+                    "--out-contract", str(out)]) == 0
+    c = json.loads(out.read_text())
+    assert c["option_id"] == _OPT_ID and "generated_at" in c
+
+
+def test_cli_reports_the_cold_read_instead_of_emitting_nothing(tmp_path):
+    """First get_option_instruments call returns [] and a retry ~10s later succeeds — 14/14 over
+    2026-08-10..11 with IDENTICAL arguments. Exit 2 so the caller re-fetches rather than
+    proceeding with a contract it cannot describe."""
+    i = tmp_path / "i.json"
+    i.write_text(json.dumps({"result": json.dumps({"data": {"instruments": []}})}))
+    q = tmp_path / "q.json"
+    q.write_text(json.dumps(REAL_OPT_QUOTES))
+    assert bs.main(["--instruments", str(i), "--option-quotes", str(q)]) == 2
+
+
+def test_contract_mode_requires_both_inputs(tmp_path):
+    i = tmp_path / "i.json"
+    i.write_text(json.dumps(REAL_INSTRUMENTS))
+    assert bs.main(["--instruments", str(i)]) == 3

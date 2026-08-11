@@ -311,6 +311,96 @@ def build_market_snapshot(bars_by_symbol: dict, last_by_symbol: dict, *,
     return out
 
 
+_INSTRUMENT_ID_KEYS = ("id", "instrument_id", "option_id")
+_QUOTE_ID_KEYS = ("instrument_id", "id", "option_id")
+
+
+def select_contract(instruments: Iterable[dict], quotes: Iterable[dict], *,
+                    option_id: str | None = None, strike_price: Any = None,
+                    option_type: str | None = None) -> tuple[dict, dict] | None:
+    """Join one instrument to its quote, or None when no tradable match exists.
+
+    The two payloads carry disjoint halves of a contract: instruments hold identity
+    (strike/expiry/type/chain), quotes hold price and the SAME uuid under a different key
+    (`instrument_id`). Joining them is what the controller has been doing by hand every tick.
+
+    Fail-closed: an instrument that is not `active`+`tradable`, or has no matching quote, is never
+    returned. A contract we cannot fully describe must not become an order.
+    """
+    q_by_id: dict[str, dict] = {}
+    for q in quotes or []:
+        if not isinstance(q, dict):
+            continue
+        inner = q.get("quote") if isinstance(q.get("quote"), dict) else q
+        qid = str(_first(inner, _QUOTE_ID_KEYS) or "").strip()
+        if qid:
+            q_by_id[qid] = inner
+
+    want_type = str(option_type or "").strip().lower() or None
+    want_strike = _num(strike_price)
+    for inst in instruments or []:
+        if not isinstance(inst, dict):
+            continue
+        iid = str(_first(inst, _INSTRUMENT_ID_KEYS) or "").strip()
+        if not iid:
+            continue
+        if option_id and iid != str(option_id).strip():
+            continue
+        if want_type and str(inst.get("type") or "").strip().lower() != want_type:
+            continue
+        if want_strike is not None and _num(inst.get("strike_price")) != want_strike:
+            continue
+        if str(inst.get("state") or "active").strip().lower() != "active":
+            continue
+        if str(inst.get("tradability") or "tradable").strip().lower() != "tradable":
+            continue
+        quote = q_by_id.get(iid)
+        if quote:
+            return inst, quote
+    return None
+
+
+def build_contract_snapshot(instrument: dict, quote: dict, *,
+                            now: datetime | None = None) -> dict:
+    """The contract.json `odte-convert` reads, from the two raw halves.
+
+    ALWAYS stamps `generated_at`. Its absence is what produced `contract_quote_undated` on
+    2026-08-10: the controller saved the raw MCP envelope, convert could not age the quote, and
+    refused — correctly, since a stale quote misprices the debit.
+    """
+    now = now or datetime.now(timezone.utc)
+    inst = instrument if isinstance(instrument, dict) else {}
+    q = quote if isinstance(quote, dict) else {}
+    out: dict[str, Any] = {
+        "schema_version": 1,
+        "generated_at": now.astimezone(timezone.utc).isoformat(timespec="seconds"),
+        "updated_at": now.astimezone(timezone.utc).isoformat(timespec="seconds"),
+        "option_id": _first(inst, _INSTRUMENT_ID_KEYS),
+        "chain_symbol": inst.get("chain_symbol"),
+        "underlying": inst.get("chain_symbol"),
+        "expiration_date": inst.get("expiration_date"),
+        "state": inst.get("state"),
+        "tradability": inst.get("tradability"),
+    }
+    otype = str(inst.get("type") or "").strip().lower() or None
+    if otype:
+        out["option_type"] = otype
+        out["type"] = otype
+    strike = _num(inst.get("strike_price"))
+    if strike is not None:
+        out["strike_price"] = strike
+    for src, dst in (("bid_price", "bid_price"), ("ask_price", "ask_price"),
+                     ("mark_price", "mark_price"), ("adjusted_mark_price", "adjusted_mark_price"),
+                     ("break_even_price", "break_even_price"), ("delta", "delta"),
+                     ("gamma", "gamma"), ("implied_volatility", "implied_volatility"),
+                     ("open_interest", "open_interest"), ("volume", "volume"),
+                     ("bid_size", "bid_size"), ("ask_size", "ask_size")):
+        v = _num(q.get(src))
+        if v is not None:
+            out[dst] = v
+    return {k: v for k, v in out.items() if v is not None}
+
+
 def audit_orb_vocabulary(market: dict) -> list[dict]:
     """Non-canonical `*orb_state` values in a snapshot someone ELSE built.
 
