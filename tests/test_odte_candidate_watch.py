@@ -650,6 +650,31 @@ def test_synthetic_scorecard_candidate_can_expire(tmp_path):
     assert reseeded["candidate"]["ticker"] in cw.EXECUTABLE_UNIVERSE
 
 
+def test_candidate_with_only_updated_at_can_still_age_out():
+    """2026-08-11 zombie: the watchdog's synthetic persists into active_candidate.json with
+    ticker+direction but ONLY an `updated_at` — no created_at/ts/generated_at. Age was therefore
+    None, the TTL could never retire it, and `_extract_candidate` early-returns on anything with a
+    ticker. Replayed against a perfect next-session tape the leftover answered KEEP_WATCHING where
+    the same tape with no candidate answered CONFIRM_ENTRY. It must be able to EXPIRE."""
+    from datetime import timedelta
+    stale = {"ticker": "SPY", "direction": "bearish", "source": "market_scorecard",
+             "updated_at": (NOW - timedelta(hours=18)).isoformat()}
+    age = cw._candidate_age_minutes(stale, NOW)
+    assert age is not None and age > 20, "a candidate with only updated_at must still have a clock"
+    payload = cw.evaluate_candidate_watch(stale, market=_market(), now=NOW)
+    assert payload["decision"] != cw.KEEP_WATCHING, "an expired synthetic must not hold the slot"
+    assert payload.get("prior_candidate_expired") is True
+
+
+def test_real_created_at_still_wins_over_updated_at():
+    """The new fallbacks rank LAST — a real mint time must never be overridden by a later write."""
+    from datetime import timedelta
+    cand = {"ticker": "SPY", "direction": "bullish",
+            "created_at": NOW.isoformat(),
+            "updated_at": (NOW - timedelta(hours=18)).isoformat()}
+    assert (cw._candidate_age_minutes(cand, NOW) or 0) < 1.0
+
+
 def test_fresh_synthetic_scorecard_is_still_scan_only():
     # The guarantee that matters is unchanged: within its TTL a synthetic candidate is refused,
     # and it can never reach CONFIRM_ENTRY however well ETF breadth aligns.

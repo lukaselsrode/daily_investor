@@ -168,7 +168,22 @@ def _candidate_age_minutes(candidate: dict, now: datetime) -> float | None:
     ET day starts its clock at the 09:30 bell, not at mint — the phantom created 09:01 burned
     its whole 20-minute TTL before the market opened and expired at 09:22. A candidate from a
     PRIOR ET day keeps its raw (huge) age and expires immediately, as it must."""
-    created = _parse_ts(candidate.get("created_at") or candidate.get("ts") or candidate.get("generated_at"))
+    # NO TIMESTAMP MEANT NO CLOCK, AND NO CLOCK MEANT IMMORTAL (2026-08-11). The watchdog's
+    # synthetic scorecard persists into active_candidate.json carrying ticker+direction but only an
+    # `updated_at` — none of the three keys below. Age was therefore None, the TTL could never
+    # retire it, and `_extract_candidate` early-returns on anything with a ticker. Replayed against
+    # a PERFECT next-session tape (breadth 6, three fully aligned, zero dissent) the leftover
+    # answered KEEP_WATCHING where the identical tape with no candidate answered CONFIRM_ENTRY.
+    # 2026-08-11 escaped only because the SCAN-state next_command omits CANDIDATE=; the prompt's
+    # canonical form includes it.
+    #
+    # The fix is the CLOCK, not the synthetic guard: a synthetic must still never confirm inside its
+    # TTL (tests pin that), but it must be able to EXPIRE, at which point the 2026-08-05 expiry
+    # fall-through already re-seeds a fresh identity-bound candidate from the live tape in the same
+    # run. `updated_at`/`selection_timestamp` rank last so a real `created_at` always wins.
+    created = _parse_ts(candidate.get("created_at") or candidate.get("ts")
+                        or candidate.get("generated_at") or candidate.get("selection_timestamp")
+                        or candidate.get("updated_at"))
     if created is None:
         return None
     created_et = created.astimezone(_ET)
