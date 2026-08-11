@@ -244,6 +244,40 @@ def test_run_position_watchdog_no_plan_is_quiet(tmp_path):
     assert payload["plan_status"] == "missing"
 
 
+# --- MONITORING_DEGRADED names its cause (2026-08-11) ----------------------------------------
+# One generic string for three problems meant a CALLER ERROR read like a bad feed: the controller
+# ran `make odte-position JSON=1` twice with no SNAPSHOT= while a position was live, got a verdict
+# that looked legitimate, and repeated it.
+
+def _degraded(result):
+    return next(t for t in result["triggers"] if t["type"] == "MONITORING_DEGRADED")
+
+
+def test_bare_invocation_says_no_snapshot_was_supplied():
+    r = op.evaluate_position(_scalp_plan(thesis={}, time_rules={}), {})
+    assert r["decision"] == "MONITORING_DEGRADED"
+    t = _degraded(r)
+    assert t["cause"] == "no_snapshot_supplied"
+    assert t["action"] == "supply_snapshot"
+    assert "SNAPSHOT=" in t["detail"], "the message must name the flag that fixes it"
+
+
+def test_priced_snapshot_missing_price_fields_is_a_feed_problem():
+    r = op.evaluate_position(_scalp_plan(thesis={}, time_rules={}), {"underlying_last": 500.0})
+    assert _degraded(r)["cause"] == "snapshot_unpriceable"
+
+
+def test_explicit_monitoring_ok_false_is_its_own_cause():
+    r = op.evaluate_position(_scalp_plan(thesis={}, time_rules={}),
+                             {"option_mark": 1.10, "monitoring_ok": False})
+    assert _degraded(r)["cause"] == "monitoring_ok_false"
+
+
+def test_a_priced_snapshot_does_not_degrade_at_all():
+    r = op.evaluate_position(_scalp_plan(thesis={}, time_rules={}), {"option_mark": 1.10})
+    assert "MONITORING_DEGRADED" not in _types(r)
+
+
 # --- bid-memory persistence (2026-08-10) -----------------------------------------------------
 # evaluate_position RETURNS the updated peak but stays pure; until now nothing wrote it back, so
 # BID_MEMORY_PROTECT's entire state depended on the LLM controller hand-persisting it between

@@ -451,9 +451,28 @@ def evaluate_position(plan: dict | None, snapshot: dict | None,
         triggers.append(t)
 
     # 6) Monitoring degraded — can't value the live position, or caller flagged the feed bad.
-    if snapshot.get("monitoring_ok") is False or not can_value:
+    #
+    # NAME THE CAUSE (2026-08-11). This used to answer one generic string for three different
+    # problems, so a CALLER ERROR read exactly like a bad feed. On 2026-08-11 the controller ran
+    # `make odte-position JSON=1` twice with no SNAPSHOT= while a position was live; both returned
+    # MONITORING_DEGRADED, which looks like a legitimate verdict, so nothing corrected it — 2 of 26
+    # checks that day (7.7%) against a 1.7% historical rate. A bare invocation cannot value a live
+    # option, and the payload should say so in the words that fix it.
+    if snapshot.get("monitoring_ok") is False:
         triggers.append({"type": "MONITORING_DEGRADED", "action": "verify_feed",
-                         "detail": "cannot value live position (no mark/bid/pnl) or monitoring_ok=false"})
+                         "cause": "monitoring_ok_false",
+                         "detail": "caller set monitoring_ok=false — the feed is flagged bad"})
+    elif not snapshot:
+        triggers.append({"type": "MONITORING_DEGRADED", "action": "supply_snapshot",
+                         "cause": "no_snapshot_supplied",
+                         "detail": "NO SNAPSHOT SUPPLIED — a bare odte-position call cannot value a "
+                                   "live position; re-run with SNAPSHOT=<live.json> (or "
+                                   "--snapshot-json). This check monitored nothing."})
+    elif not can_value:
+        triggers.append({"type": "MONITORING_DEGRADED", "action": "verify_feed",
+                         "cause": "snapshot_unpriceable",
+                         "detail": "snapshot carries no option_mark / option_bid / pnl_pct — "
+                                   "cannot value the position without a price"})
 
     return {"decision": _primary_decision(triggers), "triggers": triggers, "active": True,
             "pnl_pct": (round(pnl_pct, 4) if pnl_pct is not None else None),
