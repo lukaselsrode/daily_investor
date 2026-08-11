@@ -66,6 +66,40 @@ def test_orb_state_is_none_while_forming_not_inside():
     assert sb.orb_state(500.0, r) is None, "a range that has not formed cannot be broken"
 
 
+def test_complete_needs_the_clock_not_a_bar_printed_at_the_window_end():
+    """2026-08-11 live defect. Brokers return the last COMPLETED interval, so at 10:02 the newest
+    5-minute bar still starts 09:55. The 09:30-10:00 range is fully observed either way — both
+    cases below contain all 6 window bars — but the old rule waited for a bar AT the end and left
+    a known range reporting `complete: False` for another whole bar interval."""
+    through_0955 = bars(DAY, count=6, interval=5)          # 09:30..09:55, the realistic case
+    at_1002 = datetime.combine(DAY, sb.SESSION_OPEN_ET, tzinfo=ET) + timedelta(minutes=32)
+    r = sb.opening_range(through_0955, session_date=DAY, now=at_1002)
+    assert r["bars"] == 6, "the whole window is present"
+    assert r["complete"] is True, "clock is past 10:00 and the bars reach it"
+
+
+def test_complete_is_false_when_the_clock_has_not_passed_the_window():
+    through_0955 = bars(DAY, count=6, interval=5)
+    at_0950 = datetime.combine(DAY, sb.SESSION_OPEN_ET, tzinfo=ET) + timedelta(minutes=20)
+    assert sb.opening_range(through_0955, session_date=DAY, now=at_0950)["complete"] is False
+
+
+def test_stale_bars_cannot_fake_completion():
+    """The opposite error: clock alone would mark a 2-bar range complete and hand the tape lane an
+    orb_high that is far too low, which manufactures phantom breakouts."""
+    stale = bars(DAY, count=2, interval=5)                 # only 09:30..09:35
+    long_after = datetime.combine(DAY, sb.SESSION_OPEN_ET, tzinfo=ET) + timedelta(minutes=90)
+    r = sb.opening_range(stale, session_date=DAY, now=long_after)
+    assert r["complete"] is False, "clock elapsed, but the bars do not cover the window"
+
+
+def test_bar_interval_is_inferred_not_assumed():
+    one_min = bars(DAY, count=30, interval=1)              # 09:30..09:59
+    at_1002 = datetime.combine(DAY, sb.SESSION_OPEN_ET, tzinfo=ET) + timedelta(minutes=32)
+    r = sb.opening_range(one_min, session_date=DAY, now=at_1002)
+    assert r["complete"] is True, "1-minute bars reach 09:59; +1m interval covers 10:00"
+
+
 def test_orb_state_resolves_once_the_window_closes():
     tape = bars(DAY, count=10, interval=5, base=100.0)     # 50 minutes: window closed
     r = sb.opening_range(tape, session_date=DAY)

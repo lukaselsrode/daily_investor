@@ -160,13 +160,35 @@ def session_vwap(bars: Iterable[Any], *, session_date=None) -> float | None:
     return num / den
 
 
+def _bar_interval(rows: list[dict]) -> timedelta:
+    """Median spacing between consecutive dated bars; 5 minutes when undeterminable."""
+    gaps = sorted((rows[i]["ts"] - rows[i - 1]["ts"]).total_seconds()
+                  for i in range(1, len(rows)) if rows[i]["ts"] and rows[i - 1]["ts"])
+    if not gaps:
+        return timedelta(minutes=5)
+    mid = gaps[len(gaps) // 2]
+    return timedelta(seconds=mid) if mid > 0 else timedelta(minutes=5)
+
+
 def opening_range(bars: Iterable[Any], *, session_date=None,
-                  minutes: int = OPENING_RANGE_MINUTES) -> dict:
+                  minutes: int = OPENING_RANGE_MINUTES, now: datetime | None = None) -> dict:
     """High/low of the first `minutes` of RTH, plus whether that window has fully elapsed.
 
     Selected by TIMESTAMP, never by bar count — `bars[:6]` is only 30 minutes if the bars happen
     to be 5-minute bars, and is silently wrong otherwise. `complete` is False until the window has
     closed, which is what stops an unformed range from being reported as a real one.
+
+    `complete` needs BOTH the clock and the bars (2026-08-11). It used to ask only whether the
+    newest bar was at/after the window end — but brokers return the last COMPLETED interval, so at
+    10:02 the newest 5-minute bar still starts 09:55 and a fully-observed 09:30-10:00 range
+    reported itself incomplete for another whole bar interval. Observed live: `orb_high 774.54`
+    and `orb_low 772.58` both computed and sitting in the snapshot while `orb_state` stayed None,
+    so the tape lane could not manufacture for ~5 minutes after the range it needs had closed.
+
+    Keying off the clock ALONE would be the opposite error: a caller feeding stale bars would get
+    `complete` on an under-observed range, and an `orb_high` that is too low manufactures phantom
+    breakouts. So the window must also be covered — the last bar in it, plus one interval, must
+    reach the end.
     """
     rows = session_bars(bars, session_date=session_date)
     if not rows:
@@ -181,11 +203,13 @@ def opening_range(bars: Iterable[Any], *, session_date=None,
     window = [b for b in dated if b["ts"].astimezone(ET) < end_dt]
     if not window:
         return {"high": None, "low": None, "complete": False, "bars": 0}
-    last_ts = max(b["ts"] for b in dated).astimezone(ET)
+    interval = _bar_interval(dated)
+    covered = (max(b["ts"] for b in window) + interval) >= end_dt
+    elapsed = (now or datetime.now(timezone.utc)).astimezone(ET) >= end_dt
     return {"high": max(b["high"] for b in window),
             "low": min(b["low"] for b in window),
-            # the window is only trustworthy once the tape has moved PAST it
-            "complete": last_ts >= end_dt,
+            # BOTH: the clock is past the window, and the bars actually reach its end
+            "complete": bool(covered and elapsed),
             "bars": len(window)}
 
 
@@ -215,10 +239,11 @@ def minutes_to_close(now: datetime | None = None) -> float:
 
 
 def build_symbol_block(bars: Iterable[Any], last: float | None, *,
-                       session_date=None, prev_close: float | None = None) -> dict:
+                       session_date=None, prev_close: float | None = None,
+                       now: datetime | None = None) -> dict:
     """One symbol's tape block. Keys are OMITTED, never placeholdered, when uncomputable."""
     vwap = session_vwap(bars, session_date=session_date)
-    orb = opening_range(bars, session_date=session_date)
+    orb = opening_range(bars, session_date=session_date, now=now)
     state = orb_state(last, orb)
     block: dict[str, Any] = {}
     if last is not None:
@@ -264,8 +289,8 @@ def build_market_snapshot(bars_by_symbol: dict, last_by_symbol: dict, *,
     for sym in (bars_by_symbol or {}):
         up = str(sym).upper()
         block = build_symbol_block(bars_by_symbol.get(sym),
-                                   _num(( last_by_symbol or {}).get(sym)),
-                                   session_date=session_date,
+                                   _num((last_by_symbol or {}).get(sym)),
+                                   session_date=session_date, now=now,
                                    prev_close=_num(prev_close_by_symbol.get(sym)))
         if not block:
             continue
