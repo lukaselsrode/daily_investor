@@ -107,11 +107,29 @@ DEFAULT_BID_FLOOR = 0.05         # per-share bid at/under which an option is tre
 # keeps producing.
 #
 # Sized from the record, not from taste: across all 150 `management_check` observations in the
-# journal the worst open-position excursion is -33.8% (p5 -27.9%, median -5.6%). A -40% backstop has
-# therefore NEVER fired — it cuts no winner and changes no historical trade — while replacing the
-# -95% cliff. It is a catastrophe backstop, deliberately far outside the working range, NOT a
-# strategy stop; tightening it toward the -20%/-30% band would start cutting live trades (20% / 2.7%
-# of observations respectively) and must be measured separately if ever wanted.
+# journal the worst open-position excursion is -33.8% (p5 -27.9%, median -5.6%). It is a catastrophe
+# backstop, deliberately far outside the working range, NOT a strategy stop; tightening it toward
+# the -20%/-30% band would start cutting live trades (20% / 2.7% of observations respectively).
+#
+# IT HAS NOW FIRED (2026-08-12). The "never fired" claim above held until 2026-08-11 and is kept
+# only as the sizing history. Two exits since: SPY 771p (0.84 -> 0.50) and IWM 301p (0.46 -> 0.26).
+# BOTH carried ZERO `THESIS_DEAD` events, and THESIS_DEAD outranks MAX_LOSS in `_PRIORITY` — so in
+# both the directional thesis was still ALIVE and the premium simply bled out. That is theta/vega
+# decay, not a wrong call, and it is the case a tighter stop would cut first.
+#
+# Measured 2026-08-12 on the 11 closed trades carrying tool-measured excursion
+# (`odte_journal.summarize()["measured_excursions"]`, joined on option_id):
+#   stop     breached  winners cut  net P/L   margin to deepest winner MAE (-0.186)
+#   -0.15       6           1        +13.35     0.020
+#   -0.20       4           0        +39.40     0.014   <- one measurement error from cutting it
+#   -0.25       4           0        +30.00     0.064
+#   -0.40       2           0         +2.00     0.214   (incumbent)
+# -0.20 maximises P/L and is fragile; -0.25 keeps 76% of the gain with 4.6x the margin. NEITHER was
+# adopted: MAE is the min over ~35s-spaced polls so it UNDERSTATES drawdown, n=11 is small, and
+# both breaches above were thesis-alive. Re-run that sweep before revisiting; do not re-derive it.
+# The real question this raised is not the threshold but that a position which never goes green and
+# just bleeds has NO exit but this backstop — BID_MEMORY_PROTECT keys on giveback from a peak and
+# THESIS_DEAD on the underlying. A premium-decay exit would be a new rail, not a tuned number.
 # Overridable per plan via `max_loss_pct` / `risk_rules.max_loss_pct`.
 DEFAULT_MAX_LOSS_PCT = -0.40
 

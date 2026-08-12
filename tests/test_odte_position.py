@@ -606,9 +606,13 @@ def test_thin_plan_now_has_an_unconditional_exit():
 
 def test_backstop_sits_outside_the_observed_working_range():
     """Sized from the journal, not taste: across 150 management_check observations the worst
-    open-position excursion is -33.8%. A -40% backstop has never fired, so it cuts no winner and
-    changes no historical trade. Tightening toward -20%/-30% would start cutting live trades
-    (20% / 2.7% of observations) and needs its own measurement first."""
+    open-position excursion is -33.8%, so the backstop sits outside the working range.
+
+    It HAS now fired (SPY 771p and IWM 301p, 2026-08-11/12) — but both carried zero THESIS_DEAD
+    events, i.e. the thesis was alive and the premium bled out, which is exactly the trade a tighter
+    stop cuts first. The -20%/-25% sweep was measured on 2026-08-12 (see the module comment) and
+    deliberately NOT adopted: -0.20 sits 1.4pp from the deepest winner's MAE and MAE understates
+    drawdown. This assertion keeps the rail a catastrophe backstop rather than a strategy stop."""
     from data.odte_position import DEFAULT_MAX_LOSS_PCT
     worst_observed = -0.338
     assert DEFAULT_MAX_LOSS_PCT < worst_observed, DEFAULT_MAX_LOSS_PCT
