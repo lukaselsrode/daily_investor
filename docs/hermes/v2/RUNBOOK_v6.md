@@ -66,8 +66,18 @@ around a lock is forbidden; the lock clears only with a fresh session after inve
 sessions; on any live Hermes position the `shadow_exit_intent` stream contains no trigger a
 human adjudicates as false, and the giveback-rule replay beats-or-matches the manual close;
 p95 trigger-eval→`shadow_order_intent` < 3s.
-→ Promote: `make odte-fast-lane-stage STAGE=exits_live`; apply prompt v6 to the controller
-cron; daemon now owns exit placement, Hermes defers to `management.decision`.
+→ Promote: `make odte-fast-lane-stage STAGE=exits_live`; **MERGE** `controller_prompt_v6.md`
+into the live controller prompt — do NOT apply it verbatim; daemon now owns exit placement,
+Hermes defers to `management.decision`.
+
+> **Merge, never replace (2026-08-12).** `controller_prompt_v6.md` is a 4.3k document frozen on
+> 2026-08-05. The live prompt is now ~13.3k and has since gained five fixes that v6 contains none
+> of: the Telegram HEARTBEAT floor, the `odte_build_snapshot` FAST-PATH step, the `tool_describe`
+> ban, warm-the-chain-once-per-session-per-side, and the no-authoring-Python rule. Overwriting the
+> live prompt with v6 silently regresses all five — the heartbeat one being the exact defect that
+> produced a two-hour Telegram blackout. v6's UNIQUE content is the fast-lane section (`odte-arm`,
+> armed intents, deferring management to the daemon); graft that in and leave the rest alone.
+> Verify after `hermes cron edit` that all five markers are still present in the live prompt.
 
 **Gate 2 — exits_live → entries_live (≥2 sessions, ALL required):** ≥1 real exit placed AND
 filled by the daemon (a deliberate 1-contract cheap position may manufacture the test) with
