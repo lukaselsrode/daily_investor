@@ -440,6 +440,33 @@ def run_convert(candidate_json: str | dict | None = None, candidate_path: str | 
         append_decision_journal(event_from_candidate_evaluation(cd),
                                 source="odte_convert", event_type="candidate_evaluation",
                                 journal_path=journal_path, now=now)
+        # CLOSE OUT THE SUPERSEDED FINGERPRINT (2026-08-12). Confirms arrive in pairs: the tape
+        # lane confirms without a contract, then convert re-binds one here. `candidate_fingerprint`
+        # hashes the option_id/expiry/strike/type, so the two are DIFFERENT IDENTITIES BY
+        # CONSTRUCTION — that rebind is the safety property that stops a stale confirm converting
+        # into a changed tape, so it stays. What was missing is a terminal event for the id being
+        # replaced: on 2026-08-12 both of the day's confirms orphaned their predecessor
+        # (7016c855 -> 8e6cb1a5, 43705ae7 -> 70539262), leaving 2 of 4 unauditable.
+        #
+        # This belongs HERE, not in run_candidate_watch: by the watch tick after a rebind the
+        # candidate file already holds the new fingerprint, so watch compares it to itself and
+        # never sees a difference. Convert is the only place holding both ids at once.
+        #
+        # Telemetry only — scan_only, never a gate input, no trade_id, and weekly_telemetry
+        # deliberately ignores candidate_evaluation when moving funnel counters.
+        prior = _dict(candidate)
+        prior_fp = prior.get("candidate_fingerprint")
+        new_fp = _dict(cd.get("candidate")).get("candidate_fingerprint")
+        if prior_fp and new_fp and prior_fp != new_fp and prior.get("state") == "CONFIRMED_ENTRY":
+            append_decision_journal(
+                {**event_from_candidate_evaluation(cd),
+                 "decision": "superseded_by_rebind",
+                 "candidate_fingerprint": prior_fp,
+                 "superseded_by": new_fp,
+                 "scan_only": True, "execution_allowed": False, "trade_id": None,
+                 "reason_codes": ["contract rebind replaced the contractless tape confirm"]},
+                source="odte_convert", event_type="candidate_evaluation",
+                journal_path=journal_path, now=now)
     if write:
         base_dir.mkdir(parents=True, exist_ok=True)
         atomic_write_text(base_dir / CANDIDATE_DECISION_FILENAME,

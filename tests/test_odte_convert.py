@@ -542,3 +542,66 @@ def test_non_aplus_and_red_days_stay_capped(monkeypatch):
     with tempfile.TemporaryDirectory() as td:
         off = _run(_market(), _budget_exhausted_events(NOW, day_pnl=9.0), td)
     assert off["converted"] is False
+
+
+# --- superseded fingerprint gets a terminal event (2026-08-12) ---------------------------------
+# Confirms arrive in pairs: the tape lane confirms contractless, then convert re-binds a contract
+# and the fingerprint necessarily changes. On 2026-08-12 both of the day's confirms orphaned their
+# predecessor (2 of 4 unauditable). The rebind itself is a safety property and stays; what is added
+# is a terminal record for the id being replaced.
+
+def _confirmed_prior(now: datetime = NOW, fp: str = "deadbeefcafe0001") -> dict:
+    return {**_candidate(now), "state": "CONFIRMED_ENTRY", "candidate_fingerprint": fp}
+
+
+def _evals(jp):
+    import data.odte_journal as oj
+    return [e for e in oj.read_events(jp) if e.get("event_type") == "candidate_evaluation"]
+
+
+def test_rebind_closes_the_superseded_fingerprint(tmp_path):
+    jp = str(tmp_path / "decision_journal.jsonl")
+    _convert(tmp_path, candidate=_confirmed_prior(), journal_path=jp)
+    sup = [e for e in _evals(jp) if e.get("decision") == "superseded_by_rebind"]
+    assert len(sup) == 1, [e.get("decision") for e in _evals(jp)]
+    e = sup[0]
+    assert e["candidate_fingerprint"] == "deadbeefcafe0001"       # the OLD id is the subject
+    assert e["superseded_by"] and e["superseded_by"] != "deadbeefcafe0001"
+    assert e["scan_only"] is True and e["execution_allowed"] is False
+    assert e.get("trade_id") is None
+
+
+def test_no_supersede_event_when_fingerprint_is_unchanged(tmp_path):
+    """The watch tick after a rebind sees the new id in the candidate file; comparing it to itself
+    must not emit a second tombstone every tick."""
+    jp = str(tmp_path / "decision_journal.jsonl")
+    _convert(tmp_path, candidate=_confirmed_prior(), journal_path=jp)
+    settled = [e for e in _evals(jp) if e.get("decision") == "superseded_by_rebind"][0]["superseded_by"]
+    jp2 = str(tmp_path / "second.jsonl")
+    _convert(tmp_path, candidate=_confirmed_prior(fp=settled), journal_path=jp2)
+    assert [e for e in _evals(jp2) if e.get("decision") == "superseded_by_rebind"] == []
+
+
+def test_no_supersede_event_for_an_unconfirmed_prior(tmp_path):
+    """A candidate still being watched has not claimed an identity worth closing out."""
+    jp = str(tmp_path / "decision_journal.jsonl")
+    prior = {**_confirmed_prior(), "state": "WATCHING"}
+    _convert(tmp_path, candidate=prior, journal_path=jp)
+    assert [e for e in _evals(jp) if e.get("decision") == "superseded_by_rebind"] == []
+
+
+def test_supersede_event_is_inert_in_telemetry(tmp_path):
+    """weekly_telemetry deliberately ignores candidate_evaluation when moving funnel counters —
+    the new decision must not move entry_decisions / gates_passed / lease_refusals."""
+    import data.odte_journal as oj
+    jp = str(tmp_path / "decision_journal.jsonl")
+    _convert(tmp_path, candidate=_candidate(), journal_path=jp)      # no prior fingerprint
+    base = oj.weekly_telemetry(oj.read_events(jp))
+    jp2 = str(tmp_path / "with_supersede.jsonl")
+    _convert(tmp_path, candidate=_confirmed_prior(), journal_path=jp2)
+    evs2 = oj.read_events(jp2)
+    assert any(e.get("decision") == "superseded_by_rebind" for e in evs2)
+    after = oj.weekly_telemetry(evs2)
+    for k in ("entry_decisions", "gates_passed", "lease_refusals", "no_trade_decisions"):
+        if k in base or k in after:
+            assert base.get(k) == after.get(k), k
