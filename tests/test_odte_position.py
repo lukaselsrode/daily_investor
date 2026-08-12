@@ -592,44 +592,59 @@ def test_thin_plan_now_has_an_unconditional_exit():
     # the suite happens to run after that hour.
     thin = {"underlying": "IWM", "option_type": "call", "entry_price": 1.00,
             "quantity": 1, "status": "open", "time_rules": {}}
-    # comfortably inside the backstop: still held, as before
-    held = evaluate_position(thin, {"option_bid": 0.80, "option_mark": 0.80,
+    # Both prices are DERIVED from the live constant — a fixture that hardcodes the stop stops
+    # testing the stop the moment it moves (these read 0.80/0.60 while it was -0.40).
+    inside = round(1.00 * (1 + DEFAULT_MAX_LOSS_PCT / 2), 4)      # half-way to the stop
+    at_stop = round(1.00 * (1 + DEFAULT_MAX_LOSS_PCT), 4)
+    # comfortably inside the stop: still held, as before
+    held = evaluate_position(thin, {"option_bid": inside, "option_mark": inside,
                                     "underlying_last": 300.0})
     assert held["decision"] == "HOLD"
-    # at the backstop: fires even though the plan declares no thesis at all
-    hit = evaluate_position(thin, {"option_bid": 0.60, "option_mark": 0.60,
+    # at the stop: fires even though the plan declares no thesis at all
+    hit = evaluate_position(thin, {"option_bid": at_stop, "option_mark": at_stop,
                                    "underlying_last": 300.0})
     assert hit["decision"] == "MAX_LOSS"
     assert abs(hit["pnl_pct"] - DEFAULT_MAX_LOSS_PCT) < 1e-9
     assert any(t["type"] == "MAX_LOSS" and t["action"] == "exit" for t in hit["triggers"])
 
 
-def test_backstop_sits_outside_the_observed_working_range():
-    """Sized from the journal, not taste: across 150 management_check observations the worst
-    open-position excursion is -33.8%, so the backstop sits outside the working range.
+def test_loss_stop_sits_below_every_winner_drawdown_ever_measured():
+    """The rail changed KIND on 2026-08-12: -0.40 was a catastrophe backstop sitting outside the
+    working range (worst observed excursion -33.8%); -0.25 is a loss stop INSIDE it that will cut
+    live trades. So the old invariant ("below every excursion ever seen") no longer applies and
+    would be vacuous — what must hold instead is that the stop never cuts a trade we know recovered.
 
-    It HAS now fired (SPY 771p and IWM 301p, 2026-08-11/12) — but both carried zero THESIS_DEAD
-    events, i.e. the thesis was alive and the premium bled out, which is exactly the trade a tighter
-    stop cuts first. The -20%/-25% sweep was measured on 2026-08-12 (see the module comment) and
-    deliberately NOT adopted: -0.20 sits 1.4pp from the deepest winner's MAE and MAE understates
-    drawdown. This assertion keeps the rail a catastrophe backstop rather than a strategy stop."""
+    Deepest drawdown among WINNERS across the 11 trades with tool-measured excursion
+    (`odte_journal.summarize()["measured_excursions"]`, joined on option_id): -0.186, the +$22 SPY
+    771p/772p pair's winner. The full winner distribution is -0.186, -0.13, -0.09, -0.056, +0.047,
+    so -0.25 sits in a genuine gap rather than just below the worst point.
+
+    Margin matters more than the raw comparison: MAE is the MINIMUM over ~35s-spaced polls, so it
+    understates true drawdown and a winner recorded at -0.186 may really have touched lower. -0.20
+    was rejected for leaving only 1.4pp. Require a real buffer, not just ordering."""
     from data.odte_position import DEFAULT_MAX_LOSS_PCT
-    worst_observed = -0.338
-    assert DEFAULT_MAX_LOSS_PCT < worst_observed, DEFAULT_MAX_LOSS_PCT
+    deepest_winner_drawdown = -0.186
+    assert DEFAULT_MAX_LOSS_PCT < deepest_winner_drawdown, DEFAULT_MAX_LOSS_PCT
+    assert deepest_winner_drawdown - DEFAULT_MAX_LOSS_PCT >= 0.05, (
+        "stop is within 5pp of a known winner's drawdown, and MAE understates drawdown")
 
 
 def test_plan_may_override_the_backstop_either_signed():
-    from data.odte_position import evaluate_position
+    from data.odte_position import DEFAULT_MAX_LOSS_PCT, evaluate_position
     # time_rules={} isolates the loss axis — otherwise the 15:45 clock backstop fires whenever
     # the suite happens to run after that hour.
     thin = {"underlying": "IWM", "option_type": "call", "entry_price": 1.00,
             "quantity": 1, "status": "open", "time_rules": {}}
-    snap = {"option_bid": 0.70, "option_mark": 0.70, "underlying_last": 300.0}   # -30%
-    assert evaluate_position(thin, snap)["decision"] == "HOLD"                    # default -40%
-    loose = evaluate_position({**thin, "max_loss_pct": -0.60}, snap)
+    # Every level is derived from the live default so the three cases keep their MEANING when the
+    # rail moves: sit the position inside the default, then override looser and tighter than it.
+    level = round(1.00 * (1 + DEFAULT_MAX_LOSS_PCT * 0.8), 4)     # 80% of the way to the stop
+    snap = {"option_bid": level, "option_mark": level, "underlying_last": 300.0}
+    assert evaluate_position(thin, snap)["decision"] == "HOLD"                    # inside default
+    loose = evaluate_position({**thin, "max_loss_pct": DEFAULT_MAX_LOSS_PCT * 2}, snap)
     assert loose["decision"] == "HOLD"
     # live plans put risk keys under risk_rules, and may write the magnitude unsigned
-    tight = evaluate_position({**thin, "risk_rules": {"max_loss_pct": 0.25}}, snap)
+    tight = evaluate_position({**thin, "risk_rules": {"max_loss_pct": abs(DEFAULT_MAX_LOSS_PCT) / 2}},
+                              snap)
     assert tight["decision"] == "MAX_LOSS"
 
 

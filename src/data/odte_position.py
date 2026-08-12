@@ -123,15 +123,21 @@ DEFAULT_BID_FLOOR = 0.05         # per-share bid at/under which an option is tre
 #   -0.15       6           1        +13.35     0.020
 #   -0.20       4           0        +39.40     0.014   <- one measurement error from cutting it
 #   -0.25       4           0        +30.00     0.064
-#   -0.40       2           0         +2.00     0.214   (incumbent)
-# -0.20 maximises P/L and is fragile; -0.25 keeps 76% of the gain with 4.6x the margin. NEITHER was
-# adopted: MAE is the min over ~35s-spaced polls so it UNDERSTATES drawdown, n=11 is small, and
-# both breaches above were thesis-alive. Re-run that sweep before revisiting; do not re-derive it.
+#   -0.40       2           0         +2.00     0.214   (prior value)
+#
+# ADOPTED -0.25 on 2026-08-12, operator-directed. This is a deliberate change of KIND: the rail was
+# a catastrophe backstop outside the working range, and is now a loss stop inside it that WILL cut
+# live trades. -0.20 maximises P/L but sits 1.4pp from the deepest winner's drawdown, and since MAE
+# is the min over ~35s-spaced polls it UNDERSTATES the true excursion, so that winner may really
+# have touched -21%. -0.25 keeps 76% of the gain with 4.6x the margin and sits in a real gap in the
+# winner distribution (-0.186, -0.13, -0.09, -0.056, +0.047 - nothing between -0.186 and -0.25).
+# CAVEATS THAT SURVIVE: n=11, and all 4 breaches were thesis-alive. Re-run the sweep from
+# `measured_excursions` before moving it again; do not re-derive it by hand.
 # The real question this raised is not the threshold but that a position which never goes green and
 # just bleeds has NO exit but this backstop — BID_MEMORY_PROTECT keys on giveback from a peak and
 # THESIS_DEAD on the underlying. A premium-decay exit would be a new rail, not a tuned number.
 # Overridable per plan via `max_loss_pct` / `risk_rules.max_loss_pct`.
-DEFAULT_MAX_LOSS_PCT = -0.40
+DEFAULT_MAX_LOSS_PCT = -0.25
 
 # CLOCK BACKSTOP (2026-08-07). Same defect on the time axis, and worse: `_time_risk` returned None
 # on an absent `time_rules`, so a plan declaring none had no clock exit whatsoever. A WINNING 0DTE
