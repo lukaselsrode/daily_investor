@@ -73,6 +73,27 @@ EXECUTION_SAFETY_EVENT_TYPES = ("execution_lease_issued", "execution_lease_consu
 # on 2026-08-03 the day's real fill was an `entry_fill`, so an `order_filled`-only counter read
 # zero trades and would have left the 2/day budget and the zero-trade tripwire non-functional.
 ENTRY_FILL_EVENTS = ("order_filled", "entry_fill")
+
+
+def _decision_word(event: dict) -> str:
+    """The event's `decision` as a lowercase word, whatever shape it arrived in.
+
+    Funnel counters compared `decision` case-sensitively against literals ("enter", "issue",
+    "allow"), but the field is written by several lanes and has drifted: across the journal it
+    holds `enter`/`veto`/`skip` alongside `NO_TRADE`, `WAIT_NO_TRADE`,
+    `NO_TRADE_BROKER_DEGRADED`, `NO TRADE` — and in ~40 events a whole DICT
+    (`{"action": "HOLD", "reasons": [...]}`) rather than a string.
+
+    Today those all correctly fail the `== "enter"` test because none of them IS an entry, so the
+    counters are right BY LUCK rather than by construction — a single uppercase `ENTER` from any
+    writer would be silently counted as a non-entry and understate `gates_passed`. Normalising at
+    the READER fixes future drift and the existing history in one place, and never touches the
+    write path (the append is fail-safe telemetry and must stay that way).
+    """
+    d = event.get("decision")
+    if isinstance(d, dict):                      # some lanes journalled the whole decision object
+        d = d.get("action") or d.get("decision")
+    return str(d or "").strip().lower()
 EXIT_FILL_EVENTS = ("order_closed", "exit_fill", "exit_decision")
 
 _ENTRY_EVENTS = {"entry_decision", *ENTRY_FILL_EVENTS}
@@ -617,12 +638,12 @@ def _funnel_tally(events: list[dict] | None, keep) -> tuple[Counter, Counter, Co
             fills.append((e, i))
         elif et == "entry_decision":
             counts["entry_decisions"] += 1
-            if e.get("execution_allowed") is True or e.get("decision") == "enter":
+            if e.get("execution_allowed") is True or _decision_word(e) == "enter":
                 counts["gates_passed"] += 1
         elif et == "execution_lease_issued":
             # `decision` reads "issue" on the pre-2026-08-06 convert path and "allow" once both
             # paths moved to the canonical builder; `authorized` is the field that never moved.
-            if e.get("authorized") is True or e.get("decision") in ("issue", "allow"):
+            if e.get("authorized") is True or _decision_word(e) in ("issue", "allow"):
                 counts["leases_issued"] += 1
             else:
                 counts["lease_refusals"] += 1
