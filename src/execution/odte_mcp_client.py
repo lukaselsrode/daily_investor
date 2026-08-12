@@ -34,6 +34,12 @@ from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from data.odte_snapshot_build import (
+    PENDING_ORDER_STATES,
+    broker_rows,
+    build_broker_snapshot,
+)
+
 try:                            # the vendored SDK error type for JSON-RPC-level refusals
     from mcp.shared.exceptions import MCPError as McpProtocolError
 except ImportError:             # pragma: no cover — tests run without needing the real SDK
@@ -76,12 +82,7 @@ TOOL_CANCEL_OPTION_ORDER = "cancel_option_order"
 EQUITY_QUOTE_BATCH_MAX = 20     # above 20 the server drops `closes` from quote responses
 EQUITY_HISTORICALS_BATCH_MAX = 10   # server cap: up to 10 symbols per historicals call
 
-_PENDING_ORDER_STATES = {"pending", "queued", "confirmed", "placed", "open", "live",
-                         "unconfirmed", "submitted", "partially_filled", "pending_cancelled"}
 
-# Keys searched (recursively, in order) for buying power in the portfolio payload.
-_BUYING_POWER_KEYS = ("options_buying_power", "buying_power", "account_buying_power",
-                      "cash_available_for_trading")
 
 
 class McpAuthStale(RuntimeError):
@@ -102,40 +103,6 @@ def _unwrap_exception_group(exc: BaseException) -> Exception:
     while isinstance(exc, _ExcGroup) and getattr(exc, "exceptions", None):
         exc = exc.exceptions[0]  # type: ignore[attr-defined]
     return exc if isinstance(exc, Exception) else RuntimeError(str(exc))
-
-
-def _deep_find(payload: Any, keys: tuple[str, ...]) -> Any:
-    """First value for any of `keys` found by depth-first search, earlier keys win per level."""
-    if isinstance(payload, dict):
-        for key in keys:
-            if key in payload and payload[key] is not None:
-                return payload[key]
-        for value in payload.values():
-            found = _deep_find(value, keys)
-            if found is not None:
-                return found
-    elif isinstance(payload, list):
-        for item in payload:
-            found = _deep_find(item, keys)
-            if found is not None:
-                return found
-    return None
-
-
-def _rows(payload: Any) -> list[dict]:
-    """Normalize a positions/orders payload to a list of row dicts, wherever the server nests it."""
-    if isinstance(payload, list):
-        return [r for r in payload if isinstance(r, dict)]
-    if isinstance(payload, dict):
-        for key in ("results", "orders", "positions", "items", "data"):
-            value = payload.get(key)
-            if isinstance(value, list):
-                return [r for r in value if isinstance(r, dict)]
-            if isinstance(value, dict):
-                inner = _rows(value)
-                if inner:
-                    return inner
-    return []
 
 
 def _num(value: Any) -> float | None:
@@ -316,14 +283,14 @@ class OdteMcpClient:
         for i in range(0, len(symbols), EQUITY_QUOTE_BATCH_MAX):
             payload = await self.call(TOOL_EQUITY_QUOTES,
                                       {"symbols": symbols[i:i + EQUITY_QUOTE_BATCH_MAX]})
-            rows = _rows(payload)
+            rows = broker_rows(payload)
             out.extend(rows if rows else [payload])
         return out
 
     async def option_quote_by_id(self, option_id: str) -> Any:
         # The server calls them instrument_ids; the repo's option_id IS the instrument UUID.
         payload = await self.call(TOOL_OPTION_QUOTES, {"instrument_ids": [str(option_id)]})
-        rows = _rows(payload)
+        rows = broker_rows(payload)
         return rows[0] if rows else payload
 
     # --- broker truth (the authorize_entry snapshot contract) ----------------------------------
@@ -338,37 +305,14 @@ class OdteMcpClient:
             self.call(TOOL_OPTION_POSITIONS, {"account_number": account_number}),
             self.call(TOOL_OPTION_ORDERS, {"account_number": account_number}),
         )
-        pos_rows = _rows(positions)
-        order_rows = _rows(orders)
-        today_et = now.astimezone(_ET).date().isoformat()
-
-        def _row_state(row: dict) -> str:
-            return str(row.get("state") or row.get("status") or "").strip().lower()
-
-        def _is_today(row: dict) -> bool:
-            ts = str(row.get("created_at") or row.get("updated_at") or "")
-            try:
-                return (datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(_ET)
-                        .date().isoformat() == today_et)
-            except ValueError:
-                return False
-
-        # The live portfolio payload nests it: data.buying_power.buying_power (a string).
-        bp_raw = _deep_find(portfolio, _BUYING_POWER_KEYS)
-        if isinstance(bp_raw, dict):
-            bp_raw = _deep_find(bp_raw, _BUYING_POWER_KEYS)
-        return {
-            "as_of": now.isoformat(timespec="seconds"),
-            "source": "odte_mcp_client.broker_truth",
-            "account_number": str(account_number),
-            "buying_power": _num(bp_raw),
-            "day_trades_left": _num(_deep_find(portfolio, ("day_trades_left",))),
-            "nonzero_option_positions_count": sum(
-                1 for r in pos_rows if (_num(r.get("quantity")) or 0) != 0),
-            "open_option_orders_count": sum(
-                1 for r in order_rows if _row_state(r) in _PENDING_ORDER_STATES),
-            "today_option_orders_count": sum(1 for r in order_rows if _is_today(r)),
-        }
+        # Fetch here, compose in `data`. This method is the ONLY caller that can reach the broker,
+        # so the composition had no business being welded to it — `odte_build_snapshot --out-broker`
+        # needs the same logic against saved payloads, and a second implementation is how the two
+        # drifted within hours of being duplicated (the copy lost `cash_available_for_trading`,
+        # `submitted` and `pending_cancelled`).
+        return build_broker_snapshot(portfolio, positions, orders,
+                                     account_number=account_number, now=now,
+                                     source="odte_mcp_client.broker_truth")
 
     # --- order lane ----------------------------------------------------------------------------
 
@@ -401,9 +345,9 @@ class OdteMcpClient:
     async def open_option_orders(self, account_number: str) -> list[dict]:
         """All currently-working option orders (pending/partial/pending-cancel states)."""
         payload = await self.call(TOOL_OPTION_ORDERS, {"account_number": str(account_number)})
-        return [r for r in _rows(payload)
+        return [r for r in broker_rows(payload)
                 if str(r.get("state") or r.get("status") or "").strip().lower()
-                in _PENDING_ORDER_STATES]
+                in PENDING_ORDER_STATES]
 
     async def cancel_option_order(self, order_id: str, account_number: str) -> Any:
         # account_number is REQUIRED by the server schema (mismatches are rejected).
@@ -416,5 +360,5 @@ class OdteMcpClient:
         payload = await self.call(TOOL_OPTION_ORDERS,
                                   {"account_number": str(account_number),
                                    "order_id": str(order_id)})
-        rows = _rows(payload)
+        rows = broker_rows(payload)
         return rows[0] if rows else payload

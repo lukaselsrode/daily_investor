@@ -440,35 +440,40 @@ def audit_orb_vocabulary(market: dict) -> list[dict]:
 # get_portfolio / get_option_positions / get_option_orders payloads through this function and
 # compares against that method's own recorded output.
 #
-# The helpers below are deliberate near-duplicates of the client's `_deep_find` / `_rows`: this
-# module is `data`, the client is `execution`, and `data` must not import upward. Consolidating
-# means moving the client's copies down here — a follow-up, not something to do in the same change
-# that introduces the builder.
+# `deep_find` / `broker_rows` / the two constants are the SINGLE copy for both lanes: they live
+# here in `data` and `execution.odte_mcp_client` imports them, which is the legal direction.
 
-BUYING_POWER_KEYS = ("options_buying_power", "buying_power", "account_buying_power")
+# CANONICAL for both lanes — `execution.odte_mcp_client` imports these rather than keeping its own.
+# They were briefly duplicated (2026-08-12) and drifted within hours: the copy here was missing
+# `cash_available_for_trading`, and `submitted` / `pending_cancelled`. That last one is not
+# cosmetic — counting `pending_cancelled` as PENDING rather than "gone" was a deliberate exit-bug
+# fix, and the duplicate would have regressed it. A field-by-field equivalence check on one live
+# payload did NOT catch any of it, because that payload exercised none of the missing keys.
+BUYING_POWER_KEYS = ("options_buying_power", "buying_power", "account_buying_power",
+                     "cash_available_for_trading")
 PENDING_ORDER_STATES = {"pending", "queued", "confirmed", "placed", "open", "live",
-                        "partially_filled", "unconfirmed"}
+                        "unconfirmed", "submitted", "partially_filled", "pending_cancelled"}
 
 
-def _deep_find(payload: Any, keys: tuple[str, ...]) -> Any:
+def deep_find(payload: Any, keys: tuple[str, ...]) -> Any:
     """First value for any of `keys` found by depth-first search, earlier keys win per level."""
     if isinstance(payload, dict):
         for key in keys:
             if key in payload and payload[key] is not None:
                 return payload[key]
         for value in payload.values():
-            found = _deep_find(value, keys)
+            found = deep_find(value, keys)
             if found is not None:
                 return found
     elif isinstance(payload, list):
         for item in payload:
-            found = _deep_find(item, keys)
+            found = deep_find(item, keys)
             if found is not None:
                 return found
     return None
 
 
-def _broker_rows(payload: Any) -> list[dict]:
+def broker_rows(payload: Any) -> list[dict]:
     """Normalize a positions/orders payload to row dicts, wherever the server nests them."""
     if isinstance(payload, list):
         return [r for r in payload if isinstance(r, dict)]
@@ -478,7 +483,7 @@ def _broker_rows(payload: Any) -> list[dict]:
             if isinstance(value, list):
                 return [r for r in value if isinstance(r, dict)]
             if isinstance(value, dict):
-                inner = _broker_rows(value)
+                inner = broker_rows(value)
                 if inner:
                     return inner
     return []
@@ -489,7 +494,7 @@ def build_broker_snapshot(portfolio: Any, positions: Any, orders: Any, *,
                           source: str = "odte_snapshot_build") -> dict:
     """Compose the three raw broker payloads into the snapshot convert sizes against."""
     now = now or datetime.now(timezone.utc)
-    pos_rows, order_rows = _broker_rows(positions), _broker_rows(orders)
+    pos_rows, order_rows = broker_rows(positions), broker_rows(orders)
     today_et = now.astimezone(ET).date().isoformat()
 
     def _row_state(row: dict) -> str:
@@ -500,15 +505,15 @@ def build_broker_snapshot(portfolio: Any, positions: Any, orders: Any, *,
         return bool(ts and ts.astimezone(ET).date().isoformat() == today_et)
 
     # The live portfolio payload nests it: data.buying_power.buying_power (a string).
-    bp_raw = _deep_find(portfolio, BUYING_POWER_KEYS)
+    bp_raw = deep_find(portfolio, BUYING_POWER_KEYS)
     if isinstance(bp_raw, dict):
-        bp_raw = _deep_find(bp_raw, BUYING_POWER_KEYS)
+        bp_raw = deep_find(bp_raw, BUYING_POWER_KEYS)
     return {
         "as_of": now.isoformat(timespec="seconds"),
         "source": source,
         "account_number": str(account_number),
         "buying_power": _num(bp_raw),
-        "day_trades_left": _num(_deep_find(portfolio, ("day_trades_left",))),
+        "day_trades_left": _num(deep_find(portfolio, ("day_trades_left",))),
         "nonzero_option_positions_count": sum(
             1 for r in pos_rows if (_num(r.get("quantity")) or 0) != 0),
         "open_option_orders_count": sum(
