@@ -605,3 +605,33 @@ def test_supersede_event_is_inert_in_telemetry(tmp_path):
     for k in ("entry_decisions", "gates_passed", "lease_refusals", "no_trade_decisions"):
         if k in base or k in after:
             assert base.get(k) == after.get(k), k
+
+
+# --- preflight names the builder (2026-08-12) --------------------------------------------------
+# The contract builder existed but was invoked 0 times across every conversion; the controller
+# hand-authored contract.json instead, producing contract_quote_missing / contract_quote_undated
+# (the raw MCP envelope saved verbatim). next_command is followed, so the refusal answers
+# "refresh it HOW" with the real invocation.
+
+def test_preflight_refusal_names_the_contract_builder(tmp_path):
+    payload = _convert(tmp_path, contract={"option_id": "x"})      # no timestamp -> undated
+    assert payload["stage"] == "preflight"
+    assert "contract_quote_undated" in payload["reason_codes"]
+    assert "odte_build_snapshot.py" in payload["next_command"]
+    assert "--out-contract" in payload["next_command"]
+
+
+def test_preflight_does_not_invent_a_broker_builder(tmp_path):
+    """No broker mode exists yet; emitting a command that does not exist is worse than none."""
+    payload = _convert(tmp_path, broker={"buying_power": 500.0})   # undated broker
+    assert payload["stage"] == "preflight"
+    assert any(r.startswith("broker_snapshot") for r in payload["reason_codes"])
+    assert "--out-broker" not in payload["next_command"]
+
+
+def test_non_preflight_guidance_is_unchanged(tmp_path):
+    """The entry-gate branch's specific guidance must still win over the generic prose."""
+    payload = _convert(tmp_path)
+    gate = payload.get("entry_gate") if isinstance(payload.get("entry_gate"), dict) else {}
+    if payload.get("stage") == "entry_gate" and gate.get("next_action"):
+        assert payload["next_action"] == gate["next_action"]

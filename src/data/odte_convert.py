@@ -223,6 +223,21 @@ def _journal_no_trade(stage: str, reason_codes: list[str], candidate: dict,
                                    journal_path=journal_path, now=now)
 
 
+# Only artifacts a builder can actually produce appear here. `broker_snapshot` is deliberately
+# absent: `odte_build_snapshot` has no broker mode yet, and emitting a command that does not exist
+# would be worse guidance than none.
+_PREFLIGHT_REMEDY = {
+    "market_snapshot": (".venv/bin/python scripts/odte_build_snapshot.py "
+                        "--historicals <get_equity_historicals> --quotes <get_equity_quotes> "
+                        "--gap-pct <session gap_pct> --out data/odte/market.json"),
+    "contract_quote": (".venv/bin/python scripts/odte_build_snapshot.py "
+                       "--instruments <get_option_instruments> "
+                       "--option-quotes <get_option_quotes> "
+                       "--contract-option-id <candidate option_id> "
+                       "--out-contract data/odte/contract.json"),
+}
+
+
 def run_convert(candidate_json: str | dict | None = None, candidate_path: str | None = None,
                 market_json: str | dict | None = None, market_path: str | None = None,
                 broker_json: str | dict | None = None, broker_path: str | None = None,
@@ -360,6 +375,22 @@ def run_convert(candidate_json: str | dict | None = None, candidate_path: str | 
                 "fails")
             payload["next_command"] = ("make odte-candidate-watch CANDIDATE=<other-vehicle "
                                        "candidate.json> ... JSON=1 → odte-convert")
+        elif stage == "preflight":
+            # NAME THE BUILDER, DON'T JUST SAY "REFRESH" (2026-08-12). `scripts/odte_build_snapshot.py`
+            # has gained contract mode but was invoked 0 times across every conversion — the
+            # controller hand-authors contract.json instead, which is what produced
+            # contract_quote_missing, contract_quote_undated (the raw `{"result": "<json>"}` MCP
+            # envelope saved verbatim) and a live_chain_recheck failure. Telling the agent to use
+            # the tool in prose has a poor record; `next_command` is followed. So a preflight
+            # refusal now answers "refresh it HOW" with the exact invocation.
+            arts = list(dict.fromkeys(r.rsplit("_", 1)[0] for r in reasons))
+            cmds = [_PREFLIGHT_REMEDY[a] for a in arts if a in _PREFLIGHT_REMEDY]
+            payload["next_action"] = (
+                f"conversion refused at preflight ({', '.join(reasons[:4])}) — REBUILD the named "
+                "artifact with the builder below rather than hand-writing it; pipe the MCP "
+                "response in as-is (the tool unwraps the envelope), then re-run odte-convert")
+            payload["next_command"] = (" ; ".join(cmds) if cmds else
+                                       "odte-convert  # after refreshing the failing inputs")
         else:
             payload["next_action"] = (f"conversion refused at {stage} ({', '.join(reasons[:4])}) "
                                       "— refresh the named inputs and re-run odte-convert, or let "
