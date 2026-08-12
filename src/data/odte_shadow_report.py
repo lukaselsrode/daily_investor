@@ -39,7 +39,8 @@ MATCH_WINDOW_SECONDS = 300.0    # +/- 5 minutes when option_id can't make the jo
 SHADOW_ORDER_INTENT = "shadow_order_intent"
 SHADOW_EXIT_INTENT = "shadow_exit_intent"
 SHADOW_INCIDENT = "shadow_incident"
-SHADOW_EVENT_TYPES = ("shadow_session_start", "shadow_session_end", "shadow_trigger_fired",
+SHADOW_SESSION_START = "shadow_session_start"
+SHADOW_EVENT_TYPES = (SHADOW_SESSION_START, "shadow_session_end", "shadow_trigger_fired",
                       "shadow_convert_result", SHADOW_ORDER_INTENT, SHADOW_EXIT_INTENT,
                       SHADOW_INCIDENT)
 
@@ -124,10 +125,53 @@ def _match(anchor: dict, candidates: list[dict], used: set[int]) -> dict | None:
 
 def build_shadow_report(real_events: list[dict], shadow_events: list[dict],
                         now: datetime | None = None) -> dict:
-    """Join the live journal with the shadow journal into the adjudication payload."""
+    """Join the live journal with the shadow journal into the adjudication payload.
+
+    WINDOWED TO THE DAYS THE SHADOW LANE ACTUALLY RAN (2026-08-12). Comparing every live event
+    ever journaled against the shadow stream made `clean` unreachable by construction: on the
+    daemon's first run this reported 20 `live_only` entries and 17
+    `live_exit_without_shadow_intent` divergences going back to 2026-06-24, against 90 seconds of
+    shadow data. Those are not divergences — the lane did not exist yet — and they never age out,
+    so Gate 1's "`clean: true`" could never have been satisfied.
+
+    A day counts as observed if the shadow journal has ANY event on it (the daemon writes
+    `shadow_session_start` at startup, so a session that produced no intent still counts — that is
+    the case where a genuine `live_only` IS a real divergence). Live events outside those days are
+    excluded and COUNTED in `window.live_events_out_of_window`; a narrowing that is not reported is
+    indistinguishable from clean.
+    """
     now = now or datetime.now(timezone.utc)
     real_events = [e for e in real_events or [] if isinstance(e, dict)]
     shadow_events = [e for e in shadow_events or [] if isinstance(e, dict)]
+
+    # The window is keyed on `shadow_session_start` specifically, not on the earliest shadow event
+    # of any kind. That distinction matters: a live entry with no matching shadow intent is the
+    # core divergence signal Gate 1 adjudicates, and windowing on "first intent seen" would delete
+    # it whenever the lane fired later in the day than the live lane did. The session marker is the
+    # lane's own statement of when it began observing, so it is the only honest boundary.
+    #
+    # A shadow journal with NO session marker is left unwindowed, preserving the original
+    # semantics. Day-level windowing was tried first and was still too coarse — it charged the
+    # daemon with 2026-08-12's 11:00 ET trade when it started at 13:50 that afternoon.
+    observed_from: dict[str, datetime] = {}
+    for e in shadow_events:
+        if e.get("event_type") != SHADOW_SESSION_START:
+            continue
+        day, _, _, ts = _key_fields(e)
+        if not day or ts is None:
+            continue
+        if day not in observed_from or ts < observed_from[day]:
+            observed_from[day] = ts
+    out_of_window = 0
+    if observed_from:
+        in_window = []
+        for e in real_events:
+            day, _, _, ts = _key_fields(e)
+            start = observed_from.get(day) if day else None
+            if start is not None and ts is not None and ts >= start:
+                in_window.append(e)
+        out_of_window = len(real_events) - len(in_window)
+        real_events = in_window
 
     live_entries = _first_per_identity(real_events, _LIVE_ENTRY_TYPES)
     shadow_intents = [e for e in shadow_events if e.get("event_type") == SHADOW_ORDER_INTENT]
@@ -208,6 +252,11 @@ def build_shadow_report(real_events: list[dict], shadow_events: list[dict],
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": now.isoformat(timespec="seconds"),
+        # What was compared, stated outright — the gate reads `clean`, so the window that produced
+        # it must be auditable rather than implied.
+        "window": {"observed_from": {d: t.isoformat(timespec="seconds")
+                                     for d, t in sorted(observed_from.items())},
+                   "live_events_out_of_window": out_of_window},
         "both_fired": both_fired,
         "shadow_only": shadow_only,
         "live_only": live_only,

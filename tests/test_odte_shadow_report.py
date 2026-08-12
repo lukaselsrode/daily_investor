@@ -108,3 +108,47 @@ def test_render_markdown_names_every_divergence():
         [_shadow_intent(NOW + timedelta(hours=3), option_id="opt-b")], now=NOW)
     text = sr.render_markdown(report)
     assert "LIVE-ONLY" in text and "SHADOW-ONLY" in text and "clean: False" in text
+
+
+# --- the window (2026-08-12) -------------------------------------------------------------------
+# Comparing every live event ever journaled against the shadow stream made `clean` unreachable by
+# construction: the daemon's first run reported 20 live_only entries and 17 exit divergences going
+# back to 2026-06-24, against 90 seconds of shadow data. Gate 1 requires `clean: true`, so it could
+# never have been satisfied.
+
+def _session_start(ts, underlying="SPY"):
+    return {"event_type": sr.SHADOW_SESSION_START, "ts": _iso(ts), "underlying": underlying}
+
+
+def test_live_events_before_the_session_start_are_out_of_window():
+    report = sr.build_shadow_report(
+        [_live_entry(NOW - timedelta(hours=3))],          # the lane was not running yet
+        [_session_start(NOW - timedelta(minutes=5))], now=NOW)
+    assert report["counts"]["live_entries"] == 0
+    assert report["window"]["live_events_out_of_window"] == 1
+    assert report["clean"] is True
+
+
+def test_a_live_entry_the_lane_SHOULD_have_seen_is_still_a_divergence():
+    """The window must not swallow the signal Gate 1 exists to adjudicate."""
+    report = sr.build_shadow_report(
+        [_live_entry(NOW)],                                # after the lane started, no intent
+        [_session_start(NOW - timedelta(minutes=5))], now=NOW)
+    assert [d["option_id"] for d in report["live_only"]] == ["opt-756c"]
+    assert report["clean"] is False
+
+
+def test_window_is_reported_not_implied():
+    """A narrowing that is not reported is indistinguishable from clean."""
+    start = NOW - timedelta(minutes=5)
+    report = sr.build_shadow_report([_live_entry(NOW - timedelta(hours=3))],
+                                    [_session_start(start)], now=NOW)
+    assert report["window"]["observed_from"] == {"2026-08-05": _iso(start)}
+
+
+def test_shadow_journal_without_a_session_marker_is_unwindowed():
+    """Legacy/partial shadow data keeps the original semantics rather than silently comparing
+    against nothing."""
+    report = sr.build_shadow_report([_live_entry(NOW)], [_shadow_intent(NOW)], now=NOW)
+    assert report["counts"]["both_fired"] == 1
+    assert report["window"]["live_events_out_of_window"] == 0
