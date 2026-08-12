@@ -1856,6 +1856,7 @@ def excursion_from_polls(events: list[dict]) -> dict[str, dict]:
     exactly how 2026-08-06's IWM trade reported a +4.67% "MAE".
     """
     seen: dict[str, list[float]] = defaultdict(list)
+    dropped: dict[str, int] = defaultdict(int)
     for e in events or []:
         if str(e.get("event_type")) not in _EXCURSION_POLL_EVENTS:
             continue
@@ -1863,12 +1864,24 @@ def excursion_from_polls(events: list[dict]) -> dict[str, dict]:
         if not oid or pnl is None:
             continue
         try:
-            seen[str(oid)].append(float(pnl))
+            value = float(pnl)
         except (TypeError, ValueError):
             continue
+        # A long option cannot lose more than the premium, so pnl_pct < -1.0 is arithmetically
+        # impossible and means the writer put a PERCENT where a fraction belongs. Observed once:
+        # 2026-06-24 logged -26.56 for a contract whose other polls read -0.2656 — the same number,
+        # correctly scaled — and that single poll set the measured MAE for two trades, which is what
+        # made "worst measured excursion" read -2656%. Dropped rather than rescaled: /100 would be
+        # inferring intent, and this feeds the MAX_LOSS threshold analysis.
+        # There is deliberately NO upper bound — a 0DTE option really can go 20x.
+        if value < -1.0:
+            dropped[str(oid)] += 1
+            continue
+        seen[str(oid)].append(value)
     return {
-        oid: {"mae_pct": min(vals), "mfe_pct": max(vals), "polls": len(vals)}
-        for oid, vals in seen.items()
+        oid: {"mae_pct": min(vals), "mfe_pct": max(vals), "polls": len(vals),
+              "dropped_impossible": dropped.get(oid, 0)}
+        for oid, vals in seen.items() if vals
     }
 
 
@@ -1920,6 +1933,7 @@ def summarize(events: list[dict]) -> dict:
             "mae_pct_measured": measured.get("mae_pct"),
             "mfe_pct_measured": measured.get("mfe_pct"),
             "excursion_polls": measured.get("polls", 0),
+            "excursion_dropped": measured.get("dropped_impossible", 0),
             "closed": realized is not None, "win": realized is not None and realized > 0,
             "rule_violations": violations, "held_minutes": _held_minutes(evs),
             "entry_ts": entry_ts.isoformat() if entry_ts else None,
@@ -2032,7 +2046,8 @@ def summarize(events: list[dict]) -> dict:
         # ones whose agent-authored postmortem happened to state an excursion.
         "measured_excursions": {
             t["trade_id"]: {"mae_pct": t["mae_pct_measured"], "mfe_pct": t["mfe_pct_measured"],
-                            "polls": t["excursion_polls"]}
+                            "polls": t["excursion_polls"],
+                            "dropped_impossible": t["excursion_dropped"]}
             for t in trade_rows if t.get("excursion_polls")
         },
         "process_quality": _process_quality(trade_rows),

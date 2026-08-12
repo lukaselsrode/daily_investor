@@ -1497,3 +1497,31 @@ def test_excursion_polls_absent_when_never_polled(tmp_path):
     oj.append_event({"event_type": "order_closed", "trade_id": "t-nopoll", "underlying": "SPY",
                      "ts": "2026-08-12T15:00:00Z", "realized_pnl": 5.0}, journal_path=jp)
     assert "t-nopoll" not in oj.summarize(oj.read_events(jp))["measured_excursions"]
+
+
+def test_impossible_pnl_pct_is_dropped_and_counted(tmp_path):
+    """A long option cannot lose more than the premium, so pnl_pct < -1.0 is a units error (percent
+    written where a fraction belongs). Observed once on 2026-06-24: -26.56 alongside -0.2656 for
+    the same contract, and that single poll set the measured MAE for two trades."""
+    jp = _journal(tmp_path)
+    oid = "units-bug"
+    oj.append_event({"event_type": "entry_fill", "trade_id": "t-units-bug", "underlying": "IWM",
+                     "option_id": oid, "ts": "2026-06-24T17:00:00Z"}, journal_path=jp)
+    for pnl in (-0.2656, -26.56, -0.10):
+        oj.append_event({"event_type": "management_check", "option_id": oid, "pnl_pct": pnl,
+                         "ts": "2026-06-24T17:42:06Z"}, journal_path=jp)
+    m = oj.summarize(oj.read_events(jp))["measured_excursions"]["t-units-bug"]
+    assert m["mae_pct"] == -0.2656          # NOT -26.56
+    assert m["polls"] == 2
+    assert m["dropped_impossible"] == 1
+
+
+def test_a_20x_gain_is_not_treated_as_corrupt(tmp_path):
+    """No upper bound: a 0DTE option really can go 20x, so only the downside is bounded."""
+    jp = _journal(tmp_path)
+    oid = "moonshot"
+    oj.append_event({"event_type": "order_closed", "trade_id": "t-moon", "option_id": oid,
+                     "ts": "2026-08-12T15:00:00Z", "realized_pnl": 500.0}, journal_path=jp)
+    oj.append_event({"event_type": "management_check", "option_id": oid, "pnl_pct": 19.0,
+                     "ts": "2026-08-12T14:50:00Z"}, journal_path=jp)
+    assert oj.summarize(oj.read_events(jp))["measured_excursions"]["t-moon"]["mfe_pct"] == 19.0
