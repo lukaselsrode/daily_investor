@@ -1148,8 +1148,27 @@ def _day_postmortem_content(trade_date: str, buckets: dict) -> str:
     postmortems = [e for e in controllers + trades if e.get("event_type") == "postmortem"]
     experiments = [e for e in controllers + trades if e.get("event_type") == "experiment" or _get(e, "hypothesis")]
     no_trades = [e for e in controllers if str(e.get("event_type") or "").endswith("no_trade_decision")]
-    closed = [e for e in postmortems + trades if _num(e.get("realized_pnl_dollars_gross")) is not None]
-    pnl = sum(_num(e.get("realized_pnl_dollars_gross")) or 0.0 for e in closed)
+    # ONE ROW PER TRADE, ALL SPELLINGS (2026-08-12). This read only
+    # `realized_pnl_dollars_gross` — not even the canonical `realized_pnl` — so 2026-08-12's
+    # broker-confirmed -$20.00 close produced "No closed trades with realized P/L" while the
+    # canonical journal and the broker fills both showed it. The EOD recap caught the
+    # contradiction against its own trades.jsonl.
+    #
+    # Widening the key alone would have been WORSE than the bug: one close is journaled up to
+    # three times (exit_fill + order_closed + postmortem) and `_realized` resolves a value from
+    # each, which turns 2026-08-11's -$12.00 day into -$36.00. Dedupe per trade, preferring the
+    # latest record — duplicates carry the same number, and a later postmortem may refine it.
+    # Same rule as `green_day_preservation`.
+    by_trade: dict[str, dict] = {}
+    for e in postmortems + trades:
+        if _realized(e) is None:
+            continue
+        key = str(e.get("trade_id") or f"event#{e.get('seq', id(e))}")
+        prev = by_trade.get(key)
+        if prev is None or str(e.get("ts") or "") >= str(prev.get("ts") or ""):
+            by_trade[key] = e
+    closed = list(by_trade.values())
+    pnl = sum(_realized(e) or 0.0 for e in closed)
 
     lines = [f"# 0DTE postmortem — {trade_date}", "",
              "_Generated from the decision journal; edit freely._", "",
@@ -1159,7 +1178,7 @@ def _day_postmortem_content(trade_date: str, buckets: dict) -> str:
             tid = e.get("trade_id") or e.get("contract") or e.get("underlying") or "trade"
             entry = e.get("entry_price")
             exit_price = e.get("exit_price") or e.get("close_price")
-            rp = _num(e.get("realized_pnl_dollars_gross"))
+            rp = _realized(e)
             pct = _num(e.get("realized_pnl_pct_gross"))
             ret = f", {pct * 100:+.1f}%" if pct is not None else ""
             lines.append(f"- **{tid}**: entry `{entry}`, exit `{exit_price}`, gross **{rp:+.2f}**{ret}.")

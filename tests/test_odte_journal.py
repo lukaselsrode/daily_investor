@@ -1525,3 +1525,30 @@ def test_a_20x_gain_is_not_treated_as_corrupt(tmp_path):
     oj.append_event({"event_type": "management_check", "option_id": oid, "pnl_pct": 19.0,
                      "ts": "2026-08-12T14:50:00Z"}, journal_path=jp)
     assert oj.summarize(oj.read_events(jp))["measured_excursions"]["t-moon"]["mfe_pct"] == 19.0
+
+
+def test_day_packet_counts_a_close_once_across_all_three_spellings(tmp_path):
+    """The day packet read ONLY `realized_pnl_dollars_gross`, so 2026-08-12's broker-confirmed
+    -$20.00 close rendered as "No closed trades with realized P/L". Widening the key alone would
+    have been worse: one close is journaled as exit_fill + order_closed + postmortem, and counting
+    all three turned 2026-08-11's -$12.00 day into -$36.00."""
+    from collections import defaultdict
+    day = "2026-08-11"
+    evs = [
+        {"event_type": "exit_fill", "trade_id": "t1", "trade_date": day,
+         "ts": f"{day}T16:57:22Z", "gross_pnl": 22.0, "entry_price": 0.94, "exit_price": 1.16},
+        {"event_type": "order_closed", "trade_id": "t1", "trade_date": day,
+         "ts": f"{day}T16:57:22Z", "realized_pnl": 22.0, "realized_pnl_dollars_gross": 22.0},
+        {"event_type": "postmortem", "trade_id": "t1", "trade_date": day,
+         "ts": f"{day}T16:57:23Z", "realized_pnl": 22.0},
+        # a second trade whose ONLY record is the fill event (the 2026-08-12 shape)
+        {"event_type": "exit_fill", "trade_id": "t2", "trade_date": day,
+         "ts": f"{day}T17:42:46Z", "estimated_net_pnl": -34.0},
+    ]
+    buckets = defaultdict(list)
+    for e in evs:
+        buckets[oj._classify_day_stream(e)].append(e)
+    txt = oj._day_postmortem_content(day, buckets)
+    assert "No closed trades" not in txt
+    assert "**-12.00**" in txt              # 22 - 34, each counted ONCE
+    assert txt.count("**t1**") == 1
