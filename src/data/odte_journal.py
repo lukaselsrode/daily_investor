@@ -296,14 +296,25 @@ def read_events(journal_path: str | None = None) -> list[dict]:
 # reset is the ET calendar date — nothing carries over past the session.
 
 # Event types that mark a COMPLETED trade (may carry realized P/L). entry/management events never lock.
-_COMPLETED_EVENTS = ("order_closed", "exit_decision", "postmortem")
+# `exit_fill` joined this on 2026-08-12. It is the exit lane's own fill record and states the same
+# close as `order_closed` (which is agent-authored on the live path) — on 2026-08-12 order_closed
+# was never written, so a -$20.00 close left net_day reading $0.00. That is not cosmetic: net_day
+# gates `aplus_uncapped_active`, whose policy is that any net-red day de-activates the cap bypass,
+# so a red day was presenting itself as flat. Historical values are unchanged — every prior
+# exit_fill carries a gross_pnl identical to its order_closed realized_pnl, and the dedupe below
+# is per trade_id, so the pair collapses to one row.
+_COMPLETED_EVENTS = ("order_closed", "exit_decision", "postmortem", "exit_fill")
 _INACTIVE_PLAN_STATUS = {"closed", "exited", "flat", "done"}   # mirrors odte_position._INACTIVE_STATUS
 
 
 def _realized(container: dict) -> float | None:
     """Realized P/L from an event/plan: canonical `realized_pnl` first, then the flat live-journal
-    and plan spellings (`realized_pnl_dollars_gross`, `gross_pnl`, `net_pnl_est`)."""
-    for key in ("realized_pnl", "realized_pnl_dollars_gross", "gross_pnl", "net_pnl_est"):
+    and plan spellings (`realized_pnl_dollars_gross`, `estimated_net_pnl`, `gross_pnl`,
+    `net_pnl_est`). `estimated_net_pnl` is the exit lane's own fill record and is preferred over
+    `gross_pnl` because it is net of the fee estimate; "estimated" qualifies the fees, not the
+    fill."""
+    for key in ("realized_pnl", "realized_pnl_dollars_gross", "estimated_net_pnl", "gross_pnl",
+                "net_pnl_est"):
         v = _num(_get(container, key))
         if v is not None:
             return v
@@ -1801,10 +1812,71 @@ def _process_quality(trade_rows: list[dict]) -> dict:
     }
 
 
+def _exit_fill_net(events: list[dict]) -> float | None:
+    """Realized P&L as stated by the exit lane's own fill event.
+
+    ``order_closed`` carries ``realized_pnl``; ``exit_fill`` states the same close under
+    ``estimated_net_pnl`` (net of the fee estimate) or ``gross_pnl``. The ledger reads only the
+    former, and on the live path ``order_closed`` is agent-authored — on 2026-08-12 it was simply
+    never written, so a broker-flat-verified -$20.00 close left the ledger reading closed=17 /
+    $75.00 while the account was flat. Same failure as the mfe/mae note below: the schema grew a
+    second spelling and the reader kept reading one.
+
+    "estimated" qualifies the *fees*, not the fill — these events carry a real ``exit_order_id``
+    and ``fill_price``. Explicit ``realized_pnl`` still wins wherever it exists.
+    """
+    for e in reversed(events or []):
+        if str(e.get("event_type")) in EXIT_FILL_EVENTS:
+            pnl = _realized(e)
+            if pnl is not None:
+                return pnl
+    return None
+
+
+_EXCURSION_POLL_EVENTS = ("management_check", "position_check")
+
+
+def excursion_from_polls(events: list[dict]) -> dict[str, dict]:
+    """Measure per-contract excursion from the monitoring polls the tools already emit.
+
+    ``management_check`` carries ``option_id`` and a tool-computed ``pnl_pct`` on every poll, but
+    as of 2026-08-12 only 10 of 455 carry ``trade_id`` — so the poll stream joins to a trade
+    through the *contract* id, not the trade id. Grouping these by ``trade_id`` silently yields
+    zero polls for nearly every trade; grouping by (date, underlying) instead merges two trades
+    that share a symbol on one day, which is what 2026-08-11's pair of SPY trades did.
+
+    This exists because the postmortem's own ``excursion`` block is agent-authored. Across the 22
+    trades whose polls join, it was absent for 15 and reported a *positive* MAE — impossible — for
+    another. Where it is present and polls are plentiful the two agree inside 2.5pp, so this
+    measures the same quantity and simply always has it.
+
+    Returns ``{option_id: {"mae_pct", "mfe_pct", "polls"}}`` as fractions of entry (-0.19, not
+    -19.0), deliberately NOT the units of the dollar-denominated ``mfe``/``mae`` trade fields.
+    ``polls`` is part of the contract: one poll cannot measure an excursion, and a lone poll is
+    exactly how 2026-08-06's IWM trade reported a +4.67% "MAE".
+    """
+    seen: dict[str, list[float]] = defaultdict(list)
+    for e in events or []:
+        if str(e.get("event_type")) not in _EXCURSION_POLL_EVENTS:
+            continue
+        oid, pnl = e.get("option_id"), e.get("pnl_pct")
+        if not oid or pnl is None:
+            continue
+        try:
+            seen[str(oid)].append(float(pnl))
+        except (TypeError, ValueError):
+            continue
+    return {
+        oid: {"mae_pct": min(vals), "mfe_pct": max(vals), "polls": len(vals)}
+        for oid, vals in seen.items()
+    }
+
+
 def summarize(events: list[dict]) -> dict:
     """Deterministic metrics over the journal. Pure: no IO, no network."""
     events = sorted(list(events or []), key=lambda e: (e.get("seq", 0)))
     by_type = dict(Counter(str(e.get("event_type", "?")) for e in events))
+    measured_excursions = excursion_from_polls(events)
 
     trades: dict[str, list] = defaultdict(list)
     for e in events:
@@ -1821,6 +1893,8 @@ def summarize(events: list[dict]) -> dict:
         if restricted and underlying:
             restricted_flags.append(underlying)
         realized = _last_num(evs, "realized_pnl")
+        if realized is None:
+            realized = _exit_fill_net(evs)
         # Modern (2026-08-03+) postmortems carry excursion.{mfe,mae}_dollars + mfe_capture_pct;
         # older ones carry flat mfe/mae. Read modern first, fall back to legacy — reading only the
         # legacy keys is what made avg_mfe_capture report 7.7% on a 100%-capture trade.
@@ -1835,10 +1909,17 @@ def summarize(events: list[dict]) -> dict:
         if restricted:
             violations.append(f"RESTRICTED_EMPLOYER: {underlying or 'restricted'} must never be traded")
         entry_ts = next((_parse_ts(e.get("ts")) for e in evs if e.get("event_type") in _ENTRY_EVENTS), None)
+        measured = measured_excursions.get(str(_first(evs, "option_id") or "")) or {}
         trade_rows.append({
             "trade_id": tid, "mode": str(_first(evs, "mode") or "unknown"),
             "underlying": underlying, "restricted": restricted,
             "realized_pnl": realized, "mfe": mfe, "mae": mae,
+            # Tool-measured excursion as FRACTIONS of entry — deliberately separate fields from
+            # the dollar-denominated agent-authored mfe/mae above, because `realized_pnl / mfe`
+            # downstream is a dollar ratio and a percentage there would read as a 100x error.
+            "mae_pct_measured": measured.get("mae_pct"),
+            "mfe_pct_measured": measured.get("mfe_pct"),
+            "excursion_polls": measured.get("polls", 0),
             "closed": realized is not None, "win": realized is not None and realized > 0,
             "rule_violations": violations, "held_minutes": _held_minutes(evs),
             "entry_ts": entry_ts.isoformat() if entry_ts else None,
@@ -1945,6 +2026,15 @@ def summarize(events: list[dict]) -> dict:
         "experiments": experiments,
         "lessons": lessons,
         "pnl_sequence": [t["realized_pnl"] for t in closed],
+        # Per-trade excursion measured from the monitoring polls, keyed by trade_id. Kept out of
+        # the dollar-denominated mfe/mae fields (see excursion_from_polls) and carried here so the
+        # MAX_LOSS-threshold question can be asked of every trade that was polled, not only the
+        # ones whose agent-authored postmortem happened to state an excursion.
+        "measured_excursions": {
+            t["trade_id"]: {"mae_pct": t["mae_pct_measured"], "mfe_pct": t["mfe_pct_measured"],
+                            "polls": t["excursion_polls"]}
+            for t in trade_rows if t.get("excursion_polls")
+        },
         "process_quality": _process_quality(trade_rows),
         "canonical_guardrails": canonical_guardrails(),
         "time_window_policy": window_descriptions(),

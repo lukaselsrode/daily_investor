@@ -1402,3 +1402,98 @@ def test_money_counters_ignore_ingest_sourced_fills():
     assert b["trades_today"] == 1
     g = oj.green_day_preservation(real + dupes, now=now)
     assert g["net_day_pnl"] == 14.0                             # not 28
+
+
+# --- exit_fill as a completion record (2026-08-12) --------------------------------------------
+# On 2026-08-12 the live controller journaled `exit_fill` but never the agent-authored
+# `order_closed`. The close was real (exit_order_id, fill_price, broker_flat_verified) yet the
+# ledger read closed=17 / $75.00 with the account flat, and net_day read $0.00 on a -$20.00 day.
+# Payload shapes below mirror that live event, not an invented schema.
+
+def _exit_fill_event(trade_id="t-exitfill", *, ts="2026-08-12T15:13:42.245000Z", **over):
+    e = {"event_type": "exit_fill", "source": "0dte-live-controller", "trade_id": trade_id,
+         "trade_date": "2026-08-12", "ts": ts, "underlying": "IWM", "symbol": "IWM",
+         "mode": "scalp", "option_id": "9dcc800b-5458-4d0e-86bd-86fff9186f4d", "quantity": 1,
+         "entry_price": 0.46, "exit_price": 0.26, "gross_pnl": -20.0,
+         "estimated_total_fees": 0.0, "estimated_net_pnl": -20.0,
+         "exit_order_id": "6a7c8da6-2268-4b42-8133-fd1bfb9fdf1c",
+         "decision": "MAX_LOSS_EXIT_FILLED", "rail_fired": "MAX_LOSS",
+         "fill_price": 0.26, "broker_flat_verified": True}
+    e.update(over)
+    return e
+
+
+def test_exit_fill_counts_as_closed_when_order_closed_absent(tmp_path):
+    jp = _journal(tmp_path)
+    oj.append_event({"event_type": "entry_fill", "trade_id": "t-exitfill", "mode": "scalp",
+                     "underlying": "IWM", "ts": "2026-08-12T15:01:54Z"}, journal_path=jp)
+    oj.append_event(_exit_fill_event(), journal_path=jp)
+    s = oj.summarize(oj.read_events(jp))
+    assert s["n_closed"] == 1                       # was 0: the close was invisible
+    assert s["total_realized_pnl"] == -20.0
+    assert s["hit_rate"] == 0.0
+
+
+def test_explicit_realized_pnl_wins_over_exit_fill_estimate(tmp_path):
+    """order_closed is the broker-confirmed record; the fill event's own number never overrides it."""
+    jp = _journal(tmp_path)
+    oj.append_event(_exit_fill_event(estimated_net_pnl=-20.0, gross_pnl=-20.0), journal_path=jp)
+    oj.append_event({"event_type": "order_closed", "trade_id": "t-exitfill", "mode": "scalp",
+                     "underlying": "IWM", "ts": "2026-08-12T15:13:43Z",
+                     "realized_pnl": -19.5}, journal_path=jp)
+    s = oj.summarize(oj.read_events(jp))
+    assert s["total_realized_pnl"] == -19.5
+
+
+def test_exit_fill_makes_a_red_day_read_red(tmp_path):
+    """net_day gates aplus_uncapped_active, whose policy is that any net-red day de-activates the
+    daily-cap bypass. A close the ledger cannot see presents a red day as flat."""
+    from datetime import datetime
+
+    from data.odte_config import DAILY_BUDGET_APLUS_UNCAPPED
+    jp = _journal(tmp_path)
+    oj.append_event(_exit_fill_event(), journal_path=jp)
+    evs = oj.read_events(jp)
+    now = datetime.fromisoformat("2026-08-12T20:00:00+00:00")
+    assert oj.green_day_preservation(evs, now=now)["net_day_pnl"] == -20.0
+    if DAILY_BUDGET_APLUS_UNCAPPED:
+        assert oj.daily_trade_budget(evs, now=now)["aplus_uncapped_active"] is False
+
+
+# --- excursion measured from the monitoring polls ----------------------------------------------
+
+def test_excursion_measured_from_polls_joins_on_option_id(tmp_path):
+    """management_check carries option_id + a tool-computed pnl_pct but (2026-08-12) almost never
+    trade_id, so the poll stream joins to a trade through the contract id."""
+    jp = _journal(tmp_path)
+    oid = "9dcc800b-5458-4d0e-86bd-86fff9186f4d"
+    oj.append_event({"event_type": "entry_fill", "trade_id": "t-exc", "underlying": "IWM",
+                     "option_id": oid, "ts": "2026-08-12T15:01:54Z"}, journal_path=jp)
+    for pnl in (0.0543, -0.1413, -0.4239):
+        oj.append_event({"event_type": "management_check", "option_id": oid, "trade_id": None,
+                         "pnl_pct": pnl, "ts": "2026-08-12T15:10:00Z"}, journal_path=jp)
+    s = oj.summarize(oj.read_events(jp))
+    m = s["measured_excursions"]["t-exc"]
+    assert m["mae_pct"] == -0.4239 and m["mfe_pct"] == 0.0543 and m["polls"] == 3
+
+
+def test_measured_excursion_is_separate_from_dollar_mfe(tmp_path):
+    """mfe/mae are dollars (avg_mfe_capture divides realized_pnl by mfe); the measured fields are
+    fractions. Mixing them would read as a 100x error."""
+    jp = _journal(tmp_path)
+    oid = "abc-123"
+    oj.append_event({"event_type": "order_closed", "trade_id": "t-units", "underlying": "SPY",
+                     "option_id": oid, "ts": "2026-08-12T15:00:00Z", "realized_pnl": 22.0,
+                     "excursion": {"mfe_dollars": 44.0, "mae_dollars": -8.0}}, journal_path=jp)
+    oj.append_event({"event_type": "management_check", "option_id": oid, "pnl_pct": -0.10,
+                     "ts": "2026-08-12T14:50:00Z"}, journal_path=jp)
+    s = oj.summarize(oj.read_events(jp))
+    assert s["avg_mfe_capture"] == 0.5                       # 22.0 / 44.0 — still dollars
+    assert s["measured_excursions"]["t-units"]["mae_pct"] == -0.10
+
+
+def test_excursion_polls_absent_when_never_polled(tmp_path):
+    jp = _journal(tmp_path)
+    oj.append_event({"event_type": "order_closed", "trade_id": "t-nopoll", "underlying": "SPY",
+                     "ts": "2026-08-12T15:00:00Z", "realized_pnl": 5.0}, journal_path=jp)
+    assert "t-nopoll" not in oj.summarize(oj.read_events(jp))["measured_excursions"]
