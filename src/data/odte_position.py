@@ -133,9 +133,18 @@ DEFAULT_BID_FLOOR = 0.05         # per-share bid at/under which an option is tre
 # winner distribution (-0.186, -0.13, -0.09, -0.056, +0.047 - nothing between -0.186 and -0.25).
 # CAVEATS THAT SURVIVE: n=11, and all 4 breaches were thesis-alive. Re-run the sweep from
 # `measured_excursions` before moving it again; do not re-derive it by hand.
-# The real question this raised is not the threshold but that a position which never goes green and
-# just bleeds has NO exit but this backstop — BID_MEMORY_PROTECT keys on giveback from a peak and
-# THESIS_DEAD on the underlying. A premium-decay exit would be a new rail, not a tuned number.
+# A PREMIUM-DECAY / NO-PROGRESS EXIT WAS MEASURED AND REJECTED (2026-08-12). A position that never
+# goes green and just bleeds has no exit but this stop, because BID_MEMORY_PROTECT never arms
+# without a peak and THESIS_DEAD keys on the underlying, so a rail seemed obviously missing. Final
+# MFE separates outcomes almost perfectly (MFE > +0.10: n=4, 4 wins, +$87; MFE <= +0.10: n=7,
+# 1 win, -$97) — but that is LOOKAHEAD: a live rail only knows MFE-so-far, and the time series says
+# the tradeable version does not exist. Time to first +10%, against outcome:
+#   spy-20260811-772p  +$22   reached +10% at 10.1m, and was -9.0% at the 5-minute mark
+#   SPY-2026-07-01-748P +$27  reached +10% at  7.5m (only +8.8% by 5m)
+#   spy-20260803-756c   +$9   NEVER reached +10%
+# Any "not green by 5 minutes, exit" rule cuts the first two and the third never qualifies at all —
+# ~$49 of real winners destroyed to pre-empt losses this stop already bounds at -25%. With n=5
+# winners, one bad cut erases the edge. Re-measure with more winners before proposing it again.
 # Overridable per plan via `max_loss_pct` / `risk_rules.max_loss_pct`.
 DEFAULT_MAX_LOSS_PCT = -0.25
 

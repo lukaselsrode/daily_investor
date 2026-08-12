@@ -621,12 +621,15 @@ def test_preflight_refusal_names_the_contract_builder(tmp_path):
     assert "--out-contract" in payload["next_command"]
 
 
-def test_preflight_does_not_invent_a_broker_builder(tmp_path):
-    """No broker mode exists yet; emitting a command that does not exist is worse than none."""
+def test_preflight_names_the_broker_builder_now_that_one_exists(tmp_path):
+    """Was `test_preflight_does_not_invent_a_broker_builder` until 2026-08-12: naming a command
+    that does not exist is worse than none, so broker_snapshot was deliberately absent from the
+    remedy table. odte_build_snapshot gained broker mode, so it now names it."""
     payload = _convert(tmp_path, broker={"buying_power": 500.0})   # undated broker
     assert payload["stage"] == "preflight"
     assert any(r.startswith("broker_snapshot") for r in payload["reason_codes"])
-    assert "--out-broker" not in payload["next_command"]
+    assert "--out-broker" in payload["next_command"]
+    assert "odte_build_snapshot.py" in payload["next_command"]
 
 
 def test_non_preflight_guidance_is_unchanged(tmp_path):

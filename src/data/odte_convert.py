@@ -223,10 +223,14 @@ def _journal_no_trade(stage: str, reason_codes: list[str], candidate: dict,
                                    journal_path=journal_path, now=now)
 
 
-# Only artifacts a builder can actually produce appear here. `broker_snapshot` is deliberately
-# absent: `odte_build_snapshot` has no broker mode yet, and emitting a command that does not exist
-# would be worse guidance than none.
+# Only artifacts a builder can actually produce appear here. `broker_snapshot` joined on
+# 2026-08-12 once `odte_build_snapshot` gained broker mode; before that it was deliberately absent,
+# because naming a command that does not exist is worse guidance than none.
 _PREFLIGHT_REMEDY = {
+    "broker_snapshot": (".venv/bin/python scripts/odte_build_snapshot.py "
+                        "--portfolio <get_portfolio> --positions <get_option_positions> "
+                        "--orders <get_option_orders> --account <account_number> "
+                        "--out-broker data/odte/broker.json"),
     "market_snapshot": (".venv/bin/python scripts/odte_build_snapshot.py "
                         "--historicals <get_equity_historicals> --quotes <get_equity_quotes> "
                         "--gap-pct <session gap_pct> --out data/odte/market.json"),

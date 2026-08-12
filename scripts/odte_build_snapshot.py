@@ -30,7 +30,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from data.odte_snapshot_build import (  # noqa: E402
-    audit_orb_vocabulary, build_contract_snapshot, build_market_snapshot, select_contract,
+    audit_orb_vocabulary, build_broker_snapshot, build_contract_snapshot, build_market_snapshot,
+    select_contract,
 )
 
 _INSTRUMENT_LIST_KEYS = ("instruments", "results", "data")
@@ -207,7 +208,40 @@ def main(argv=None) -> int:
     ap.add_argument("--contract-option-id", help="pick this exact option uuid")
     ap.add_argument("--contract-strike", help="pick this strike (e.g. 301.0)")
     ap.add_argument("--contract-type", help="'call' or 'put'")
+    ap.add_argument("--portfolio", help="get_portfolio payload (with --positions/--orders)")
+    ap.add_argument("--positions", help="get_option_positions payload")
+    ap.add_argument("--orders", help="get_option_orders payload")
+    ap.add_argument("--account", help="account number stamped into the broker snapshot")
+    ap.add_argument("--out-broker", help="write the composed broker.json here")
     args = ap.parse_args(argv)
+
+    # --- broker mode: compose the three account payloads ---------------------------------------
+    if args.portfolio or args.positions or args.orders:
+        if not (args.portfolio and args.positions and args.orders):
+            print("broker mode needs --portfolio AND --positions AND --orders", file=sys.stderr)
+            return 3
+        if not args.account:
+            print("broker mode needs --account", file=sys.stderr)
+            return 3
+        try:
+            portfolio, positions, orders = (_load(args.portfolio), _load(args.positions),
+                                            _load(args.orders))
+        except (OSError, ValueError) as exc:
+            print(f"could not read broker inputs: {exc}", file=sys.stderr)
+            return 3
+        broker = build_broker_snapshot(portfolio, positions, orders,
+                                       account_number=args.account,
+                                       now=datetime.now(timezone.utc))
+        # Refuse to emit a snapshot convert would reject at preflight: no buying power means it
+        # cannot size, and it would fail the budget_check with a confusing reason instead.
+        if broker.get("buying_power") is None:
+            print("no buying_power found in --portfolio payload", file=sys.stderr)
+            return 2
+        text = json.dumps(broker, indent=2) + "\n"
+        if args.out_broker:
+            Path(args.out_broker).expanduser().write_text(text)
+        sys.stdout.write(text)
+        return 0
 
     # --- contract mode: join instruments to quotes, no tape needed -----------------------------
     if args.instruments or args.option_quotes:
