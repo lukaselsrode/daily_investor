@@ -734,7 +734,16 @@ def weekly_telemetry(events: list[dict] | None, now: datetime | None = None) -> 
         "iso_week": f"{year}-W{week:02d}",
         "trades_this_week": trades,
         "weekly_target": [WEEKLY_TRADE_TARGET_MIN, WEEKLY_TRADE_TARGET_MAX],
+        # `on_pace` answers the ONE question this telemetry was built for — "are we under-trading,
+        # and is a zero-trade week still fixable?" — so it is deliberately floor-only. But a reader
+        # handed `weekly_target: [3, 4]`, `trades: 5` and `on_pace: True` reasonably calls that a
+        # contradiction; the 2026-08-12 EOD recap did exactly that in writing. `pace` states the
+        # direction outright so over-trading is visible instead of inferred. Kept additive:
+        # `on_pace` has no code consumers but the recap reads it, and silently redefining a field
+        # a reader already trusts is worse than adding one.
         "on_pace": trades >= WEEKLY_TRADE_TARGET_MIN or not armed,
+        "pace": ("under" if trades < WEEKLY_TRADE_TARGET_MIN
+                 else "over" if trades > WEEKLY_TRADE_TARGET_MAX else "on"),
         "entry_decisions": counts["entry_decisions"],
         "gates_passed": counts["gates_passed"],
         "leases_issued": counts["leases_issued"],

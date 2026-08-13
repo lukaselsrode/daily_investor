@@ -1552,3 +1552,36 @@ def test_day_packet_counts_a_close_once_across_all_three_spellings(tmp_path):
     assert "No closed trades" not in txt
     assert "**-12.00**" in txt              # 22 - 34, each counted ONCE
     assert txt.count("**t1**") == 1
+
+
+def test_weekly_pace_states_the_direction_not_just_the_floor(tmp_path):
+    """`on_pace` is floor-only by design (its job is catching zero-trade weeks), which made
+    `weekly_target: [3,4]` + `trades: 5` + `on_pace: True` read as a contradiction — the
+    2026-08-12 EOD recap flagged it in writing. `pace` states the direction."""
+    from datetime import datetime, timezone
+
+    from data.odte_config import WEEKLY_TRADE_TARGET_MAX
+    jp = _journal(tmp_path)
+    friday = datetime(2026, 8, 14, 18, 0, tzinfo=timezone.utc)          # armed (past Wednesday)
+    for i in range(WEEKLY_TRADE_TARGET_MAX + 1):                        # one OVER the ceiling
+        oj.append_event({"event_type": "order_filled", "trade_id": f"t{i}", "underlying": "SPY",
+                         "option_id": f"opt-{i}", "ts": f"2026-08-1{i % 4 + 1}T14:00:00Z"},
+                        journal_path=jp)
+    w = oj.weekly_telemetry(oj.read_events(jp), now=friday)
+    assert w["trades_this_week"] > WEEKLY_TRADE_TARGET_MAX
+    assert w["pace"] == "over"
+    assert w["on_pace"] is True          # unchanged: it only ever meant "not under-trading"
+
+
+def test_weekly_pace_under_and_on(tmp_path):
+    from datetime import datetime, timezone
+
+    from data.odte_config import WEEKLY_TRADE_TARGET_MIN
+    jp = _journal(tmp_path)
+    friday = datetime(2026, 8, 14, 18, 0, tzinfo=timezone.utc)
+    assert oj.weekly_telemetry(oj.read_events(jp), now=friday)["pace"] == "under"
+    for i in range(WEEKLY_TRADE_TARGET_MIN):
+        oj.append_event({"event_type": "order_filled", "trade_id": f"u{i}", "underlying": "SPY",
+                         "option_id": f"o-{i}", "ts": f"2026-08-1{i % 4 + 1}T14:00:00Z"},
+                        journal_path=jp)
+    assert oj.weekly_telemetry(oj.read_events(jp), now=friday)["pace"] == "on"
