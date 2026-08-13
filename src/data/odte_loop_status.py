@@ -958,9 +958,15 @@ def _resolve_loop_state(active_trade: dict | None = None,
 
     if closed_trade and not reviewed and recent_close:
         reasons.append(f"trade {trade_id or '?'} closed, no postmortem yet")
+        # `gross_pnl or net_pnl_est` had two faults (2026-08-12): it knew only two of the five
+        # spellings a close is written under, and `or` is falsy — a SCRATCH plan with
+        # `gross_pnl: 0.0` reported `net_pnl_est` instead of zero, and scratches are real
+        # (2026-07-06 SCRATCH_FILLED, 2026-08-06 closed at exactly +0.00). `_realized` is the one
+        # reader that understands every spelling and distinguishes 0.0 from absent.
+        from data.odte_journal import _realized
         return _payload("EXITED", reasons, now, live=False,
                         context={"trade_id": trade_id, "underlying": plan.get("underlying"),
-                                 "realized_pnl": plan.get("gross_pnl") or plan.get("net_pnl_est")})
+                                 "realized_pnl": _realized(plan)})
     if gate_exec:
         reasons.append(f"entry gate execution-allowed ({gate.get('underlying') or '?'})")
         return _payload("PROMOTED", reasons, now, live=False, context=_gate_ctx(gate))
