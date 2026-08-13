@@ -68,8 +68,10 @@ class FakeClient:
             raise RuntimeError("broker exploded")
         return {"data": {"id": "order-abc-123"}}
 
-    async def close(self):
-        self.calls.append("close")
+    async def aclose(self):
+        # `aclose`, not `close`: OdteMcpClient has no close(), and naming it wrong here would let
+        # the module's AttributeError-swallowing finally hide a leaked MCP session.
+        self.calls.append("aclose")
 
 
 def _run(payload, tmp_path, client, now=NOW):
@@ -220,3 +222,20 @@ def test_the_ask_is_used_when_it_is_below_the_ceiling(tmp_path):
     c = FakeClient()
     report, _ = _run(_payload(_contract={"ask": 0.41}), tmp_path, c)
     assert report["limit_price"] == 0.41 and report["limit_price"] < 0.50
+
+
+def test_a_client_it_created_is_torn_down_with_aclose(monkeypatch, tmp_path):
+    """OdteMcpClient exposes `aclose`, never `close`. Calling the wrong name raised
+    AttributeError straight into the best-effort handler, silently leaking the session."""
+    from execution.odte_mcp_client import OdteMcpClient
+    assert hasattr(OdteMcpClient, "aclose") and not hasattr(OdteMcpClient, "close")
+
+    made = FakeClient()
+    ledger = str(tmp_path / "consumed_leases.json")
+    (tmp_path / "consumed_leases.json").write_text("[]")
+    made.ledger_path = ledger
+    monkeypatch.setattr("execution.odte_convert_place.OdteMcpClient", lambda *a, **k: made)
+    asyncio.run(place_converted({"converted": True, "lease": _lease()},
+                                account_number=ACCT, ledger_path=ledger,
+                                contract={"ask": 0.46}, now=NOW))       # client=None -> we own it
+    assert "aclose" in made.calls, "a client we created was never torn down"

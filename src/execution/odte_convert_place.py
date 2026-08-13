@@ -139,9 +139,12 @@ async def place_converted(payload: dict, *, account_number: str, ledger_path: st
             check, placed = await consume_then(guard_order, lease, ledger_path=ledger_path,
                                                now=now, place=_place)
         finally:
-            if own_client:
+            # `aclose`, NOT `close` — OdteMcpClient has no close() and the AttributeError was being
+            # swallowed by this very handler, leaking the MCP session on every call. Same guarded
+            # form the fast-lane daemon uses (odte_fast_lane.py:879).
+            if own_client and hasattr(client, "aclose"):
                 try:
-                    await client.close()
+                    await client.aclose()
                 except Exception:                                       # teardown is best-effort
                     pass
 
