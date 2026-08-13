@@ -239,3 +239,23 @@ def test_a_client_it_created_is_torn_down_with_aclose(monkeypatch, tmp_path):
                                 account_number=ACCT, ledger_path=ledger,
                                 contract={"ask": 0.46}, now=NOW))       # client=None -> we own it
     assert "aclose" in made.calls, "a client we created was never torn down"
+
+
+def test_the_order_placed_event_cannot_be_miscounted(tmp_path):
+    """`order_placed` is a NEW vocabulary term (EVENT_TYPES is a partial legacy declaration, not a
+    whitelist — `entry_fill` and `no_trade_decision` are absent from it too). This week produced
+    four spellings of one close and three readers that each understood a different subset, so a new
+    term has to be proven inert before it ships: informational only, never a fill, never a trade."""
+    import data.odte_journal as oj
+    jp = str(tmp_path / "j.jsonl")
+    oj.append_decision_journal({"event_type": "order_placed", "underlying": "IWM",
+                                "option_id": "x", "lease_id": "L1", "order_id": "o1",
+                                "limit_price": 0.46},
+                               source="odte_convert_place", event_type="order_placed",
+                               journal_path=jp)
+    evs = oj.read_events(jp)
+    assert evs[0]["event_type"] == "order_placed"
+    assert oj._classify_day_stream(evs[0]) == "controller_events"   # NOT "trades"
+    assert oj.summarize(evs)["n_trades"] == 0                       # creates no trade row
+    assert oj.summarize(evs)["n_closed"] == 0
+    assert oj.daily_trade_budget(evs)["trades_today"] == 0          # never burns a budget slot
