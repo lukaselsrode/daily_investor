@@ -92,7 +92,11 @@ def test_alarms_on_a_lease_that_expired_without_an_order():
     line = guard.evaluate_lease(_lease(NOW - timedelta(seconds=30)), [], now=NOW)
     assert line and "LEASE MISSED" in line
     assert "SPY" in line and "778" in line
-    assert "latency" in line.lower()          # names the cause, not just the symptom
+    # It must NOT assert a cause it cannot know. An unconsumed lease is consistent with
+    # never-sent, sent-and-rejected, and blocked-pre-place; 2026-08-13's SPY 778C was rejected AT
+    # THE BROKER while looking identical from the ledger.
+    assert "latency" not in line.lower()
+    assert "rejected" in line.lower() and "broker order count" in line.lower()
 
 
 def test_silent_when_the_lease_was_consumed():

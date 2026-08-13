@@ -114,10 +114,17 @@ def evaluate_lease(lease: dict | None, consumed: list | None, *, now: datetime,
     # The lease file spells the ticker `symbol`; the journal event spells it `underlying`. Read
     # both — an alert that says "? 778.0 call" is the kind of thing nobody acts on.
     ticker = (lease.get("symbol") or lease.get("underlying") or lease.get("chain_symbol") or "?")
-    return ("0DTE LEASE MISSED: %s %s%s expired unused after 60s — the setup was confirmed and "
-            "authorized but no order was placed, so no trade happened. Conversion latency, not a "
-            "gate refusal." % (ticker, lease.get("strike_price") or "",
-                               "C" if str(lease.get("option_type")) == "call" else "P"))
+    # STATE ONLY WHAT AN UNCONSUMED LEASE PROVES (corrected 2026-08-13). The first version asserted
+    # "no order was placed" and blamed "conversion latency". Both were unsupported: on 2026-08-13
+    # the SPY 778C lease looked identical, yet `today_option_orders_count` went to 3 against two
+    # known IWM orders — an order DID reach the broker and was rejected, which the EOD recap caught
+    # and I had not. The ledger only tells us the lease was never claimed; it cannot distinguish
+    # never-sent from sent-and-rejected from blocked-by-the-hook. Say that, and name where to look.
+    return ("0DTE LEASE MISSED: %s %s%s expired without being consumed — the setup was confirmed "
+            "and authorized but produced no position. The order may never have been sent, or been "
+            "rejected, or blocked pre-place. Check broker order count vs journal fills."
+            % (ticker, lease.get("strike_price") or "",
+               "C" if str(lease.get("option_type")) == "call" else "P"))
 
 
 def main(argv=None) -> int:
