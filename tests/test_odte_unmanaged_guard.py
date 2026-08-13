@@ -74,3 +74,47 @@ def test_main_is_silent_and_exit_zero_when_state_is_absent(tmp_path, monkeypatch
     monkeypatch.setattr(guard, "ODTE", tmp_path)
     assert guard.main([]) == 0
     assert capsys.readouterr().out == ""
+
+
+# --- missed-lease alarm (2026-08-13) -----------------------------------------------------------
+# The only setup of the day reached a lease and lost it: 4235f2af issued 11:03:36 for SPY 778C,
+# expired 11:04:36, never consumed, no order. Nothing alerted. The controller's own Telegram said
+# "converted successfully: stage=authorize, no refusal codes" — true and completely misleading.
+
+def _lease(expires, lease_id="4235f2af929d0a25", **over):
+    d = {"lease": {"lease_id": lease_id, "underlying": "SPY", "strike_price": 778.0,
+                   "option_type": "call", "expires_at": expires.isoformat()}}
+    d["lease"].update(over)
+    return d
+
+
+def test_alarms_on_a_lease_that_expired_without_an_order():
+    line = guard.evaluate_lease(_lease(NOW - timedelta(seconds=30)), [], now=NOW)
+    assert line and "LEASE MISSED" in line
+    assert "SPY" in line and "778" in line
+    assert "latency" in line.lower()          # names the cause, not just the symptom
+
+
+def test_silent_when_the_lease_was_consumed():
+    """It became an order — that is the happy path, not an alarm."""
+    lid = "4235f2af929d0a25"
+    assert guard.evaluate_lease(_lease(NOW - timedelta(seconds=30), lease_id=lid), [lid],
+                                now=NOW) is None
+
+
+def test_silent_before_the_lease_has_lapsed():
+    assert guard.evaluate_lease(_lease(NOW + timedelta(seconds=20)), [], now=NOW) is None
+
+
+def test_stops_repeating_once_the_window_passes():
+    """The pulse runs every minute; a stateless window keeps it to one or two lines, not forever."""
+    fresh = guard.evaluate_lease(_lease(NOW - timedelta(seconds=60)), [], now=NOW)
+    stale = guard.evaluate_lease(
+        _lease(NOW - timedelta(seconds=guard.LEASE_ALERT_WINDOW_SECONDS + 30)), [], now=NOW)
+    assert fresh and stale is None
+
+
+def test_undated_lease_is_not_an_alarm():
+    """Absent expires_at means we cannot show it lapsed; the position guard is the loud one."""
+    d = {"lease": {"lease_id": "x", "underlying": "SPY"}}
+    assert guard.evaluate_lease(d, [], now=NOW) is None

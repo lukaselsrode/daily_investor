@@ -1,5 +1,9 @@
 #!/usr/bin/env python
-"""Alarm when a position is open and nothing has managed it recently.
+"""Alarms for the two things that cost money and that nothing else reports.
+
+1. A position is open and nothing has managed it recently.
+2. An execution lease expired WITHOUT ever becoming an order — we reached the point of trading
+   and lost it.
 
 WHY THIS EXISTS. Every exit in the system's history was placed by `0dte-live-controller`
 (`exit_fill` sources: {'0dte-live-controller': 9}). The watchdog pulse and the heartbeat are
@@ -35,6 +39,17 @@ ODTE = ROOT / "data" / "odte"
 STALE_AFTER_SECONDS = 300.0
 
 _OPEN_STATUS = {"open", "active", "filled", "managing"}
+
+# A lease is single-use and 60s. Once it lapses unused the setup is gone, and on 2026-08-13 that
+# happened on the ONLY setup of the day: lease 4235f2af issued 11:03:36 for SPY 778C b_plus,
+# expired 11:04:36, never consumed, no order. The controller's own Telegram called it "converted
+# successfully: stage=authorize, no refusal codes" and "No position opened" — technically true and
+# completely misleading, and it was the last message for 25 minutes. 11 of 14 leases ever issued
+# were consumed, so a miss is the exception and worth saying out loud.
+#
+# Stateless de-dup: only fire while the expiry is between 0 and this many seconds old, so the
+# once-a-minute pulse says it once or twice rather than forever.
+LEASE_ALERT_WINDOW_SECONDS = 120.0
 
 
 def _load(path: Path):
@@ -82,11 +97,37 @@ def evaluate(trade: dict | None, position: dict | None, *, now: datetime,
                 label, age, stale_after))
 
 
+def evaluate_lease(lease: dict | None, consumed: list | None, *, now: datetime,
+                   window: float = LEASE_ALERT_WINDOW_SECONDS) -> str | None:
+    """Return an alert for a lease that lapsed without becoming an order, else None. Pure."""
+    lease = (lease or {}).get("lease") if isinstance(lease, dict) else None
+    if not isinstance(lease, dict) or not lease.get("lease_id"):
+        return None
+    if str(lease["lease_id"]) in {str(x) for x in (consumed or [])}:
+        return None                       # it became an order — nothing to say
+    expires = _parse_ts(lease.get("expires_at"))
+    if expires is None:
+        return None
+    age = (now - expires).total_seconds()
+    if not (0 < age <= window):
+        return None                       # not yet lapsed, or already reported
+    # The lease file spells the ticker `symbol`; the journal event spells it `underlying`. Read
+    # both — an alert that says "? 778.0 call" is the kind of thing nobody acts on.
+    ticker = (lease.get("symbol") or lease.get("underlying") or lease.get("chain_symbol") or "?")
+    return ("0DTE LEASE MISSED: %s %s%s expired unused after 60s — the setup was confirmed and "
+            "authorized but no order was placed, so no trade happened. Conversion latency, not a "
+            "gate refusal." % (ticker, lease.get("strike_price") or "",
+                               "C" if str(lease.get("option_type")) == "call" else "P"))
+
+
 def main(argv=None) -> int:
     now = datetime.now(timezone.utc)
-    line = evaluate(_load(ODTE / "active_trade.json"), _load(ODTE / "position_state.json"), now=now)
-    if line:
-        print(line)
+    for line in (evaluate(_load(ODTE / "active_trade.json"),
+                          _load(ODTE / "position_state.json"), now=now),
+                 evaluate_lease(_load(ODTE / "execution_lease.json"),
+                                _load(ODTE / "consumed_leases.json"), now=now)):
+        if line:
+            print(line)
     return 0
 
 
