@@ -387,6 +387,13 @@ def evaluate_position(plan: dict | None, snapshot: dict | None,
 
     underlying = str(plan.get("underlying") or "").upper()
     option_id = plan.get("option_id")
+    # ECHO THE PLAN'S trade_id (2026-08-13). Dropping it here is why only 10 of 455
+    # `management_check` events ever carried one: `event_from_position_decision` stamps
+    # `trade_id or payload["trade_id"]`, and this payload had neither. The consequence was that
+    # grouping the poll stream by trade_id silently yielded ZERO polls for nearly every trade, and
+    # analysis had to join through option_id instead — which in turn merged two trades that shared
+    # a symbol on one day (2026-08-11's SPY pair).
+    trade_id = plan.get("trade_id")
     option_type = _norm_type(plan.get("option_type"))
     mode = str(plan.get("mode") or "").lower()
     qty = int(_num(plan.get("quantity")) or 0)
@@ -395,6 +402,7 @@ def evaluate_position(plan: dict | None, snapshot: dict | None,
     from data.social_sentiment import is_restricted_underlying
     if is_restricted_underlying(underlying):
         return {"decision": "RESTRICTED", "active": True, "pnl_pct": None,
+                "trade_id": trade_id,
                 "underlying": underlying, "option_id": option_id, "mode": mode,
                 "option_type": option_type,
                 "triggers": [{"type": "RESTRICTED", "action": "no_action", "reason": "employer",
@@ -509,7 +517,7 @@ def evaluate_position(plan: dict | None, snapshot: dict | None,
 
     return {"decision": _primary_decision(triggers), "triggers": triggers, "active": True,
             "pnl_pct": (round(pnl_pct, 4) if pnl_pct is not None else None),
-            "best_seen_bid": best_seen,
+            "best_seen_bid": best_seen, "trade_id": trade_id,
             "underlying": underlying, "option_id": option_id, "mode": mode,
             "option_type": option_type}
 

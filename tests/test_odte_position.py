@@ -708,3 +708,28 @@ def test_clock_backstop_never_bound_a_historical_exit():
     from data.odte_position import DEFAULT_FLAT_BEFORE_ET
     hh, mm = (int(x) for x in DEFAULT_FLAT_BEFORE_ET.split(":"))
     assert (hh, mm) > (15, 30)
+
+
+def test_position_payload_echoes_the_plan_trade_id():
+    """Dropping it is why only 10 of 455 management_check events ever carried a trade_id:
+    `event_from_position_decision` stamps `trade_id or payload["trade_id"]` and this payload had
+    neither, so grouping the poll stream by trade_id silently yielded zero polls for nearly every
+    trade and analysis had to join through option_id — which merged 2026-08-11's two SPY trades."""
+    from data.odte_position import evaluate_position
+    plan = {"trade_id": "iwm-20260813-abc", "underlying": "IWM", "option_type": "put",
+            "entry_price": 0.46, "quantity": 1, "status": "open", "option_id": "opt-abc",
+            "time_rules": {}}
+    out = evaluate_position(plan, {"option_bid": 0.44, "option_mark": 0.44,
+                                   "underlying_last": 300.0})
+    assert out["trade_id"] == "iwm-20260813-abc"
+
+
+def test_trade_id_reaches_the_journal_event():
+    from data.odte_journal import event_from_position_decision
+    from data.odte_position import evaluate_position
+    plan = {"trade_id": "spy-20260813-xyz", "underlying": "SPY", "option_type": "call",
+            "entry_price": 1.00, "quantity": 1, "status": "open", "option_id": "opt-xyz",
+            "time_rules": {}}
+    out = evaluate_position(plan, {"option_bid": 0.95, "option_mark": 0.95,
+                                   "underlying_last": 500.0})
+    assert event_from_position_decision(out)["trade_id"] == "spy-20260813-xyz"
