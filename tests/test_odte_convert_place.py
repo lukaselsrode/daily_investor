@@ -259,3 +259,46 @@ def test_the_order_placed_event_cannot_be_miscounted(tmp_path):
     assert oj.summarize(evs)["n_trades"] == 0                       # creates no trade row
     assert oj.summarize(evs)["n_closed"] == 0
     assert oj.daily_trade_budget(evs)["trades_today"] == 0          # never burns a budget slot
+
+
+def test_cli_actually_loads_the_contract_and_passes_it_through(monkeypatch, tmp_path):
+    """The missing-contract bug lived in the WIRING, not the module: place_converted was correct
+    in isolation and still overpaid, because nobody handed it a contract. Test the seam."""
+    m = _cli_main_module()
+    seen = {}
+
+    async def _capture(payload, **kw):
+        seen.update(kw)
+        return {"placed": False, "reasons": ["captured"]}
+
+    contract = tmp_path / "contract.json"
+    contract.write_text(json.dumps({"ask": 0.46, "bid": 0.44, "option_id": "opt-x"}))
+    monkeypatch.setenv("ODTE_ACCOUNT_NUMBER", ACCT)
+    monkeypatch.setattr("data.odte_convert.run_convert",
+                        lambda **kw: {"converted": True, "lease": _lease()})
+    monkeypatch.setattr("data.odte_convert.render_markdown", lambda p: "")
+    monkeypatch.setattr("execution.odte_convert_place.place_converted", _capture)
+    m._cmd_odte_convert(["--place", "--contract", str(contract),
+                         "--state-dir", str(tmp_path)])
+    assert seen.get("contract") == {"ask": 0.46, "bid": 0.44, "option_id": "opt-x"}, (
+        "CLI did not forward the contract — the limit would fall back to the lease ceiling")
+    assert seen.get("account_number") == ACCT
+
+
+def test_cli_accepts_the_contract_as_inline_json_too(monkeypatch, tmp_path):
+    """The controller passes --contract-json on the live path, not a file."""
+    m = _cli_main_module()
+    seen = {}
+
+    async def _capture(payload, **kw):
+        seen.update(kw)
+        return {"placed": False, "reasons": ["captured"]}
+
+    monkeypatch.setenv("ODTE_ACCOUNT_NUMBER", ACCT)
+    monkeypatch.setattr("data.odte_convert.run_convert",
+                        lambda **kw: {"converted": True, "lease": _lease()})
+    monkeypatch.setattr("data.odte_convert.render_markdown", lambda p: "")
+    monkeypatch.setattr("execution.odte_convert_place.place_converted", _capture)
+    m._cmd_odte_convert(["--place", "--contract-json", json.dumps({"ask": 0.39}),
+                         "--state-dir", str(tmp_path)])
+    assert seen.get("contract") == {"ask": 0.39}
