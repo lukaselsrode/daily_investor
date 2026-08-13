@@ -70,9 +70,16 @@ def place_limit_for(lease: dict, contract: dict) -> float | None:
 
 
 async def place_converted(payload: dict, *, account_number: str, ledger_path: str,
-                          journal_path: str | None = None, client: Any = None,
-                          now: datetime | None = None) -> dict:
+                          contract: dict | None = None, journal_path: str | None = None,
+                          client: Any = None, now: datetime | None = None) -> dict:
     """Review once, then guard-consume-place the lease `run_convert` just minted.
+
+    `contract` MUST be passed by the caller — the same snapshot it handed `run_convert`. The
+    convert payload does NOT carry one (verified 2026-08-13: no "contract" key anywhere in its
+    return), and reading `payload["contract"]` therefore silently yielded {}, which makes
+    `place_limit_for` fall back to the lease ceiling and pay the top of the chase band on EVERY
+    fill instead of the ask. Passing it in also keeps `run_convert`'s payload untouched, so the
+    no-`--place` path stays byte-identical.
 
     Returns a report dict; NEVER raises. A refusal or an error leaves the lease unconsumed to
     expire on its own — missing a fill is acceptable, acquiring a stale 0DTE position is not.
@@ -84,7 +91,7 @@ async def place_converted(payload: dict, *, account_number: str, ledger_path: st
             report["reasons"] = ["not_converted"]
             return report
         lease = _dict(payload.get("lease"))
-        contract = _dict(payload.get("contract"))
+        contract = _dict(contract)
         report["lease_id"] = lease.get("lease_id")
 
         # The window belongs to the LEASE, not to convert's entry clock. Re-read it at the moment

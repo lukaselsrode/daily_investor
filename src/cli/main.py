@@ -672,8 +672,19 @@ def _cmd_odte_convert(rest: list[str]) -> None:
             print("odte-convert --place: provide --account or set ODTE_ACCOUNT_NUMBER",
                   file=sys.stderr)
             sys.exit(3)
+        # The SAME contract snapshot run_convert decided on. It is not in the convert payload, and
+        # omitting it makes the limit fall back to the lease ceiling — i.e. paying the top of the
+        # chase band on every fill instead of the ask.
+        contract_raw = _flag_value(rest, "--contract-json")
+        contract_path = _flag_value(rest, "--contract")
+        try:
+            contract = (json.loads(contract_raw) if contract_raw
+                        else json.loads(open(os.path.expanduser(contract_path)).read())
+                        if contract_path else {})
+        except (OSError, ValueError):
+            contract = {}
         report = asyncio.run(place_converted(
-            payload, account_number=account,
+            payload, account_number=account, contract=contract,
             ledger_path=os.path.join(state_dir, "consumed_leases.json"),
             journal_path=_flag_value(rest, "--journal-path")))
         payload["placement"] = report

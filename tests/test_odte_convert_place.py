@@ -30,7 +30,9 @@ def _lease(**over):
 
 
 def _payload(**over):
-    d = {"converted": True, "lease": _lease(), "contract": {"ask": 0.46, "bid": 0.44}}
+    # `_contract` is a TEST carrier only: run_convert's real payload has no contract key, which is
+    # exactly the bug this file now pins. The helper forwards it as the explicit argument.
+    d = {"converted": True, "lease": _lease(), "_contract": {"ask": 0.46, "bid": 0.44}}
     d.update(over)
     return d
 
@@ -76,7 +78,8 @@ def _run(payload, tmp_path, client, now=NOW):
         (tmp_path / "consumed_leases.json").write_text("[]")
     client.ledger_path = ledger
     return asyncio.run(place_converted(payload, account_number=ACCT, ledger_path=ledger,
-                                       client=client, now=now)), ledger
+                                       contract=payload.get("_contract"), client=client,
+                                       now=now)), ledger
 
 
 # --- the ordering property this module exists to provide ---------------------------------------
@@ -120,7 +123,7 @@ def test_unconverted_payload_places_nothing(tmp_path):
 
 def test_no_priceable_quote_stands_down(tmp_path):
     c = FakeClient()
-    report, _ = _run(_payload(lease=_lease(max_limit_price=None), contract={}), tmp_path, c)
+    report, _ = _run(_payload(lease=_lease(max_limit_price=None), _contract={}), tmp_path, c)
     assert report["placed"] is False and "no_priceable_quote" in report["reasons"]
     assert "place" not in c.calls
 
@@ -153,7 +156,7 @@ def test_limit_is_the_ask_capped_by_the_lease_ceiling():
 
 def test_limit_never_exceeds_the_lease_ceiling(tmp_path):
     c = FakeClient()
-    report, _ = _run(_payload(contract={"ask": 99.0}), tmp_path, c)
+    report, _ = _run(_payload(_contract={"ask": 99.0}), tmp_path, c)
     assert report["limit_price"] == 0.50
 
 
@@ -197,3 +200,23 @@ def test_without_the_flag_no_placement_is_attempted(monkeypatch, capsys):
     m._cmd_odte_convert([])                        # no --place
     assert called["n"] == 0
     assert "placement" not in capsys.readouterr().out
+
+
+def test_missing_contract_does_not_silently_pay_the_ceiling(tmp_path):
+    """THE bug this argument exists for. `run_convert`'s payload has no "contract" key, so reading
+    payload["contract"] always yielded {} and the limit fell back to the lease ceiling — paying the
+    top of the chase band on every fill instead of the ask. The caller must pass it."""
+    c = FakeClient()
+    payload = {"converted": True, "lease": _lease()}           # no contract anywhere
+    ledger = str(tmp_path / "consumed_leases.json")
+    (tmp_path / "consumed_leases.json").write_text("[]")
+    c.ledger_path = ledger
+    report = asyncio.run(place_converted(payload, account_number=ACCT, ledger_path=ledger,
+                                         contract={"ask": 0.46}, client=c, now=NOW))
+    assert report["limit_price"] == 0.46, "paid the lease ceiling instead of the ask"
+
+
+def test_the_ask_is_used_when_it_is_below_the_ceiling(tmp_path):
+    c = FakeClient()
+    report, _ = _run(_payload(_contract={"ask": 0.41}), tmp_path, c)
+    assert report["limit_price"] == 0.41 and report["limit_price"] < 0.50
