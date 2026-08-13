@@ -352,3 +352,76 @@ def test_exits_mode_also_keeps_off_the_shared_plan(tmp_path):
     daemon, _ = _setup(tmp_path, stage="exits_live", mode="exits")
     assert daemon.mode == fl.MODE_EXITS
     assert daemon._plan_write_path().parent.name == fl.SHADOW_DIRNAME
+
+
+# --- adopting a position this lane did not open (2026-08-13) ------------------------------------
+# `_startup_reconcile` runs once, so a position the CONTROLLER opens mid-session was invisible
+# forever: from IDLE the tick only ran `_watch`, which reads armed intents and nothing else.
+# Measured live — the controller held IWM 303P from 11:54:29 to 12:07:07 while the daemon sat IDLE
+# for 711 ticks and emitted ZERO exit intents. Gate 1 wants `shadow_exit_intent` on "any live
+# Hermes position" and so could never have been satisfied; worse, at `exits_live` Hermes DEFERS
+# exits to this lane, against a position it cannot see.
+
+def _controller_plan(**over):
+    plan = {"status": "open", "underlying": "IWM", "option_id": "opt-iwm-303p",
+            "option_type": "put", "strike_price": 303.0, "entry_price": 0.46, "quantity": 1,
+            "trade_id": "iwm-20260813-303p-scalp", "mode": "scalp",
+            "thesis": {"underlying_stop": 304.0}, "time_rules": {}}
+    plan.update(over)
+    return plan
+
+
+def test_daemon_adopts_a_position_the_controller_opened_mid_session(tmp_path):
+    daemon, session = _setup(tmp_path)
+    _queue_startup(session)
+    _queue_tape(session)
+    _tick(daemon)                                   # startup: flat -> IDLE
+    assert daemon.state == fl.IDLE
+
+    # the controller opens a position AFTER startup
+    (tmp_path / fl.DEFAULT_PLAN_FILENAME).write_text(json.dumps(_controller_plan()))
+    _queue_tape(session)
+    _tick(daemon)
+    assert daemon.state == fl.MANAGING, "daemon stayed blind to a controller-opened position"
+
+
+def test_adoption_is_journaled_so_the_handover_is_auditable(tmp_path):
+    daemon, session = _setup(tmp_path)
+    _queue_startup(session)
+    _queue_tape(session)
+    _tick(daemon)
+    (tmp_path / fl.DEFAULT_PLAN_FILENAME).write_text(json.dumps(_controller_plan()))
+    _queue_tape(session)
+    _tick(daemon)
+    rows = [json.loads(x) for x in
+            (tmp_path / "shadow" / "decision_journal.jsonl").read_text().splitlines() if x.strip()]
+    adopted = [e for e in rows if e.get("event_type") == "shadow_position_adopted"]
+    assert len(adopted) == 1
+    assert adopted[0]["trade_id"] == "iwm-20260813-303p-scalp"
+    assert adopted[0]["opened_by"] == "controller"
+
+
+def test_a_closed_plan_is_never_adopted(tmp_path):
+    daemon, session = _setup(tmp_path)
+    _queue_startup(session)
+    _queue_tape(session)
+    _tick(daemon)
+    (tmp_path / fl.DEFAULT_PLAN_FILENAME).write_text(
+        json.dumps(_controller_plan(status="closed")))
+    _queue_tape(session)
+    _tick(daemon)
+    assert daemon.state == fl.IDLE
+
+
+def test_entries_locked_blocks_adoption(tmp_path):
+    """An unexplained working order means we do not understand the account; managing into that is
+    how a misunderstanding becomes an order."""
+    daemon, session = _setup(tmp_path)
+    _queue_startup(session)
+    _queue_tape(session)
+    _tick(daemon)
+    daemon.entries_locked = True
+    (tmp_path / fl.DEFAULT_PLAN_FILENAME).write_text(json.dumps(_controller_plan()))
+    _queue_tape(session)
+    _tick(daemon)
+    assert daemon.state == fl.IDLE

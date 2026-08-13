@@ -347,6 +347,34 @@ class FastLaneDaemon:
                           shadow=self.mode != MODE_LIVE, now=now)
         self.state = IDLE
 
+    def _adopt_external_position(self, now: datetime) -> None:
+        """Move IDLE/WATCHING -> MANAGING when a plan this lane did not open is live.
+
+        Same adoption rule as `_startup_reconcile` (open status + an underlying), just applied
+        every tick instead of once. Read-only: it never places, never cancels, and never writes
+        the canonical plan — `_plan_write_path` already redirects non-live modes to the shadow
+        copy, so adopting in shadow cannot clobber the controller's `thesis` or
+        `management.best_seen_bid`.
+
+        Deliberately does NOT adopt while `entries_locked`: an unexplained working order at
+        startup means we do not understand the account, and managing into that is how a
+        misunderstanding becomes an order.
+        """
+        if self.entries_locked or self.pending_order:
+            return
+        plan = _read_json(self._plan_path())
+        if not plan or str(plan.get("status") or "open").lower() != "open":
+            return
+        if not plan.get("underlying"):
+            return
+        self.state = MANAGING
+        self._journal({"underlying": plan.get("underlying"),
+                       "option_id": plan.get("option_id"),
+                       "trade_id": plan.get("trade_id"),
+                       "reason": "adopted_external_position",
+                       "opened_by": "controller"},
+                      "shadow_position_adopted", shadow=self.mode != MODE_LIVE, now=now)
+
     # ── the tick ────────────────────────────────────────────────────────────────────────────
 
     async def tick(self, now: datetime | None = None) -> dict:
@@ -365,6 +393,22 @@ class FastLaneDaemon:
             paused = self._paused()
 
             self.last_tape, self.tape_state = await build_tape(self.client, self.tape_state, now)
+
+            # ADOPT A POSITION THIS LANE DID NOT OPEN (2026-08-13). `_startup_reconcile` runs
+            # exactly once (`self._started`), so a position the CONTROLLER opens mid-session was
+            # invisible forever: from IDLE the tick only ran `_watch`, which looks at armed
+            # intents and nothing else. Measured live — the controller held IWM 303P from 11:54:29
+            # to 12:07:07 while this daemon sat IDLE for 711 ticks and emitted ZERO exit intents.
+            #
+            # Two consequences, the second serious. Gate 1 requires `shadow_exit_intent` on "any
+            # live Hermes position" and could therefore NEVER have been satisfied. And at
+            # `exits_live` Hermes DEFERS exits to this lane — against a position this lane cannot
+            # see, which is nobody managing it at all.
+            #
+            # Adoption is read-only and mode-agnostic: in shadow it produces exit INTENTS, which is
+            # exactly the evidence the gate asks for.
+            if self.state in (IDLE, WATCHING):
+                self._adopt_external_position(now)
 
             if self.state in (IDLE, WATCHING):
                 await self._watch(now, paused)
