@@ -32,15 +32,29 @@ EVERY PATH THAT CAN REACH AN ORDER  (enumerated 2026-08-07 — keep this current
         -> authorize_entry mints the lease)
      -> agent: ONE review_option_order + place_option_order inside the 60s lease
      -> odte-order-guard poll -> entry_fill -> odte-position HAWK -> exit.
+     The agent turn here is the lane's weak point: the 60s lease budgeted ZERO seconds for
+     inference, measured lease->submit is 14-37s, and 3 of 15 leases produced no order at all.
+     Path 6 removes that turn.
 2. CONTROLLER POST-GREEN RE-ENTRY — same path, re-armed by `green_reentry` when the budget has a
    slot, the cooldown passed, tier ranks >= the winner's and BP covers the multiple.
 3. WATCHDOG LANE — CANNOT reach an order. `scan_only=True` / `execution_allowed=False` at every
    return, no order/broker/lease imports at all, and a `market_scorecard` candidate is refused by
    candidate-watch even on a perfect tape. Verified by assertion, not by reading.
 4. FAST LANE (`execution/odte_fast_lane.py`) — armed intents -> in-process convert -> direct MCP
-   place. Dormant (stage `shadow`, no process/plist/cron). It SHARES `consumed_leases.json` with
-   this lane, which is why the ledger claim is an atomic test-and-set.
+   place. Installed and RUNNING under launchd since 2026-08-12, still at stage `shadow`, so
+   `ShadowClient` makes review/place/cancel raise. No intent has ever been armed. It SHARES
+   `consumed_leases.json` with this lane, which is why the ledger claim is an atomic test-and-set.
 5. EOD / close-bell jobs — read-only reporting; they place nothing.
+6. CONVERT IN-PROCESS PLACE (`execution/odte_convert_place.py`, added 2026-08-13) — path 1 with
+   the agent turn REMOVED: `odte-convert --place` consumes the lease it just minted, in the same
+   process, milliseconds after the mint. OPT-IN and default OFF; without the flag path 1 is
+   unchanged. It reuses the fast lane's `consume_then`/`pre_place_check`, so it claims the shared
+   ledger BEFORE placing — closing the window where path 1 records the claim only on the first
+   `odte-order-guard` poll, AFTER the order exists.
+   The Hermes pre-order hook does NOT see this path (a direct OdteMcpClient place never passes
+   through `pre_tool_call`), exactly as it never sees path 4 — `pre_place_check` is its hook.
+   Do not run it while stage is `entries_live`: hook v6 blocks Hermes opens there precisely so one
+   lane owns entries.
 
 STATE OWNERSHIP AND THE ONE INTENTIONAL DUAL WRITER
   `active_candidate.json` and `candidate_decision.json` are written by BOTH `odte_candidate_watch`

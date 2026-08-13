@@ -607,9 +607,14 @@ def _cmd_odte_convert(rest: list[str]) -> None:
     # controller tick). Consumes a confirmed/active candidate plus FRESH market/broker/contract
     # snapshots the caller fetched immediately before the call; refuses (naming the stale input)
     # otherwise. Every non-converting stage journals an identity-bound terminal no_trade_decision —
-    # no silent scan-only dead ends. Places NO orders, makes NO broker/network/LLM calls; the lease
-    # is still minted only by the unchanged odte-execution-authorize policy (single-use, 60s cap,
-    # chase band, tiered sizing).
+    # no silent scan-only dead ends. The lease is still minted only by the unchanged
+    # odte-execution-authorize policy (single-use, 60s cap, chase band, tiered sizing).
+    #
+    # PLACES NO ORDERS WITHOUT `--place`. The decision half (`run_convert`) is pure/offline and
+    # unchanged. `--place` (opt-in, 2026-08-13) additionally CONSUMES the lease it just minted, in
+    # this process, via execution.odte_convert_place — because the 60s lease budgeted zero seconds
+    # for inference and 3 of 15 leases died in the model turn between minting and placing. Without
+    # the flag the agent still does review+place itself and behaviour is byte-identical to before.
     import json
 
     from data.odte_convert import render_markdown, run_convert
@@ -617,10 +622,13 @@ def _cmd_odte_convert(rest: list[str]) -> None:
         print("Usage: odte-convert [--candidate PATH] --market PATH|--market-json '{...}' "
               "--broker PATH|--broker-json '{...}' --contract PATH|--contract-json '{...}' "
               "[--gamma PATH] [--policy PATH] [--journal-path PATH] [--state-dir DIR] "
-              "[--no-write] [--no-journal] [--json]\n"
+              "[--no-write] [--no-journal] [--json] [--place [--account NUM]]\n"
               "Atomic CONFIRM_ENTRY→gate→lease conversion in one process. Candidate defaults to "
-              "data/odte/active_candidate.json. Snapshots must be fresh (snapshot TTL). "
-              "Places NO orders.")
+              "data/odte/active_candidate.json. Snapshots must be fresh (snapshot TTL).\n"
+              "Places NO orders unless --place is given. With --place the lease minted here is "
+              "consumed IN THIS PROCESS (one review, guard-consume-place) so no model turn sits "
+              "inside the 60s window; needs --account or ODTE_ACCOUNT_NUMBER. Any refusal or "
+              "error leaves the lease unconsumed to expire.")
         return
     try:
         payload = run_convert(
@@ -644,6 +652,32 @@ def _cmd_odte_convert(rest: list[str]) -> None:
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"odte-convert: could not read/parse input: {exc}")
         sys.exit(2)
+    # --- OPT-IN: consume the lease in THIS process ------------------------------------------
+    # Default OFF: without --place the behaviour above is byte-identical to before, and the agent
+    # still does review+place itself. With it, the 60s window contains no model turn at all —
+    # which is the point, since lease->submit has measured 14-37s when it works and 3 of 15 leases
+    # produced no order whatsoever.
+    #
+    # This lives in `execution`, not in `odte_convert`: the latter is `data`, and the import-linter
+    # contract "data must not import from higher layers" forbids data -> execution. So the CLI is
+    # the seam that may touch both — decide there, place here.
+    if "--place" in rest and payload.get("converted"):
+        import asyncio
+        import os
+
+        from execution.odte_convert_place import place_converted
+        account = (_flag_value(rest, "--account") or os.environ.get("ODTE_ACCOUNT_NUMBER") or "")
+        state_dir = _flag_value(rest, "--state-dir") or "data/odte"
+        if not account:
+            print("odte-convert --place: provide --account or set ODTE_ACCOUNT_NUMBER",
+                  file=sys.stderr)
+            sys.exit(3)
+        report = asyncio.run(place_converted(
+            payload, account_number=account,
+            ledger_path=os.path.join(state_dir, "consumed_leases.json"),
+            journal_path=_flag_value(rest, "--journal-path")))
+        payload["placement"] = report
+
     print(json.dumps(payload, separators=(",", ":"), default=str) if "--json" in rest
           else render_markdown(payload))
     if payload.get("stage") == "journal":
@@ -890,8 +924,12 @@ def _cmd_auto_tune_all(rest: list[str]) -> None:
     _cl = _flag_value(rest, "--clusters")
     clusters = [c.strip() for c in _cl.split(",") if c.strip()] if _cl else None
     regime_scope = _flag_value(rest, "--regime-scope") or "all"
+    checkpoint = _flag_value(rest, "--checkpoint")
+    _ms = _flag_value(rest, "--max-seconds")
     cmd_auto_tune_all(profile=profile, n_days=n_days, mode=mode, clusters=clusters,
-                      regime_scope=regime_scope)
+                      regime_scope=regime_scope, checkpoint=checkpoint,
+                      resume="--resume" in rest,
+                      max_seconds=float(_ms) if _ms else None)
 
 
 def _cmd_report(rest: list[str]) -> None:
@@ -1416,6 +1454,14 @@ OPTIONS (auto-tune-all / interaction-screen)
   --profile P              quick | standard | deep  (default: standard)
   --days N                 history window to load (default: 730)
   --clusters a,b,c         auto-tune-all only: which interaction clusters to co-tune
+  --checkpoint NAME        auto-tune-all only: persist resumable state to
+                           data/tune_checkpoints/NAME.json (per stage AND per DE
+                           generation). Strongly recommended for non-quick profiles.
+  --resume                 auto-tune-all only: continue a --checkpoint run, skipping
+                           completed stages. Refuses loudly if the code revision or
+                           run configuration changed since the checkpoint was written.
+  --max-seconds N          auto-tune-all only: wall-clock budget per stage; DE stops
+                           cleanly with best-so-far instead of needing a kill
 
 OPTIONS (fmp)
   fmp status

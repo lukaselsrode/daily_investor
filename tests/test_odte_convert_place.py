@@ -10,6 +10,8 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from execution.odte_convert_place import place_converted, place_limit_for
@@ -153,3 +155,45 @@ def test_limit_never_exceeds_the_lease_ceiling(tmp_path):
     c = FakeClient()
     report, _ = _run(_payload(contract={"ask": 99.0}), tmp_path, c)
     assert report["limit_price"] == 0.50
+
+
+# --- the CLI seam (2026-08-13) ------------------------------------------------------------------
+# The placement lives in `execution` and the decision in `data`, because the import-linter contract
+# "data must not import from higher layers" forbids data -> execution. The CLI is the only place
+# allowed to touch both, so these pin that wiring rather than the module in isolation.
+
+def _cli_main_module():
+    """`cli.main` resolves to the re-exported main() FUNCTION, not the module — import it properly."""
+    import importlib
+    return importlib.import_module("cli.main")
+
+
+def test_place_flag_is_opt_in_and_needs_an_account(monkeypatch, capsys):
+    """Without --account (and no env var) the CLI refuses rather than guessing an account."""
+    m = _cli_main_module()
+    monkeypatch.delenv("ODTE_ACCOUNT_NUMBER", raising=False)
+    monkeypatch.setattr("data.odte_convert.run_convert",
+                        lambda **kw: {"converted": True, "lease": {"lease_id": "x"}})
+    monkeypatch.setattr("data.odte_convert.render_markdown", lambda p: "")
+    with pytest.raises(SystemExit) as exc:
+        m._cmd_odte_convert(["--place"])
+    assert exc.value.code == 3
+    assert "ODTE_ACCOUNT_NUMBER" in capsys.readouterr().err
+
+
+def test_without_the_flag_no_placement_is_attempted(monkeypatch, capsys):
+    """The whole safety story is that omitting --place leaves path 1 byte-identical."""
+    m = _cli_main_module()
+    called = {"n": 0}
+
+    async def _boom(*a, **k):                      # must never be awaited
+        called["n"] += 1
+        return {}
+
+    monkeypatch.setattr("data.odte_convert.run_convert",
+                        lambda **kw: {"converted": True, "lease": {"lease_id": "x"}})
+    monkeypatch.setattr("data.odte_convert.render_markdown", lambda p: "CONVERTED")
+    monkeypatch.setattr("execution.odte_convert_place.place_converted", _boom)
+    m._cmd_odte_convert([])                        # no --place
+    assert called["n"] == 0
+    assert "placement" not in capsys.readouterr().out
