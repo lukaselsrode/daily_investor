@@ -872,3 +872,37 @@ def test_invalidation_survives_the_convert_round_trip():
     second = cw.evaluate_candidate_watch(first["candidate"], market=convert_tape, now=NOW)
     assert second["decision"] == cw.CONFIRM_ENTRY
     assert second["candidate"]["invalidation"] == inv      # carried, never recomputed to None
+
+
+def test_written_candidate_gets_a_mint_clock_that_does_not_walk(tmp_path):
+    """The 2026-08-11 fix let age fall back to `updated_at`, but the write path rewrites
+    `updated_at` every tick — so the anchor walked with the clock and the TTL never fired. Live on
+    2026-08-13: a SPY scorecard candidate reported age 1.29m against a 20m TTL having been hawked
+    since the open, deadlocking the session into HAWK mode with zero broad scans."""
+    import json
+    from datetime import timedelta
+
+    import data.odte_candidate_watch as cw
+    market = _market()
+    synthetic = {"ticker": "SPY", "direction": "bullish", "updated_at": NOW.isoformat()}
+    cw.run_candidate_watch(candidate_json=json.dumps(synthetic),
+                           market_json=json.dumps(market),
+                           state_dir=str(tmp_path), write=True)
+    first = json.loads((tmp_path / cw.ACTIVE_CANDIDATE_FILENAME).read_text())
+    minted = first.get("created_at")
+    assert minted, "a written candidate must carry a stable mint timestamp"
+
+    # A later tick must NOT move the mint clock, even as updated_at advances.
+    cw.run_candidate_watch(candidate_json=json.dumps(first),
+                           market_json=json.dumps(market),
+                           state_dir=str(tmp_path), write=True)
+    second = json.loads((tmp_path / cw.ACTIVE_CANDIDATE_FILENAME).read_text())
+    assert second.get("created_at") == minted, "mint clock walked forward — the TTL can never fire"
+
+    # And the age must be measured from that anchor, not from the refreshed updated_at.
+    anchored = dict(second)
+    old = cw._parse_ts(minted) - timedelta(minutes=45)
+    anchored["created_at"] = old.isoformat()
+    anchored["updated_at"] = minted                      # refreshed "just now"
+    age = cw._candidate_age_minutes(anchored, cw._parse_ts(minted))
+    assert age is not None and age >= 44, age

@@ -691,6 +691,21 @@ def run_candidate_watch(candidate_json: str | None = None, candidate_path: str |
         # Keep active_candidate as the compact watch plan while the candidate is live.
         if payload["decision"] in {KEEP_WATCHING, CONFIRM_ENTRY, BROKER_BLOCKED}:
             active = dict(payload["candidate"])
+            # STABLE MINT CLOCK (2026-08-13). The 2026-08-11 fix gave a timestamp-less synthetic a
+            # clock by letting `_candidate_age_minutes` fall back to `updated_at` — but THIS line
+            # rewrites `updated_at` to `now` on every tick, so the anchor walked forward with the
+            # clock and the TTL could never reach it. Observed live: a SPY scorecard candidate
+            # reporting age 1.29m against a 20m TTL at 10:31 ET, having been hawked since the open.
+            #
+            # That is a full deadlock, not a cosmetic drift: loop-status routes a live candidate to
+            # the narrow HAWK lane (`next_command: odte-candidate-watch`), so the broad scan that
+            # would mint a real contract candidate never runs; the synthetic cannot confirm (the
+            # scan-only guard, correctly); and it cannot expire. The session produced ZERO
+            # day_score/vehicle_score events while SPY and QQQ were both above their opening range.
+            #
+            # `setdefault` so a real `created_at` — or the one the expiry fall-through stamps on a
+            # re-seed — always wins; this only supplies one where nothing else did.
+            active.setdefault("created_at", payload["generated_at"])
             active.update({"state": payload["state"], "updated_at": payload["generated_at"],
                            "decision": payload["decision"], "scan_only": True,
                            "execution_allowed": False})
