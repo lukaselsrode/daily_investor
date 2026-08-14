@@ -715,7 +715,10 @@ def test_live_posture_pins_the_w33_fences():
     """The pre-registered production posture. Reverting any of these is a deliberate act that
     should have to update this test and cite new evidence (plan O2: re-evaluate at 20 new closed)."""
     import data.odte_config as _oc
-    assert _oc.GREEN_REENTRY_AUTO_ARM is False
+    # 2026-08-14 PM operator decision: auto-arm back ON with the STRICT bar — a re-entry must
+    # EXCEED the winning tier (the -$49/4 losers were all same-tier re-entries).
+    assert _oc.GREEN_REENTRY_AUTO_ARM is True
+    assert _oc.GREEN_REENTRY_REQUIRE_BETTER_TIER is True
     assert _oc.MIN_ENTRY_PREMIUM == 0.60
     assert _oc.MIDDAY_FULL_TIER_AFTER_ET_HOUR == 13.0
     assert _oc.DAILY_LOSS_FLOOR_DOLLARS == 30.0

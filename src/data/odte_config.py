@@ -97,6 +97,13 @@ GREEN_REENTRY_MIN_BP_MULTIPLE: float = _num("green_reentry_min_bp_multiple", 1.5
 # the multiple above. On 2026-08-03 the manual-override-only rule made trade #2 structurally
 # impossible while SPY ran 2.6 points. False restores the manual-override-only behavior.
 GREEN_REENTRY_AUTO_ARM: bool = _bool("green_reentry_auto_arm", True)
+# STRICT RE-ENTRY BAR (2026-08-14, operator decision). The same-or-better bar is what failed:
+# both tiered-era post-green losers (08-10 -$17, 08-11 -$34) were SAME-tier b_plus re-entries
+# after b_plus wins — a same-grade setup re-taken after variance already paid. With this on, a
+# re-entry must be STRICTLY better than the winning tier: after b_plus only full/a_plus arms,
+# after full only a_plus, and an a_plus win ends the day. n=0 on strictly-better outcomes — no
+# such re-entry has ever occurred — so this is pre-registered upside, not proven edge.
+GREEN_REENTRY_REQUIRE_BETTER_TIER: bool = _bool("green_reentry_require_better_tier", False)
 
 # ── Freshness ──────────────────────────────────────────────────────────────────
 # Lease default TTL (still clamped by the un-tunable 60s hard cap in

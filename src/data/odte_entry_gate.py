@@ -46,6 +46,7 @@ from data.odte_config import (
     DAILY_LOSS_FLOOR_DOLLARS,
     GREEN_REENTRY_AUTO_ARM,
     GREEN_REENTRY_MIN_BP_MULTIPLE,
+    GREEN_REENTRY_REQUIRE_BETTER_TIER,
 )
 
 SCHEMA_VERSION = 1
@@ -603,8 +604,13 @@ def build_entry_gate_decision(trigger: dict | None = None, candidate: dict | Non
                                      or (budget.get("aplus_uncapped_active")
                                          and str(tier or "").lower() == "a_plus")))
         cadence_clear = bool(budget and slot_open and not budget.get("cooldown_active"))
-        tier_qualifies = tier_rank(tier) >= 1 and tier_rank(tier) >= winning_rank
-        tier_below_winner = bool(tier is not None and tier_rank(tier) < winning_rank)
+        # STRICT BAR (2026-08-14): with GREEN_REENTRY_REQUIRE_BETTER_TIER the re-entry tier must
+        # EXCEED the winning tier — both tiered-era post-green losers were same-tier re-entries
+        # the old same-or-better comparator armed. required = winner+1 also makes an a_plus win
+        # unbeatable, which ends the day by construction.
+        required_rank = winning_rank + (1 if GREEN_REENTRY_REQUIRE_BETTER_TIER else 0)
+        tier_qualifies = tier_rank(tier) >= 1 and tier_rank(tier) >= required_rank
+        tier_below_winner = bool(tier is not None and tier_rank(tier) < required_rank)
         auto_armed = cadence_clear and tier_qualifies and bp_ok
         auto_ready_except_bp = cadence_clear and tier_qualifies and not bp_ok
     reentry_armed = manual_armed or auto_armed

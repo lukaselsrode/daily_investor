@@ -1139,10 +1139,10 @@ odte:
                                   # false to disable.
   reentry_cooldown_minutes: 20    # min gap between a close and the next entry
   green_reentry_min_bp_multiple: 1.5  # re-entry after green armed when BP >= mult*cost
-  green_reentry_auto_arm: false   # OFF 2026-08-14 (W33 fence): post-green re-entries are -$49
-                                  # over 4 all-time and -$57 over the last three; 08-11 turned a
-                                  # +$22 day into -$12. Manual override (allow_reentry_after_green)
-                                  # still works. Re-evaluate at 20 new closed trades (plan O2).
+  green_reentry_auto_arm: true    # back ON 2026-08-14 PM with the STRICT bar below — the -$49/4
+                                  # losers were all SAME-tier re-entries under the old
+                                  # same-or-better bar; strictly-better blocks exactly them.
+  green_reentry_require_better_tier: true  # re-entry tier must EXCEED the winning tier
   lease_ttl_seconds: 60           # default lease TTL (hard cap 60s stays in code)
   snapshot_ttl_seconds: 120       # market+broker snapshot freshness at authorize
   confirm_conversion_sla_seconds: 180  # CONFIRM_ENTRY -> disposition accountability SLA

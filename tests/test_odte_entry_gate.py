@@ -611,6 +611,9 @@ def test_green_reentry_auto_arms_on_same_or_better_tier(monkeypatch):
     # post-green re-entries ran -$49/4), so pin it ON here the same way the kill-switch test
     # pins it off.
     monkeypatch.setattr(eg, "GREEN_REENTRY_AUTO_ARM", True)
+    # This test is the SAME-OR-BETTER comparator mechanism; the live posture moved to
+    # strictly-better on 2026-08-14 PM, pinned off here and covered by its own tests below.
+    monkeypatch.setattr(eg, "GREEN_REENTRY_REQUIRE_BETTER_TIER", False)
     # Winning trade carries no tier (legacy journal) -> ranks "full"; a "full" candidate with a
     # budget slot, cooldown clear, and BP >= 1.5x cost auto-arms WITHOUT any manual flag.
     d = eg.build_entry_gate_decision(journal_events=_green_scalp_events(), now=_LOCK_NOW,
@@ -738,3 +741,30 @@ def test_stale_confirm_transition_steers_to_odte_convert():
     assert d["execution_allowed"] is False
     assert d["next_command"] == "odte-convert"
     assert "NOT terminal" in d["next_action"]
+
+
+# --- strict re-entry bar (2026-08-14 PM, operator decision) -------------------------------------
+# Both tiered-era post-green losers (08-10 -$17, 08-11 -$34) were SAME-tier b_plus re-entries the
+# same-or-better comparator armed. Strictly-better blocks exactly them; an a_plus win is unbeatable
+# and ends the day by construction.
+
+def test_strict_bar_vetoes_a_same_tier_reentry(monkeypatch):
+    """The 08-11 class replayed on the existing fixture: winning tier ranks "full" (legacy journal),
+    another FULL candidate confirms — same grade re-taken, must stay locked under the strict bar."""
+    monkeypatch.setattr(eg, "GREEN_REENTRY_AUTO_ARM", True)
+    monkeypatch.setattr(eg, "GREEN_REENTRY_REQUIRE_BETTER_TIER", True)
+    d = eg.build_entry_gate_decision(journal_events=_green_scalp_events(), now=_LOCK_NOW,
+                                     **_auto_arm_kwargs(tier="full"))
+    assert d["execution_allowed"] is False
+    assert eg.GREEN_LOCKOUT_VETO in d["veto_reasons"]
+    assert d["green_reentry"]["auto_armed"] is False
+
+
+def test_strict_bar_arms_a_strictly_better_tier(monkeypatch):
+    """a_plus after a full-ranked win EXCEEDS the bar and arms."""
+    monkeypatch.setattr(eg, "GREEN_REENTRY_AUTO_ARM", True)
+    monkeypatch.setattr(eg, "GREEN_REENTRY_REQUIRE_BETTER_TIER", True)
+    d = eg.build_entry_gate_decision(journal_events=_green_scalp_events(), now=_LOCK_NOW,
+                                     **_auto_arm_kwargs(tier="a_plus"))
+    assert "green_reentry_auto_armed_tier" in d["reason_codes"]
+    assert d["green_reentry"]["auto_armed"] is True

@@ -710,9 +710,14 @@ def _green_reentry_scan_allowed(events: list[dict] | None, now: datetime | None,
     if budget.get("cooldown_active"):
         return False, f"post-trade cooldown active until {budget.get('cooldown_until')}"
     if tier is not None:
+        from data.odte_config import GREEN_REENTRY_REQUIRE_BETTER_TIER
         winning = green_day_winning_tier(events, now=now)
-        if tier_rank(tier) < winning.get("winning_rank", 0):
-            return False, (f"candidate tier {tier} below today's winning tier "
+        required = winning.get("winning_rank", 0) + (1 if GREEN_REENTRY_REQUIRE_BETTER_TIER else 0)
+        if tier_rank(tier) < required:
+            # Mirrors the gate's strict bar — advertising "armable" here for a tier the gate will
+            # veto sends the controller into a doomed convert.
+            bar = "strictly above" if GREEN_REENTRY_REQUIRE_BETTER_TIER else "at or above"
+            return False, (f"candidate tier {tier} not {bar} today's winning tier "
                            f"{winning.get('winning_tier')}")
     return True, ""
 

@@ -1236,6 +1236,7 @@ def test_below_winner_tier_watch_after_green_scalp_is_consumed(monkeypatch):
     # pins it off.
     import data.odte_config as _oc
     monkeypatch.setattr(_oc, "GREEN_REENTRY_AUTO_ARM", True)
+    monkeypatch.setattr(_oc, "GREEN_REENTRY_REQUIRE_BETTER_TIER", False)  # same-or-better mechanism
     # The green trade's tier defaults to "full" (legacy journal, no tier events): a B+ watch ranks
     # below it and is consumed early — same-or-better tier only.
     import data.odte_journal as oj
@@ -1245,7 +1246,7 @@ def test_below_winner_tier_watch_after_green_scalp_is_consumed(monkeypatch):
             "ts": _ts(minutes_ago=1)}
     r = ls.derive_loop_state(candidate_decision=cdec, journal_events=_green_scalp_journal(), now=NOW)
     assert r["posture"] == "FLAT_NO_TRADE"
-    assert any("below today's winning tier" in s for s in r["reasons"])
+    assert any("today's winning tier" in s for s in r["reasons"])
 
 
 def test_green_closed_plan_alone_locks_fresh_promoted_gate():
