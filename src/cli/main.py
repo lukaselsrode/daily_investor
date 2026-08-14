@@ -85,6 +85,13 @@ def _cmd_list_presets(rest: list[str]) -> None:
 
 
 def _cmd_fetch_data(rest: list[str]) -> None:
+    if "-h" in rest or "--help" in rest:
+        print(
+            "usage: daily-investor fetch-data [--skip-fetch-news]\n\n"
+            "Fetch valuations, dividends, holdings, fundamentals, news, and a "
+            "scored snapshot. Places no trades."
+        )
+        return
     from cli.commands import cmd_fetch_data
     cmd_fetch_data()
 

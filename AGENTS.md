@@ -106,6 +106,16 @@ Services are thin wrappers — they do not contain business logic. They orchestr
 
 ---
 
+## Long-Running Tune Rules
+
+- **Announce the cost before spending it.** `tuning.profiles.projected_tune_cost` multiplies `n_windows × weight_samples` (the real driver — `total_simulations` alone undercounts by up to 40×) by the DE evaluation budget. `auto-tune-all` prints it before loading data. For reference: `--profile standard --days 730` is ~2.4M sim-runs *per cluster*, ~14M across six stages — a multi-day job, not an overnight one. A 2026-08-06 run was killed at 39 hours having not finished its first cluster.
+- **Any tune that can outlive a coffee break takes `--checkpoint`.** State persists per stage AND per DE generation (`tuning/checkpoint.py`, atomic writes via `core.paths.atomic_write_text`); `--resume` skips completed stages and warm-starts the in-flight one. Checkpoints from a different code revision or run configuration RAISE — `tuning.constants` appends param slots at import time, so stale indices silently describe different parameters.
+- **Prefer `--max-seconds` over `kill`.** It stops DE cleanly through the scipy callback with the checkpoint intact.
+- **`workers=1` at every `differential_evolution` call site is deliberate.** Parallel DE would pickle the closure — and the multi-hundred-MB `precomp` — to each worker, and every child would spawn its own Accelerate BLAS thread pool and oversubscribe the machine. The multi-core usage you see is numpy/Accelerate inside a single process, not DE parallelism.
+- **Search cheap, confirm rigorously.** `scripts/gauntlet_tune_peer3.py` is the template: DE searches on the quick matrix, then the winner *and* the incumbent are confirmed on the full standard matrix over the temporally-disjoint holdout. Search precision is second-order; the confirmation decides adopt/reject.
+
+---
+
 ## research/ Module Rules
 
 - `research/` is for **offline evaluation and calibration only**.

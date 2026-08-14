@@ -435,17 +435,26 @@ def _staged_tune_scaffold(monkeypatch, cand_check_score):
 
     monkeypatch.setattr(rs, "run_robust_scan", fake_scan)
 
+    calls: list[str] = []
+
     def fake_tune_subset(precomp, preset, run_matrix, scope, maxiter, popsize,
-                         seed=42, baseline=None, regime_scope="all"):
+                         seed=42, baseline=None, regime_scope="all",
+                         checkpoint_cb=None, x0=None, max_seconds=None):
         assert precomp is train_obj
+        calls.append(preset)
+        if checkpoint_cb is not None:      # exercise the generation-level hook
+            checkpoint_cb(1, np.array([float(cand[6])]), -0.5)
+        if _boom.get(preset):
+            raise RuntimeError(f"simulated kill during {preset}")
         return MarginalResult(name=preset, score=0.5, params=cand.copy(), active=[6])
 
+    _boom: dict[str, bool] = {}
     monkeypatch.setattr(iscr, "_tune_subset", fake_tune_subset)
-    return st, tc, cand, slices
+    return st, tc, cand, slices, calls, _boom
 
 
 def test_run_staged_tune_rejects_stage_that_fails_disjoint_seed_check(monkeypatch):
-    st, tc, cand, slices = _staged_tune_scaffold(monkeypatch, cand_check_score=0.05)
+    st, tc, cand, slices, _calls, _boom = _staged_tune_scaffold(monkeypatch, cand_check_score=0.05)
     precomp = SimpleNamespace(prices=np.zeros((100, 2)))
     run_matrix = [{"horizon_days": 20, "seed": 1, "n_windows": 3}]
 
@@ -460,7 +469,7 @@ def test_run_staged_tune_rejects_stage_that_fails_disjoint_seed_check(monkeypatc
 
 
 def test_run_staged_tune_accepts_stage_confirmed_on_disjoint_seeds(monkeypatch):
-    st, tc, cand, slices = _staged_tune_scaffold(monkeypatch, cand_check_score=0.40)
+    st, tc, cand, slices, _calls, _boom = _staged_tune_scaffold(monkeypatch, cand_check_score=0.40)
     precomp = SimpleNamespace(prices=np.zeros((100, 2)))
     run_matrix = [{"horizon_days": 20, "seed": 1, "n_windows": 3}]
 
@@ -468,6 +477,116 @@ def test_run_staged_tune_accepts_stage_confirmed_on_disjoint_seeds(monkeypatch):
     assert out.stages and out.stages[0].accepted is True
     assert out.accepted_clusters == ["active_exit_ladder"]
     np.testing.assert_allclose(out.final_params, cand)
+
+
+# ---------------------------------------------------------------------------
+# Fix 7 — staged tune checkpoint / resume (a 39h standard-profile run was killed
+#         on 2026-08-06 having persisted nothing; a single cluster can outlast a day)
+# ---------------------------------------------------------------------------
+
+def _ckpt_env(monkeypatch, tmp_path):
+    """Redirect the checkpoint store to a temp dir."""
+    import tuning.checkpoint as ck
+    monkeypatch.setattr(ck, "checkpoint_dir", lambda: tmp_path)
+    return ck
+
+
+def test_checkpoint_written_per_stage_and_resume_skips_completed(monkeypatch, tmp_path):
+    st, tc, cand, _slices, calls, boom = _staged_tune_scaffold(monkeypatch, cand_check_score=0.40)
+    ck = _ckpt_env(monkeypatch, tmp_path)
+    precomp = SimpleNamespace(prices=np.zeros((100, 2)))
+    run_matrix = [{"horizon_days": 20, "seed": 1, "n_windows": 3}]
+    clusters = ["active_momentum_engine", "active_exit_ladder"]
+
+    # First attempt dies inside the SECOND cluster (simulating the kill).
+    boom["active_exit_ladder"] = True
+    with pytest.raises(RuntimeError):
+        st.run_staged_tune(precomp, clusters, run_matrix, checkpoint="t1")
+
+    saved = ck.load("t1")
+    assert saved is not None
+    assert saved.stage_index == 1                     # first cluster completed
+    assert [s["cluster"] for s in saved.stages] == ["active_momentum_engine"]
+    assert calls == ["active_momentum_engine", "active_exit_ladder"]
+
+    # Resume: the completed cluster must NOT be re-tuned.
+    boom["active_exit_ladder"] = False
+    calls.clear()
+    out = st.run_staged_tune(precomp, clusters, run_matrix, checkpoint="t1", resume=True)
+    assert calls == ["active_exit_ladder"], "resume re-ran an already-completed stage"
+    assert [s.cluster for s in out.stages] == clusters
+    np.testing.assert_allclose(out.final_params, cand)
+
+
+def test_resume_matches_uninterrupted_run(monkeypatch, tmp_path):
+    clusters = ["active_momentum_engine", "active_exit_ladder"]
+    run_matrix = [{"horizon_days": 20, "seed": 1, "n_windows": 3}]
+    precomp = SimpleNamespace(prices=np.zeros((100, 2)))
+
+    st, _tc, _cand, _sl, _calls, _boom = _staged_tune_scaffold(monkeypatch, cand_check_score=0.40)
+    _ckpt_env(monkeypatch, tmp_path)
+    straight = st.run_staged_tune(precomp, clusters, run_matrix)
+
+    st2, _tc2, _c2, _s2, _calls2, boom2 = _staged_tune_scaffold(monkeypatch, cand_check_score=0.40)
+    _ckpt_env(monkeypatch, tmp_path)
+    boom2["active_exit_ladder"] = True
+    with pytest.raises(RuntimeError):
+        st2.run_staged_tune(precomp, clusters, run_matrix, checkpoint="t2")
+    boom2["active_exit_ladder"] = False
+    resumed = st2.run_staged_tune(precomp, clusters, run_matrix, checkpoint="t2", resume=True)
+
+    np.testing.assert_allclose(resumed.final_params, straight.final_params)
+    assert resumed.final_score == pytest.approx(straight.final_score)
+    assert resumed.accepted_clusters == straight.accepted_clusters
+
+
+def test_generation_level_de_state_is_persisted(monkeypatch, tmp_path):
+    st, _tc, cand, _sl, _calls, boom = _staged_tune_scaffold(monkeypatch, cand_check_score=0.40)
+    ck = _ckpt_env(monkeypatch, tmp_path)
+    precomp = SimpleNamespace(prices=np.zeros((100, 2)))
+    run_matrix = [{"horizon_days": 20, "seed": 1, "n_windows": 3}]
+
+    # Die mid-stage: the only state that can exist is the generation-level DE snapshot
+    # the scaffold's fake _tune_subset emits through checkpoint_cb.
+    boom["active_momentum_engine"] = True
+    with pytest.raises(RuntimeError):
+        st.run_staged_tune(precomp, ["active_momentum_engine"], run_matrix, checkpoint="t3")
+
+    saved = ck.load("t3")
+    assert saved is not None and saved.stage_index == 0     # no stage completed
+    assert saved.de_state is not None
+    assert saved.de_state["cluster"] == "active_momentum_engine"
+    assert saved.de_state["generation"] == 1
+    assert saved.de_state["best_x"] == [pytest.approx(float(cand[6]))]
+
+
+def test_stale_checkpoint_raises_rather_than_reindexing(monkeypatch, tmp_path):
+    import json
+    ck = _ckpt_env(monkeypatch, tmp_path)
+    good = ck.new_checkpoint("t4", "identity-A", np.array([1.0, 2.0, 3.0]))
+    ck.save(good)
+
+    # Same run, different code revision → param indices no longer mean the same thing.
+    raw = json.loads((tmp_path / "t4.json").read_text())
+    raw["code_fingerprint"] = "999:deadbeefcafe"
+    (tmp_path / "t4.json").write_text(json.dumps(raw))
+    with pytest.raises(ck.CheckpointMismatch, match="param layout"):
+        ck.load("t4")
+
+    # Right code, different run configuration (matrix/clusters/baseline changed).
+    ck.save(ck.new_checkpoint("t5", "identity-A", np.array([1.0])))
+    with pytest.raises(ck.CheckpointMismatch, match="different run configuration"):
+        ck.load("t5", expected_identity="identity-B")
+
+
+def test_checkpoint_write_is_atomic_and_leaves_no_tmp(monkeypatch, tmp_path):
+    ck = _ckpt_env(monkeypatch, tmp_path)
+    ck.save(ck.new_checkpoint("t6", "id", np.array([0.5, 0.25])))
+    assert (tmp_path / "t6.json").exists()
+    assert not list(tmp_path.glob(".*tmp*")), "atomic write left a tmp sibling behind"
+    again = ck.load("t6")
+    np.testing.assert_allclose(again.baseline_array(), [0.5, 0.25])
+    assert ck.clear("t6") and not (tmp_path / "t6.json").exists()
 
 
 def _patch_validate_scan(monkeypatch):

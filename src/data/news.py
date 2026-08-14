@@ -136,6 +136,9 @@ def _fetch_news_with_retry(ticker: str, max_articles: int, max_retries: int = 3)
 # Async news fetching
 # ---------------------------------------------------------------------------
 
+# Concurrent yfinance news fetches. Rate-limit hits already back off and fall
+# through to Robinhood news, so this trades politeness for wall-clock only.
+# Override per-run with NEWS_CONCURRENCY=N (e.g. a cautious 2 after a 429 storm).
 MAX_NEWS_CONCURRENT = 3
 
 # Reuse an existing same-symbol news scrape if it is younger than this many hours,
@@ -143,8 +146,17 @@ MAX_NEWS_CONCURRENT = 3
 NEWS_MAX_AGE_HOURS = 8.0
 
 
+def _news_concurrency() -> int:
+    """Return the bounded per-run news concurrency override."""
+    try:
+        requested = int(os.environ.get("NEWS_CONCURRENCY", MAX_NEWS_CONCURRENT))
+    except (TypeError, ValueError):
+        return MAX_NEWS_CONCURRENT
+    return max(1, min(requested, 16))
+
+
 async def _fetch_all_news_async(tickers: list[str], max_articles: int) -> dict[str, list]:
-    semaphore = asyncio.Semaphore(MAX_NEWS_CONCURRENT)
+    semaphore = asyncio.Semaphore(_news_concurrency())
     total = len(tickers)
     completed = 0
 
@@ -167,7 +179,7 @@ def get_news_for_tickers_by_symbol(
     max_articles: int = 3,
 ) -> dict[str, list[dict[str, Any]]]:
     """Fetch news for all tickers concurrently. Returns {symbol: [article, ...]}."""
-    print(f"Fetching news for {len(tickers)} tickers ({MAX_NEWS_CONCURRENT} concurrent threads)...")
+    print(f"Fetching news for {len(tickers)} tickers ({_news_concurrency()} concurrent threads)...")
     return run_async(_fetch_all_news_async(tickers, max_articles))
 
 
@@ -237,8 +249,8 @@ def get_news_df(tickers: list[str], force_refresh: bool) -> pd.DataFrame | None:
         print("News: --skip-fetch-news set but no valid cached scrape found — fetching.")
         logger.warning("--skip-fetch-news set but no valid cached news exists; fetching.")
 
-    # The full news scrape is by far the slowest stage (thousands of tickers, 3
-    # concurrent threads). News changes little intraday, so if a valid scrape
+    # The full news scrape is by far the slowest stage (thousands of tickers,
+    # MAX_NEWS_CONCURRENT fetchers). News changes little intraday, so if a valid scrape
     # exists within the freshness window, reuse it instead of refetching. Set
     # NEWS_FORCE_REFETCH=1 to override (e.g. to pick up breaking headlines).
     # 0DTE options sentiment is fetched separately and is NOT cached this way.

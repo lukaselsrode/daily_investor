@@ -106,6 +106,46 @@ def total_simulations(run_matrix: list[dict]) -> int:
     return sum(cell["n_windows"] for cell in run_matrix)
 
 
+def sims_per_objective_call(run_matrix: list[dict]) -> int:
+    """Simulation runs behind ONE objective evaluation (one robust-scan).
+
+    The cost driver is n_windows × weight_samples per cell, NOT the window count
+    alone — `total_simulations` undercounts by the weight-sample factor (40× on the
+    standard profile), which is how a 2.4M-sim-per-cluster job got launched as if it
+    were an overnight run.
+    """
+    return sum(
+        int(cell.get("n_windows", 1)) * max(1, int(cell.get("weight_samples", 1)))
+        for cell in run_matrix
+    )
+
+
+def projected_tune_cost(
+    run_matrix: list[dict],
+    *,
+    maxiter: int,
+    popsize: int,
+    n_params: int = 5,
+    n_stages: int = 1,
+) -> dict:
+    """Rough cost projection for a differential-evolution tune.
+
+    scipy's DE evaluates roughly (maxiter + 1) × popsize × n_params candidates, each
+    costing one full robust-scan. Returns per-stage and total sim-run counts so a
+    caller can announce the price BEFORE loading data and committing hours.
+    """
+    per_call = sims_per_objective_call(run_matrix)
+    evals = (int(maxiter) + 1) * int(popsize) * max(1, int(n_params))
+    per_stage = per_call * evals
+    return {
+        "sims_per_objective_call": per_call,
+        "evals_per_stage": evals,
+        "sims_per_stage": per_stage,
+        "stages": int(n_stages),
+        "sims_total": per_stage * int(n_stages),
+    }
+
+
 def effort_caption(
     robustness: str,
     horizon: str,

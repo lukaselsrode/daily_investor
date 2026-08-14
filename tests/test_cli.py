@@ -91,6 +91,15 @@ def _stability_report():
     )
 
 
+class TestFetchDataHelp:
+
+    def test_subcommand_help_does_not_run_fetch(self, capsys):
+        with patch("cli.commands.cmd_fetch_data") as mock_fetch:
+            cli_main(["fetch-data", "--help"])
+        mock_fetch.assert_not_called()
+        assert "usage: daily-investor fetch-data" in capsys.readouterr().out
+
+
 # ---------------------------------------------------------------------------
 # cmd_backtest
 # ---------------------------------------------------------------------------

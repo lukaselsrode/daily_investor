@@ -659,11 +659,18 @@ def _regime_tilt_default_frozen_indices() -> set[int]:
 
 
 def _get_active_indices(scope: str = "overall_strategy", preset: str | None = None) -> list[int]:
-    frozen = {
+    # Operator-declared freezes from cfg config `tuning.frozen_parameters`. These are
+    # AUTHORITATIVE: re-applied after the preset unfreeze below, so a preset can never
+    # resurrect a slot the operator declared off-limits. (2026-08-07: a gauntlet stage
+    # tuned scoring.momentum_residual_blend to 0.30 despite it being frozen in config —
+    # that slot is implemented ONLY in the simulator, so an adopted value would have
+    # changed backtest results while live scoring ignored it.)
+    config_frozen = {
         _CONFIG_PATH_TO_PARAM_IDX[p]
         for p in TUNING_PARAMS.get("frozen_parameters", [])
         if p in _CONFIG_PATH_TO_PARAM_IDX
     }
+    frozen = set(config_frozen)
     # Archetype lifecycle slots are frozen-by-default; an archetype preset unfreezes them.
     frozen |= _archetype_default_frozen_indices()
     # Candidate-filter slots are frozen-by-default; active_candidate_filters unfreezes them.
@@ -686,6 +693,8 @@ def _get_active_indices(scope: str = "overall_strategy", preset: str | None = No
     if preset is not None:
         from .presets import apply_preset_to_frozen
         frozen = apply_preset_to_frozen(frozen, preset)
+        # Operator freezes win over preset unfreezes — see config_frozen above.
+        frozen |= config_frozen
     if scope == "active_sleeve_compounding":
         frozen |= {
             _CONFIG_PATH_TO_PARAM_IDX[p]

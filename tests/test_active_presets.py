@@ -39,8 +39,23 @@ def test_composition_validation():
         validate_preset("active_exits+bogus")
 
 
+def _config_frozen_slots() -> set[int]:
+    """Slots the OPERATOR froze via cfg `tuning.frozen_parameters`.
+
+    These win over any preset's unfreeze list, so preset-slot expectations must
+    subtract them rather than hardcoding a surface that ignores live config.
+    """
+    import tuning.constants as tc
+    return {
+        tc._CONFIG_PATH_TO_PARAM_IDX[p]
+        for p in tc.TUNING_PARAMS.get("frozen_parameters", [])
+        if p in tc._CONFIG_PATH_TO_PARAM_IDX
+    }
+
+
 def test_interaction_cluster_presets_slots():
-    """The 5 curated interaction-cluster presets unfreeze exactly their mapped slots."""
+    """The 5 curated interaction-cluster presets unfreeze exactly their mapped slots,
+    minus anything the operator froze in config (which is authoritative)."""
     from tuning.constants import _REL_VOLUME_SLOT
     expected = {
         "active_buy_gate":         {0, 1, 2, 3, 5, 40, 41, 42},
@@ -50,8 +65,9 @@ def test_interaction_cluster_presets_slots():
         "active_breadth_turnover": {8, 40, 41, 42, 43, 44, 45, 57, 58, 59},
         "active_quality_stack":    {1, 41, 48, 52},
     }
+    op_frozen = _config_frozen_slots()
     for name, slots in expected.items():
-        assert _active(preset=name) == slots, name
+        assert _active(preset=name) == (slots - op_frozen), name
 
 
 def test_interaction_screener_report_helpers():
@@ -180,8 +196,9 @@ def test_new_menu_presets_validate_and_unfreeze():
     for name in ("active_legacy_turnaround", "active_core_default", "active_scoring_blends"):
         validate_preset(name)
         assert _PRESETS[name]["unfreeze"], f"{name} must unfreeze something"
-    # scoring_blends opens exactly slots 48/49.
-    assert set(_active(preset="active_scoring_blends")) == {48, 49}
+    # scoring_blends opens exactly slots 48/49, less any operator freeze (slot 49
+    # momentum_residual_blend is sim-only and frozen in the live config).
+    assert set(_active(preset="active_scoring_blends")) == {48, 49} - _config_frozen_slots()
     # regularized regime_tilt_plus_weights = momentum_tilt (46) + 4 weights + 4 exits.
     assert set(_active(preset="active_regime_tilt_plus_weights")) == {0, 1, 2, 3, 5, 6, 7, 8, 46}
 
@@ -300,6 +317,42 @@ def test_no_preset_active_sleeve_tunes_full_base_space():
         assert idx in active, f"index {idx} should be tunable without preset (full base space)"
     # index_pct (4) stays frozen in active_sleeve scope (ACTIVE_SLEEVE_FROZEN)
     assert 4 not in active, "index_pct must stay frozen in active_sleeve scope"
+
+
+# ---------------------------------------------------------------------------
+# Operator freezes beat preset unfreezes
+# ---------------------------------------------------------------------------
+
+def test_config_frozen_parameters_survive_preset_unfreeze():
+    """cfg `tuning.frozen_parameters` is authoritative — a preset must not resurrect it.
+
+    Regression (2026-08-07): a gauntlet stage tuned scoring.momentum_residual_blend to
+    0.30 even though config froze it. That slot is implemented ONLY in the backtest
+    simulator, so an adopted value would have moved backtest results while live scoring
+    ignored it entirely — the exact backtest≠live divergence the freeze exists to stop.
+    """
+    import tuning.constants as tc
+
+    slot = tc._CONFIG_PATH_TO_PARAM_IDX["scoring.momentum_residual_blend"]
+    frozen_paths = tc.TUNING_PARAMS.get("frozen_parameters", [])
+    if "scoring.momentum_residual_blend" not in frozen_paths:
+        pytest.skip("live config no longer freezes momentum_residual_blend")
+    active = _active(scope="active_sleeve_compounding", preset="active_momentum_engine")
+    assert slot not in active, (
+        "preset unfroze a slot the operator froze in config — sim-only knobs would be tuned"
+    )
+
+
+def test_operator_freeze_is_honored_for_any_preset(monkeypatch):
+    """Generic: whatever is in frozen_parameters stays frozen under every preset."""
+    import tuning.constants as tc
+
+    path = "scoring.factors.value.pe_weight"
+    slot = tc._CONFIG_PATH_TO_PARAM_IDX[path]
+    monkeypatch.setitem(tc.TUNING_PARAMS, "frozen_parameters", [path])
+    for preset in ("active_core_weights", "active_factor_internals", "active_full_safe"):
+        active = _active(scope="active_sleeve_compounding", preset=preset)
+        assert slot not in active, f"{preset} overrode an operator freeze on {path}"
 
 
 # ---------------------------------------------------------------------------

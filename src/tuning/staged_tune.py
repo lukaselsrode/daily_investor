@@ -18,12 +18,15 @@ RESEARCH ONLY — neither writes config.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 
 import numpy as np
 
 from backtesting.random_walk import _slice_precomp as _slice_window_precomp
 from backtesting.types import BacktestScope
+
+logger = logging.getLogger(__name__)
 
 # Fixed leverage order: scoring/momentum first (change which stocks rank high), then
 # the quality tilt, the buy gate, the exit ladder, and finally breadth/turnover.
@@ -102,6 +105,9 @@ def run_staged_tune(
     progress_callback=None,
     regime_scope: str = "all",
     train_frac: float = 0.70,
+    checkpoint: str | None = None,
+    resume: bool = False,
+    max_seconds: float | None = None,
 ) -> StagedTuneResult:
     """Staged coordinate-ascent over the selected clusters. progress_callback(done,total,label).
 
@@ -114,7 +120,21 @@ def run_staged_tune(
         matrix (different random windows, same data). With min_improve=0.0, requiring the
         improvement to replicate across two independent window draws is the noise floor —
         previously a stage was accepted on a single window set, i.e. on seed noise.
+
+    Durability (`checkpoint` = run id under data/tune_checkpoints/):
+      - State is written after every stage and after the final joint pass, plus after
+        each DE generation WITHIN a stage — a standard-profile cluster can outlast a
+        day on its own, so between-stage checkpoints alone would not have saved the
+        39-hour run that motivated this.
+      - `resume=True` restarts from the last completed stage; the in-flight stage warm
+        starts from its saved best-so-far. A checkpoint from a different code revision
+        or run configuration RAISES (see tuning.checkpoint) rather than silently
+        resuming onto a param layout its indices no longer describe.
+      - `max_seconds` bounds each stage's DE, stopping it cleanly with its checkpoint
+        intact instead of requiring a kill.
     """
+    import time
+
     from .constants import _current_params
     from .interaction_screen import _tune_subset
 
@@ -131,42 +151,126 @@ def run_staged_tune(
 
     check_matrix = _shifted_run_matrix(run_matrix)
     baseline = _current_params().copy()
-    orig_score = _robust_score(precomp, baseline, run_matrix, scope, regime_scope)
-    cur_score = orig_score
-    baseline_check = _robust_score(precomp, baseline, check_matrix, scope, regime_scope)
-    out = StagedTuneResult(final_params=baseline, final_score=orig_score, baseline_score=orig_score)
+
+    ckpt = None
+    ckpt_mod = None
+    identity = None
+    if checkpoint:
+        from . import checkpoint as ckpt_mod
+        identity = ckpt_mod.run_identity(
+            run_matrix=run_matrix, clusters=ordered, scope=str(scope),
+            regime_scope=regime_scope, maxiter=maxiter, popsize=popsize,
+            train_frac=train_frac, baseline=baseline,
+        )
+        if resume:
+            ckpt = ckpt_mod.load(checkpoint, expected_identity=identity)
+        if ckpt is None:
+            ckpt = ckpt_mod.new_checkpoint(checkpoint, identity, baseline)
+
+    out = StagedTuneResult(final_params=baseline, final_score=0.0, baseline_score=0.0)
+
+    resumed_stages = 0
+    if ckpt is not None and ckpt.stage_index > 0:
+        # Restore everything the completed stages produced.
+        baseline = ckpt.baseline_array()
+        orig_score = ckpt.orig_score
+        cur_score = ckpt.cur_score
+        baseline_check = ckpt.baseline_check
+        out.stages = [StageResult(**s) for s in ckpt.stages]
+        resumed_stages = int(ckpt.stage_index)
+        logger.info(
+            "staged tune: resuming '%s' after %d completed stage(s) "
+            "(score %.4f, updated %s)",
+            checkpoint, resumed_stages, cur_score, ckpt.updated_at,
+        )
+    else:
+        orig_score = _robust_score(precomp, baseline, run_matrix, scope, regime_scope)
+        cur_score = orig_score
+        baseline_check = _robust_score(precomp, baseline, check_matrix, scope, regime_scope)
+    out.baseline_score = orig_score
+    out.final_score = cur_score
+
+    def _persist(*, stage_index: int, de_state: dict | None = None, joint_done: bool = False) -> None:
+        if ckpt is None:
+            return
+        ckpt.stage_index = stage_index
+        ckpt.baseline = [float(v) for v in np.asarray(baseline).ravel()]
+        ckpt.cur_score = float(cur_score)
+        ckpt.baseline_check = float(baseline_check)
+        ckpt.orig_score = float(orig_score)
+        ckpt.stages = [vars(s).copy() for s in out.stages]
+        ckpt.de_state = de_state
+        ckpt.joint_done = joint_done
+        ckpt_mod.save(ckpt)
 
     def _confirmed(params) -> tuple[bool, float]:
         """Disjoint-seed re-evaluation: does the candidate also beat the baseline there?"""
         check = _robust_score(precomp, params, check_matrix, scope, regime_scope)
         return check > baseline_check + min_improve, check
 
+    def _stage_hooks(cluster: str):
+        """(checkpoint_cb, warm-start x0) for one cluster's DE run."""
+        if ckpt is None:
+            return None, None
+        prev = ckpt.de_state or {}
+        warm = (
+            list(prev.get("best_x") or [])
+            if prev.get("cluster") == cluster and prev.get("best_x")
+            else None
+        )
+
+        def _cb(generation: int, best_x, best_fun) -> None:
+            _persist(
+                stage_index=ckpt.stage_index,
+                de_state={
+                    "cluster": cluster,
+                    "generation": int(generation),
+                    "best_x": [float(v) for v in np.asarray(best_x).ravel()],
+                    "best_fun": float(best_fun) if best_fun is not None else float("inf"),
+                },
+            )
+
+        return _cb, warm
+
     total = len(ordered) + 1  # + final joint pass
-    done = 0
-    for c in ordered:
+    done = resumed_stages
+    t_stage = time.time()
+    for idx, c in enumerate(ordered):
+        if idx < resumed_stages:
+            continue   # already completed in an earlier run
+        cb, warm = _stage_hooks(c)
         m = _tune_subset(precomp, c, run_matrix, scope, maxiter, popsize, baseline=baseline,
-                         regime_scope=regime_scope)
+                         regime_scope=regime_scope, checkpoint_cb=cb, x0=warm,
+                         max_seconds=max_seconds)
         done += 1
         if progress_callback:
             progress_callback(done, total, f"stage: {c}")
-        if m is None:
-            continue
-        accepted = m.score > cur_score + min_improve
-        if accepted:
-            accepted, cand_check = _confirmed(m.params)
-        out.stages.append(StageResult(c, cur_score, m.score, accepted))
-        if accepted:
-            baseline = m.params.copy()
-            cur_score = m.score
-            baseline_check = cand_check
+        if m is not None:
+            accepted = m.score > cur_score + min_improve
+            if accepted:
+                accepted, cand_check = _confirmed(m.params)
+            out.stages.append(StageResult(c, cur_score, m.score, accepted))
+            if accepted:
+                baseline = m.params.copy()
+                cur_score = m.score
+                baseline_check = cand_check
+        # Stage boundary: clear the in-flight DE state so a resume starts the NEXT one.
+        _persist(stage_index=idx + 1, de_state=None)
+        logger.info("staged tune: stage %d/%d (%s) done in %.0fs",
+                    done, total, c, time.time() - t_stage)
+        t_stage = time.time()
 
     out.accepted_clusters = [s.cluster for s in out.stages if s.accepted]
 
     # Final DOF-bounded joint re-tune of the accepted clusters (captures cross-cluster gains).
-    if len(out.accepted_clusters) >= 2:
+    joint_already_done = bool(ckpt is not None and ckpt.joint_done)
+    if len(out.accepted_clusters) >= 2 and not joint_already_done:
+        joint_name = "+".join(out.accepted_clusters)
+        cb, warm = _stage_hooks(joint_name)
         joint = _tune_subset(
-            precomp, "+".join(out.accepted_clusters), run_matrix, scope,
+            precomp, joint_name, run_matrix, scope,
             maxiter, popsize, baseline=baseline, regime_scope=regime_scope,
+            checkpoint_cb=cb, x0=warm, max_seconds=max_seconds,
         )
         if joint is not None and joint.score > cur_score + min_improve:
             joint_ok, joint_check = _confirmed(joint.params)
@@ -180,6 +284,7 @@ def run_staged_tune(
 
     out.final_params = baseline
     out.final_score = cur_score
+    _persist(stage_index=len(ordered), de_state=None, joint_done=True)
     return out
 
 

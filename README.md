@@ -217,7 +217,7 @@ daily-investor COMMAND [OPTIONS]
 | `backtest DAYS` | Run backtest simulation |
 | `tune DAYS` | Single-objective parameter tune — prints diff, no write |
 | `auto-tune [DAYS]` | Dual-objective tune + multi-source candidate tournament (`--random-topk N`, `--leads a.npy`) gated by split, incumbent-relative, random-window, multi-horizon, and stress-gauntlet tiers (default: 90d) |
-| `auto-tune-all` | Staged coordinate-ascent over interaction clusters + full windowed validation (`--profile`, `--clusters`) — research only |
+| `auto-tune-all` | Staged coordinate-ascent over interaction clusters + full windowed validation (`--profile`, `--clusters`) — research only. Prints its projected simulation cost before loading data; use `--checkpoint NAME` (resume with `--resume`) and `--max-seconds N` for anything above `--profile quick` — `standard` is ~14M sim-runs across six stages |
 | `interaction-screen` | Screen which param clusters synergize/clash when co-tuned (`--profile quick\|standard\|deep`) — research only |
 | `list-presets` | Print available tuning presets and exit (presets compose with `+`) |
 | `stability-scan` | Parameter stability scan across multiple windows — research only, no writes |

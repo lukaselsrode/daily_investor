@@ -26,10 +26,28 @@ ui:                          ## Launch the Streamlit dashboard
 ##@ Data
 
 SKIP_NEWS ?=
+HERMES ?= hermes
+TELEGRAM_TARGET ?= telegram
 
 .PHONY: fetch-data
-fetch-data:                  ## Fetch all market data + snapshot, no trades  (SKIP_NEWS=1 reuses cached news)
-	$(DI) fetch-data $(if $(SKIP_NEWS),--skip-fetch-news,)
+fetch-data:                  ## Fetch all market data + snapshot, no trades; notify Telegram at start/end
+	@started_at=$$(date +%s); \
+	if ! $(HERMES) send --quiet --to "$(TELEGRAM_TARGET)" \
+		"Daily Investor: fetch-data started."; then \
+		printf '%s\n' 'Warning: could not send fetch-data start notification.' >&2; \
+	fi; \
+	status=0; \
+	$(DI) fetch-data $(if $(SKIP_NEWS),--skip-fetch-news,) || status=$$?; \
+	elapsed=$$(($$(date +%s) - $$started_at)); \
+	if [ "$$status" -eq 0 ]; then \
+		message="Daily Investor: fetch-data completed successfully in $${elapsed}s."; \
+	else \
+		message="Daily Investor: fetch-data FAILED after $${elapsed}s (exit $${status}). Check investment_bot.log."; \
+	fi; \
+	if ! $(HERMES) send --quiet --to "$(TELEGRAM_TARGET)" "$$message"; then \
+		printf '%s\n' 'Warning: could not send fetch-data completion notification.' >&2; \
+	fi; \
+	exit "$$status"
 
 .PHONY: update-outcomes
 update-outcomes:             ## Backfill future return outcomes for past decisions (calibration only — never touches live scoring)
@@ -224,8 +242,8 @@ odte-vehicle-score:          ## 0DTE non-sentiment vehicle score — NO broker (
 # odte-vehicle-score (which scores one contract).
 #   make odte-day-score MARKET=data/odte/market.json GAMMA=data/odte/reports/odte_gamma_map_qqq.json JSON=1
 .PHONY: odte-day-score
-odte-day-score:              ## 0DTE non-sentiment day score — NO broker (MARKET=path; GAMMA=path; JSON=1; WRITE=1)
-	@$(DI) odte-day-score $(if $(MARKET),--market $(MARKET),) $(if $(GAMMA),--gamma $(GAMMA),) $(if $(JSON),--json,) $(if $(WRITE),--write,) $(if $(OUT_DIR),--out-dir $(OUT_DIR),)
+odte-day-score:              ## 0DTE non-sentiment day score — NO broker (MARKET=path; GAMMA=path; JSON=1; WRITE=1; JOURNAL=1)
+	@$(DI) odte-day-score $(if $(MARKET),--market $(MARKET),) $(if $(GAMMA),--gamma $(GAMMA),) $(if $(JSON),--json,) $(if $(WRITE),--write,) $(if $(OUT_DIR),--out-dir $(OUT_DIR),) $(if $(JOURNAL),--journal,) $(if $(JOURNAL_PATH),--journal-path $(JOURNAL_PATH),)
 
 # PURE/OFFLINE thesis->entry gate. Assembles a journalable entry-gate decision (enter/deny/veto/
 # observe) from the upstream artifacts. Records intent ONLY — places NO orders, NO broker/network/LLM.
@@ -277,8 +295,8 @@ odte-order-guard:            ## 0DTE pending-order cancel-first guard — NO ord
 	@$(DI) odte-order-guard $(if $(ORDER),--order $(ORDER),) $(if $(LEASE),--lease $(LEASE),) $(if $(MARKET),--market $(MARKET),) $(if $(STATE_DIR),--state-dir $(STATE_DIR),) $(if $(JSON),--json,) $(if $(WRITE),--write,) $(if $(JOURNAL),--journal,)
 
 .PHONY: odte-candidate-watch
-odte-candidate-watch:        ## 0DTE pre-entry candidate HAWK — NO orders/broker (CANDIDATE=; MARKET=; DAY_SCORE=; VEHICLE=; GAMMA=; BROKER_HEALTH=; WRITE=1; JSON=1)
-	@$(DI) odte-candidate-watch $(if $(CANDIDATE),--candidate $(CANDIDATE),) $(if $(MARKET),--market $(MARKET),) $(if $(DAY_SCORE),--day-score $(DAY_SCORE),) $(if $(VEHICLE),--vehicle-score $(VEHICLE),) $(if $(GAMMA),--gamma $(GAMMA),) $(if $(BROKER_HEALTH),--broker-health $(BROKER_HEALTH),) $(if $(STATE_DIR),--state-dir $(STATE_DIR),) $(if $(WRITE),--write,) $(if $(JSON),--json,)
+odte-candidate-watch:        ## 0DTE pre-entry candidate HAWK — NO orders/broker (CANDIDATE=; MARKET=; DAY_SCORE=; VEHICLE=; GAMMA=; BROKER_HEALTH=; WRITE=1; JSON=1; JOURNAL=1)
+	@$(DI) odte-candidate-watch $(if $(CANDIDATE),--candidate $(CANDIDATE),) $(if $(MARKET),--market $(MARKET),) $(if $(DAY_SCORE),--day-score $(DAY_SCORE),) $(if $(VEHICLE),--vehicle-score $(VEHICLE),) $(if $(GAMMA),--gamma $(GAMMA),) $(if $(BROKER_HEALTH),--broker-health $(BROKER_HEALTH),) $(if $(STATE_DIR),--state-dir $(STATE_DIR),) $(if $(WRITE),--write,) $(if $(JSON),--json,) $(if $(JOURNAL),--journal,) $(if $(JOURNAL_PATH),--journal-path $(JOURNAL_PATH),)
 
 # FMP single-name context for 0DTE meme/squeeze SANITY — read-only, NO orders, NO options/gamma.
 # Cheap FMP stable fundamentals (profile/quote/shares-float/key-metrics-ttm/news) + squeeze profile.

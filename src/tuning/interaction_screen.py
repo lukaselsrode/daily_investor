@@ -21,10 +21,13 @@ overnight job; use the `quick` profile for a smoke run.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from itertools import combinations
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_CLUSTERS: tuple[str, ...] = (
     "active_buy_gate",
@@ -107,13 +110,26 @@ def _verdict(interaction: float, displacement: float) -> str:
 
 
 def _tune_subset(precomp, preset, run_matrix, scope, maxiter, popsize, seed=42, baseline=None,
-                 regime_scope: str = "all"):
+                 regime_scope: str = "all", checkpoint_cb=None, x0=None, max_seconds=None):
     """
     Optimize a preset's active subset over the robust_scan objective, holding all
     other slots at `baseline` (defaults to current config). Returns a MarginalResult,
     or None if the preset has no active slots. `baseline` lets a caller tune a group
     ON TOP of an evolving best vector (used by the staged coordinate-ascent driver).
+
+    Long-run controls (a standard-profile cluster can exceed a day on its own):
+      checkpoint_cb(generation, best_x, best_fun) — called after each DE generation so
+        the caller can persist best-so-far. Failures are swallowed: a checkpoint write
+        must never kill a tune that is otherwise progressing.
+      x0        — warm start (REDUCED vector over `active`), e.g. a resumed best-so-far.
+                  Restores the best point found, NOT DE's population/RNG state, so a
+                  resumed stage explores differently than an uninterrupted one.
+      max_seconds — wall-clock budget. On expiry the callback stops DE cleanly and the
+                  best-so-far is returned, rather than the operator needing kill -9
+                  (which is what lost 39 hours of work on 2026-08-06).
     """
+    import time
+
     from scipy.optimize import differential_evolution
 
     from .constants import (
@@ -144,9 +160,54 @@ def _tune_subset(precomp, preset, run_matrix, scope, maxiter, popsize, seed=42, 
             # return a large penalty so crashes always rank last.
             return 1e6
 
+    de_kwargs: dict = {}
+    if x0 is not None:
+        x0_arr = np.asarray(x0, dtype=float).ravel()
+        if x0_arr.size == len(active_bounds):
+            lo = np.array([b[0] for b in active_bounds], dtype=float)
+            hi = np.array([b[1] for b in active_bounds], dtype=float)
+            de_kwargs["x0"] = np.clip(x0_arr, lo, hi)
+        else:
+            logger.warning(
+                "%s: ignoring warm-start x0 of length %d (expected %d active slots)",
+                preset, x0_arr.size, len(active_bounds),
+            )
+
+    if checkpoint_cb is not None or max_seconds is not None:
+        started = time.time()
+        gen = {"n": 0}
+
+        # Parameter NAMES matter: scipy >= 1.14 inspects the signature and uses the
+        # modern `intermediate_result` form when that name is present, falling back to
+        # the legacy `(xk, convergence=...)` call otherwise. Declaring both keeps this
+        # working across versions.
+        def _de_callback(intermediate_result=None, convergence=None):
+            gen["n"] += 1
+            best_x, best_fun = None, None
+            if intermediate_result is not None:
+                if hasattr(intermediate_result, "x"):          # modern OptimizeResult
+                    best_x = np.asarray(intermediate_result.x, dtype=float)
+                    best_fun = float(getattr(intermediate_result, "fun", np.nan))
+                else:                                          # legacy positional xk
+                    best_x = np.asarray(intermediate_result, dtype=float)
+            if checkpoint_cb is not None and best_x is not None:
+                try:
+                    checkpoint_cb(gen["n"], best_x, best_fun)
+                except Exception as exc:
+                    logger.warning("%s: checkpoint callback failed: %s", preset, exc)
+            if max_seconds is not None and (time.time() - started) >= float(max_seconds):
+                logger.warning(
+                    "%s: wall-clock budget %.0fs reached after %d generations — "
+                    "stopping DE cleanly with best-so-far.", preset, float(max_seconds), gen["n"],
+                )
+                return True   # scipy stops the run and returns the incumbent best
+            return False
+
+        de_kwargs["callback"] = _de_callback
+
     res = differential_evolution(
         _obj, active_bounds, maxiter=maxiter, popsize=popsize,
-        tol=0.01, seed=seed, workers=1, polish=True,
+        tol=0.01, seed=seed, workers=1, polish=True, **de_kwargs,
     )
     return MarginalResult(
         name=preset, score=-float(res.fun),

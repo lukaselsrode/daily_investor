@@ -141,6 +141,39 @@ _SPY_HORIZON_COLS = {
     90: ("future_90d_return", "future_90d_vs_spy"),
 }
 
+
+def symbols_due_for_backfill(
+    df: pd.DataFrame,
+    *,
+    today: datetime.date | None = None,
+) -> list[str]:
+    """Return symbols with at least one elapsed, unresolved return horizon.
+
+    Compute this before requesting market data: a fully resolved ledger should
+    not trigger a hundreds-of-symbol download on every routine fetch-data run.
+    """
+    if df.empty:
+        return []
+
+    as_of = today or datetime.date.today()
+    decision_dates = pd.to_datetime(df.get("decision_date"), errors="coerce").dt.date
+    prices = pd.to_numeric(df.get("price"), errors="coerce")
+    eligible = prices.gt(0) & decision_dates.notna()
+    due = pd.Series(False, index=df.index)
+
+    for horizon, (return_col, _) in _SPY_HORIZON_COLS.items():
+        if return_col not in df.columns:
+            continue
+        elapsed = decision_dates.map(
+            lambda value, days=horizon: (
+                (as_of - value).days >= days if pd.notna(value) else False
+            )
+        )
+        due |= eligible & elapsed & df[return_col].isna()
+
+    return sorted(df.loc[due, "symbol"].dropna().astype(str).unique().tolist())
+
+
 _JOURNAL_COLS = [
     "timestamp", "decision_date", "symbol", "record_type", "decision_state",
     "final_action", "executed_bool", "percent_change", "current_value_metric",

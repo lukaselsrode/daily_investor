@@ -288,15 +288,25 @@ def cmd_auto_tune_all(
     mode: str | None = None,
     clusters: list[str] | None = None,
     regime_scope: str = "all",
+    checkpoint: str | None = None,
+    resume: bool = False,
+    max_seconds: float | None = None,
 ) -> None:
     """
     Auto-tune All — staged coordinate-ascent over interaction clusters, then a full
     windowed validation confirmation. RESEARCH ONLY — never writes config (review the
     trace + verdict, then apply via the UI or auto-tune --apply on a chosen preset).
+
+    Long runs: pass --checkpoint NAME so progress survives a kill (resume with
+    --resume), and --max-seconds to bound each stage's DE. The projected cost is
+    printed BEFORE the data load — a 2026-08-06 standard-profile run burned 39 hours
+    without finishing one cluster because nobody had a number in front of them.
     """
+    import time
+
     from backtesting.data_loader import load_and_precompute
     from tuning.interaction_screen import DEFAULT_CLUSTERS
-    from tuning.profiles import expand_run_matrix
+    from tuning.profiles import expand_run_matrix, projected_tune_cost
     from tuning.staged_tune import run_staged_tune, validate_full_windowed
 
     _profiles = {
@@ -309,16 +319,41 @@ def cmd_auto_tune_all(
     run_matrix = expand_run_matrix(cfg["robustness"], cfg["horizon"])
 
     print(f"\nAuto-tune All — profile={profile}, {n_days}d, regime_scope={regime_scope}, clusters={sel}")
-    print("Loading full-universe data …")
+
+    cost = projected_tune_cost(
+        run_matrix, maxiter=cfg["maxiter"], popsize=cfg["popsize"],
+        n_stages=len(sel) + 1,   # clusters + the final joint re-tune
+    )
+    print(
+        f"  projected cost: {cost['sims_per_objective_call']:,} sim-runs per objective call "
+        f"× ~{cost['evals_per_stage']} DE evals = ~{cost['sims_per_stage']:,} per stage, "
+        f"~{cost['sims_total']:,} across {cost['stages']} stages"
+    )
+    if cost["sims_total"] > 1_000_000 and not checkpoint:
+        print(
+            "  ⚠️  This is a multi-day job and NO --checkpoint was given: a kill would "
+            "lose everything. Consider --profile quick, fewer --clusters, or "
+            "--checkpoint NAME [--max-seconds N]."
+        )
+    if checkpoint:
+        print(f"  checkpoint: {checkpoint}{' (resuming)' if resume else ''}"
+              + (f", max {max_seconds:.0f}s per stage" if max_seconds else ""))
+
+    print("Loading full-universe data …", flush=True)
     precomp = load_and_precompute(n_days, mode=mode)
 
+    _t = [time.time()]
+
     def _cb(done: int, total: int, label: str) -> None:
-        print(f"  [{done}/{total}] {label}", flush=True)
+        now = time.time()
+        print(f"  [{done}/{total}] {label}  (+{now - _t[-1]:.0f}s)", flush=True)
+        _t.append(now)
 
     staged = run_staged_tune(
         precomp, clusters=sel, run_matrix=run_matrix, scope="active_sleeve_compounding",
         maxiter=cfg["maxiter"], popsize=cfg["popsize"], progress_callback=_cb,
-        regime_scope=regime_scope,
+        regime_scope=regime_scope, checkpoint=checkpoint, resume=resume,
+        max_seconds=max_seconds,
     )
     print("\nStaged trace:")
     print(staged.trace_df().to_string(index=False))

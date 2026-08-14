@@ -188,15 +188,19 @@ def _maybe_fill_outcomes() -> None:
 
         import yfinance as yf
 
-        from portfolio.outcome_tracker import fill_future_returns, load_outcomes
+        from portfolio.outcome_tracker import (
+            fill_future_returns,
+            load_outcomes,
+            symbols_due_for_backfill,
+        )
 
         df = load_outcomes()
         if df.empty:
             return
 
-        sym_col = "symbol" if "symbol" in df.columns else "ticker"
-        symbols = [s for s in df[sym_col].dropna().unique() if str(s).strip()]
+        symbols = symbols_due_for_backfill(df)
         if not symbols:
+            logger.info("Outcome backfill: nothing due — skipping price download")
             return
 
         fetch_syms = sorted(set(symbols) | {"SPY"})
@@ -205,7 +209,13 @@ def _maybe_fill_outcomes() -> None:
         yf_alias = {s: s.replace(".", "-") for s in fetch_syms}
         today  = datetime.date.today()
         start  = (today - datetime.timedelta(days=125)).isoformat()
-        hist   = yf.download(sorted(set(yf_alias.values())), start=start, auto_adjust=True, progress=False)
+        hist   = yf.download(
+            sorted(set(yf_alias.values())),
+            start=start,
+            auto_adjust=True,
+            progress=False,
+            timeout=10,
+        )
         close  = hist["Close"] if "Close" in hist.columns else hist
 
         current_prices: dict[str, float] = {}
