@@ -109,6 +109,21 @@ CONFIRM_CONVERSION_SLA_SECONDS: float = _num("confirm_conversion_sla_seconds", 1
 # ── Computed final confirmations (odte-convert) ────────────────────────────────
 SPREAD_CAP_FRACTION: float = _num("spread_cap_fraction", 0.25)
 
+# ── W33 entry fences (2026-08-14) ──────────────────────────────────────────────
+# Pre-registered in the W33 post-mortem plan; each code default is OFF so deleting the YAML key is
+# the rollback. Evidence (all 20 closed trades, forensic audit 2026-08-13):
+#   min_entry_premium      — every recent loser entered at $0.45-0.50 premium; every winner
+#                            >= $0.64. At DEFAULT_MAX_CONTRACTS=1 the tier debit fraction halves
+#                            nothing, so premium selection is the only real size knob, and cheap
+#                            contracts carry the worst tick-% and spread-% economics.
+#   midday_full_tier_after_et_hour — the 13:00-15:30 entry bucket is 1 win in 6, -$49; after this
+#                            ET hour a NEW entry must be tier >= full (b_plus blocked).
+#   daily_loss_floor_dollars — the daily budget caps COUNT (2), not dollars; 08-11 stacked a -$34
+#                            stop on a +$22 day. Once day net P/L <= -N, no new entries.
+MIN_ENTRY_PREMIUM: float = _num("min_entry_premium", 0.0)
+MIDDAY_FULL_TIER_AFTER_ET_HOUR: float = _num("midday_full_tier_after_et_hour", 0.0)
+DAILY_LOSS_FLOOR_DOLLARS: float = _num("daily_loss_floor_dollars", 0.0)
+
 # ── Watchdog ───────────────────────────────────────────────────────────────────
 WATCHDOG_REALERT_MINUTES: int = _int("watchdog_realert_minutes", 10)
 

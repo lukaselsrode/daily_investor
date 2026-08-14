@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import data.odte_config as oc
 import data.odte_convert as cv
+import data.odte_entry_gate as eg
 import data.odte_journal as oj
 
 NOW = datetime(2026, 7, 31, 15, 35, 3, tzinfo=timezone.utc)   # the real failed-conversion moment
@@ -98,8 +99,7 @@ def test_one_call_converts_fresh_package_to_lease(tmp_path):
     assert lease["anchor_quote"] == 1.19
     assert lease["max_limit_price"] == round(1.19 * (1 + oc.CHASE_BAND_FRACTION), 2)
     # computed confirmations, not asserted booleans
-    assert payload["confirmations"] == {"live_chain_recheck": True, "spread_cap_check": True,
-                                        "budget_check": True}
+    assert payload["confirmations"] == {name: True for name in eg.REQUIRED_CONFIRMATIONS}
     # artifacts persisted through the canonical writers
     assert (tmp_path / "candidate_decision.json").exists()
     assert (tmp_path / "active_candidate.json").exists()
@@ -296,7 +296,11 @@ def _seed_green_journal(tmp_path, now):
     return str(jp)
 
 
-def test_post_green_second_trade_auto_arms_and_converts(tmp_path):
+def test_post_green_second_trade_auto_arms_and_converts(tmp_path, monkeypatch):
+    # The auto-arm MECHANISM under test; the live posture is OFF since 2026-08-14 (W33 fence:
+    # post-green re-entries ran -$49/4), so pin it ON here the same way the kill-switch test
+    # pins it off.
+    monkeypatch.setattr(eg, "GREEN_REENTRY_AUTO_ARM", True)
     # The 2026-08-03 failure: after the +$9 green close, trade #2 was structurally impossible.
     # Now an a_plus tape (>= the winning "full" tier) with a budget slot, cooldown clear, and BP
     # covering the multiple converts straight through — no manual flag anywhere.
@@ -310,7 +314,6 @@ def test_post_green_second_trade_auto_arms_and_converts(tmp_path):
 
 
 def test_post_green_kill_switch_off_refuses_at_gate(tmp_path, monkeypatch):
-    import data.odte_entry_gate as eg
     monkeypatch.setattr(eg, "GREEN_REENTRY_AUTO_ARM", False)
     jp = _seed_green_journal(tmp_path, NOW)
     payload = _convert(tmp_path, journal_path=jp)
@@ -490,7 +493,11 @@ def _budget_exhausted_events(now, day_pnl=5.0):
     return events
 
 
-def test_aplus_converts_past_exhausted_budget_on_green_day():
+def test_aplus_converts_past_exhausted_budget_on_green_day(monkeypatch):
+    # The auto-arm MECHANISM under test; the live posture is OFF since 2026-08-14 (W33 fence:
+    # post-green re-entries ran -$49/4), so pin it ON here the same way the kill-switch test
+    # pins it off.
+    monkeypatch.setattr(eg, "GREEN_REENTRY_AUTO_ARM", True)
     # a_plus tape (the default _market: 3 confirmers, 0 dissenters) + budget 2/2 used + day
     # net-green -> the gate grants the a_plus exception and the conversion mints a lease.
     import tempfile
@@ -502,7 +509,6 @@ def test_aplus_converts_past_exhausted_budget_on_green_day():
                                  journal_events=_budget_exhausted_events(NOW, day_pnl=9.0),
                                  journal_path=str(Path(td) / "j.jsonl"), now=NOW)
     assert payload["converted"] is True, payload["reason_codes"]
-    import data.odte_entry_gate as eg
     assert eg.APLUS_BUDGET_EXCEPTION in payload["entry_gate"]["reason_codes"]
 
 
@@ -638,3 +644,78 @@ def test_non_preflight_guidance_is_unchanged(tmp_path):
     gate = payload.get("entry_gate") if isinstance(payload.get("entry_gate"), dict) else {}
     if payload.get("stage") == "entry_gate" and gate.get("next_action"):
         assert payload["next_action"] == gate["next_action"]
+
+
+# --- W33 entry fences (2026-08-14, pre-registered) ---------------------------------------------
+# Forensic audit of all 20 closed trades: every recent loser entered at $0.45-0.50 premium while
+# every winner was >= $0.64; post-green re-entries ran -$49/4; the 13:00-15:30 ET bucket was
+# 1 win in 6 for -$49; and the daily budget capped COUNT, not dollars. Each fence's code default
+# is OFF (deleting the YAML key is the rollback), so these tests pin the mechanism via monkeypatch
+# and pin the LIVE posture separately.
+
+def test_premium_floor_refuses_a_cheap_contract(tmp_path, monkeypatch):
+    monkeypatch.setattr("data.odte_config.MIN_ENTRY_PREMIUM", 0.60)
+    cheap = _contract(bid=0.44, ask=0.46, mark=0.45)          # the W33 loser profile
+    payload = _convert(tmp_path, contract=cheap)
+    assert payload["converted"] is False
+    assert payload["confirmations"]["premium_floor_check"] is False
+    detail = payload["confirmation_detail"]["premium_floor_check"]
+    assert detail == {"ask": 0.46, "min_entry_premium": 0.60}
+
+
+def test_premium_floor_passes_at_the_winner_profile(tmp_path, monkeypatch):
+    monkeypatch.setattr("data.odte_config.MIN_ENTRY_PREMIUM", 0.60)
+    payload = _convert(tmp_path)                              # default ask 1.19
+    assert payload["converted"] is True, payload["reason_codes"]
+    assert payload["confirmations"]["premium_floor_check"] is True
+
+
+def test_premium_floor_off_is_trivially_true(tmp_path, monkeypatch):
+    monkeypatch.setattr("data.odte_config.MIN_ENTRY_PREMIUM", 0.0)
+    payload = _convert(tmp_path, contract=_contract(bid=0.10, ask=0.12, mark=0.11))
+    assert payload["confirmations"]["premium_floor_check"] is True
+
+
+def test_daily_loss_floor_blocks_new_entries(tmp_path, monkeypatch):
+    monkeypatch.setattr(eg, "DAILY_LOSS_FLOOR_DOLLARS", 30.0)
+    events = [{"event_type": "entry_fill", "trade_id": "t1", "underlying": "SPY",
+               "option_id": "o1", "ts": _iso(NOW - timedelta(hours=2))},
+              {"event_type": "order_closed", "trade_id": "t1", "underlying": "SPY",
+               "option_id": "o1", "realized_pnl": -34.0,
+               "ts": _iso(NOW - timedelta(minutes=45))}]
+    payload = cv.run_convert(candidate_json=json.dumps(_candidate()),
+                             market_json=json.dumps(_market()),
+                             broker_json=json.dumps(_broker()),
+                             contract_json=json.dumps(_contract()),
+                             state_dir=str(tmp_path), write=False, journal=False,
+                             journal_events=events,
+                             journal_path=str(tmp_path / "j.jsonl"), now=NOW)
+    assert payload["converted"] is False
+    assert any(eg.DAILY_LOSS_FLOOR_VETO in str(r) for r in payload["reason_codes"])
+
+
+def test_daily_loss_floor_ignores_a_small_red(tmp_path, monkeypatch):
+    monkeypatch.setattr(eg, "DAILY_LOSS_FLOOR_DOLLARS", 30.0)
+    events = [{"event_type": "entry_fill", "trade_id": "t1", "underlying": "SPY",
+               "option_id": "o1", "ts": _iso(NOW - timedelta(hours=2))},
+              {"event_type": "order_closed", "trade_id": "t1", "underlying": "SPY",
+               "option_id": "o1", "realized_pnl": -10.0,
+               "ts": _iso(NOW - timedelta(minutes=45))}]
+    payload = cv.run_convert(candidate_json=json.dumps(_candidate()),
+                             market_json=json.dumps(_market()),
+                             broker_json=json.dumps(_broker()),
+                             contract_json=json.dumps(_contract()),
+                             state_dir=str(tmp_path), write=False, journal=False,
+                             journal_events=events,
+                             journal_path=str(tmp_path / "j.jsonl"), now=NOW)
+    assert payload["converted"] is True, payload["reason_codes"]
+
+
+def test_live_posture_pins_the_w33_fences():
+    """The pre-registered production posture. Reverting any of these is a deliberate act that
+    should have to update this test and cite new evidence (plan O2: re-evaluate at 20 new closed)."""
+    import data.odte_config as _oc
+    assert _oc.GREEN_REENTRY_AUTO_ARM is False
+    assert _oc.MIN_ENTRY_PREMIUM == 0.60
+    assert _oc.MIDDAY_FULL_TIER_AFTER_ET_HOUR == 13.0
+    assert _oc.DAILY_LOSS_FLOOR_DOLLARS == 30.0

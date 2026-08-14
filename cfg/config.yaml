@@ -1139,12 +1139,18 @@ odte:
                                   # false to disable.
   reentry_cooldown_minutes: 20    # min gap between a close and the next entry
   green_reentry_min_bp_multiple: 1.5  # re-entry after green armed when BP >= mult*cost
-  green_reentry_auto_arm: true    # post-green re-entry auto-arms on same-or-better tier
-                                  # (budget slot + cooldown + BP multiple still gate)
+  green_reentry_auto_arm: false   # OFF 2026-08-14 (W33 fence): post-green re-entries are -$49
+                                  # over 4 all-time and -$57 over the last three; 08-11 turned a
+                                  # +$22 day into -$12. Manual override (allow_reentry_after_green)
+                                  # still works. Re-evaluate at 20 new closed trades (plan O2).
   lease_ttl_seconds: 60           # default lease TTL (hard cap 60s stays in code)
   snapshot_ttl_seconds: 120       # market+broker snapshot freshness at authorize
   confirm_conversion_sla_seconds: 180  # CONFIRM_ENTRY -> disposition accountability SLA
   spread_cap_fraction: 0.25       # computed spread_cap_check ceiling in odte-convert
+  # ── W33 entry fences (2026-08-14, pre-registered; delete a key to roll it back) ──
+  min_entry_premium: 0.60         # all recent losers entered <= $0.50; every winner >= $0.64
+  midday_full_tier_after_et_hour: 13   # after 13:00 ET new entries need tier >= full (1w/6, -$49)
+  daily_loss_floor_dollars: 30    # no new entries once day net P/L <= -$30 (count cap != $ cap)
   watchdog_realert_minutes: 10    # re-alert when a candidate persists unchanged
   weekly_trade_target_min: 3
   weekly_trade_target_max: 4

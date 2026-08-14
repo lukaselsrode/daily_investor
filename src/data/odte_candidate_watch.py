@@ -582,6 +582,19 @@ def evaluate_candidate_watch(candidate: dict | None = None, *, market: dict | No
         reasons.append("late-day window requires A+ confirmation")
         return _payload(KEEP_WATCHING, cand, reasons, checks, now)
 
+    # W33 MIDDAY FENCE (2026-08-14, pre-registered): the 13:00-15:30 ET entry bucket is 1 win in 6
+    # for -$49, and b_plus is the tier that carried it. After the configured ET hour a NEW entry
+    # must be tier >= full; a_plus/full still pass, so a genuinely aligned afternoon tape trades.
+    # Code default 0 = fence off; cfg/config.yaml arms it at 13.
+    from data.odte_config import MIDDAY_FULL_TIER_AFTER_ET_HOUR
+    if MIDDAY_FULL_TIER_AFTER_ET_HOUR > 0 and now is not None:
+        et_now = now.astimezone(_ET)
+        if (et_now.hour + et_now.minute / 60.0) >= MIDDAY_FULL_TIER_AFTER_ET_HOUR \
+                and tier not in ("a_plus", "full"):
+            reasons.append(f"midday window (after {MIDDAY_FULL_TIER_AFTER_ET_HOUR:g}:00 ET) "
+                           "requires full-tier confirmation")
+            return _payload(KEEP_WATCHING, cand, reasons, checks, now)
+
     if day == "CHOP" and not a_plus and not b_plus:
         reasons.append("CHOP requires at least B+ ETF confirmation")
         return _payload(KEEP_WATCHING, cand, reasons, checks, now)

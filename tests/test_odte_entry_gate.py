@@ -447,7 +447,10 @@ def test_prior_day_green_scalp_does_not_lock():
 
 def test_red_close_does_not_lock():
     # Falsification: a completed LOSING trade is post-loss-cooldown territory, not green-day lockout.
-    events = _green_scalp_events(realized_pnl=-30.0)
+    # Red but strictly inside the daily loss floor — the OLD fixture value (-30.0) sat exactly on
+    # the W33 floor and started failing for the floor's reason, not this test's (green lockout).
+    red = -(eg.DAILY_LOSS_FLOOR_DOLLARS / 2) if eg.DAILY_LOSS_FLOOR_DOLLARS > 0 else -30.0
+    events = _green_scalp_events(realized_pnl=red)
     d = eg.build_entry_gate_decision(journal_events=events, now=_LOCK_NOW, **_spy_gates_kwargs())
     assert d["green_day_preservation"]["locked"] is False
     assert d["execution_allowed"] is True
@@ -603,7 +606,11 @@ def _auto_arm_kwargs(tier="full", ask=1.2):
     return kw
 
 
-def test_green_reentry_auto_arms_on_same_or_better_tier():
+def test_green_reentry_auto_arms_on_same_or_better_tier(monkeypatch):
+    # The auto-arm MECHANISM under test; the live posture is OFF since 2026-08-14 (W33 fence:
+    # post-green re-entries ran -$49/4), so pin it ON here the same way the kill-switch test
+    # pins it off.
+    monkeypatch.setattr(eg, "GREEN_REENTRY_AUTO_ARM", True)
     # Winning trade carries no tier (legacy journal) -> ranks "full"; a "full" candidate with a
     # budget slot, cooldown clear, and BP >= 1.5x cost auto-arms WITHOUT any manual flag.
     d = eg.build_entry_gate_decision(journal_events=_green_scalp_events(), now=_LOCK_NOW,
@@ -619,7 +626,11 @@ def test_green_reentry_auto_arms_on_same_or_better_tier():
     assert ev["allow_reentry_after_green"] is True and ev["tier"] == "full"
 
 
-def test_green_reentry_below_winner_tier_stays_locked():
+def test_green_reentry_below_winner_tier_stays_locked(monkeypatch):
+    # The auto-arm MECHANISM under test; the live posture is OFF since 2026-08-14 (W33 fence:
+    # post-green re-entries ran -$49/4), so pin it ON here the same way the kill-switch test
+    # pins it off.
+    monkeypatch.setattr(eg, "GREEN_REENTRY_AUTO_ARM", True)
     d = eg.build_entry_gate_decision(journal_events=_green_scalp_events(), now=_LOCK_NOW,
                                      **_auto_arm_kwargs(tier="b_plus"))
     assert d["execution_allowed"] is False
@@ -637,6 +648,10 @@ def test_green_reentry_auto_arm_kill_switch(monkeypatch):
 
 
 def test_green_reentry_auto_arm_blocked_by_budget_and_cooldown(monkeypatch):
+    # The auto-arm MECHANISM under test; the live posture is OFF since 2026-08-14 (W33 fence:
+    # post-green re-entries ran -$49/4), so pin it ON here the same way the kill-switch test
+    # pins it off.
+    monkeypatch.setattr(eg, "GREEN_REENTRY_AUTO_ARM", True)
     import data.odte_config as oc
     # Budget exhausted: seed DAILY_TRADE_BUDGET completed green trades.
     events = []
@@ -671,7 +686,11 @@ def test_green_reentry_auto_arm_blocked_by_budget_and_cooldown(monkeypatch):
     assert eg.COOLDOWN_VETO in d2["veto_reasons"]
 
 
-def test_green_reentry_auto_arm_bp_short_names_bp_veto():
+def test_green_reentry_auto_arm_bp_short_names_bp_veto(monkeypatch):
+    # The auto-arm MECHANISM under test; the live posture is OFF since 2026-08-14 (W33 fence:
+    # post-green re-entries ran -$49/4), so pin it ON here the same way the kill-switch test
+    # pins it off.
+    monkeypatch.setattr(eg, "GREEN_REENTRY_AUTO_ARM", True)
     # Everything qualifies except BP (ask 7.0 -> needs 1.5x$700=$1050 vs $250): the honest blocker.
     d = eg.build_entry_gate_decision(journal_events=_green_scalp_events(), now=_LOCK_NOW,
                                      **_auto_arm_kwargs(tier="a_plus", ask=7.0))

@@ -906,3 +906,41 @@ def test_written_candidate_gets_a_mint_clock_that_does_not_walk(tmp_path):
     anchored["updated_at"] = minted                      # refreshed "just now"
     age = cw._candidate_age_minutes(anchored, cw._parse_ts(minted))
     assert age is not None and age >= 44, age
+
+
+# --- W33 midday fence (2026-08-14, pre-registered) ---------------------------------------------
+
+def test_midday_fence_blocks_b_plus_after_the_hour(monkeypatch):
+    """13:00-15:30 ET entries ran 1 win in 6 for -$49, all carried by b_plus."""
+    monkeypatch.setattr("data.odte_config.MIDDAY_FULL_TIER_AFTER_ET_HOUR", 13.0)
+    from datetime import datetime, timezone
+    afternoon = datetime(2026, 6, 29, 17, 30, tzinfo=timezone.utc)   # 13:30 ET
+    m = _market(day_verdict="CHOP")
+    m["IWM"] = {"last": 298.0, "above_vwap": False, "orb_state": "inside"}   # -> b_plus tier
+    payload = cw.evaluate_candidate_watch({"ticker": "QQQ", "direction": "bullish"},
+                                          market=m, now=afternoon)
+    assert payload["decision"] == cw.KEEP_WATCHING
+    assert any("midday window" in r for r in payload["reasons"])
+
+
+def test_midday_fence_lets_a_full_tier_afternoon_trade(monkeypatch):
+    """A genuinely aligned afternoon tape must still trade — the fence is a tier floor, not a
+    trading-hours cutoff."""
+    monkeypatch.setattr("data.odte_config.MIDDAY_FULL_TIER_AFTER_ET_HOUR", 13.0)
+    from datetime import datetime, timezone
+    afternoon = datetime(2026, 6, 29, 17, 30, tzinfo=timezone.utc)   # 13:30 ET
+    payload = cw.evaluate_candidate_watch({"ticker": "QQQ", "direction": "bullish"},
+                                          market=_market(), now=afternoon)   # full alignment
+    assert payload["decision"] == cw.CONFIRM_ENTRY
+    assert payload["candidate"]["tier"] in ("a_plus", "full")
+
+
+def test_midday_fence_off_changes_nothing(monkeypatch):
+    monkeypatch.setattr("data.odte_config.MIDDAY_FULL_TIER_AFTER_ET_HOUR", 0.0)
+    from datetime import datetime, timezone
+    afternoon = datetime(2026, 6, 29, 17, 30, tzinfo=timezone.utc)
+    m = _market(day_verdict="CHOP")
+    m["IWM"] = {"last": 298.0, "above_vwap": False, "orb_state": "inside"}
+    payload = cw.evaluate_candidate_watch({"ticker": "QQQ", "direction": "bullish"},
+                                          market=m, now=afternoon)
+    assert payload["decision"] == cw.CONFIRM_ENTRY               # b_plus converts as before

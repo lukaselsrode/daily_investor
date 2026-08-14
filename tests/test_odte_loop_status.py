@@ -1161,7 +1161,12 @@ def test_reentry_override_gate_survives_green_lockout():
     assert r["posture"] == "EXECUTION_READY"
 
 
-def test_fresh_candidate_after_green_scalp_surfaces_with_budget_slot():
+def test_fresh_candidate_after_green_scalp_surfaces_with_budget_slot(monkeypatch):
+    # The auto-arm MECHANISM under test; the live posture is OFF since 2026-08-14 (W33 fence:
+    # post-green re-entries ran -$49/4), so pin it ON here the same way the kill-switch test
+    # pins it off.
+    import data.odte_config as _oc
+    monkeypatch.setattr(_oc, "GREEN_REENTRY_AUTO_ARM", True)
     # 2026-08-03 auto-arm: with a budget slot open and the cooldown clear, a post-green scan
     # candidate SURFACES (tier/BP enforced at the gate inside odte-convert) instead of being
     # consumed — on 2026-08-03 the old consumption made trade #2 structurally impossible.
@@ -1183,6 +1188,11 @@ def test_fresh_candidate_after_green_scalp_consumed_when_auto_arm_off(monkeypatc
 
 
 def test_fresh_candidate_after_green_scalp_consumed_when_budget_exhausted(monkeypatch):
+    # The auto-arm MECHANISM under test; the live posture is OFF since 2026-08-14 (W33 fence:
+    # post-green re-entries ran -$49/4), so pin it ON here the same way the kill-switch test
+    # pins it off.
+    import data.odte_config as _oc
+    monkeypatch.setattr(_oc, "GREEN_REENTRY_AUTO_ARM", True)
     import data.odte_config as oc
     journal = _green_scalp_journal()
     for i in range(2, oc.DAILY_TRADE_BUDGET + 1):
@@ -1206,7 +1216,12 @@ def test_fresh_candidate_after_green_scalp_consumed_when_budget_exhausted(monkey
     assert any("budget" in s for s in r2["reasons"])
 
 
-def test_confirmed_candidate_watch_after_green_scalp_surfaces():
+def test_confirmed_candidate_watch_after_green_scalp_surfaces(monkeypatch):
+    # The auto-arm MECHANISM under test; the live posture is OFF since 2026-08-14 (W33 fence:
+    # post-green re-entries ran -$49/4), so pin it ON here the same way the kill-switch test
+    # pins it off.
+    import data.odte_config as _oc
+    monkeypatch.setattr(_oc, "GREEN_REENTRY_AUTO_ARM", True)
     cdec = {"decision": "CONFIRM_ENTRY", "candidate": {"ticker": "SPY", "direction": "bullish"},
             "ts": _ts(minutes_ago=1)}
     r = ls.derive_loop_state(candidate_decision=cdec, journal_events=_green_scalp_journal(), now=NOW)
@@ -1215,7 +1230,12 @@ def test_confirmed_candidate_watch_after_green_scalp_surfaces():
     assert any("green_reentry_auto_arm" in s for s in r["reasons"])
 
 
-def test_below_winner_tier_watch_after_green_scalp_is_consumed():
+def test_below_winner_tier_watch_after_green_scalp_is_consumed(monkeypatch):
+    # The auto-arm MECHANISM under test; the live posture is OFF since 2026-08-14 (W33 fence:
+    # post-green re-entries ran -$49/4), so pin it ON here the same way the kill-switch test
+    # pins it off.
+    import data.odte_config as _oc
+    monkeypatch.setattr(_oc, "GREEN_REENTRY_AUTO_ARM", True)
     # The green trade's tier defaults to "full" (legacy journal, no tier events): a B+ watch ranks
     # below it and is consumed early — same-or-better tier only.
     import data.odte_journal as oj
@@ -1361,7 +1381,12 @@ def test_broker_flat_close_overrides_stale_live_read():
     assert r["posture"] != "STALE_DATA_BLOCKED"
 
 
-def test_todays_net_green_low_bp_day_ends_clean_flat_no_new_entry():
+def test_todays_net_green_low_bp_day_ends_clean_flat_no_new_entry(monkeypatch):
+    # The auto-arm MECHANISM under test; the live posture is OFF since 2026-08-14 (W33 fence:
+    # post-green re-entries ran -$49/4), so pin it ON here the same way the kill-switch test
+    # pins it off.
+    import data.odte_config as _oc
+    monkeypatch.setattr(_oc, "GREEN_REENTRY_AUTO_ARM", True)
     # The full acceptance scenario: two 1DTE scalps banked net green, broker flat, BP down to $7.60,
     # and a fresh candidate still on the board. The day must end FLAT_NO_TRADE with the green-day
     # lockout blocking re-entry — low BP and the 1DTE vehicle are neither errors nor violations.
@@ -1600,7 +1625,12 @@ def test_live_rails_computes_dollars_from_fresh_broker_truth():
     assert rails["max_debit_dollars"]["b_plus"] == round(oc.B_PLUS_DEBIT_FRACTION * 348.16, 2)
 
 
-def test_live_rails_green_reentry_state_reflects_journal():
+def test_live_rails_green_reentry_state_reflects_journal(monkeypatch):
+    # The auto-arm MECHANISM under test; the live posture is OFF since 2026-08-14 (W33 fence:
+    # post-green re-entries ran -$49/4), so pin it ON here the same way the kill-switch test
+    # pins it off.
+    import data.odte_config as _oc
+    monkeypatch.setattr(_oc, "GREEN_REENTRY_AUTO_ARM", True)
     r = ls.derive_loop_state(journal_events=_green_scalp_journal(), now=NOW)
     gr = r["live_rails"]["green_reentry"]
     assert gr["locked"] is True

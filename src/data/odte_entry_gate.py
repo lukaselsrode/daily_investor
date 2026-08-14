@@ -43,6 +43,7 @@ from typing import Any
 from core.paths import ODTE_REPORT_DIR
 from data.odte_config import (
     B_PLUS_MIN_VEHICLE_SCORE,
+    DAILY_LOSS_FLOOR_DOLLARS,
     GREEN_REENTRY_AUTO_ARM,
     GREEN_REENTRY_MIN_BP_MULTIPLE,
 )
@@ -55,7 +56,8 @@ DEFAULT_REQUIRED_GATES = ("day_regime", "vehicle", "directional_thesis", "accoun
 
 # Live re-validations the manager must still perform before acting, even when the gates pass. These
 # preserve Hermes autonomy (no `human_review` block) while recording the honest pre-trade checks.
-REQUIRED_CONFIRMATIONS = ("live_chain_recheck", "spread_cap_check", "budget_check")
+REQUIRED_CONFIRMATIONS = ("live_chain_recheck", "spread_cap_check", "budget_check",
+                          "premium_floor_check")
 
 _BULLISH = {"call", "bullish", "long_call", "calls", "up"}
 _BEARISH = {"put", "bearish", "long_put", "puts", "down"}
@@ -77,6 +79,9 @@ GREEN_REENTRY_BP_VETO = "insufficient_bp_for_green_reentry"
 # Daily trade cadence (2026-08-02 retune): a hard per-ET-day entry budget plus a cooldown after
 # every completed trade. Enforced from the day's journal events (see odte_journal.daily_trade_budget).
 DAILY_BUDGET_VETO = "daily_trade_budget_exhausted"
+# W33 fence (2026-08-14): the budget caps COUNT, not dollars — 08-11 stacked a -$34 stop onto a
+# +$22 day. Once the ET day's net realized P/L reaches -DAILY_LOSS_FLOOR_DOLLARS, no new entries.
+DAILY_LOSS_FLOOR_VETO = "daily_loss_floor_reached"
 COOLDOWN_VETO = "post_trade_cooldown_active"
 # A+ UNCAPPED (2026-08-06 user policy): an a_plus-tier candidate passes an exhausted daily
 # budget WHILE the day is net-green (budget.aplus_uncapped_active). Everything else about the
@@ -620,6 +625,12 @@ def build_entry_gate_decision(trigger: dict | None = None, candidate: dict | Non
                 veto_reasons.append(DAILY_BUDGET_VETO)
         elif budget.get("cooldown_active"):
             veto_reasons.append(COOLDOWN_VETO)
+        # W33 fence: a DOLLAR floor beside the count cap. No tier exception — an a_plus can bypass
+        # the count on a green day, but nothing trades through a -$30 day.
+        day_net = _num(budget.get("day_net_pnl"))
+        if (DAILY_LOSS_FLOOR_DOLLARS > 0 and day_net is not None
+                and day_net <= -DAILY_LOSS_FLOOR_DOLLARS):
+            veto_reasons.append(DAILY_LOSS_FLOOR_VETO)
 
     confirmation_states = {name: confirmations.get(name) for name in REQUIRED_CONFIRMATIONS}
     confirmations_ok = all(confirmation_states[name] is True for name in REQUIRED_CONFIRMATIONS)

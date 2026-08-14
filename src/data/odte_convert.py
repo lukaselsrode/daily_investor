@@ -208,9 +208,19 @@ def _computed_confirmations(candidate: dict, contract: dict, broker: dict,
     detail["budget_check"] = {"debit": debit, "buying_power": bp, "tier": tier,
                                "max_debit_fraction": frac}
 
+    # W33 FENCE (2026-08-14): cheap contracts are the loss engine — every recent loser entered at
+    # $0.45-0.50 premium, every winner >= $0.64, and at 1 contract the tier debit fraction halves
+    # nothing, so premium IS the size knob. Floor of 0 (the code default) keeps this check
+    # trivially true; cfg/config.yaml arms it at 0.60.
+    from data.odte_config import MIN_ENTRY_PREMIUM
+    premium_floor_check = bool(MIN_ENTRY_PREMIUM <= 0
+                               or (ask is not None and ask >= MIN_ENTRY_PREMIUM))
+    detail["premium_floor_check"] = {"ask": ask, "min_entry_premium": MIN_ENTRY_PREMIUM}
+
     return ({"live_chain_recheck": live_chain_recheck,
              "spread_cap_check": spread_cap_check,
-             "budget_check": budget_check}, detail)
+             "budget_check": budget_check,
+             "premium_floor_check": premium_floor_check}, detail)
 
 
 def _journal_no_trade(stage: str, reason_codes: list[str], candidate: dict,

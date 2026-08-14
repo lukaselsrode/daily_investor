@@ -100,7 +100,10 @@ FULL_ACCOUNT_PLAN_FIELDS = ("trigger", "invalidation", "target", "scratch_rail",
 
 # Final live confirmations required as EXPLICIT booleans on the gate (strings/missing fail closed).
 # Mirrors odte_entry_gate.REQUIRED_CONFIRMATIONS (kept literal here so this module stays leaf-pure).
-DEFAULT_REQUIRED_CONFIRMATIONS = ("live_chain_recheck", "spread_cap_check", "budget_check")
+# premium_floor_check joined 2026-08-14 (W33 fence) — the lease layer re-requires the SAME set the
+# entry gate does; a drift between the two lists is how a confirmation stops being enforced.
+DEFAULT_REQUIRED_CONFIRMATIONS = ("live_chain_recheck", "spread_cap_check", "budget_check",
+                                  "premium_floor_check")
 
 _BULLISH = {"call", "bullish", "long_call", "calls", "up"}
 _BEARISH = {"put", "bearish", "long_put", "puts", "down"}
