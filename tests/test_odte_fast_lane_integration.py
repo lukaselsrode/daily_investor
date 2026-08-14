@@ -94,7 +94,13 @@ def _events(tmp_path):
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
-def test_full_lifecycle_entry_to_giveback_exit(tmp_path):
+def test_full_lifecycle_entry_to_giveback_exit(tmp_path, monkeypatch):
+    # This test's whole scenario (queued fills, exit rows, giveback P&L) is built around ONE
+    # contract; its subject is the LIFECYCLE, not sizing. The tier-scaled sizing that made a
+    # full-tier tape mint quantity=2 (2026-08-14) is pinned off here and covered by its own tests
+    # in test_odte_execution_policy.py.
+    monkeypatch.setattr("data.odte_config.TIER_MAX_CONTRACTS_FULL", 1)
+    monkeypatch.setattr("data.odte_config.TIER_MAX_CONTRACTS_APLUS", 1)
     daemon, session = _setup_live(tmp_path)
     t0 = NOW
 

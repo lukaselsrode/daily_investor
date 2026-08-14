@@ -673,3 +673,67 @@ def test_ledger_lock_is_a_sidecar_not_the_ledger_itself(tmp_path):
     record_consumed(ledger, "L1")
     assert (tmp_path / ".consumed_leases.json.lock").exists()
     assert ledger.exists()
+
+
+# --- tier-scaled contract sizing (2026-08-14, operator decision) --------------------------------
+# At 1 contract the debit fractions never bind: a +20% winner moved the account +3.3% while tier
+# quality changed nothing about size. full/a_plus may now size up to their configured max WITHIN
+# the fraction and BP; b_plus (the tier that carried every recent loss) stays at
+# DEFAULT_MAX_CONTRACTS. Code default is 1 (off); cfg/config.yaml arms full/a_plus at 2.
+
+def _cheap_package(at, tier, ask=0.67):
+    # the contract rides INSIDE vehicle_score; _package takes it as a parameter
+    contract = dict(_fixture()["contract"])
+    contract["ask"] = ask                               # 0.67 = today's real SPY 776P premium
+    pkg = _package(at, contract=contract)
+    pkg["candidate_decision"]["candidate"]["tier"] = tier
+    pkg["gate"]["tier"] = tier
+    return pkg
+
+
+def test_full_tier_sizes_to_two_contracts_within_the_fraction(monkeypatch):
+    monkeypatch.setattr("data.odte_config.TIER_MAX_CONTRACTS_FULL", 2)
+    res = xp.authorize_entry(**_cheap_package(PROMOTION_AT, "full"), now=PROMOTION_AT, policy={})
+    assert res["authorized"] is True, res["reason_codes"]
+    lease = res["lease"]
+    assert lease["quantity"] == 2
+    bp = 400.34
+    assert lease["max_debit"] <= xp.DEFAULT_MAX_DEBIT_FRACTION * bp + 0.01
+    assert res["policy"]["max_contracts"] == 2
+
+
+def test_b_plus_stays_one_contract_even_when_affordable(monkeypatch):
+    """The loss-carrying tier NEVER sizes up, no matter the knobs or affordability."""
+    monkeypatch.setattr("data.odte_config.TIER_MAX_CONTRACTS_FULL", 2)
+    monkeypatch.setattr("data.odte_config.TIER_MAX_CONTRACTS_APLUS", 2)
+    pkg = _cheap_package(PROMOTION_AT, "b_plus", ask=0.30)   # b_plus fraction affords 4
+    res = xp.authorize_entry(**pkg, now=PROMOTION_AT, policy={})
+    assert res["authorized"] is True, res["reason_codes"]
+    assert res["lease"]["quantity"] == 1
+    assert res["policy"]["max_contracts"] == xp.DEFAULT_MAX_CONTRACTS
+
+
+def test_full_tier_caps_at_one_when_the_fraction_affords_only_one(monkeypatch):
+    """The fraction is the binding rail, not the tier ceiling — the incident-priced contract
+    (debit between the two caps) still sizes 1 at full tier."""
+    monkeypatch.setattr("data.odte_config.TIER_MAX_CONTRACTS_FULL", 2)
+    res = xp.authorize_entry(**_package(PROMOTION_AT), now=PROMOTION_AT, policy={})
+    assert res["authorized"] is True, res["reason_codes"]
+    assert res["lease"]["quantity"] == 1                # 2 x $168 would breach 0.60 x BP
+
+
+def test_knobs_off_is_exactly_the_old_behavior(monkeypatch):
+    monkeypatch.setattr("data.odte_config.TIER_MAX_CONTRACTS_FULL", 1)
+    monkeypatch.setattr("data.odte_config.TIER_MAX_CONTRACTS_APLUS", 1)
+    res = xp.authorize_entry(**_cheap_package(PROMOTION_AT, "full"), now=PROMOTION_AT, policy={})
+    assert res["authorized"] is True, res["reason_codes"]
+    assert res["lease"]["quantity"] == 1
+    assert res["policy"]["max_contracts"] == xp.DEFAULT_MAX_CONTRACTS
+
+
+def test_live_posture_pins_tier_scaled_sizing():
+    """Operator decision 2026-08-14; reverting must update this test and cite evidence."""
+    import data.odte_config as _oc
+    assert _oc.TIER_MAX_CONTRACTS_FULL == 2
+    assert _oc.TIER_MAX_CONTRACTS_APLUS == 2
+    assert xp.DEFAULT_MAX_CONTRACTS == 1               # b_plus/default ceiling unchanged

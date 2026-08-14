@@ -124,6 +124,15 @@ MIN_ENTRY_PREMIUM: float = _num("min_entry_premium", 0.0)
 MIDDAY_FULL_TIER_AFTER_ET_HOUR: float = _num("midday_full_tier_after_et_hour", 0.0)
 DAILY_LOSS_FLOOR_DOLLARS: float = _num("daily_loss_floor_dollars", 0.0)
 
+# ── Tier-scaled contract sizing (2026-08-14, operator decision) ────────────────
+# "A +20% trade moving the account +3.3% is the cap working against us." At 1 contract the tier
+# debit fractions (0.30/0.60) never bind, so tier quality changes nothing about size. These raise
+# the CONTRACT ceiling for the stronger tiers only — b_plus (the tier that carried every recent
+# loss) stays at DEFAULT_MAX_CONTRACTS=1. Quantity is still capped by the tier debit fraction and
+# buying power at authorize time; code default 1 = feature off, YAML arms it.
+TIER_MAX_CONTRACTS_FULL: int = _int("tier_max_contracts_full", 1)
+TIER_MAX_CONTRACTS_APLUS: int = _int("tier_max_contracts_aplus", 1)
+
 # ── Watchdog ───────────────────────────────────────────────────────────────────
 WATCHDOG_REALERT_MINUTES: int = _int("watchdog_realert_minutes", 10)
 

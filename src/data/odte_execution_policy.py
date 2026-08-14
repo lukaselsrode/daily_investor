@@ -614,6 +614,7 @@ def authorize_entry(*, gate: dict, candidate_decision: dict, vehicle_score: dict
     max_premium_loss: float | None = None
     chase_ceiling: float | None = None
     partial_frac: float | None = None
+    tier_max = DEFAULT_MAX_CONTRACTS
     if risk_mode == "FULL_ACCOUNT_A_PLUS":
         plan = _dict(pol.get("management_plan"))
         for field in FULL_ACCOUNT_PLAN_FIELDS:
@@ -627,14 +628,32 @@ def authorize_entry(*, gate: dict, candidate_decision: dict, vehicle_score: dict
         if max_premium_loss is not None and debit is not None and debit > max_premium_loss:
             reasons.append("debit_exceeds_accepted_max_loss")
     else:
-        if quantity > DEFAULT_MAX_CONTRACTS:
-            reasons.append("quantity_exceeds_policy")
         if gate_tier and tier and gate_tier != tier:
             reasons.append("tier_mismatch")
         base_frac = B_PLUS_DEBIT_FRACTION if tier == "b_plus" else DEFAULT_MAX_DEBIT_FRACTION
         frac = _num(pol.get("max_debit_fraction"))
         # Policy can only TIGHTEN the debit cap, never widen it.
         partial_frac = min(frac, base_frac) if frac else base_frac
+        # TIER-SCALED SIZING (2026-08-14, operator decision). At 1 contract the debit fractions
+        # never bind, so a +20% winner moved the account +3.3% — tier quality changed nothing
+        # about size. full/a_plus may now size up to their configured max, WITHIN the fraction
+        # and buying power; b_plus (the tier that carried every recent loss) stays at
+        # DEFAULT_MAX_CONTRACTS. The policy's `quantity` remains the requested base; sizing only
+        # ever raises it when the tier ceiling and affordability both allow, and the lease still
+        # carries the exact resulting quantity as a MAXIMUM downstream.
+        from data.odte_config import TIER_MAX_CONTRACTS_APLUS, TIER_MAX_CONTRACTS_FULL
+        if tier == "full":
+            tier_max = max(DEFAULT_MAX_CONTRACTS, TIER_MAX_CONTRACTS_FULL)
+        elif tier == "a_plus":
+            tier_max = max(DEFAULT_MAX_CONTRACTS, TIER_MAX_CONTRACTS_APLUS)
+        if (tier_max > quantity and limit_price and limit_price > 0
+                and bp is not None and bp > 0):
+            affordable = int((partial_frac * bp) // (limit_price * 100.0))
+            if affordable > quantity:
+                quantity = min(tier_max, affordable)
+                debit = round(quantity * limit_price * 100.0, 2)
+        if quantity > tier_max:
+            reasons.append("quantity_exceeds_policy")
         # CHASE BAND: the fill ceiling is the CONFIRM_ENTRY anchor plus a bounded band — an entry
         # may pay up to anchor*(1+band), never more. Re-anchoring at confirmation (not precompute)
         # is what stops the rail from vetoing entries whose premium rose BECAUSE the thesis
@@ -653,7 +672,7 @@ def authorize_entry(*, gate: dict, candidate_decision: dict, vehicle_score: dict
     resolved_policy = {
         "risk_mode": risk_mode,
         "ttl_seconds": ttl_seconds,
-        "max_contracts": (quantity if risk_mode == "FULL_ACCOUNT_A_PLUS" else DEFAULT_MAX_CONTRACTS),
+        "max_contracts": (quantity if risk_mode == "FULL_ACCOUNT_A_PLUS" else tier_max),
         "max_debit_fraction": partial_frac,
         "tier": tier,
         "chase_band_fraction": (None if risk_mode == "FULL_ACCOUNT_A_PLUS" else CHASE_BAND_FRACTION),

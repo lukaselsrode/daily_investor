@@ -1151,6 +1151,8 @@ odte:
   min_entry_premium: 0.60         # all recent losers entered <= $0.50; every winner >= $0.64
   midday_full_tier_after_et_hour: 13   # after 13:00 ET new entries need tier >= full (1w/6, -$49)
   daily_loss_floor_dollars: 30    # no new entries once day net P/L <= -$30 (count cap != $ cap)
+  tier_max_contracts_full: 2      # 2026-08-14: full-tier tapes may size 2 contracts (fraction caps)
+  tier_max_contracts_aplus: 2     # a_plus likewise; b_plus stays 1 (DEFAULT_MAX_CONTRACTS)
   watchdog_realert_minutes: 10    # re-alert when a candidate persists unchanged
   weekly_trade_target_min: 3
   weekly_trade_target_max: 4
