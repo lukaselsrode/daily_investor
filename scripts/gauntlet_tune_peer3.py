@@ -108,9 +108,16 @@ def main() -> None:
     print(staged.trace_df().to_string(index=False), flush=True)
     print(
         f"\nrobust score (search matrix): {staged.baseline_score:.4f} (baseline) → "
-        f"{staged.final_score:.4f} (final); accepted clusters: "
+        f"{staged.final_score:.4f} (final); promoted clusters: "
         f"{staged.accepted_clusters or 'none'}"
     )
+    print(f"noise band: {staged.noise_band:.4f} — a promotion must clear the largest gain "
+          f"posted by a cluster that did NOT replicate")
+    if staged.promotion_blocked_reason:
+        print(f"\n🚫 ANTI-RATCHET BLOCKED THE PROMOTION — {staged.promotion_blocked_reason}")
+    elif not staged.accepted_clusters:
+        print("\nNo cluster cleared replication + the noise band — the incumbent holds.")
+    print(f"promotable: {staged.promotable}")
 
     incumbent = _current_params().astype(float)
     print(f"\nincumbent weights: {_weights(incumbent)}")

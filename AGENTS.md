@@ -106,6 +106,49 @@ Services are thin wrappers — they do not contain business logic. They orchestr
 
 ---
 
+## The Promotion Ladder — how a config change earns its way into cfg/config.yaml
+
+Every change to `cfg/config.yaml` climbs all of this. No step is skippable, and "it is
+obviously better" is not a step. Five independent searches (2026-08) all held at the
+incumbent; the ladder exists because each one looked like a winner before the last rung.
+
+- **Tier 0 — Generation.** DE, IC study, random search, intuition. Anything goes, and
+  **nothing from this tier is ever a claim.** The 2026-08-14 quality-component study had
+  t-stats of 8-11, stable across halves, and still lost the system test.
+- **Tier 1 — Marginals vs a FROZEN incumbent.** `run_staged_tune` tunes every cluster
+  against the same starting vector, never an evolving one. Coordinate ascent let stage 1
+  move momentum 0.10 → 0.85 with the other weights frozen and every later stage inherited it.
+- **Tier 2 — Replication.** The winner must also beat the incumbent on a disjoint seed draw.
+- **Tier 3 — Noise band.** The winner's gain must exceed the largest gain posted by a
+  cluster that did NOT replicate. Those are measured noise draws, they are free, and they
+  are the price of taking a max over N clusters. `active_breadth_turnover` once posted the
+  single largest gain of a whole gauntlet and was pure noise.
+- **Tier 4 — System confirmation.** Standard matrix, temporally-disjoint holdout, judged on
+  **robust score — never validation excess.** A tie loses. In the quality-variant gauntlet
+  the arm with the BEST validation excess (+19.8% vs +13.7%) had the WORST robust score.
+- **Tier 5 — Controls.** Weight changes must beat the equal-weight control
+  (`validate_full_windowed`, automatic). Factor-internals changes are controlled by the
+  unmodified incumbent.
+- **Tier 6 — Scale coherence.** If score distributions move, percentile-remap every absolute
+  threshold **on the population its gate actually filters** (entry gates on the
+  liquidity-eligible subset, not the full universe), then re-verify BOUNDS containment.
+
+**Anti-ratchet.** A run's final vector is re-scored against the ORIGINAL incumbent before
+promotion; if it does not beat it the promotion is withdrawn and the incumbent returned
+unchanged. Without this, running rounds back-to-back re-baselines against a vector that was
+itself selected as a maximum, and walks uphill on noise.
+
+**Re-tune on triggers, not schedules.** Re-tune when the ENGINE changes (peer-3 shipping was
+a legitimate trigger), when new data lands, or on a documented regime break. Never "it has
+been a month" — with no trigger you are resampling the same noise until a draw clears.
+
+**IC is not P&L here.** Three separate signal-level winners (`quality_low_vol_blend`,
+`momentum_residual_blend`, the 4-component quality blend) all failed the system test. Rank
+correlation scores the whole cross-section; P&L only sees the dozen names that clear the
+entry gate and get sized. Treat every IC study as a Tier 0 generator.
+
+---
+
 ## Long-Running Tune Rules
 
 - **Announce the cost before spending it.** `tuning.profiles.projected_tune_cost` multiplies `n_windows × weight_samples` (the real driver — `total_simulations` alone undercounts by up to 40×) by the DE evaluation budget. `auto-tune-all` prints it before loading data. For reference: `--profile standard --days 730` is ~2.4M sim-runs *per cluster*, ~14M across six stages — a multi-day job, not an overnight one. A 2026-08-06 run was killed at 39 hours having not finished its first cluster.

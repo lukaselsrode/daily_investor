@@ -505,15 +505,22 @@ def test_checkpoint_written_per_stage_and_resume_skips_completed(monkeypatch, tm
 
     saved = ck.load("t1")
     assert saved is not None
-    assert saved.stage_index == 1                     # first cluster completed
-    assert [s["cluster"] for s in saved.stages] == ["active_momentum_engine"]
+    assert saved.stage_index == 1                     # first marginal completed
+    # Mid-run the checkpoint carries MARGINALS; accept/reject stages are only decided
+    # once every cluster has run and the noise band can be measured.
+    assert list(saved.marginals) == ["active_momentum_engine"]
+    assert saved.stages == []
     assert calls == ["active_momentum_engine", "active_exit_ladder"]
 
     # Resume: the completed cluster must NOT be re-tuned.
     boom["active_exit_ladder"] = False
     calls.clear()
     out = st.run_staged_tune(precomp, clusters, run_matrix, checkpoint="t1", resume=True)
-    assert calls == ["active_exit_ladder"], "resume re-ran an already-completed stage"
+    # The completed marginal must NOT be re-tuned; the only extra call is the joint
+    # pass over the promoted clusters (a combined "a+b" preset), which is not a marginal.
+    assert "active_momentum_engine" not in calls, "resume re-ran a completed marginal"
+    assert calls[0] == "active_exit_ladder"
+    assert all("+" in c for c in calls[1:]), f"unexpected extra marginal(s): {calls[1:]}"
     assert [s.cluster for s in out.stages] == clusters
     np.testing.assert_allclose(out.final_params, cand)
 
@@ -645,6 +652,258 @@ def test_validate_full_windowed_falls_back_with_residual_overlap_note(monkeypatc
     assert seeds_used == [7 + st._VALIDATION_SEED_OFFSET], "seeds still disjoint in fallback"
     assert horizons == [80]
     assert "RESIDUAL OVERLAP" in out["validation_note"]
+
+
+# ---------------------------------------------------------------------------
+# Fix 9 — Tier 3 noise band + anti-ratchet (2026-08-14 promotion ladder)
+#
+# Promoting "any cluster that beats the incumbent" takes a max over N noisy draws, so
+# with effect sizes at the noise floor it promotes noise nearly every round. The
+# non-replicating clusters from the SAME run measure how big noise is; a winner must
+# clear that. And a run's final vector must beat the ORIGINAL incumbent, not a
+# re-baselined one, or repeated rounds ratchet uphill on noise.
+# ---------------------------------------------------------------------------
+
+def _band_scaffold(monkeypatch, per_cluster):
+    """per_cluster: {name: (tuning_score, disjoint_check_score)}; baseline scores 0.10."""
+    import tuning.constants as tc
+    import tuning.interaction_screen as iscr
+    import tuning.robust_scan as rs
+    import tuning.staged_tune as st
+    from tuning.interaction_screen import MarginalResult
+
+    base = tc._current_params().copy()
+    train_obj = SimpleNamespace(tag="train")
+    monkeypatch.setattr(st, "_slice_window_precomp", lambda precomp, s: train_obj)
+
+    # Each cluster gets its own signature slot value so fake_scan can identify it.
+    sigs = {name: 6 + i for i, name in enumerate(per_cluster)}
+
+    def fake_scan(precomp, params=None, run_matrix=None, scope="active_sleeve_compounding",
+                  regime_scope="all", **kw):
+        shifted = int(run_matrix[0]["seed"]) >= st._VALIDATION_SEED_OFFSET
+        for name, slot in sigs.items():
+            if abs(float(params[slot]) - 99.0) < 1e-9:
+                tune_s, check_s = per_cluster[name]
+                return SimpleNamespace(overall_robust_score=check_s if shifted else tune_s)
+        return SimpleNamespace(overall_robust_score=0.10)      # the incumbent
+
+    monkeypatch.setattr(rs, "run_robust_scan", fake_scan)
+
+    def fake_tune_subset(precomp, preset, run_matrix, scope, maxiter, popsize,
+                         seed=42, baseline=None, regime_scope="all",
+                         checkpoint_cb=None, x0=None, max_seconds=None):
+        p = np.asarray(baseline, dtype=float).copy()
+        if preset in sigs:                       # a marginal
+            p[sigs[preset]] = 99.0
+            return MarginalResult(name=preset, score=per_cluster[preset][0],
+                                  params=p, active=[sigs[preset]])
+        # joint pass: mark every member, score as the best member
+        members = [m for m in preset.split("+") if m in sigs]
+        for m in members:
+            p[sigs[m]] = 99.0
+        return MarginalResult(name=preset,
+                              score=max(per_cluster[m][0] for m in members),
+                              params=p, active=[sigs[m] for m in members])
+
+    monkeypatch.setattr(iscr, "_tune_subset", fake_tune_subset)
+    return st, base
+
+
+def test_noise_band_blocks_a_win_inside_the_measured_band(monkeypatch):
+    """A cluster that replicates but only matches what noise produces is NOT promoted."""
+    st, _base = _band_scaffold(monkeypatch, {
+        # winner: replicates (check 0.16 > 0.10) but gain 0.04 == the noise draw below
+        "active_momentum_engine": (0.14, 0.16),
+        # noise: big tuning gain (+0.20) that does NOT replicate (check 0.05 < 0.10)
+        "active_exit_ladder":     (0.30, 0.05),
+    })
+    out = st.run_staged_tune(
+        SimpleNamespace(prices=np.zeros((100, 2))),
+        ["active_momentum_engine", "active_exit_ladder"],
+        [{"horizon_days": 20, "seed": 1, "n_windows": 3}],
+    )
+    assert out.noise_band == pytest.approx(0.20), "band = largest non-replicating gain"
+    mom = next(s for s in out.stages if s.cluster == "active_momentum_engine")
+    assert mom.delta == pytest.approx(0.04)
+    assert mom.cleared_band is False
+    assert mom.accepted is False, "a gain inside the measured noise band must not promote"
+    assert out.accepted_clusters == []
+
+
+def test_noise_band_allows_a_win_that_clears_it(monkeypatch):
+    st, _base = _band_scaffold(monkeypatch, {
+        "active_momentum_engine": (0.60, 0.55),   # gain +0.50, replicates
+        "active_exit_ladder":     (0.15, 0.05),   # gain +0.05, noise
+    })
+    out = st.run_staged_tune(
+        SimpleNamespace(prices=np.zeros((100, 2))),
+        ["active_momentum_engine", "active_exit_ladder"],
+        [{"horizon_days": 20, "seed": 1, "n_windows": 3}],
+    )
+    assert out.noise_band == pytest.approx(0.05)
+    assert out.accepted_clusters == ["active_momentum_engine"]
+    assert out.beats_original is True
+    assert out.promotable is True
+
+
+def test_marginals_are_tuned_against_the_frozen_incumbent(monkeypatch):
+    """No path dependence: every cluster sees the SAME baseline, not an evolving one."""
+    import tuning.constants as tc
+    st, _base = _band_scaffold(monkeypatch, {
+        "active_momentum_engine": (0.60, 0.55),
+        "active_exit_ladder":     (0.50, 0.45),
+    })
+    seen_baselines = []
+    import tuning.interaction_screen as iscr
+    inner = iscr._tune_subset
+
+    def spy(precomp, preset, *a, baseline=None, **kw):
+        if "+" not in preset:
+            seen_baselines.append(np.asarray(baseline, dtype=float).copy())
+        return inner(precomp, preset, *a, baseline=baseline, **kw)
+
+    monkeypatch.setattr(iscr, "_tune_subset", spy)
+    st.run_staged_tune(
+        SimpleNamespace(prices=np.zeros((100, 2))),
+        ["active_momentum_engine", "active_exit_ladder"],
+        [{"horizon_days": 20, "seed": 1, "n_windows": 3}],
+    )
+    assert len(seen_baselines) == 2
+    np.testing.assert_allclose(seen_baselines[0], seen_baselines[1],
+                               err_msg="second marginal saw a MUTATED baseline (path bias)")
+    np.testing.assert_allclose(seen_baselines[0], tc._current_params())
+
+
+def test_anti_ratchet_blocks_promotion_that_loses_to_the_original(monkeypatch):
+    """A stage can clear replication + band and STILL fail to beat the starting config."""
+    import tuning.robust_scan as rs
+    st, _base = _band_scaffold(monkeypatch, {
+        "active_momentum_engine": (0.60, 0.55),
+        "active_exit_ladder":     (0.15, 0.05),
+    })
+    # Re-point the disjoint-seed scan so the FINAL vector scores below the incumbent's
+    # 0.10 when it is re-checked at the end (simulating a gain that does not survive).
+    real = rs.run_robust_scan
+    calls = {"n": 0}
+
+    def late_fail(precomp, params=None, run_matrix=None, **kw):
+        shifted = int(run_matrix[0]["seed"]) >= st._VALIDATION_SEED_OFFSET
+        if shifted:
+            calls["n"] += 1
+            if calls["n"] >= 3:            # 1: baseline, 2: marginal check, 3+: final
+                return SimpleNamespace(overall_robust_score=0.01)
+        return real(precomp, params=params, run_matrix=run_matrix, **kw)
+
+    monkeypatch.setattr(rs, "run_robust_scan", late_fail)
+    out = st.run_staged_tune(
+        SimpleNamespace(prices=np.zeros((100, 2))),
+        ["active_momentum_engine", "active_exit_ladder"],
+        [{"horizon_days": 20, "seed": 1, "n_windows": 3}],
+    )
+    assert out.beats_original is False
+    assert out.accepted_clusters == [], "promotion must be withdrawn"
+    assert out.promotable is False
+    assert "ORIGINAL incumbent" in out.promotion_blocked_reason
+    np.testing.assert_allclose(out.final_params, _base,
+                               err_msg="a blocked run must return the incumbent unchanged")
+
+
+# ---------------------------------------------------------------------------
+# Fix 8 — equal-weight control: a proposed WEIGHTING must beat the naive baseline
+#         (2026-08-13: the live incumbent scored 0.2387 vs equal-weight 0.2379 — a
+#          draw — while every DE-tuned weighting scored strictly below both)
+# ---------------------------------------------------------------------------
+
+def _patch_control_scan(monkeypatch, cand_score, control_score):
+    """Scan returning one score for the candidate weighting and another for uniform.
+
+    The OOS gate is stubbed to PASS so `confirmed` reflects the weight control alone —
+    otherwise a real run_backtest_report failure makes confirmed False for an unrelated
+    reason and the test passes vacuously.
+    """
+    import backtesting.simulator as bsim
+    import backtesting.validator as bval
+    import tuning.robust_scan as rs
+    import tuning.staged_tune as st
+
+    monkeypatch.setattr(st, "_slice_window_precomp", lambda precomp, s: precomp)
+    monkeypatch.setattr(bsim, "run_backtest_report", lambda *a, **k: SimpleNamespace(tag="rep"))
+    monkeypatch.setattr(
+        bval, "WalkForwardValidator",
+        lambda: SimpleNamespace(validate_report=lambda rep, bp: (True, [])),
+    )
+
+    scanned = []   # one entry per robust scan: the normalized weight vector it saw
+
+    def fake_scan(precomp, params=None, run_matrix=None, scope="active_sleeve_compounding", **kw):
+        w = np.asarray(params[:4], dtype=float)
+        norm = w / max(w.sum(), 1e-9)
+        scanned.append(norm)
+        is_uniform = float(np.max(np.abs(norm - 0.25))) <= 1e-9
+        return SimpleNamespace(
+            overall_robust_score=control_score if is_uniform else cand_score,
+            overfit_warning_score=lambda: 0.0,
+            horizon_heatmap_df=lambda: None,
+        )
+
+    monkeypatch.setattr(rs, "run_robust_scan", fake_scan)
+    return st, scanned
+
+
+def _tilted(n=16):
+    p = np.zeros(n)
+    p[:4] = [0.25, 0.40, 0.25, 0.10]      # the live incumbent's tilt
+    return p
+
+
+def test_weighting_that_loses_to_equal_weight_fails_confirmation(monkeypatch):
+    st, scanned = _patch_control_scan(monkeypatch, cand_score=0.10, control_score=0.20)
+    out = st.validate_full_windowed(
+        SimpleNamespace(prices=np.zeros((100, 2))), _tilted(),
+        run_matrix=[{"horizon_days": 20, "seed": 7, "n_windows": 3}],
+    )
+    assert len(scanned) == 2, "candidate AND equal-weight control must both be scored"
+    assert out["weight_control_passed"] is False
+    assert out["confirmed"] is False, "a weighting that loses to uniform must not confirm"
+    assert any("equal weights" in r for r in out["oos_reasons"])
+    assert out["control_robust_score"] == pytest.approx(0.20)
+
+
+def test_weighting_that_beats_equal_weight_confirms(monkeypatch):
+    st, scanned = _patch_control_scan(monkeypatch, cand_score=0.30, control_score=0.20)
+    out = st.validate_full_windowed(
+        SimpleNamespace(prices=np.zeros((100, 2))), _tilted(),
+        run_matrix=[{"horizon_days": 20, "seed": 7, "n_windows": 3}],
+    )
+    assert len(scanned) == 2
+    assert out["weight_control_passed"] is True
+    assert out["confirmed"] is True
+    assert "beats" in out["weight_control"]
+
+
+def test_uniform_candidate_skips_the_control(monkeypatch):
+    """Nothing to justify — don't burn a full robust scan on it."""
+    st, scanned = _patch_control_scan(monkeypatch, cand_score=0.30, control_score=0.20)
+    p = np.zeros(16)
+    p[:4] = 0.25
+    out = st.validate_full_windowed(
+        SimpleNamespace(prices=np.zeros((100, 2))), p,
+        run_matrix=[{"horizon_days": 20, "seed": 7, "n_windows": 3}],
+    )
+    assert len(scanned) == 1, "uniform candidate must not trigger a second (control) scan"
+    assert out["weight_control_passed"] is True
+    assert "skipped" in out["weight_control"]
+
+
+def test_control_isolates_the_weighting_only(monkeypatch):
+    """The control differs from the candidate ONLY in slots 0-3."""
+    import tuning.staged_tune as st
+
+    p = np.arange(60, dtype=float)
+    ctrl = st._uniform_weight_variant(p)
+    np.testing.assert_allclose(ctrl[4:], p[4:], err_msg="control altered a non-weight slot")
+    np.testing.assert_allclose(ctrl[:4], [0.25] * 4)
 
 
 # ---------------------------------------------------------------------------

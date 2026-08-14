@@ -105,11 +105,29 @@ PARAM_NAMES: list[str] = [
     "mom_r5d",          # 15  (new in this consolidation — was implicit in v2)
 ]
 
+    # Score weights (slots 0-3) are SYMMETRIC (0.0, 1.0) — 2026-08-13.
+    #
+    # They were (0.05,0.80)/(0.05,0.60)/(0.00,0.40)/(0.00,0.90): momentum had been widened
+    # 0.40->0.90 for the active_alpha_engine preset and income was never rebalanced, so the
+    # box encoded an unintended prior. Because the simulator normalizes (sw = raw/sum), a
+    # Latin-hypercube draw over that box averaged ~32% momentum vs ~14% income — the search
+    # started momentum-led before seeing any data, and the DE-tuned income-led config of
+    # 2026-06-28 (raw income 0.5747) was not even expressible. Same bug class that silently
+    # reverted sell_weak_below in June: a bound excluding a previously-validated value.
+    #
+    # Symmetric and non-negative is the right shape: only the RATIO matters after
+    # normalization, every ratio is now reachable without cornering, and keeping weights
+    # >= 0 keeps the composite a convex combination of factors that each live in
+    # [-1, 1.5] — which is what makes the absolute thresholds (metric_threshold, the entry
+    # ladder, the sell floors) mean anything. Negative weights would silently rescale all
+    # of them. NOTE: widening the box does NOT imply a better weighting exists — the
+    # 2026-08-13 control run found equal weights tie the incumbent and every tuned
+    # weighting lost (see the equal-weight control gate in staged_tune).
 BOUNDS: list[tuple[float, float]] = [
-    (0.05, 0.80),  # 0 sw_value
-    (0.05, 0.60),  # 1 sw_quality
-    (0.00, 0.40),  # 2 sw_income
-    (0.00, 0.90),  # 3 sw_momentum (widened 0.40->0.90 for momentum-alpha engine; see active_alpha_engine preset)
+    (0.00, 1.00),  # 0 sw_value
+    (0.00, 1.00),  # 1 sw_quality
+    (0.00, 1.00),  # 2 sw_income
+    (0.00, 1.00),  # 3 sw_momentum
     (RISK_LIMITS["min_index_pct"], 0.95),  # 4 index_pct
     (0.30, 1.50),  # 5 metric_threshold (upper bound = scoring clamp_high 1.5: composite
                    #   scores cannot exceed it, so the old 3.00 ceiling let the tuner

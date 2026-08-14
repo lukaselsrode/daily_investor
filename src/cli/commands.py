@@ -358,7 +358,14 @@ def cmd_auto_tune_all(
     print("\nStaged trace:")
     print(staged.trace_df().to_string(index=False))
     print(f"\nrobust score: {staged.baseline_score:.4f} (baseline) → {staged.final_score:.4f} "
-          f"(final); accepted clusters: {staged.accepted_clusters or 'none'}")
+          f"(final); promoted clusters: {staged.accepted_clusters or 'none'}")
+    print(f"noise band: {staged.noise_band:.4f} "
+          f"(largest gain from a cluster that did NOT replicate — a promotion must clear it)")
+    if staged.promotion_blocked_reason:
+        print(f"\n🚫 PROMOTION BLOCKED — {staged.promotion_blocked_reason}")
+        print("   Returning the incumbent unchanged.")
+    elif not staged.accepted_clusters:
+        print("\nNo cluster cleared replication + the noise band — the incumbent holds.")
 
     print("\nValidating (full windowed confirmation) …")
     v = validate_full_windowed(precomp, staged.final_params, run_matrix=run_matrix,

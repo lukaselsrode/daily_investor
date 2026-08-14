@@ -55,6 +55,11 @@ class StageResult:
     score_before: float
     score_after: float
     accepted: bool
+    # Tier 3 diagnostics: the raw gain this stage proposed, and whether it cleared the
+    # noise band measured from the stages that did NOT win.
+    delta: float = 0.0
+    noise_band: float = 0.0
+    cleared_band: bool = True
 
 
 @dataclass
@@ -64,6 +69,15 @@ class StagedTuneResult:
     final_score: float = 0.0
     baseline_score: float = 0.0
     accepted_clusters: list[str] = field(default_factory=list)
+    # Tier 3: the largest gain posted by a cluster that did NOT replicate — i.e. how big
+    # "nothing" measures on this substrate. A promoted cluster must clear it.
+    noise_band: float = 0.0
+    # Anti-ratchet: the final vector re-scored against the ORIGINAL incumbent on the
+    # disjoint-seed matrix. None when the run made no change (nothing to check).
+    original_score: float | None = None
+    final_vs_original: float | None = None
+    beats_original: bool = True
+    promotion_blocked_reason: str = ""
 
     def trace_df(self):
         import pandas as pd
@@ -73,11 +87,20 @@ class StagedTuneResult:
                 "score before": round(s.score_before, 4),
                 "score after": round(s.score_after, 4),
                 "Δ": round(s.score_after - s.score_before, 4),
-                "result": "✅ accepted" if s.accepted else "— kept prior",
+                "noise band": round(s.noise_band, 4),
+                "result": (
+                    "✅ accepted" if s.accepted
+                    else ("✗ inside noise band" if not s.cleared_band else "— kept prior")
+                ),
             }
             for i, s in enumerate(self.stages)
         ]
         return pd.DataFrame(rows)
+
+    @property
+    def promotable(self) -> bool:
+        """True when this run produced a change that cleared every gate."""
+        return bool(self.accepted_clusters) and self.beats_original
 
 
 def _robust_score(precomp, params, run_matrix, scope, regime_scope: str = "all") -> float:
@@ -169,42 +192,45 @@ def run_staged_tune(
 
     out = StagedTuneResult(final_params=baseline, final_score=0.0, baseline_score=0.0)
 
+    # The ORIGINAL incumbent is frozen for the whole run: every cluster is a marginal
+    # against IT, never against an evolving vector (see the docstring's path-bias note),
+    # and the anti-ratchet check at the end re-scores against it too.
+    original = baseline.copy()
+    marginals: dict[str, dict] = {}
+
     resumed_stages = 0
     if ckpt is not None and ckpt.stage_index > 0:
-        # Restore everything the completed stages produced.
-        baseline = ckpt.baseline_array()
         orig_score = ckpt.orig_score
-        cur_score = ckpt.cur_score
         baseline_check = ckpt.baseline_check
-        out.stages = [StageResult(**s) for s in ckpt.stages]
+        marginals = dict(ckpt.marginals or {})
         resumed_stages = int(ckpt.stage_index)
         logger.info(
-            "staged tune: resuming '%s' after %d completed stage(s) "
-            "(score %.4f, updated %s)",
-            checkpoint, resumed_stages, cur_score, ckpt.updated_at,
+            "staged tune: resuming '%s' after %d completed marginal(s) (updated %s)",
+            checkpoint, resumed_stages, ckpt.updated_at,
         )
     else:
-        orig_score = _robust_score(precomp, baseline, run_matrix, scope, regime_scope)
-        cur_score = orig_score
-        baseline_check = _robust_score(precomp, baseline, check_matrix, scope, regime_scope)
+        orig_score = _robust_score(precomp, original, run_matrix, scope, regime_scope)
+        baseline_check = _robust_score(precomp, original, check_matrix, scope, regime_scope)
     out.baseline_score = orig_score
-    out.final_score = cur_score
+    out.final_score = orig_score
 
-    def _persist(*, stage_index: int, de_state: dict | None = None, joint_done: bool = False) -> None:
+    def _persist(*, stage_index: int, de_state: dict | None = None,
+                 joint_done: bool = False) -> None:
         if ckpt is None:
             return
         ckpt.stage_index = stage_index
-        ckpt.baseline = [float(v) for v in np.asarray(baseline).ravel()]
-        ckpt.cur_score = float(cur_score)
+        ckpt.baseline = [float(v) for v in np.asarray(original).ravel()]
+        ckpt.cur_score = float(out.final_score)
         ckpt.baseline_check = float(baseline_check)
         ckpt.orig_score = float(orig_score)
         ckpt.stages = [vars(s).copy() for s in out.stages]
+        ckpt.marginals = marginals
         ckpt.de_state = de_state
         ckpt.joint_done = joint_done
         ckpt_mod.save(ckpt)
 
-    def _confirmed(params) -> tuple[bool, float]:
-        """Disjoint-seed re-evaluation: does the candidate also beat the baseline there?"""
+    def _replicates(params) -> tuple[bool, float]:
+        """Disjoint-seed re-evaluation: does the candidate also beat the incumbent there?"""
         check = _robust_score(precomp, params, check_matrix, scope, regime_scope)
         return check > baseline_check + min_improve, check
 
@@ -232,60 +258,139 @@ def run_staged_tune(
 
         return _cb, warm
 
+    # ── Phase 1: marginals, every cluster against the FROZEN incumbent ────────────
     total = len(ordered) + 1  # + final joint pass
     done = resumed_stages
     t_stage = time.time()
     for idx, c in enumerate(ordered):
         if idx < resumed_stages:
-            continue   # already completed in an earlier run
+            continue
         cb, warm = _stage_hooks(c)
-        m = _tune_subset(precomp, c, run_matrix, scope, maxiter, popsize, baseline=baseline,
+        m = _tune_subset(precomp, c, run_matrix, scope, maxiter, popsize, baseline=original,
                          regime_scope=regime_scope, checkpoint_cb=cb, x0=warm,
                          max_seconds=max_seconds)
         done += 1
         if progress_callback:
             progress_callback(done, total, f"stage: {c}")
         if m is not None:
-            accepted = m.score > cur_score + min_improve
-            if accepted:
-                accepted, cand_check = _confirmed(m.params)
-            out.stages.append(StageResult(c, cur_score, m.score, accepted))
-            if accepted:
-                baseline = m.params.copy()
-                cur_score = m.score
-                baseline_check = cand_check
-        # Stage boundary: clear the in-flight DE state so a resume starts the NEXT one.
+            replicated, check = _replicates(m.params)
+            marginals[c] = {
+                "score": float(m.score),
+                "delta": float(m.score - orig_score),
+                "replicated": bool(replicated),
+                "check": float(check),
+                "params": [float(v) for v in np.asarray(m.params).ravel()],
+            }
         _persist(stage_index=idx + 1, de_state=None)
-        logger.info("staged tune: stage %d/%d (%s) done in %.0fs",
+        logger.info("staged tune: marginal %d/%d (%s) done in %.0fs",
                     done, total, c, time.time() - t_stage)
         t_stage = time.time()
 
+    # ── Tier 3: noise band from the clusters that did NOT replicate ───────────────
+    # A cluster that improved the tuning windows but failed the disjoint-seed re-draw is,
+    # by construction, a measured noise draw. The largest such gain is how big "nothing"
+    # looks on this substrate today, so a real winner must clear it. This is the price of
+    # taking a max over N clusters — without it, promoting whichever cluster happens to
+    # top the list promotes noise nearly every round.
+    noise_draws = [v["delta"] for v in marginals.values() if not v["replicated"]]
+    band = max([d for d in noise_draws if d > 0.0], default=0.0)
+    if noise_draws:
+        logger.info(
+            "staged tune: noise band %.4f from %d non-replicating cluster(s) %s",
+            band, len(noise_draws), [round(d, 4) for d in noise_draws],
+        )
+    else:
+        logger.info("staged tune: no non-replicating clusters — noise band unmeasured (0.0)")
+    out.noise_band = band
+
+    for c in ordered:
+        v = marginals.get(c)
+        if v is None:
+            continue
+        cleared = v["delta"] > band + min_improve
+        accepted = bool(v["replicated"]) and cleared
+        out.stages.append(StageResult(
+            cluster=c, score_before=orig_score, score_after=v["score"], accepted=accepted,
+            delta=v["delta"], noise_band=band, cleared_band=cleared,
+        ))
+        if v["replicated"] and not cleared:
+            logger.info(
+                "staged tune: %s replicated but its gain %.4f is inside the %.4f noise "
+                "band — not promoted", c, v["delta"], band,
+            )
+
     out.accepted_clusters = [s.cluster for s in out.stages if s.accepted]
 
-    # Final DOF-bounded joint re-tune of the accepted clusters (captures cross-cluster gains).
-    joint_already_done = bool(ckpt is not None and ckpt.joint_done)
-    if len(out.accepted_clusters) >= 2 and not joint_already_done:
+    # ── Phase 2: joint re-tune over the promoted clusters (captures interactions) ──
+    best = original.copy()
+    best_score = orig_score
+    if len(out.accepted_clusters) == 1:
+        only = marginals[out.accepted_clusters[0]]
+        best = np.asarray(only["params"], dtype=float)
+        best_score = only["score"]
+    elif len(out.accepted_clusters) >= 2 and not (ckpt is not None and ckpt.joint_done):
         joint_name = "+".join(out.accepted_clusters)
         cb, warm = _stage_hooks(joint_name)
         joint = _tune_subset(
-            precomp, joint_name, run_matrix, scope,
-            maxiter, popsize, baseline=baseline, regime_scope=regime_scope,
-            checkpoint_cb=cb, x0=warm, max_seconds=max_seconds,
+            precomp, joint_name, run_matrix, scope, maxiter, popsize, baseline=original,
+            regime_scope=regime_scope, checkpoint_cb=cb, x0=warm, max_seconds=max_seconds,
         )
-        if joint is not None and joint.score > cur_score + min_improve:
-            joint_ok, joint_check = _confirmed(joint.params)
+        # Start from the best single marginal, so a failed joint pass never loses ground.
+        top = max((marginals[c] for c in out.accepted_clusters), key=lambda v: v["score"])
+        best = np.asarray(top["params"], dtype=float)
+        best_score = top["score"]
+        if joint is not None and joint.score > best_score + min_improve:
+            joint_ok, _ = _replicates(joint.params)
             if joint_ok:
-                baseline = joint.params.copy()
-                cur_score = joint.score
-                baseline_check = joint_check
+                best = joint.params.copy()
+                best_score = joint.score
     done += 1
     if progress_callback:
         progress_callback(done, total, "final joint re-tune")
 
-    out.final_params = baseline
-    out.final_score = cur_score
+    # ── Anti-ratchet: the result must beat the ORIGINAL incumbent, not a re-baselined
+    # one. Without this, running rounds back-to-back walks uphill on noise — each round
+    # compares against a vector that was itself selected as a maximum.
+    if out.accepted_clusters:
+        final_vs_orig = _robust_score(precomp, best, check_matrix, scope, regime_scope)
+        out.original_score = baseline_check
+        out.final_vs_original = final_vs_orig
+        out.beats_original = bool(final_vs_orig > baseline_check + min_improve)
+        if not out.beats_original:
+            out.promotion_blocked_reason = (
+                f"final vector scores {final_vs_orig:.4f} on the disjoint-seed matrix vs the "
+                f"ORIGINAL incumbent's {baseline_check:.4f} — promoted stages did not survive "
+                "re-scoring against the starting config"
+            )
+            logger.warning("staged tune: %s", out.promotion_blocked_reason)
+            best = original.copy()
+            best_score = orig_score
+            out.accepted_clusters = []
+
+    out.final_params = best
+    out.final_score = best_score
     _persist(stage_index=len(ordered), de_state=None, joint_done=True)
     return out
+
+
+def _uniform_weight_variant(params: np.ndarray) -> np.ndarray:
+    """The same candidate with slots 0-3 set equal — its weighting claim, neutralized.
+
+    Everything else (thresholds, momentum internals, exits) is held identical, so the
+    comparison isolates "is this WEIGHTING worth anything?" rather than re-testing the
+    whole vector.
+    """
+    control = np.asarray(params, dtype=float).copy()
+    control[:4] = 0.25
+    return control
+
+
+def _weights_are_uniform(params: np.ndarray, tol: float = 0.02) -> bool:
+    w = np.asarray(params[:4], dtype=float)
+    total = float(w.sum())
+    if total <= 0:
+        return True
+    return bool(np.max(np.abs(w / total - 0.25)) <= tol)
 
 
 def validate_full_windowed(
@@ -295,6 +400,7 @@ def validate_full_windowed(
     scope: BacktestScope = "active_sleeve_compounding",
     regime_scope: str = "all",
     holdout_start_frac: float = 0.70,
+    weight_control: bool = True,
 ) -> dict:
     """
     Full windowed confirmation of a candidate config: OOS train/val gate + robust scan
@@ -305,6 +411,15 @@ def validate_full_windowed(
     run_staged_tune (train_frac=holdout_start_frac) never tunes on — with seeds offset
     from the tuning matrix. Previously this step re-ran the IDENTICAL windows the
     parameters were tuned on, so the robust/overfit verdicts were in-sample.
+
+    EQUAL-WEIGHT CONTROL (weight_control=True, 2026-08-13). A candidate that proposes a
+    non-uniform score weighting is ALSO scored with slots 0-3 flattened to equal weights,
+    everything else identical, on the same windows. If the weighting cannot beat uniform
+    it fails confirmation. Measured that day: the live incumbent (.25/.40/.25/.10) scored
+    0.2387 against equal-weight's 0.2379 — a 0.3% gap, i.e. the weighting bought nothing —
+    while every DE-tuned weighting scored strictly BELOW both. Without this control,
+    "beats the incumbent" reads as a finding when it is a draw against a naive baseline.
+    Candidates already ~uniform skip the control (nothing to justify).
     """
     from backtesting.simulator import run_backtest_report, split_price_window
     from util import BACKTEST_PARAMS as bp
@@ -368,6 +483,48 @@ def validate_full_windowed(
         out["overfit_score"] = 1.0
         out["scan_error"] = str(exc)
 
-    # Overall confirmation: OOS gate passes AND not strongly overfit across horizons.
-    out["confirmed"] = bool(out.get("oos_passed")) and out.get("overfit_score", 1.0) <= 0.5
+    # 3. Equal-weight control — a non-uniform weighting must earn its keep against the
+    # naive baseline, scored on the SAME windows so the comparison is paired.
+    if not weight_control:
+        out["weight_control"] = "skipped (disabled by caller)"
+        out["weight_control_passed"] = True
+    elif _weights_are_uniform(params):
+        out["weight_control"] = "skipped (candidate weights already ~uniform)"
+        out["weight_control_passed"] = True
+    elif "scan_error" in out:
+        out["weight_control"] = "skipped (candidate scan failed)"
+        out["weight_control_passed"] = True
+    else:
+        try:
+            ctrl_scan = run_robust_scan(
+                scan_precomp, params=_uniform_weight_variant(params),
+                run_matrix=val_matrix, scope=scope,
+            )
+            ctrl = float(ctrl_scan.overall_robust_score)
+            cand = float(out.get("robust_score", 0.0))
+            out["control_robust_score"] = ctrl
+            out["weight_control_passed"] = bool(cand > ctrl)
+            out["weight_control"] = (
+                f"candidate {cand:.4f} vs equal-weight {ctrl:.4f} "
+                f"({'beats' if cand > ctrl else 'LOSES TO'} the naive baseline)"
+            )
+            if not out["weight_control_passed"]:
+                out.setdefault("oos_reasons", []).append(
+                    f"weighting does not beat equal weights ({cand:.4f} <= {ctrl:.4f})"
+                )
+                logger.warning(
+                    "equal-weight control: candidate robust %.4f <= uniform %.4f — "
+                    "the proposed weighting is not earning its keep", cand, ctrl,
+                )
+        except Exception as exc:
+            out["weight_control"] = f"control scan failed: {exc}"
+            out["weight_control_passed"] = True   # never fail a candidate on our own error
+
+    # Overall confirmation: OOS gate passes, not strongly overfit across horizons, AND
+    # (when it proposes one) its weighting beats the equal-weight control.
+    out["confirmed"] = (
+        bool(out.get("oos_passed"))
+        and out.get("overfit_score", 1.0) <= 0.5
+        and bool(out.get("weight_control_passed", True))
+    )
     return out

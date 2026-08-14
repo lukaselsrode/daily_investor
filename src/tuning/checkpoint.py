@@ -138,6 +138,10 @@ class TuneCheckpoint:
     joint_done: bool = False
     # Generation-level state for the stage currently in flight
     de_state: dict | None = None
+    # Phase-1 marginals: cluster -> {"score": float, "params": [float, ...]}. Each is
+    # tuned against the FROZEN incumbent, so a resume can rebuild the noise band and the
+    # promotion decision without re-running completed clusters.
+    marginals: dict = field(default_factory=dict)
 
     def baseline_array(self) -> np.ndarray:
         return np.asarray(self.baseline, dtype=float)
@@ -193,6 +197,7 @@ def load(
         stages=list(raw.get("stages", [])),
         joint_done=bool(raw.get("joint_done", False)),
         de_state=raw.get("de_state"),
+        marginals=dict(raw.get("marginals") or {}),
     )
     if not strict:
         return ckpt
