@@ -66,6 +66,14 @@ _PENDING_STATUSES = {"pending", "queued", "confirmed", "placed", "open", "live",
                      "submitted", "partially_filled", "pending_cancelled"}
 _FILLED_STATUSES = {"filled", "executed", "complete", "completed"}
 _GONE_STATUSES = {"", "none", "cancelled", "canceled", "rejected", "expired", "failed"}
+# Public alias: the fast lane's exit poller must classify "is this order gone" with the SAME
+# vocabulary — it compared `status == "gone"` against raw broker states and never matched
+# (found 2026-08-13 while adding rejection journaling).
+GONE_ORDER_STATUSES = frozenset(_GONE_STATUSES)
+# The subset that means the BROKER refused the order — journaled as `order_rejected` so a refusal
+# can never again vanish (2026-08-13: SPY 778C rejected in 317ms, zero journal trace, found only
+# by the EOD recap reconciling broker order counts).
+REJECTED_STATUSES = frozenset({"rejected", "failed"})
 
 
 def _dict(value: Any) -> dict:
@@ -315,6 +323,7 @@ def evaluate_order_guard(order: dict | None = None, *, lease: dict | None = None
     ld = _lease_dict(lease)
     market = _dict(market_snapshot)
     reasons: list[str] = []
+    order_rejected = False
 
     status = _order_status(order)
     has_lease = bool(ld.get("lease_id"))
@@ -323,7 +332,10 @@ def evaluate_order_guard(order: dict | None = None, *, lease: dict | None = None
     submitted = _parse_ts(order.get("submitted_at") or order.get("created_at"))
     pending_age = round((now - submitted).total_seconds(), 3) if submitted else None
     direction = str(ld.get("direction") or "").lower() or None
-    symbol = (order.get("symbol") or order.get("underlying") or ld.get("symbol"))
+    # `chain_symbol` is how the RAW broker row spells it — without it a rejection journaled from
+    # an un-aliased row carries underlying=None (seen replaying the 2026-08-13 SPY 778C row).
+    symbol = (order.get("symbol") or order.get("underlying") or order.get("chain_symbol")
+              or ld.get("symbol"))
 
     # A lease can NEVER retroactively cover an order submitted before it was issued — that would be
     # "extending" a stale order with a fresh lease, which the incident remediation forbids.
@@ -338,6 +350,14 @@ def evaluate_order_guard(order: dict | None = None, *, lease: dict | None = None
         state = NO_ORDER
     elif status == "gone":
         if order:
+            raw_status = str(order.get("status") or "").strip().lower()
+            if raw_status in REJECTED_STATUSES:
+                order_rejected = True
+                reason = order.get("reject_reason")
+                detail = (f": {reason}" if reason else
+                          " — no reason returned (the MCP get_option_orders schema does not"
+                          " surface reject_reason; see the 2026-08-13 SPY 778C forensics)")
+                reasons.append(f"broker {raw_status} the order{detail}")
             reasons.append(f"order status '{order.get('status') or 'none'}' — no live entry order")
         else:
             reasons.append("no broker order supplied — nothing open")
@@ -405,8 +425,9 @@ def evaluate_order_guard(order: dict | None = None, *, lease: dict | None = None
         "order": {k: order.get(k) for k in
                   ("order_id", "status", "symbol", "chain_symbol", "option_id", "option_type",
                    "strike_price", "expiration_date", "quantity", "limit_price",
-                   "submitted_at", "filled_at", "filled_quantity")
+                   "submitted_at", "filled_at", "filled_quantity", "reject_reason")
                   if order.get(k) is not None},
+        "order_rejected": order_rejected,
         "cancel_required": cancel_required,
         "safety_incident": incident,
         "prohibit_new_entries": incident,

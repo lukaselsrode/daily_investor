@@ -1537,7 +1537,14 @@ def event_from_order_guard(guard_payload: dict, trade_id: str | None = None,
     state = str(p.get("state") or "").upper()
     event_type = _GUARD_EVENT_TYPES.get(state)
     if event_type is None:
-        return None
+        # A broker REJECTION used to vanish exactly here: `rejected` is a _GONE_STATUSES member,
+        # so the guard classified NO_ORDER and this returned None — which is how the 2026-08-13
+        # SPY 778C rejection (killed in 317ms, broker gave no reason) left ZERO journal trace and
+        # was found only by the EOD recap reconciling broker order counts. The guard now flags
+        # `order_rejected`; a refusal gets a first-class event, everything else stays unrecorded.
+        if not p.get("order_rejected"):
+            return None
+        event_type = "order_rejected"
     order = p.get("order") if isinstance(p.get("order"), dict) else {}
     e = {
         "event_type": event_type,
@@ -1551,6 +1558,7 @@ def event_from_order_guard(guard_payload: dict, trade_id: str | None = None,
         "guard_state": state,
         "lease_id": p.get("lease_id"),
         "order_status": order.get("status"),
+        "reject_reason": order.get("reject_reason"),
         "limit_price": order.get("limit_price"),
         "submitted_at": order.get("submitted_at"),
         "filled_at": order.get("filled_at"),

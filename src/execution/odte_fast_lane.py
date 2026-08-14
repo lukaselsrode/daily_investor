@@ -55,8 +55,10 @@ from data.odte_journal import DEFAULT_JOURNAL_PATH, append_decision_journal, rea
 from data.odte_order_guard import (
     CANCEL_STATES,
     FILLED_FRESH,
+    GONE_ORDER_STATUSES,
     INCIDENT_STATES,
     NO_ORDER,
+    REJECTED_STATUSES,
     evaluate_order_guard,
 )
 from data.odte_position import DEFAULT_PLAN_FILENAME, evaluate_position
@@ -202,6 +204,8 @@ def _order_row_to_guard(row: Any, account_symbol: str | None = None) -> dict:
     avg = _num(row.get("average_price") or row.get("processed_premium"))
     if avg is not None:
         out["average_price"] = avg
+    if row.get("reject_reason") not in (None, ""):
+        out["reject_reason"] = row.get("reject_reason")
     return out
 
 
@@ -643,11 +647,17 @@ class FastLaneDaemon:
         if state == NO_ORDER:
             # The broker says our order is gone (externally cancelled/rejected) or the adopted
             # order never resolved — stand down cleanly; a new entry needs a fresh fire.
+            # A REFUSAL is first-class: `order_rejected` with the broker's reason (2026-08-13 —
+            # a rejection previously journaled as a generic no_trade and the reason was lost).
             if order_id:
                 self._journal({"order_id": order_id, "reasons": guard.get("reasons"),
+                               "side": "entry",
+                               "reject_reason": order.get("reject_reason"),
                                "underlying": order.get("symbol"),
                                "option_id": order.get("option_id")},
-                              "no_trade_decision", shadow=self.mode != MODE_LIVE, now=now)
+                              "order_rejected" if guard.get("order_rejected")
+                              else "no_trade_decision",
+                              shadow=self.mode != MODE_LIVE, now=now)
             self.pending_order, self.lease = None, None
             self.state = WATCHING
             return
@@ -805,7 +815,20 @@ class FastLaneDaemon:
             self.exit_order, self.lease = None, None
             self.state = IDLE
             return
-        if order.get("status") == "gone":                      # cancelled/rejected: re-decide
+        exit_status = str(order.get("status") or "").strip().lower()
+        if exit_status in GONE_ORDER_STATUSES:
+            # This branch compared `status == "gone"` until 2026-08-13 — but _order_row_to_guard
+            # keeps the RAW broker state ("cancelled"/"rejected"/...), so it NEVER matched and a
+            # dead exit order fell through into the reprice loop. Now: stand down, re-decide next
+            # tick, and journal a broker REFUSAL first-class (a rejected EXIT on a live position
+            # is exactly the thing an operator must hear about — the position remains open).
+            if exit_status in REJECTED_STATUSES:
+                self._journal({"order_id": info.get("order_id"), "side": "exit",
+                               "reject_reason": order.get("reject_reason"),
+                               "underlying": plan.get("underlying"),
+                               "trade_id": plan.get("trade_id"),
+                               "option_id": plan.get("option_id")},
+                              "order_rejected", shadow=self.mode == MODE_SHADOW, now=now)
             self.exit_order = None
             return
         if paused:

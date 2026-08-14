@@ -546,3 +546,63 @@ def test_thesis_rail_still_silent_when_the_thesis_holds():
     for market in ({"SPY": {"above_vwap": True, "last": 775.0}},
                    {"spy_above_vwap": True, "spy_last": 775.0}):
         assert og._thesis_invalidated("bullish", "SPY", market) is None
+
+
+# --- broker rejections become first-class events (2026-08-13) ----------------------------------
+# The SPY 778C order was rejected in 317ms and left ZERO journal trace: `rejected` is a
+# _GONE_STATUSES member, the guard classified NO_ORDER, and event_from_order_guard returned None.
+# It was found only by the EOD recap reconciling broker order counts. The fixture is a TRIMMED
+# COPY of the real captured row (/private/tmp/odte_order_6a7ddcde.json), not a hand-written shape.
+
+def _rejected_row(**over):
+    row = {"id": "6a7ddcde-e8ce-4fca-9e50-d9c631a3a055", "chain_symbol": "SPY",
+           "state": "rejected", "type": "limit", "quantity": "1.00000",
+           "processed_quantity": "0.00000", "canceled_quantity": "1.00000",
+           "price": "1.02000000", "premium": "102.00000000",
+           "created_at": "2026-08-13T15:03:58.027414Z",
+           "updated_at": "2026-08-13T15:03:58.344814Z",
+           "legs": [{"option_id": "7cfa4e32-9cfb-443f-af1d-0528f7e27249", "side": "buy",
+                     "position_effect": "open", "option_type": "call",
+                     "strike_price": "778.0000", "expiration_date": "2026-08-13"}]}
+    row.update(over)
+    return row
+
+
+def test_rejected_order_is_flagged_and_journaled():
+    from datetime import datetime, timezone
+
+    from data.odte_journal import event_from_order_guard
+    now = datetime(2026, 8, 13, 15, 4, 20, tzinfo=timezone.utc)
+    guard = og.evaluate_order_guard(_rejected_row(), lease=None, market_snapshot=None, now=now)
+    assert guard["state"] == og.NO_ORDER                 # classification unchanged: nothing live
+    assert guard["order_rejected"] is True
+    assert any("broker rejected" in r for r in guard["reasons"])
+    ev = event_from_order_guard(guard)
+    assert ev is not None and ev["event_type"] == "order_rejected"
+    assert ev["underlying"] == "SPY"                     # chain_symbol fallback (raw row spelling)
+    assert ev["option_id"] == "7cfa4e32-9cfb-443f-af1d-0528f7e27249"
+
+
+def test_reject_reason_travels_when_the_broker_provides_one():
+    from datetime import datetime, timezone
+
+    from data.odte_journal import event_from_order_guard
+    now = datetime(2026, 8, 13, 15, 4, 20, tzinfo=timezone.utc)
+    guard = og.evaluate_order_guard(_rejected_row(reject_reason="price outside collar"),
+                                    lease=None, market_snapshot=None, now=now)
+    assert any("price outside collar" in r for r in guard["reasons"])
+    assert event_from_order_guard(guard)["reject_reason"] == "price outside collar"
+
+
+def test_cancelled_and_absent_orders_still_journal_nothing():
+    """Cancelled is normal churn (place-cancel-replace); only a REFUSAL is first-class."""
+    from datetime import datetime, timezone
+
+    from data.odte_journal import event_from_order_guard
+    now = datetime(2026, 8, 13, 15, 4, 20, tzinfo=timezone.utc)
+    cancelled = og.evaluate_order_guard(_rejected_row(state="cancelled"), lease=None,
+                                        market_snapshot=None, now=now)
+    assert cancelled["order_rejected"] is False
+    assert event_from_order_guard(cancelled) is None
+    absent = og.evaluate_order_guard(None, lease=None, market_snapshot=None, now=now)
+    assert event_from_order_guard(absent) is None

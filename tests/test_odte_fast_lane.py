@@ -425,3 +425,50 @@ def test_entries_locked_blocks_adoption(tmp_path):
     _queue_tape(session)
     _tick(daemon)
     assert daemon.state == fl.IDLE
+
+
+# --- a rejected/dead EXIT order stands down and is journaled (2026-08-13) -----------------------
+# _poll_exit compared `status == "gone"` but _order_row_to_guard keeps the RAW broker state
+# ("rejected"/"cancelled"), so the branch NEVER matched — a dead exit order fell through into the
+# reprice loop. A rejected exit on a live position is exactly what an operator must hear about.
+
+def _rejected_exit_row(state="rejected"):
+    return {"data": {"orders": [{
+        "id": "exit-ord-1", "chain_symbol": "IWM", "state": state, "quantity": "1.00000",
+        "processed_quantity": "0.00000", "price": "0.30000000",
+        "created_at": "2026-08-13T15:00:00Z",
+        "legs": [{"option_id": "opt-iwm-303p", "side": "sell", "position_effect": "close"}]}]}}
+
+
+def _managed_daemon(tmp_path, state="rejected"):
+    daemon, session = _setup(tmp_path)
+    _queue_startup(session)
+    _queue_tape(session)
+    _tick(daemon)
+    daemon.exit_order = {"order_id": "exit-ord-1", "limit": 0.30, "trigger_type": "MAX_LOSS",
+                         "placed_at": _iso(NOW), "replacements": 0}
+    session.queue("get_option_orders", _rejected_exit_row(state))
+    plan = {"trade_id": "iwm-t1", "underlying": "IWM", "option_id": "opt-iwm-303p",
+            "entry_price": 0.46, "quantity": 1, "status": "open"}
+    asyncio.run(daemon._poll_exit(plan, NOW, paused=False))
+    return daemon, tmp_path
+
+
+def test_rejected_exit_order_stands_down_and_journals(tmp_path):
+    daemon, base = _managed_daemon(tmp_path, "rejected")
+    assert daemon.exit_order is None, "dead exit order must stand down, not enter the reprice loop"
+    rows = [json.loads(x) for x in
+            (base / "shadow" / "decision_journal.jsonl").read_text().splitlines() if x.strip()]
+    rejected = [e for e in rows if e.get("event_type") == "order_rejected"]
+    assert len(rejected) == 1
+    assert rejected[0]["side"] == "exit" and rejected[0]["trade_id"] == "iwm-t1"
+
+
+def test_cancelled_exit_order_stands_down_quietly(tmp_path):
+    """Cancelled is churn (the reprice loop itself cancels) — stand down, no rejection event."""
+    daemon, base = _managed_daemon(tmp_path, "cancelled")
+    assert daemon.exit_order is None
+    sj = base / "shadow" / "decision_journal.jsonl"
+    rows = ([json.loads(x) for x in sj.read_text().splitlines() if x.strip()]
+            if sj.exists() else [])          # nothing journaled at all is the passing case
+    assert [e for e in rows if e.get("event_type") == "order_rejected"] == []
