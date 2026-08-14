@@ -1841,3 +1841,22 @@ def test_broker_health_accepts_every_timestamp_spelling_the_writers_use():
     for field in ("as_of", "ts", "checked_at", "generated_at", "updated_at"):
         out = classify_broker_lane({**healthy, field: now.isoformat()}, now=now)
         assert out["lane"] == "ok", f"{field} not accepted: {out}"
+
+
+def test_live_rails_advertise_the_strict_reentry_bar(monkeypatch):
+    """After the strict bar shipped, the controller ran FOUR doomed convert cycles on post-green
+    b_plus confirms — nothing told it the bar had moved. The rails now name the lowest tier that
+    can arm, and None when nothing can (an a_plus win ends the day)."""
+    import data.odte_config as _oc
+    monkeypatch.setattr(_oc, "GREEN_REENTRY_AUTO_ARM", True)
+    monkeypatch.setattr(_oc, "GREEN_REENTRY_REQUIRE_BETTER_TIER", True)
+    r = ls.derive_loop_state(journal_events=_green_scalp_journal(), now=NOW)
+    gr = r["live_rails"]["green_reentry"]
+    assert gr["require_better_tier"] is True
+    assert gr["winning_tier_today"] == "full"
+    assert gr["min_reentry_tier"] == "a_plus"             # strictly above full
+
+    monkeypatch.setattr(_oc, "GREEN_REENTRY_REQUIRE_BETTER_TIER", False)
+    gr2 = ls.derive_loop_state(journal_events=_green_scalp_journal(),
+                               now=NOW)["live_rails"]["green_reentry"]
+    assert gr2["min_reentry_tier"] == "full"              # same-or-better semantics

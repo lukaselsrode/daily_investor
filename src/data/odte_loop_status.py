@@ -643,6 +643,21 @@ def _live_rails(events: list[dict] | None, broker: dict, now: datetime) -> dict:
         green_day_preservation,
         green_day_winning_tier,
     )
+
+    def _reentry_requires_better() -> bool:
+        from data.odte_config import GREEN_REENTRY_REQUIRE_BETTER_TIER
+        return bool(GREEN_REENTRY_REQUIRE_BETTER_TIER)
+
+    def _min_reentry_tier(winning: str | None) -> str | None:
+        """Lowest tier that can arm a post-green re-entry, or None when nothing can (a_plus win,
+        or no green banked). Names, not ranks — this is agent-facing guidance."""
+        if winning is None:
+            return None
+        from data.odte_journal import TIER_RANK, tier_rank
+        required = tier_rank(winning) + (1 if _reentry_requires_better() else 0)
+        by_rank = {r: name for name, r in TIER_RANK.items()}
+        return by_rank.get(required)
+
     broker = _dict(broker)
     truth = _dict(broker.get("truth"))
     lane = broker.get("lane")
@@ -670,6 +685,13 @@ def _live_rails(events: list[dict] | None, broker: dict, now: datetime) -> dict:
         "green_reentry": {
             "locked": locked,
             "auto_arm_enabled": GREEN_REENTRY_AUTO_ARM,
+            # STRICT BAR ADVERTISED (2026-08-14): after the strict-tier rule shipped, the
+            # controller ran FOUR doomed confirm->convert->veto cycles on post-green b_plus
+            # confirms because nothing told it the bar had moved. The gate stays the enforcement;
+            # `min_reentry_tier` lets the agent skip converting candidates that cannot arm
+            # (None = nothing can arm today, e.g. after an a_plus win).
+            "require_better_tier": _reentry_requires_better(),
+            "min_reentry_tier": _min_reentry_tier(winning_tier),
             "min_bp_multiple": GREEN_REENTRY_MIN_BP_MULTIPLE,
             "winning_tier_today": winning_tier,
             "budget_remaining": budget.get("remaining"),
