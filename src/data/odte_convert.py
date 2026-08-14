@@ -555,7 +555,10 @@ def run_convert(candidate_json: str | dict | None = None, candidate_path: str | 
                                      journal_events=journal_events, now=now)
     payload["entry_gate"] = gate
     if journal:
-        gate_event = event_from_entry_gate(gate)
+        # confirmation_detail rides on the journaled gate event (2026-08-14): the spread at entry
+        # was computed on every conversion and then DISCARDED, which is why the spread-quality
+        # lever in the W33 plan had to be evaluated by proxy. Telemetry only, never a gate input.
+        gate_event = event_from_entry_gate(gate, extra={"confirmation_detail": confirmation_detail})
         if gap_backfilled:
             gate_event["gap_pct_backfilled"] = True
         gate_result = append_decision_journal(gate_event, source="odte_convert",

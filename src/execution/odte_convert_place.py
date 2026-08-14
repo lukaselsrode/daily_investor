@@ -56,6 +56,16 @@ def _dict(value: Any) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def _quote_prices(quote: Any) -> tuple[float | None, float | None]:
+    """(bid, ask) from an option-quote payload — handles the nested `quote` envelope and the
+    bid_price/bid spelling pair, same as `odte_fast_lane._option_quote_to_contract`."""
+    quote = quote if isinstance(quote, dict) else {}
+    inner = quote.get("quote") if isinstance(quote.get("quote"), dict) else quote
+    bid = _num(inner.get("bid_price") if inner.get("bid_price") is not None else inner.get("bid"))
+    ask = _num(inner.get("ask_price") if inner.get("ask_price") is not None else inner.get("ask"))
+    return bid, ask
+
+
 def place_limit_for(lease: dict, contract: dict) -> float | None:
     """Place at the ask, capped by the lease's chase ceiling — never above either.
 
@@ -109,15 +119,31 @@ async def place_converted(payload: dict, *, account_number: str, ledger_path: st
             report["reasons"] = ["lease_expired_before_place"]
             return report
 
-        limit = place_limit_for(lease, contract)
-        if limit is None:
-            report["reasons"] = ["no_priceable_quote"]
-            return report
-        report["limit_price"] = limit
-
         own_client = client is None
         client = client or OdteMcpClient()
         try:
+            # F5 STALE-ANCHOR HARDENING (2026-08-14). The 2026-08-13 SPY 778C order was placed at
+            # the SNAPSHOT ask of $1.02 while the live ask was $0.81 — inside the 120s snapshot
+            # TTL but economically stale — and the broker killed it in 317ms with no reason. The
+            # fast lane already re-quotes at fire time (`_fire` -> option_quote_by_id); this path
+            # must too. A fresh-quote failure falls back to the snapshot (the pre-2026-08-14
+            # behaviour), never blocks the place on its own.
+            fresh = None
+            try:
+                fresh = await client.option_quote_by_id(str(lease.get("option_id")))
+            except Exception as exc:
+                logger.warning("fresh quote failed, falling back to snapshot: %s", exc)
+            live_bid, live_ask = _quote_prices(fresh)
+            if live_ask is not None:
+                contract = {**contract, "ask": live_ask, "bid": live_bid}
+                report["fresh_quote"] = {"bid": live_bid, "ask": live_ask}
+
+            limit = place_limit_for(lease, contract)
+            if limit is None:
+                report["reasons"] = ["no_priceable_quote"]
+                return report
+            report["limit_price"] = limit
+
             order_args = client.build_order_args(
                 account_number=str(account_number), option_id=str(lease.get("option_id")),
                 quantity=int(_num(lease.get("quantity")) or 1), limit_price=limit)

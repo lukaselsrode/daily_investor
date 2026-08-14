@@ -40,11 +40,20 @@ def _payload(**over):
 class FakeClient:
     """Records call ORDER — the whole point is that the ledger claim precedes the place."""
 
-    def __init__(self, ledger_path=None, fail_place=False):
+    def __init__(self, ledger_path=None, fail_place=False, fresh_quote=None,
+                 fresh_quote_raises=False):
         self.calls = []
         self.ledger_path = ledger_path
         self.fail_place = fail_place
+        self.fresh_quote = fresh_quote
+        self.fresh_quote_raises = fresh_quote_raises
         self.ledger_at_place = None
+
+    async def option_quote_by_id(self, option_id):
+        self.calls.append("quote")
+        if self.fresh_quote_raises:
+            raise RuntimeError("quote endpoint down")
+        return self.fresh_quote
 
     def build_order_args(self, *, account_number, option_id, quantity, limit_price):
         self.calls.append("build")
@@ -94,7 +103,8 @@ def test_lease_is_claimed_BEFORE_the_order_is_placed(tmp_path):
     report, ledger = _run(_payload(), tmp_path, c)
     assert report["placed"] is True
     # No "close": the module only closes a client it CREATED, never a caller-supplied one.
-    assert c.calls == ["build", "review", "place"]
+    # "quote" first: the F5 fresh-quote fetch precedes pricing.
+    assert c.calls == ["quote", "build", "review", "place"]
     assert "232ff1290e46aa01" in (c.ledger_at_place or []), "lease was NOT claimed before placing"
 
 
@@ -302,3 +312,36 @@ def test_cli_accepts_the_contract_as_inline_json_too(monkeypatch, tmp_path):
     m._cmd_odte_convert(["--place", "--contract-json", json.dumps({"ask": 0.39}),
                          "--state-dir", str(tmp_path)])
     assert seen.get("contract") == {"ask": 0.39}
+
+
+# --- F5: fresh quote at place time (2026-08-14) -------------------------------------------------
+# The 2026-08-13 SPY 778C order was placed at the SNAPSHOT ask ($1.02) while the live ask was
+# $0.81 — inside the snapshot TTL but economically stale — and the broker killed it in 317ms.
+
+def test_fresh_quote_overrides_the_stale_snapshot_ask(tmp_path):
+    """The exact 778C shape: snapshot says 1.02, the live market says 0.81."""
+    c = FakeClient(fresh_quote={"quote": {"bid_price": "0.80", "ask_price": "0.81"}})
+    # max_debit matches the real 778C lease ($117) — the first fixture kept the default $50 and
+    # consume_then's debit ceiling correctly refused an $81 order, which is the guard working.
+    report, _ = _run(_payload(lease=_lease(max_limit_price=1.17, max_debit=117.0),
+                              _contract={"ask": 1.02, "bid": 1.01}), tmp_path, c)
+    assert report["limit_price"] == 0.81, "placed at the stale snapshot ask"
+    assert report["fresh_quote"] == {"bid": 0.80, "ask": 0.81}
+    assert report["placed"] is True
+
+
+def test_fresh_quote_failure_falls_back_to_the_snapshot(tmp_path):
+    """A dead quote endpoint must not block the place on its own — snapshot pricing is the
+    pre-hardening behaviour and still bounded by the lease ceiling."""
+    c = FakeClient(fresh_quote_raises=True)
+    report, _ = _run(_payload(), tmp_path, c)
+    assert report["placed"] is True
+    assert report["limit_price"] == 0.46                     # the snapshot ask
+    assert "fresh_quote" not in report
+
+
+def test_fresh_quote_never_lifts_the_limit_above_the_ceiling(tmp_path):
+    """Market ran AWAY: live ask above the chase ceiling — the lease ceiling still caps."""
+    c = FakeClient(fresh_quote={"quote": {"bid_price": "1.30", "ask_price": "1.40"}})
+    report, _ = _run(_payload(lease=_lease(max_limit_price=0.50)), tmp_path, c)
+    assert report["limit_price"] == 0.50
