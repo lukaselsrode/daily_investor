@@ -444,6 +444,37 @@ def tier_rank(tier) -> int:
     return TIER_RANK.get(str(tier or "").strip().lower(), 0)
 
 
+SIGNAL_AGE_LOOKBACK_MINUTES = 90.0
+
+
+def first_signal_age_minutes(events: list[dict] | None, underlying, direction,
+                             now: datetime | None = None) -> float | None:
+    """PURE: minutes from the FIRST same-direction candidate evaluation of the current move to
+    `now` — the 2026-08-18 autopsy's lateness clock. Candidate re-seeds of the same move do NOT
+    reset it (that is the point: the clock measures the MOVE's age, not the current candidate's).
+    Returns None when no matching evaluation exists inside the lookback — an unknown age, which
+    callers treat as fail-open telemetry, never a veto. Evidence: entries >15 min after first
+    signal went 0-for-7 (-$156); both real winners entered ~11 min in."""
+    if not events or not underlying or not direction:
+        return None
+    now = now or datetime.now(timezone.utc)
+    sym = str(underlying).upper()
+    direc = str(direction).lower()
+    first = None
+    for e in events:
+        if e.get("event_type") != "candidate_evaluation":
+            continue
+        if str(e.get("symbol") or "").upper() != sym or str(e.get("direction") or "").lower() != direc:
+            continue
+        t = _parse_ts(e.get("ts") or e.get("generated_at"))
+        if t is None:
+            continue
+        age_min = (now - t).total_seconds() / 60.0
+        if 0.0 <= age_min <= SIGNAL_AGE_LOOKBACK_MINUTES and (first is None or t < first):
+            first = t
+    return None if first is None else round((now - first).total_seconds() / 60.0, 1)
+
+
 def green_day_winning_tier(events: list[dict] | None, active_trade: dict | None = None,
                            now: datetime | None = None) -> dict:
     """PURE: the confirmation tier(s) behind today's banked green trade(s).

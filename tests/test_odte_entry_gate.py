@@ -768,3 +768,62 @@ def test_strict_bar_arms_a_strictly_better_tier(monkeypatch):
                                      **_auto_arm_kwargs(tier="a_plus"))
     assert "green_reentry_auto_armed_tier" in d["reason_codes"]
     assert d["green_reentry"]["auto_armed"] is True
+
+
+# --- freshness gate (2026-08-18 autopsy: >15m-late entries went 0-for-7, -$156) ----------------
+
+def _signal_history(now, ages_minutes, symbol="SPY", direction="bullish"):
+    """candidate_evaluation telemetry rows at the given ages before `now`."""
+    return [{"event_type": "candidate_evaluation", "symbol": symbol, "direction": direction,
+             "ts": (now - timedelta(minutes=m)).isoformat()} for m in ages_minutes]
+
+
+def test_stale_signal_is_vetoed(monkeypatch):
+    monkeypatch.setattr(eg, "MAX_SIGNAL_AGE_MINUTES", 20.0)
+    d = eg.build_entry_gate_decision(
+        journal_events=_signal_history(_LOCK_NOW, [55.0, 30.0, 2.0]),
+        now=_LOCK_NOW, **_spy_gates_kwargs())
+    assert d["execution_allowed"] is False
+    assert eg.STALE_SIGNAL_VETO in d["veto_reasons"]
+    assert d["signal_age_minutes"] == 55.0            # the MOVE's age — re-seeds do not reset it
+
+
+def test_fresh_signal_passes_the_freshness_gate(monkeypatch):
+    monkeypatch.setattr(eg, "MAX_SIGNAL_AGE_MINUTES", 20.0)
+    d = eg.build_entry_gate_decision(
+        journal_events=_signal_history(_LOCK_NOW, [11.0, 2.0]),
+        now=_LOCK_NOW, **_spy_gates_kwargs())
+    assert eg.STALE_SIGNAL_VETO not in d["veto_reasons"]
+    assert d["signal_age_minutes"] == 11.0
+    assert d["execution_allowed"] is True
+
+
+def test_unknown_signal_age_fails_open(monkeypatch):
+    # A telemetry hole (no matching evaluations) is NOT evidence of staleness: the gate stays
+    # open and advertises signal_age_minutes: null for the reviewer to see.
+    monkeypatch.setattr(eg, "MAX_SIGNAL_AGE_MINUTES", 20.0)
+    other = _signal_history(_LOCK_NOW, [70.0], symbol="IWM")   # different move entirely
+    d = eg.build_entry_gate_decision(journal_events=other, now=_LOCK_NOW, **_spy_gates_kwargs())
+    assert eg.STALE_SIGNAL_VETO not in d["veto_reasons"]
+    assert d["signal_age_minutes"] is None
+    assert d["execution_allowed"] is True
+
+
+def test_freshness_gate_off_when_unarmed(monkeypatch):
+    monkeypatch.setattr(eg, "MAX_SIGNAL_AGE_MINUTES", 0.0)     # code default = off
+    d = eg.build_entry_gate_decision(
+        journal_events=_signal_history(_LOCK_NOW, [55.0]),
+        now=_LOCK_NOW, **_spy_gates_kwargs())
+    assert eg.STALE_SIGNAL_VETO not in d["veto_reasons"]
+
+
+def test_freshness_veto_has_no_aplus_exception(monkeypatch):
+    # a_plus is the cohort the autopsy convicted — unanimity IS lateness. No bypass.
+    monkeypatch.setattr(eg, "MAX_SIGNAL_AGE_MINUTES", 20.0)
+    kw = _spy_gates_kwargs()
+    kw["candidate"]["tier"] = "a_plus"
+    d = eg.build_entry_gate_decision(
+        journal_events=_signal_history(_LOCK_NOW, [48.0, 3.0]),
+        now=_LOCK_NOW, **kw)
+    assert d["execution_allowed"] is False
+    assert eg.STALE_SIGNAL_VETO in d["veto_reasons"]

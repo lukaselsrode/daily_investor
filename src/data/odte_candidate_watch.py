@@ -572,7 +572,12 @@ def evaluate_candidate_watch(candidate: dict | None = None, *, market: dict | No
     tier = ("a_plus" if a_plus
             else "b_plus" if (b_plus and (day == "CHOP" or half_derived))
             else "full")
-    checks["tier"] = tier
+    # JOURNALED tier is None until confirmation (2026-08-18): the ladder's else-branch reads
+    # "full" for an UNCONFIRMED candidate — zero evidence — and scan events journaling that
+    # misled analytics and a live investigation. The internal `tier` variable keeps the ladder
+    # value because the midday fence and CHOP checks below evaluate it (and at confirm time it
+    # is real); only what unconfirmed events ADVERTISE changes.
+    checks["tier"] = tier if confirmed else None
     checks["tier_basis"] = {"full_confirmers": full_confirmers,
                             "breadth_score": breadth_score,
                             "half_derived": half_derived}

@@ -47,6 +47,7 @@ from data.odte_config import (
     GREEN_REENTRY_AUTO_ARM,
     GREEN_REENTRY_MIN_BP_MULTIPLE,
     GREEN_REENTRY_REQUIRE_BETTER_TIER,
+    MAX_SIGNAL_AGE_MINUTES,
 )
 
 SCHEMA_VERSION = 1
@@ -83,6 +84,11 @@ DAILY_BUDGET_VETO = "daily_trade_budget_exhausted"
 # W33 fence (2026-08-14): the budget caps COUNT, not dollars — 08-11 stacked a -$34 stop onto a
 # +$22 day. Once the ET day's net realized P/L reaches -DAILY_LOSS_FLOOR_DOLLARS, no new entries.
 DAILY_LOSS_FLOOR_VETO = "daily_loss_floor_reached"
+# FRESHNESS GATE (2026-08-18 autopsy): entries >15 min after the move's first same-direction
+# signal went 0-for-7 (-$156); both real winners entered ~11 min in. Unanimity-late a_plus
+# confirms bought three climaxes that week. The veto fires when the move's first signal is older
+# than MAX_SIGNAL_AGE_MINUTES; an UNKNOWN age (telemetry hole) never vetoes — fail-open, noted.
+STALE_SIGNAL_VETO = "entry_signal_stale"
 COOLDOWN_VETO = "post_trade_cooldown_active"
 # A+ UNCAPPED (2026-08-06 user policy): an a_plus-tier candidate passes an exhausted daily
 # budget WHILE the day is net-green (budget.aplus_uncapped_active). Everything else about the
@@ -638,6 +644,19 @@ def build_entry_gate_decision(trigger: dict | None = None, candidate: dict | Non
                 and day_net <= -DAILY_LOSS_FLOOR_DOLLARS):
             veto_reasons.append(DAILY_LOSS_FLOOR_VETO)
 
+    # FRESHNESS GATE (2026-08-18 autopsy, resume spec): the move's age at entry is the strongest
+    # win/loss separator in the record — >15 min late went 0-for-7 (-$156), winners entered ~11
+    # min in, and a_plus unanimity was lateness in disguise (48-72 min, three climaxes, -$86).
+    # NO tier exception, a_plus least of all. Unknown age (no matching evaluation in the
+    # lookback) is a telemetry hole, not evidence of staleness: fail OPEN, surfaced in the
+    # payload as signal_age_minutes: null.
+    signal_age = None
+    if journal_events is not None and MAX_SIGNAL_AGE_MINUTES > 0:
+        from data.odte_journal import first_signal_age_minutes
+        signal_age = first_signal_age_minutes(journal_events, sym, direction, now=current_now)
+        if signal_age is not None and signal_age > MAX_SIGNAL_AGE_MINUTES:
+            veto_reasons.append(STALE_SIGNAL_VETO)
+
     confirmation_states = {name: confirmations.get(name) for name in REQUIRED_CONFIRMATIONS}
     confirmations_ok = all(confirmation_states[name] is True for name in REQUIRED_CONFIRMATIONS)
     core_gates_ready = (not scan_only and not restricted and not veto_reasons
@@ -767,6 +786,8 @@ def build_entry_gate_decision(trigger: dict | None = None, candidate: dict | Non
             "winning_tier_today": winning_tier_today,
         },
         "tier": tier,
+        "signal_age_minutes": signal_age,
+        "max_signal_age_minutes": (MAX_SIGNAL_AGE_MINUTES if MAX_SIGNAL_AGE_MINUTES > 0 else None),
         "sizing_tier": ("half" if tier == "b_plus" else "full"),
         "daily_trade_budget": budget,
         "places_orders": False,

@@ -732,8 +732,10 @@ def test_knobs_off_is_exactly_the_old_behavior(monkeypatch):
 
 
 def test_live_posture_pins_tier_scaled_sizing():
-    """Operator decision 2026-08-14; reverting must update this test and cite evidence."""
+    """2026-08-18 RESUME posture: back to 1-lot everywhere — the 08-14 2-lot decision rode the
+    a_plus losers (-$32 was a 2-lot). Size returns only when the freshness spec earns it
+    (data/odte/reports/entry_signal_autopsy_2026-08-18.md); updating these pins IS that act."""
     import data.odte_config as _oc
-    assert _oc.TIER_MAX_CONTRACTS_FULL == 2
-    assert _oc.TIER_MAX_CONTRACTS_APLUS == 2
+    assert _oc.TIER_MAX_CONTRACTS_FULL == 1
+    assert _oc.TIER_MAX_CONTRACTS_APLUS == 1
     assert xp.DEFAULT_MAX_CONTRACTS == 1               # b_plus/default ceiling unchanged

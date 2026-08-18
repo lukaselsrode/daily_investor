@@ -702,8 +702,39 @@ def _live_rails(events: list[dict] | None, broker: dict, now: datetime) -> dict:
                                          and not budget.get("cooldown_active")),
             "manual_override_key": "allow_reentry_after_green",
         },
+        # FENCES ADVERTISED (2026-08-18): on the first daily-loss-floor day the controller could
+        # not see the day was over — it converted a clean confirm straight into a gate veto. The
+        # gate stays the enforcement; this block lets the agent stop spending conversion cycles
+        # on entries that cannot pass. `day_over` folds the floor and the budget into one bit.
+        "fences": _fences_block(budget),
         "basis": ("authoritative live rails — read these numbers every tick; never act on "
                   "remembered policy"),
+    }
+
+
+def _fences_block(budget: dict) -> dict:
+    from data.odte_config import (
+        DAILY_LOSS_FLOOR_DOLLARS,
+        MAX_SIGNAL_AGE_MINUTES,
+        MIDDAY_FULL_TIER_AFTER_ET_HOUR,
+        MIN_ENTRY_PREMIUM,
+    )
+    day_net = budget.get("day_net_pnl")
+    floor_armed = DAILY_LOSS_FLOOR_DOLLARS > 0
+    floor_reached = bool(floor_armed and isinstance(day_net, (int, float))
+                         and day_net <= -DAILY_LOSS_FLOOR_DOLLARS)
+    return {
+        "min_entry_premium": (MIN_ENTRY_PREMIUM if MIN_ENTRY_PREMIUM > 0 else None),
+        "midday_full_tier_after_et_hour": (MIDDAY_FULL_TIER_AFTER_ET_HOUR
+                                           if MIDDAY_FULL_TIER_AFTER_ET_HOUR > 0 else None),
+        "daily_loss_floor_dollars": (DAILY_LOSS_FLOOR_DOLLARS if floor_armed else None),
+        "daily_loss_floor_reached": floor_reached,
+        "max_signal_age_minutes": (MAX_SIGNAL_AGE_MINUTES
+                                   if MAX_SIGNAL_AGE_MINUTES > 0 else None),
+        # Honest even off the resume posture: an exhausted budget with the a_plus exception
+        # still active is NOT a finished day — an a_plus confirm could trade it.
+        "day_over": bool(floor_reached or (budget.get("exhausted")
+                                           and not budget.get("aplus_uncapped_active"))),
     }
 
 

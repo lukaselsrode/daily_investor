@@ -1131,13 +1131,13 @@ odte:
   b_plus_max_dissenters: 1
   b_plus_min_vehicle_score: 3     # WATCH verdict acceptable for B+ at/above this score
   good_day_min_score: 4           # unchanged default; tune only on telemetry evidence
-  daily_trade_budget: 0           # OPERATOR HALT 2026-08-18: live entries stopped (account $346.68
-                                  # < $350 capital floor; a_plus cohort 0-for-3 this week, -$86).
-                                  # Scanning/journaling/shadow continue. Resume ONLY with the
-                                  # re-derived, pre-registered entry spec. Was: 2.
-  daily_budget_aplus_uncapped: false  # HALT 2026-08-18: MUST be bare false while budget is 0 —
-                                  # true lets a_plus bypass the zero cap on any net-flat day,
-                                  # and a_plus is the exact cohort being halted. Was: true.
+  daily_trade_budget: 1           # RESUME 2026-08-18 (operator, "make it live"): trading resumes
+                                  # under the re-derived freshness spec at MINIMUM cost — one
+                                  # entry per day. The 15:20 halt (account $346.68, a_plus
+                                  # 0-for-3) stands as the reason the old posture (2/day) does
+                                  # not return without O2 evidence.
+  daily_budget_aplus_uncapped: false  # STAYS false (was the halt setting): a_plus was the losing
+                                  # cohort — it gets NO budget bypass under the resume spec.
                                   # (a net-red day hard-stops at the cap — anti-tilt survives).
                                   # NOTE: absent OR wrong-typed falls back to the code default,
                                   # which is True — a quoted "false" leaves this ON. Use a bare
@@ -1155,9 +1155,15 @@ odte:
   # ── W33 entry fences (2026-08-14, pre-registered; delete a key to roll it back) ──
   min_entry_premium: 0.60         # all recent losers entered <= $0.50; every winner >= $0.64
   midday_full_tier_after_et_hour: 13   # after 13:00 ET new entries need tier >= full (1w/6, -$49)
-  daily_loss_floor_dollars: 30    # no new entries once day net P/L <= -$30 (count cap != $ cap)
-  tier_max_contracts_full: 2      # 2026-08-14: full-tier tapes may size 2 contracts (fraction caps)
-  tier_max_contracts_aplus: 2     # a_plus likewise; b_plus stays 1 (DEFAULT_MAX_CONTRACTS)
+  daily_loss_floor_dollars: 15    # RESUME 2026-08-18: tightened from 30 — on 08-18 a -$27 first
+                                  # loss passed the -$30 floor and a second trade doubled the day
+                                  # to -$54; at -$15 any full stop ends the day.
+  tier_max_contracts_full: 1      # RESUME 2026-08-18: back to 1-lot everywhere until the
+  tier_max_contracts_aplus: 1     # freshness spec earns size back (was 2/2 from 08-14; those
+                                  # 2-lots rode the a_plus losers). DEFAULT_MAX_CONTRACTS=1.
+  max_signal_age_minutes: 20      # RESUME 2026-08-18 FRESHNESS GATE (the autopsy's core finding):
+                                  # entries >15m after the move's first signal went 0-for-7
+                                  # (-$156); winners entered ~11m in. Veto: entry_signal_stale.
   shadow_validation_enabled: true # 2026-08-18 halt: track vetoed-but-clean confirms with real
                                   # quotes (would-be entries) to validate the freshness spec at
                                   # zero dollars — see reports/entry_signal_autopsy_2026-08-18.md

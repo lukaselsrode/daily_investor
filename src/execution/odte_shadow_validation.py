@@ -82,15 +82,9 @@ def find_qualifying_confirms(events: list[dict], now: datetime) -> list[dict]:
 
         direction = (contract.get("vehicle_score") or {}).get("direction") or contract.get("direction")
         underlying = contract.get("underlying") or e.get("symbol")
-        first_signal = None
-        for prior in events:
-            if prior.get("event_type") != "candidate_evaluation":
-                continue
-            tp = _ts(prior)
-            if tp is None or not (timedelta(0) <= t0 - tp <= timedelta(minutes=SIGNAL_LOOKBACK_MINUTES)):
-                continue
-            if prior.get("direction") == direction and (prior.get("symbol") or underlying) == underlying:
-                first_signal = tp if first_signal is None else min(first_signal, tp)
+        # SHARED CLOCK: the same function the entry gate's freshness veto uses — the harness
+        # scores exactly the lateness the gate will enforce, by construction.
+        from data.odte_journal import first_signal_age_minutes
         out.append({
             "confirm_ts": t0.isoformat(timespec="seconds"),
             "underlying": underlying,
@@ -99,8 +93,7 @@ def find_qualifying_confirms(events: list[dict], now: datetime) -> list[dict]:
             "option_id": str(contract["option_id"]),
             "strike": contract.get("strike"),
             "option_type": contract.get("option_type"),
-            "signal_age_minutes": (round((t0 - first_signal).total_seconds() / 60.0, 1)
-                                   if first_signal else None),
+            "signal_age_minutes": first_signal_age_minutes(events, underlying, direction, now=t0),
         })
     return out
 

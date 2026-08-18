@@ -1860,3 +1860,31 @@ def test_live_rails_advertise_the_strict_reentry_bar(monkeypatch):
     gr2 = ls.derive_loop_state(journal_events=_green_scalp_journal(),
                                now=NOW)["live_rails"]["green_reentry"]
     assert gr2["min_reentry_tier"] == "full"              # same-or-better semantics
+
+
+def test_live_rails_advertise_the_fences():
+    """2026-08-18: on the first daily-loss-floor day the controller converted a clean confirm
+    straight into a gate veto — it could not see the day was over. The fences block folds the
+    floor, budget, and the freshness gate into rails the agent reads every tick."""
+    r = ls.derive_loop_state(journal_events=[], now=NOW)
+    f = r["live_rails"]["fences"]
+    import data.odte_config as _oc
+    assert f["min_entry_premium"] == _oc.MIN_ENTRY_PREMIUM
+    assert f["daily_loss_floor_dollars"] == _oc.DAILY_LOSS_FLOOR_DOLLARS
+    assert f["max_signal_age_minutes"] == _oc.MAX_SIGNAL_AGE_MINUTES
+    assert f["daily_loss_floor_reached"] is False
+    assert f["day_over"] is False
+
+
+def test_fences_day_over_folds_floor_and_budget():
+    # A closed trade at -$40 (past any armed floor) plus an exhausted budget both flip day_over.
+    events = [
+        {"event_type": "order_filled", "trade_id": "t1", "option_id": "o1",
+         "ts": NOW.isoformat()},
+        {"event_type": "order_closed", "trade_id": "t1", "option_id": "o1",
+         "realized_pnl": -40.0, "ts": NOW.isoformat()},
+    ]
+    r = ls.derive_loop_state(journal_events=events, now=NOW)
+    f = r["live_rails"]["fences"]
+    assert f["daily_loss_floor_reached"] is True
+    assert f["day_over"] is True

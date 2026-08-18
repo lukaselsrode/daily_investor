@@ -724,10 +724,12 @@ def test_live_posture_pins_the_w33_fences():
     assert _oc.GREEN_REENTRY_REQUIRE_BETTER_TIER is True
     assert _oc.MIN_ENTRY_PREMIUM == 0.60
     assert _oc.MIDDAY_FULL_TIER_AFTER_ET_HOUR == 13.0
-    assert _oc.DAILY_LOSS_FLOOR_DOLLARS == 30.0
-    # 2026-08-18 OPERATOR HALT: account $346.68 < $350 capital floor; a_plus cohort 0-for-3 this
-    # week (-$86). Live entries stopped via budget 0 + uncapped OFF (true would let a_plus bypass
-    # a zero cap on any net-flat day). Resume ONLY with the re-derived, pre-registered entry spec
-    # — updating these two pins IS the resume act and must cite that spec.
-    assert _oc.DAILY_TRADE_BUDGET == 0
+    # 2026-08-18 RESUME (operator, same evening as the halt): trading returns under the autopsy's
+    # freshness spec (data/odte/reports/entry_signal_autopsy_2026-08-18.md) at MINIMUM cost —
+    # 1 entry/day, any full stop ends the day (floor 15 < a ~$20 1-lot stop), a_plus keeps no
+    # budget bypass, and the 20-min freshness gate vetoes the 0-for-7 late-entry cohort. The
+    # pre-halt posture (budget 2, floor 30) does not return without O2-grade evidence.
+    assert _oc.DAILY_TRADE_BUDGET == 1
     assert _oc.DAILY_BUDGET_APLUS_UNCAPPED is False
+    assert _oc.DAILY_LOSS_FLOOR_DOLLARS == 15.0
+    assert _oc.MAX_SIGNAL_AGE_MINUTES == 20.0

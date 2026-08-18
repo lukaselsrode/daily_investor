@@ -140,6 +140,13 @@ DAILY_LOSS_FLOOR_DOLLARS: float = _num("daily_loss_floor_dollars", 0.0)
 TIER_MAX_CONTRACTS_FULL: int = _int("tier_max_contracts_full", 1)
 TIER_MAX_CONTRACTS_APLUS: int = _int("tier_max_contracts_aplus", 1)
 
+# ── Freshness entry gate (2026-08-18 autopsy, resume spec) ─────────────────────
+# The move's age at entry is the strongest win/loss separator in the record: entries >15 min
+# after the first same-direction signal went 0-for-7 (-$156); both real winners entered ~11 min
+# in. Vetoes entries whose move is older than this many minutes (entry_signal_stale). Applies to
+# ALL tiers — a_plus unanimity is lateness in disguise. Code default 0 = gate off; YAML arms it.
+MAX_SIGNAL_AGE_MINUTES: float = _num("max_signal_age_minutes", 0.0)
+
 # ── Shadow validation of the freshness entry spec (2026-08-18 halt) ────────────
 # While entries are halted, the daemon tracks every vetoed-but-clean confirm — real option
 # quotes over a would-be hold — so the pre-registered freshness gate is validated at zero
