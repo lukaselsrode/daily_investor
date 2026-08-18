@@ -94,6 +94,9 @@ where = ["src"]
 # Primary test suite. Legacy: python3 -m pytest src/tests.py
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+markers = [
+    "halt_posture: test pins the LIVE operator-halt config; exempt from the pre-halt budget fixture",
+]
 
 # ---------------------------------------------------------------------------
 # Ruff — linting and formatting

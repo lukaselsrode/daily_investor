@@ -19,6 +19,8 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+import pytest
+
 import data.odte_config as oc
 import data.odte_convert as cv
 import data.odte_entry_gate as eg
@@ -430,7 +432,7 @@ def test_journal_events_override_enforces_budget_with_zero_appends(tmp_path):
              "ts": (NOW - timedelta(hours=hours_ago - 1)).isoformat()},
         ]
     assert len([e for e in real_events if e["event_type"] == "order_filled"]) \
-        == oc.DAILY_TRADE_BUDGET
+        == oc.DAILY_TRADE_BUDGET    # the conftest-pinned mechanism budget, not the halted live 0
     payload = cv.run_convert(candidate_json=_candidate(), market_json=_market(),
                              broker_json=_broker(), contract_json=_contract(),
                              state_dir=str(tmp_path), write=False, journal=False,
@@ -711,6 +713,7 @@ def test_daily_loss_floor_ignores_a_small_red(tmp_path, monkeypatch):
     assert payload["converted"] is True, payload["reason_codes"]
 
 
+@pytest.mark.halt_posture
 def test_live_posture_pins_the_w33_fences():
     """The pre-registered production posture. Reverting any of these is a deliberate act that
     should have to update this test and cite new evidence (plan O2: re-evaluate at 20 new closed)."""
@@ -722,3 +725,9 @@ def test_live_posture_pins_the_w33_fences():
     assert _oc.MIN_ENTRY_PREMIUM == 0.60
     assert _oc.MIDDAY_FULL_TIER_AFTER_ET_HOUR == 13.0
     assert _oc.DAILY_LOSS_FLOOR_DOLLARS == 30.0
+    # 2026-08-18 OPERATOR HALT: account $346.68 < $350 capital floor; a_plus cohort 0-for-3 this
+    # week (-$86). Live entries stopped via budget 0 + uncapped OFF (true would let a_plus bypass
+    # a zero cap on any net-flat day). Resume ONLY with the re-derived, pre-registered entry spec
+    # — updating these two pins IS the resume act and must cite that spec.
+    assert _oc.DAILY_TRADE_BUDGET == 0
+    assert _oc.DAILY_BUDGET_APLUS_UNCAPPED is False

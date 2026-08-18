@@ -1131,8 +1131,13 @@ odte:
   b_plus_max_dissenters: 1
   b_plus_min_vehicle_score: 3     # WATCH verdict acceptable for B+ at/above this score
   good_day_min_score: 4           # unchanged default; tune only on telemetry evidence
-  daily_trade_budget: 2           # hard cap on entries per ET day
-  daily_budget_aplus_uncapped: true   # a_plus setups bypass the cap WHILE the day is net-green
+  daily_trade_budget: 0           # OPERATOR HALT 2026-08-18: live entries stopped (account $346.68
+                                  # < $350 capital floor; a_plus cohort 0-for-3 this week, -$86).
+                                  # Scanning/journaling/shadow continue. Resume ONLY with the
+                                  # re-derived, pre-registered entry spec. Was: 2.
+  daily_budget_aplus_uncapped: false  # HALT 2026-08-18: MUST be bare false while budget is 0 —
+                                  # true lets a_plus bypass the zero cap on any net-flat day,
+                                  # and a_plus is the exact cohort being halted. Was: true.
                                   # (a net-red day hard-stops at the cap — anti-tilt survives).
                                   # NOTE: absent OR wrong-typed falls back to the code default,
                                   # which is True — a quoted "false" leaves this ON. Use a bare

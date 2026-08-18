@@ -143,3 +143,21 @@ def isolate_data_writers(tmp_path, monkeypatch):
     # Position-event journal + thesis weak-streak store.
     monkeypatch.setattr(pj, "_journal_path", lambda: tmp_path / "position_journal.csv")
     monkeypatch.setattr(tct, "_WEAK_STREAK_CSV", str(tmp_path / "weak_streak.csv"))
+
+
+@pytest.fixture(autouse=True)
+def pre_halt_trade_budget(request, monkeypatch):
+    """OPERATOR HALT (2026-08-18): cfg/config.yaml sets daily_trade_budget: 0 and
+    daily_budget_aplus_uncapped: false — live entries are stopped below the capital floor
+    (account $346.68 < $350; a_plus cohort 0-for-3, -$86 that week).
+
+    Mechanism tests across the suite exercise a TRADEABLE system and were written against the
+    pre-halt posture, so this fixture restores it for them at the source every consumer reads
+    (data.odte_config — daily_trade_budget() imports it at call time). Tests that pin the live
+    halt itself opt out with @pytest.mark.halt_posture; un-halting must update those tests, not
+    this fixture."""
+    if request.node.get_closest_marker("halt_posture"):
+        return
+    import data.odte_config as _oc
+    monkeypatch.setattr(_oc, "DAILY_TRADE_BUDGET", 2)
+    monkeypatch.setattr(_oc, "DAILY_BUDGET_APLUS_UNCAPPED", True)
