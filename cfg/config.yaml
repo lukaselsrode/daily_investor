@@ -1158,6 +1158,9 @@ odte:
   daily_loss_floor_dollars: 30    # no new entries once day net P/L <= -$30 (count cap != $ cap)
   tier_max_contracts_full: 2      # 2026-08-14: full-tier tapes may size 2 contracts (fraction caps)
   tier_max_contracts_aplus: 2     # a_plus likewise; b_plus stays 1 (DEFAULT_MAX_CONTRACTS)
+  shadow_validation_enabled: true # 2026-08-18 halt: track vetoed-but-clean confirms with real
+                                  # quotes (would-be entries) to validate the freshness spec at
+                                  # zero dollars — see reports/entry_signal_autopsy_2026-08-18.md
   watchdog_realert_minutes: 10    # re-alert when a candidate persists unchanged
   weekly_trade_target_min: 3
   weekly_trade_target_max: 4

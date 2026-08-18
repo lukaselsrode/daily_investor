@@ -242,6 +242,22 @@ class FastLaneDaemon:
         self.last_error: str | None = None
         self._started = False
 
+        # 2026-08-18 halt: track vetoed-but-clean confirms (would-be entries) with real quotes
+        # so the freshness entry spec validates at zero dollars. Advisory lane — its step()
+        # swallows its own errors and can never break a tick. Config-armed, default off.
+        from data.odte_config import (
+            SHADOW_VALIDATION_ENABLED,
+            SHADOW_VALIDATION_HOLD_MINUTES,
+            SHADOW_VALIDATION_POLL_SECONDS,
+        )
+        self.shadow_validation = None
+        if SHADOW_VALIDATION_ENABLED:
+            from execution.odte_shadow_validation import ShadowValidationTracker
+            self.shadow_validation = ShadowValidationTracker(
+                self.base_dir / "shadow_validation",
+                hold_minutes=SHADOW_VALIDATION_HOLD_MINUTES,
+                poll_seconds=SHADOW_VALIDATION_POLL_SECONDS)
+
     # ── journaling ──────────────────────────────────────────────────────────────────────────
 
     def _journal(self, event: dict, event_type: str, *, shadow: bool, now: datetime) -> None:
@@ -416,6 +432,9 @@ class FastLaneDaemon:
 
             if self.state in (IDLE, WATCHING):
                 await self._watch(now, paused)
+                if self.shadow_validation is not None:
+                    await self.shadow_validation.step(self._real_events(),
+                                                      self.client.option_quote_by_id, now)
             elif self.state == PENDING:
                 await self._pending(now)
             elif self.state == MANAGING:

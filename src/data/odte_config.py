@@ -140,6 +140,15 @@ DAILY_LOSS_FLOOR_DOLLARS: float = _num("daily_loss_floor_dollars", 0.0)
 TIER_MAX_CONTRACTS_FULL: int = _int("tier_max_contracts_full", 1)
 TIER_MAX_CONTRACTS_APLUS: int = _int("tier_max_contracts_aplus", 1)
 
+# ── Shadow validation of the freshness entry spec (2026-08-18 halt) ────────────
+# While entries are halted, the daemon tracks every vetoed-but-clean confirm — real option
+# quotes over a would-be hold — so the pre-registered freshness gate is validated at zero
+# dollars (data/odte/reports/entry_signal_autopsy_2026-08-18.md). Read-only; code default
+# off, YAML arms it. Data lands in data/odte/shadow_validation/.
+SHADOW_VALIDATION_ENABLED: bool = _bool("shadow_validation_enabled", False)
+SHADOW_VALIDATION_HOLD_MINUTES: float = _num("shadow_validation_hold_minutes", 45.0)
+SHADOW_VALIDATION_POLL_SECONDS: float = _num("shadow_validation_poll_seconds", 30.0)
+
 # ── Watchdog ───────────────────────────────────────────────────────────────────
 WATCHDOG_REALERT_MINUTES: int = _int("watchdog_realert_minutes", 10)
 

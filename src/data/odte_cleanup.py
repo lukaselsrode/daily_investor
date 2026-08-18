@@ -60,6 +60,9 @@ KEEP_FILES: frozenset[str] = frozenset({
 # `data/odte/` is gitignored, so the swept copy was the ONLY copy.
 KEEP_DIRS: frozenset[str] = frozenset({
     "days", "reports", "scrape", "swarm", "precompute", "archive", "shadow", "research",
+    # 2026-08-18 halt: freshness-spec validation data (would-be entries + quote paths) — the
+    # evidence the un-halt decision consumes; a sweep here erases the resume case.
+    "shadow_validation",
 })
 
 # Scrape snapshot kinds (data/odte/scrape/<kind>_text_YYYY_MM_DD_HH_MM.txt + stable pointer).
