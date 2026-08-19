@@ -466,6 +466,15 @@ def first_signal_age_minutes(events: list[dict] | None, underlying, direction,
             continue
         if str(e.get("symbol") or "").upper() != sym or str(e.get("direction") or "").lower() != direc:
             continue
+        # CLOCK POLLUTION FIX (2026-08-19 ORB study): only an evaluation carrying a REAL tape
+        # read may start the move clock. Expiry tombstones (a 3,937-minute-old candidate's
+        # expiry event started 08-10's clock at 09:32) and the watchdog's synthetic scorecards
+        # (no tape) anchored the literal clock so early that BOTH recorded winners would have
+        # been vetoed at 46.3m/37.9m "age" vs tape-true 11.2m/11.5m. `underlying_orb_state` is
+        # present exactly when the evaluation saw the tape (ORB omitted pre-freeze by design).
+        checks = e.get("checks")
+        if not (isinstance(checks, dict) and checks.get("underlying_orb_state")):
+            continue
         t = _parse_ts(e.get("ts") or e.get("generated_at"))
         if t is None:
             continue

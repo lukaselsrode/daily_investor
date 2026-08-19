@@ -1896,8 +1896,10 @@ def test_fences_advertise_signal_ages_with_stale_flags():
     controller can skip converting a move the gate must refuse."""
     import data.odte_config as _oc
     old = {"event_type": "candidate_evaluation", "symbol": "SPY", "direction": "bullish",
+           "checks": {"underlying_orb_state": "above"},
            "ts": (NOW - __import__("datetime").timedelta(minutes=55)).isoformat()}
     fresh = {"event_type": "candidate_evaluation", "symbol": "QQQ", "direction": "bearish",
+             "checks": {"underlying_orb_state": "below"},
              "ts": (NOW - __import__("datetime").timedelta(minutes=5)).isoformat()}
     r = ls.derive_loop_state(journal_events=[old, fresh], now=NOW)
     ages = r["live_rails"]["fences"]["signal_ages"]

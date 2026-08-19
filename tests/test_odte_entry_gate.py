@@ -775,6 +775,7 @@ def test_strict_bar_arms_a_strictly_better_tier(monkeypatch):
 def _signal_history(now, ages_minutes, symbol="SPY", direction="bullish"):
     """candidate_evaluation telemetry rows at the given ages before `now`."""
     return [{"event_type": "candidate_evaluation", "symbol": symbol, "direction": direction,
+             "checks": {"underlying_orb_state": "above"},   # a REAL tape read starts the clock
              "ts": (now - timedelta(minutes=m)).isoformat()} for m in ages_minutes]
 
 
@@ -827,3 +828,21 @@ def test_freshness_veto_has_no_aplus_exception(monkeypatch):
         now=_LOCK_NOW, **kw)
     assert d["execution_allowed"] is False
     assert eg.STALE_SIGNAL_VETO in d["veto_reasons"]
+
+
+def test_tombstones_and_synthetics_cannot_start_the_clock(monkeypatch):
+    # 2026-08-19 ORB study: expiry tombstones and synthetic scorecard evaluations (no tape read)
+    # anchored the clock so early that BOTH recorded winners would have been vetoed. Only an
+    # evaluation carrying checks.underlying_orb_state may start the move clock.
+    monkeypatch.setattr(eg, "MAX_SIGNAL_AGE_MINUTES", 20.0)
+    polluted = [{"event_type": "candidate_evaluation", "symbol": "SPY", "direction": "bullish",
+                 "decision": "expired_no_confirmation",           # tombstone — no checks
+                 "ts": (_LOCK_NOW - timedelta(minutes=55)).isoformat()},
+                {"event_type": "candidate_evaluation", "symbol": "SPY", "direction": "bullish",
+                 "ts": (_LOCK_NOW - timedelta(minutes=48)).isoformat()}]  # synthetic — no checks
+    real = _signal_history(_LOCK_NOW, [9.0])                      # first TAPE read 9 min ago
+    d = eg.build_entry_gate_decision(journal_events=polluted + real, now=_LOCK_NOW,
+                                     **_spy_gates_kwargs())
+    assert eg.STALE_SIGNAL_VETO not in d["veto_reasons"]
+    assert d["signal_age_minutes"] == 9.0                         # the tape-true clock
+    assert d["execution_allowed"] is True

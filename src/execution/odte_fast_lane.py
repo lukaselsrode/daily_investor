@@ -992,6 +992,21 @@ async def run_fast_lane(client: Any, *, account_number: str,
         daemon._journal({"counts": daemon.counts, "entries_locked": daemon.entries_locked,
                          "last_error": daemon.last_error},
                         "shadow_session_end", shadow=True, now=end)
+        # BARS ARCHIVE (2026-08-19 ORB study): the tape's 5m bars lived only in memory, so no
+        # opening-range question (15m vs 30m, head-fake rates, alignment lead times) was ever
+        # answerable offline. Dump them at session end — a few KB/day makes every ORB variant a
+        # deterministic replay. Best-effort: archiving can never break shutdown.
+        try:
+            bars = (daemon.tape_state or {}).get("bars") or {}
+            if bars:
+                day_dir = daemon.base_dir / "days" / end.astimezone(_ET).date().isoformat()
+                day_dir.mkdir(parents=True, exist_ok=True)
+                atomic_write_text(day_dir / "bars_5m.json", json.dumps(
+                    {"date": end.astimezone(_ET).date().isoformat(),
+                     "source": "fast_lane_tape", "schema": "parse_historicals_v1",
+                     "bars": bars}, default=str))
+        except Exception:
+            logger.exception("bars archive failed (non-fatal)")
         if hasattr(client, "aclose"):
             await client.aclose()
     return {"state": daemon.state, "counts": daemon.counts}

@@ -235,6 +235,7 @@ def test_stale_move_is_parked_never_poked(tmp_path, monkeypatch):
         {"ticker": "SPY", "direction": "bullish",
          "created_at": (NOW - timedelta(minutes=3)).isoformat()}))
     history = [{"event_type": "candidate_evaluation", "symbol": "SPY", "direction": "bullish",
+                "checks": {"underlying_orb_state": "above"},
                 "ts": (NOW - timedelta(minutes=25)).isoformat()}]
     for i in range(5):
         det.step(_tape(), NOW + timedelta(seconds=3 * i), events=history)
@@ -257,6 +258,7 @@ def test_fresh_journal_clock_still_pokes(tmp_path, monkeypatch):
         {"ticker": "SPY", "direction": "bullish",
          "created_at": (NOW - timedelta(minutes=3)).isoformat()}))
     history = [{"event_type": "candidate_evaluation", "symbol": "SPY", "direction": "bullish",
+                "checks": {"underlying_orb_state": "above"},
                 "ts": (NOW - timedelta(minutes=8)).isoformat()}]
     det.step(_tape(), NOW, events=history)
     assert len(calls) == 1

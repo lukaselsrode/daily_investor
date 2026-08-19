@@ -32,7 +32,8 @@ def _confirm_pair(t, *, vetoed=True, option_id="opt-1", direction="bearish", tie
 
 def _signal(t, direction="bearish"):
     return {"event_type": "candidate_evaluation", "ts": t.isoformat(timespec="seconds"),
-            "symbol": "SPY", "direction": direction}
+            "symbol": "SPY", "direction": direction,
+            "checks": {"underlying_orb_state": "below"}}    # tape read — starts the move clock
 
 
 def test_detects_vetoed_confirm_with_signal_age():
