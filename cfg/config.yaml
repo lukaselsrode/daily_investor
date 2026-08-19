@@ -1158,9 +1158,10 @@ odte:
   daily_loss_floor_dollars: 15    # RESUME 2026-08-18: tightened from 30 — on 08-18 a -$27 first
                                   # loss passed the -$30 floor and a second trade doubled the day
                                   # to -$54; at -$15 any full stop ends the day.
-  tier_max_contracts_full: 1      # RESUME 2026-08-18: back to 1-lot everywhere until the
-  tier_max_contracts_aplus: 1     # freshness spec earns size back (was 2/2 from 08-14; those
-                                  # 2-lots rode the a_plus losers). DEFAULT_MAX_CONTRACTS=1.
+  tier_max_contracts_full: 2      # 2026-08-18 evening (operator): tier sizing restored to 2 on
+  tier_max_contracts_aplus: 2     # the resume — the lateness autopsy convicted the ENTRY timing,
+                                  # not the sizing; with budget 1/day + freshness gate the worst
+                                  # day is ONE fresh 2-lot stop (~-$40). b_plus stays 1.
   max_signal_age_minutes: 20      # RESUME 2026-08-18 FRESHNESS GATE (the autopsy's core finding):
                                   # entries >15m after the move's first signal went 0-for-7
                                   # (-$156); winners entered ~11m in. Veto: entry_signal_stale.
