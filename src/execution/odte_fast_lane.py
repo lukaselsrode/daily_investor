@@ -478,6 +478,8 @@ class FastLaneDaemon:
                            "tape_generated_at": self.last_tape.get("generated_at")})
             if self.confirm_detector is not None:
                 status["confirm_detector"] = self.confirm_detector.summary()
+            if self.shadow_validation is not None:
+                status["shadow_validation"] = self.shadow_validation.summary()
         except Exception as exc:
             self.last_error = f"{type(exc).__name__}: {exc}"
             logger.exception("fast-lane tick error")

@@ -148,6 +148,12 @@ class ShadowValidationTracker:
         self.tracking.pop(key, None)
         self._persist()
 
+    def summary(self) -> dict:
+        """Heartbeat surface — 2026-08-19: three empty holds finalized before anyone could see
+        the tracker was erroring/parsing nothing."""
+        return {"tracking": len(self.tracking), "errors": self.errors,
+                "sampled": sum(1 for r in self.tracking.values() if r.get("samples"))}
+
     # ── per-tick entry point (never raises) ──────────────────────────────────────────────
     async def step(self, events: list[dict],
                    quote_fn: Callable[[str], Any], now: datetime | None = None) -> None:
@@ -160,7 +166,10 @@ class ShadowValidationTracker:
 
     async def _step(self, events, quote_fn, now: datetime) -> None:
         for cand in find_qualifying_confirms(events, now):
-            key = f"{cand['option_id']}:{cand['confirm_ts']}"
+            # Keyed by CONTRACT (2026-08-19): keying by confirm_ts let one stale move's
+            # re-confirms fill every tracking slot with the same option — three slots, one
+            # contract, zero new information.
+            key = str(cand["option_id"])
             if key in self.tracking or len(self.tracking) >= MAX_CONCURRENT:
                 continue
             self.tracking[key] = {**cand, "started_at": now.isoformat(timespec="seconds"),
@@ -178,6 +187,11 @@ class ShadowValidationTracker:
             quote = await quote_fn(rec["option_id"])
             rec["last_poll"] = now.isoformat(timespec="seconds")
             q = quote if isinstance(quote, dict) else getattr(quote, "__dict__", {}) or {}
+            # The live payload NESTS under "quote" ({'quote': {'bid_price': ...}}) — same unwrap
+            # as the daemon's _option_quote_to_contract. 2026-08-19: the flat read parsed None on
+            # every poll and three 45-min holds finalized with zero samples, silently.
+            if isinstance(q.get("quote"), dict):
+                q = q["quote"]
             bid = _num(q.get("bid_price") or q.get("bid"))
             ask = _num(q.get("ask_price") or q.get("ask"))
             if rec.get("ref_ask") is None and ask and ask > 0:

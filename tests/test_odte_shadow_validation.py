@@ -158,3 +158,30 @@ def test_stale_vetoed_confirm_is_tracked_as_counterfactual():
     assert len(hits) == 1
     assert hits[0]["veto_kind"] == "entry_signal_stale"
     assert hits[0]["signal_age_minutes"] == 25.0
+
+
+def test_nested_quote_payload_is_unwrapped(tmp_path):
+    # 2026-08-19: the LIVE payload nests under "quote" — the flat read parsed None on every poll
+    # and three 45-minute holds finalized with zero samples, silently.
+    tr = _tracker(tmp_path)
+    events = _confirm_pair(NOW)
+
+    async def quote_fn(_oid):
+        return {"quote": {"instrument_id": "x", "ask_price": "0.310000",
+                          "bid_price": "0.300000"}}
+    asyncio.run(tr.step(events, quote_fn, NOW))
+    rec = next(iter(tr.tracking.values()))
+    assert rec["ref_ask"] == 0.31
+    assert rec["samples"][0][1] == 0.30
+
+
+def test_reconfirms_of_one_contract_track_once(tmp_path):
+    # Keyed by contract: a stale move's re-confirms must not fill every slot with one option.
+    tr = _tracker(tmp_path)
+    events = (_confirm_pair(NOW) + _confirm_pair(NOW + timedelta(minutes=6))
+              + _confirm_pair(NOW + timedelta(minutes=12)))
+
+    async def quote_fn(_oid):
+        return {"quote": {"ask_price": "0.80", "bid_price": "0.78"}}
+    asyncio.run(tr.step(events, quote_fn, NOW + timedelta(minutes=12)))
+    assert len(tr.tracking) == 1
