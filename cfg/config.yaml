@@ -858,12 +858,23 @@ backtest:
     min_history: 63
     switch_bps: 20.0
 tuning:
-  # frozen_parameters near-empty: presets define the tunable surface per-run,
-  # and OOS validation gates catch overfitting. momentum_residual_blend is
-  # PERMANENTLY frozen: slot 49 is implemented only in the simulator — a tuned
-  # nonzero value would change sim results but never live scoring.
+  # frozen_parameters: presets define the tunable surface per-run, and OOS
+  # validation gates catch overfitting. These two are PERMANENTLY frozen —
+  # operator freezes beat preset unfreezes (tuning.constants._get_active_indices).
+  #
+  # momentum_residual_blend (slot 49): implemented ONLY in the backtest simulator.
+  #   A tuned nonzero value would move sim results while live scoring ignored it.
+  #
+  # quality_low_vol_blend (slot 48, frozen 2026-08-18): implemented live since
+  #   peer-3, so it is technically tunable — but a prior multi-seed system test
+  #   recorded it as MONOTONICALLY harmful (-0.3% to -1.4% active-sleeve excess),
+  #   and the 2026-08-18 ladder tune reached for it anyway (proposed 0.365) inside
+  #   the active_quality_stack cluster. A knob already measured as harmful should
+  #   not be re-searched every run; unfreeze only with a multi-seed result that
+  #   clears the promotion ladder.
   frozen_parameters:
   - scoring.momentum_residual_blend
+  - scoring.quality_low_vol_blend
 reliability:
   enabled: false
   min_reliability_score: 0.7
@@ -1168,6 +1179,10 @@ odte:
   shadow_validation_enabled: true # 2026-08-18 halt: track vetoed-but-clean confirms with real
                                   # quotes (would-be entries) to validate the freshness spec at
                                   # zero dollars — see reports/entry_signal_autopsy_2026-08-18.md
+  confirm_detector_enabled: true  # 2026-08-18 latency fix: daemon-side confirm detection +
+                                  # controller poke (median 297s / p90 417s tick-spacing gap
+                                  # -> seconds). Delete key (or false) + daemon restart = off.
+  confirm_poke_cooldown_seconds: 90   # re-poke floor per (symbol,direction) while confirm holds
   watchdog_realert_minutes: 10    # re-alert when a candidate persists unchanged
   weekly_trade_target_min: 3
   weekly_trade_target_max: 4

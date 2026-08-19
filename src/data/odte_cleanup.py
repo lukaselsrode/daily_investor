@@ -52,6 +52,9 @@ KEEP_FILES: frozenset[str] = frozenset({
     "fast_lane_stage.json",
     "fast_lane_status.json",
     "fast_lane_pause",
+    # 2026-08-18: confirm-detector poke-cooldown state — sweeping it re-pokes the controller
+    # after every cleanup.
+    "confirm_detector_state.json",
 })
 
 # Canonical subdirectories — never entered, never moved.

@@ -147,6 +147,15 @@ TIER_MAX_CONTRACTS_APLUS: int = _int("tier_max_contracts_aplus", 1)
 # ALL tiers — a_plus unanimity is lateness in disguise. Code default 0 = gate off; YAML arms it.
 MAX_SIGNAL_AGE_MINUTES: float = _num("max_signal_age_minutes", 0.0)
 
+# ── Confirm detector / controller poke rail (2026-08-18 lateness autopsy) ──────
+# The daemon evaluates candidate-watch in-process at tick cadence (3-15s) and POKES the
+# controller cron (`hermes cron run`) the moment the tape confirms — collapsing the */5
+# tick-spacing detection gap (median 297s, p90 417s, max 1447s measured 08-17..18) to seconds.
+# The poke is a wake-up, never authority: every gate still runs in the poked tick. Code
+# default OFF; YAML arms it.
+CONFIRM_DETECTOR_ENABLED: bool = _bool("confirm_detector_enabled", False)
+CONFIRM_POKE_COOLDOWN_SECONDS: float = _num("confirm_poke_cooldown_seconds", 90.0)
+
 # ── Shadow validation of the freshness entry spec (2026-08-18 halt) ────────────
 # While entries are halted, the daemon tracks every vetoed-but-clean confirm — real option
 # quotes over a would-be hold — so the pre-registered freshness gate is validated at zero

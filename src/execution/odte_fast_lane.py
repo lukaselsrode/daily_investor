@@ -258,6 +258,23 @@ class FastLaneDaemon:
                 hold_minutes=SHADOW_VALIDATION_HOLD_MINUTES,
                 poll_seconds=SHADOW_VALIDATION_POLL_SECONDS)
 
+        # 2026-08-18 latency fix: in-process confirm detection at tick cadence + controller
+        # poke — collapses the */5 detection gap (median 297s measured) to seconds. Advisory,
+        # read-only on shared state, fail-open. Config-armed, default off.
+        from data.odte_config import CONFIRM_DETECTOR_ENABLED, CONFIRM_POKE_COOLDOWN_SECONDS
+        self.confirm_detector = None
+        if CONFIRM_DETECTOR_ENABLED:
+            from execution.odte_confirm_detector import ConfirmDetector
+            # SHADOW PURITY: a shadow-mode daemon rehearses — its detector journals would-pokes
+            # to the shadow journal and never fires the real poke chain.
+            detector_live = self.mode != MODE_SHADOW
+            self.confirm_detector = ConfirmDetector(
+                self.base_dir,
+                journal_path=(self.journal_path if detector_live
+                              else self.shadow_journal_path),
+                live=detector_live,
+                poke_cooldown_seconds=CONFIRM_POKE_COOLDOWN_SECONDS)
+
     # ── journaling ──────────────────────────────────────────────────────────────────────────
 
     def _journal(self, event: dict, event_type: str, *, shadow: bool, now: datetime) -> None:
@@ -435,6 +452,8 @@ class FastLaneDaemon:
                 if self.shadow_validation is not None:
                     await self.shadow_validation.step(self._real_events(),
                                                       self.client.option_quote_by_id, now)
+                if self.confirm_detector is not None:
+                    self.confirm_detector.step(self.last_tape, now)
             elif self.state == PENDING:
                 await self._pending(now)
             elif self.state == MANAGING:
@@ -445,6 +464,8 @@ class FastLaneDaemon:
                            "intents_armed": len(self._armed_intents(now)),
                            "counts": dict(self.counts),
                            "tape_generated_at": self.last_tape.get("generated_at")})
+            if self.confirm_detector is not None:
+                status["confirm_detector"] = self.confirm_detector.summary()
         except Exception as exc:
             self.last_error = f"{type(exc).__name__}: {exc}"
             logger.exception("fast-lane tick error")

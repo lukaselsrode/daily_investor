@@ -70,9 +70,13 @@ def test_keep_list_covers_the_loop_state_contract():
     # The exact files whose loss broke the loop historically must be hardcoded-protected.
     for name in ("triggers.json", "watchdog_state.json", "active_candidate.json",
                  "candidate_decision.json", "execution_lease.json", "consumed_leases.json",
-                 "broker_health.json", "decision_journal.jsonl", "active_state.json"):
+                 "broker_health.json", "decision_journal.jsonl", "active_state.json",
+                 # 2026-08-18: poke-cooldown state — sweeping it re-pokes after every cleanup
+                 "confirm_detector_state.json"):
         assert name in cl.KEEP_FILES, name
-    for d in ("days", "reports", "scrape", "swarm", "precompute", "archive"):
+    for d in ("days", "reports", "scrape", "swarm", "precompute", "archive",
+              # 2026-08-18: freshness-spec validation evidence
+              "shadow_validation"):
         assert d in cl.KEEP_DIRS, d
 
 
