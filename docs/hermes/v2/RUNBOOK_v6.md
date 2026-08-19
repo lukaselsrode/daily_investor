@@ -88,6 +88,10 @@ CONFIRM_ENTRY and 0 unexplained shadow-only fires; hook v6 deployed and dry-veri
 lease refused by the hook) passes.
 → Promote: `make odte-fast-lane-stage STAGE=entries_live`. Week one operational cap:
 **1 armed intent/day**, reviewed each EOD (runbook rule, not code).
+**HARD PRE-REQ (2026-08-18): remove `--place --account` from the controller prompt's convert
+step FIRST.** `--place` constructs its own MCP client and ignores `fast_lane_stage.json` — left
+in place it re-creates a dual entry lane the moment the daemon owns opens (the pre-order hook
+cannot stop it; `pre_place_check` + the shared ledger is its only guard).
 
 ## G. Failure modes and their answers
 
@@ -99,6 +103,7 @@ lease refused by the hook) passes.
 | Same intent seems dead after one fire | intents are single-shot (`fired_at`); re-arm deliberately |
 | Parked MCP connection (Hermes lane) | unchanged v5 protocol + un-parker; the daemon holds its OWN session and reconnects once per call, so a Hermes park does not affect it |
 | Both lanes near one position | entries: consumed ledger arbiters; exits: daemon writes `management.decision`, Hermes defers (prompt v6); a true double-close rejects at the broker (no position) |
+| Poke rail misbehaving (pre-10:00 poke, poke storm, stale-notepad actions) | `cfg/config.yaml` `confirm_detector_enabled: false` + daemon restart; `data/odte/fast_lane_pause` silences pokes with no restart; `hermes cron pause 344e4c3333a7` — the claim layer refuses pokes on a paused job (verified) |
 
 ## H2. Incident adjudication (added 2026-08-06)
 
