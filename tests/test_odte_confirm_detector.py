@@ -218,3 +218,45 @@ def test_live_posture_arms_the_confirm_detector():
     import data.odte_config as oc
     assert oc.CONFIRM_DETECTOR_ENABLED is True
     assert oc.CONFIRM_POKE_COOLDOWN_SECONDS == 90.0
+
+
+def test_stale_move_is_parked_never_poked(tmp_path, monkeypatch):
+    # 2026-08-19 live poke-storm: a confirm-ready move past the freshness limit re-poked every
+    # cooldown — and candidate TTL re-seeds minted FRESH detector clocks that kept the storm
+    # going under new keys. The detector now uses the GATE'S journal clock
+    # (first_signal_age_minutes), which spans re-seeds: one ready_but_stale transition, zero
+    # pokes, parked for the session.
+    import data.odte_config as oc
+    monkeypatch.setattr(oc, "MAX_SIGNAL_AGE_MINUTES", 20.0)
+    det, calls = _detector(tmp_path, cooldown=0.0)
+    # The tape-lane confirm resolves to SPY; the journal carries SPY-bullish history from 25
+    # minutes ago (the controller's scan telemetry in production).
+    (tmp_path / "active_candidate.json").write_text(json.dumps(
+        {"ticker": "SPY", "direction": "bullish",
+         "created_at": (NOW - timedelta(minutes=3)).isoformat()}))
+    history = [{"event_type": "candidate_evaluation", "symbol": "SPY", "direction": "bullish",
+                "ts": (NOW - timedelta(minutes=25)).isoformat()}]
+    for i in range(5):
+        det.step(_tape(), NOW + timedelta(seconds=3 * i), events=history)
+    assert calls == []                                       # stale from the first look
+    evs = _events(tmp_path)
+    stale = [e for e in evs if e.get("detector_transition") == "ready_but_stale"]
+    # Same-second identity dedupe may fold the stale event into the first-sighting append; the
+    # park is STATE-based either way and the phase is visible in the heartbeat summary.
+    assert len(stale) <= 1
+    move = next(iter((det.state.get("moves") or {}).values()))
+    assert move["phase"] == "stale"
+
+
+def test_fresh_journal_clock_still_pokes(tmp_path, monkeypatch):
+    # The journal clock must not over-block: a move whose first signal is recent pokes normally.
+    import data.odte_config as oc
+    monkeypatch.setattr(oc, "MAX_SIGNAL_AGE_MINUTES", 20.0)
+    det, calls = _detector(tmp_path)
+    (tmp_path / "active_candidate.json").write_text(json.dumps(
+        {"ticker": "SPY", "direction": "bullish",
+         "created_at": (NOW - timedelta(minutes=3)).isoformat()}))
+    history = [{"event_type": "candidate_evaluation", "symbol": "SPY", "direction": "bullish",
+                "ts": (NOW - timedelta(minutes=8)).isoformat()}]
+    det.step(_tape(), NOW, events=history)
+    assert len(calls) == 1

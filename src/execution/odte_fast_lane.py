@@ -459,11 +459,13 @@ class FastLaneDaemon:
 
             if self.state in (IDLE, WATCHING):
                 await self._watch(now, paused)
-                if self.shadow_validation is not None:
-                    await self.shadow_validation.step(self._real_events(),
-                                                      self.client.option_quote_by_id, now)
-                if self.confirm_detector is not None:
-                    self.confirm_detector.step(self.last_tape, now)
+                if self.shadow_validation is not None or self.confirm_detector is not None:
+                    events = self._real_events()               # one read, both consumers
+                    if self.shadow_validation is not None:
+                        await self.shadow_validation.step(events,
+                                                          self.client.option_quote_by_id, now)
+                    if self.confirm_detector is not None:
+                        self.confirm_detector.step(self.last_tape, now, events=events)
             elif self.state == PENDING:
                 await self._pending(now)
             elif self.state == MANAGING:

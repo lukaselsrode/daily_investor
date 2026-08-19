@@ -134,15 +134,18 @@ class ConfirmDetector:
                 "moves": {k: v.get("phase") for k, v in (self.state.get("moves") or {}).items()}}
 
     # ── per-tick entry point (never raises) ─────────────────────────────────────────────────
-    def step(self, tape: dict | None, now: datetime | None = None) -> None:
+    def step(self, tape: dict | None, now: datetime | None = None,
+             events: list[dict] | None = None) -> None:
+        """`events` is the day's canonical journal (the daemon already reads it each tick for
+        the shadow harness) — it powers the SAME freshness clock the gate uses."""
         now = now or datetime.now(timezone.utc)
         try:
-            self._step(tape or {}, now)
+            self._step(tape or {}, now, events)
         except Exception as exc:                              # advisory lane: fail open, count it
             self.errors += 1
             logger.exception("confirm-detector step error: %s", exc)
 
-    def _step(self, tape: dict, now: datetime) -> None:
+    def _step(self, tape: dict, now: datetime, events: list[dict] | None = None) -> None:
         if not tape or not (tape.get("generated_at") or tape.get("as_of")):
             return
         # New ET session ⇒ fresh state (poke counters, move phases).
@@ -188,12 +191,39 @@ class ConfirmDetector:
         if kind is None or move is None:
             return
 
-        # TRANSITION: confirm-ready.
-        if move.get("phase") != "ready":
+        # TRANSITION: confirm-ready. A parked ("stale") move stays parked — flipping it back
+        # would re-journal ready transitions every tick and re-open the poke path.
+        if move.get("phase") not in ("ready", "stale"):
             move["phase"] = "ready"
             move["ready_at"] = now.isoformat(timespec="seconds")
             self._journal_transition(payload, f"ready:{kind}", now)
             self._persist()
+
+        # STALE MOVES ARE NEVER POKED (2026-08-19, live poke-storm): a confirm-ready move older
+        # than the freshness gate's limit gets vetoed at the gate EVERY time — poking it burns a
+        # controller run per cooldown for a structurally impossible entry (11 pokes in ~35 min).
+        # The clock is the GATE'S OWN (`first_signal_age_minutes` over the journal) so the two
+        # can never disagree — candidate TTL re-seeds do NOT reset it (the trap: a re-seeded
+        # candidate minted a fresh detector move and the storm continued under a new key). The
+        # detector's own first_seen is only the fallback when the journal has no history.
+        from data.odte_config import MAX_SIGNAL_AGE_MINUTES
+        if MAX_SIGNAL_AGE_MINUTES > 0:
+            age_min = None
+            if events:
+                from data.odte_journal import first_signal_age_minutes
+                age_min = first_signal_age_minutes(events, symbol, direction, now=now)
+            if age_min is None and move.get("first_seen"):
+                try:
+                    age_min = (now - datetime.fromisoformat(
+                        move["first_seen"])).total_seconds() / 60.0
+                except ValueError:
+                    age_min = None
+            if age_min is not None and age_min > MAX_SIGNAL_AGE_MINUTES:
+                if move.get("phase") != "stale":
+                    move["phase"] = "stale"
+                    self._journal_transition(payload, "ready_but_stale", now)
+                    self._persist()
+                return
 
         # Poke, throttled per move.
         last = move.get("last_poke")
