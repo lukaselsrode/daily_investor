@@ -138,3 +138,23 @@ def test_live_posture_arms_shadow_validation():
     starves the un-halt decision of data. Update only with the resume decision."""
     import data.odte_config as oc
     assert oc.SHADOW_VALIDATION_ENABLED is True
+
+
+def test_stale_vetoed_confirm_is_tracked_as_counterfactual():
+    # 2026-08-19: the freshness gate's first live veto — a stale-vetoed confirm's forward path is
+    # the direct evidence for/against the 20-minute threshold and must be tracked like a
+    # budget-vetoed one.
+    events = [_signal(NOW - timedelta(minutes=25))]
+    ts = NOW.isoformat(timespec="seconds")
+    events += [
+        {"event_type": "entry_decision", "ts": ts, "symbol": "SPY", "tier": "b_plus",
+         "reasons": ["day_regime:ok", "confirmed_candidate_transition"]},
+        {"event_type": "vehicle_score", "ts": ts, "underlying": "SPY", "option_id": "opt-stale",
+         "strike": 640.0, "option_type": "put", "vehicle_score": {"direction": "bearish"}},
+        {"event_type": "no_trade_decision", "ts": ts,
+         "reason_codes": ["gate:veto", "entry_signal_stale"]},
+    ]
+    hits = sv.find_qualifying_confirms(events, NOW)
+    assert len(hits) == 1
+    assert hits[0]["veto_kind"] == "entry_signal_stale"
+    assert hits[0]["signal_age_minutes"] == 25.0

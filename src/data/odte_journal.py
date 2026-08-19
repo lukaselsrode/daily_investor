@@ -1376,6 +1376,10 @@ def event_from_entry_gate(gate_decision: dict, trade_id: str | None = None,
         "option_type": g.get("option_type"),
         "gates": g.get("gates"),
         "tier": g.get("tier"),
+        # Freshness gate telemetry (2026-08-19): the FIRST live entry_signal_stale veto journaled
+        # with no age — the veto was right but unreviewable. The age must survive into the event.
+        "signal_age_minutes": g.get("signal_age_minutes"),
+        "max_signal_age_minutes": g.get("max_signal_age_minutes"),
         "sizing_tier": g.get("sizing_tier"),
         "scan_only": bool(g.get("scan_only", False)),
         "execution_allowed": bool(g.get("execution_allowed", False)),
