@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shlex
 import subprocess
 from datetime import datetime, timezone
@@ -57,7 +58,16 @@ BROKER_HEALTH_FILENAME = "broker_health.json"
 
 
 def _detached_chain(cmds: list[list[str]]) -> None:
-    """Fire an ordered command chain fully detached — the daemon tick never blocks on it."""
+    """Fire an ordered command chain fully detached — the daemon tick never blocks on it.
+
+    PYTEST SEAT BELT (2026-08-19, live incident): integration tests construct daemons with the
+    live YAML, so a confirming test tape fired REAL pokes at the REAL controller job from inside
+    the suite — Hermes's own auth-store guard refused those runs, and their dead fire-claims
+    made two SCHEDULED controller ticks lose their claims during market hours. A test process
+    must never reach the real cron, whatever config it loaded."""
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        logger.error("refusing to spawn the poke chain under pytest: %s", cmds)
+        return
     script = " && ".join(" ".join(shlex.quote(a) for a in cmd) for cmd in cmds)
     subprocess.Popen(["/bin/sh", "-c", script],
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,

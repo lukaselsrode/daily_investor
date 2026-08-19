@@ -260,3 +260,13 @@ def test_fresh_journal_clock_still_pokes(tmp_path, monkeypatch):
                 "ts": (NOW - timedelta(minutes=8)).isoformat()}]
     det.step(_tape(), NOW, events=history)
     assert len(calls) == 1
+
+
+def test_detached_chain_refuses_to_spawn_under_pytest(monkeypatch):
+    # 2026-08-19 incident: suite runs fired REAL pokes at the REAL controller job. The default
+    # spawner must be inert whenever pytest is in the environment — this test runs under pytest
+    # by construction, so a spawn here would be the bug itself.
+    spawned = []
+    monkeypatch.setattr(cd.subprocess, "Popen", lambda *a, **k: spawned.append(a))
+    cd._detached_chain([["echo", "poke"]])
+    assert spawned == []
