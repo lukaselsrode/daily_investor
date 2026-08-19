@@ -142,6 +142,14 @@ def _tune_subset(precomp, preset, run_matrix, scope, maxiter, popsize, seed=42, 
 
     active = _get_active_indices(scope, preset=preset)
     if not active:
+        # Every slot the preset would unfreeze is frozen elsewhere (operator freeze in
+        # cfg `tuning.frozen_parameters`, or a scope-level freeze). Silently returning
+        # None makes a whole tune look like it ran and found nothing — say so instead.
+        logger.warning(
+            "preset %r has NO tunable slots under scope %r — every slot it unfreezes is "
+            "frozen (check tuning.frozen_parameters). This stage is a no-op.",
+            preset, scope,
+        )
         return None
     frozen = _current_params() if baseline is None else np.asarray(baseline, dtype=float).copy()
     bounds = _effective_bounds(scope, preset=preset)

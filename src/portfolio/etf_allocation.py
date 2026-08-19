@@ -46,6 +46,18 @@ _BUCKET_MAX_CAP: dict[str, str] = {
 
 _EPS = 1e-9
 
+# Allocation resolution runs once per rebalance day, so an unchanging condition would
+# otherwise emit the same line hundreds of times (one run logged 522 identical errors,
+# which is how the silent-fallback bug stayed buried). Log each distinct signature once.
+_LOGGED_ONCE: set[str] = set()
+
+
+def _log_once(log_fn, key: str, msg: str, *args) -> None:
+    if key in _LOGGED_ONCE:
+        return
+    _LOGGED_ONCE.add(key)
+    log_fn(msg, *args)
+
 
 # ---------------------------------------------------------------------------
 # Pure weight helpers
@@ -174,10 +186,86 @@ def validate_allocation(
 # Config-driven target weights (the single source of truth)
 # ---------------------------------------------------------------------------
 
+def repair_allocation(
+    weights: dict[str, float],
+    buckets: dict[str, list[str]],
+    constraints: dict,
+    universe: list[str],
+    max_passes: int = 8,
+) -> dict[str, float] | None:
+    """Project an allocation back into the constraint set, or None if unrepairable.
+
+    Why this exists (2026-08-19): the tradeable universe SHRINKS in historical windows —
+    VXUS and SCHD have no prices before 2011, VOO before 2010. `expand_bucket_weights`
+    renormalizes over whatever survives, which inflates the remaining buckets and can
+    breach their caps. A candidate allocating SMH 21.8% became 29.5% semis in a pre-2011
+    stress episode, breaching max_semis_weight, and the old code silently substituted
+    EQUAL WEIGHT — so the stress gauntlet scored a different allocation than the one on
+    trial and reported a pass. Capping the offenders preserves the candidate's intent;
+    substituting equal weight destroys it while looking like success.
+
+    Method: cap each over-limit bucket at its ceiling and redistribute the freed weight to
+    core_market, which is the natural sink (it carries a MINIMUM, never a maximum, and
+    splits across enough ETFs that max_single_etf_weight cannot bind). Repeat until clean,
+    since capping one bucket renormalizes the rest.
+    """
+    if not weights:
+        return None
+    core_etfs = [e for e in (buckets.get("core_market") or []) if e in set(universe)]
+    if not core_etfs:
+        return None   # no sink to absorb the excess
+
+    etf_bucket = _etf_to_bucket(buckets)
+    w = normalize({e: max(0.0, float(x)) for e, x in weights.items()})
+
+    for _ in range(max_passes):
+        if not validate_allocation(w, buckets, constraints, universe):
+            return w
+        sums = bucket_weight_sums(w, buckets)
+
+        # Per-bucket ceilings, plus the combined thematic ceiling expressed as a
+        # proportional haircut across its member buckets.
+        excess: dict[str, float] = {}
+        for bucket, ckey in _BUCKET_MAX_CAP.items():
+            cap = float(constraints[ckey])
+            over = sums.get(bucket, 0.0) - cap
+            if over > _EPS:
+                excess[bucket] = max(excess.get(bucket, 0.0), over)
+        thematic = sum(sums.get(b, 0.0) for b in THEMATIC_BUCKETS)
+        t_cap = float(constraints["max_thematic_combined"])
+        if thematic > t_cap + _EPS and thematic > _EPS:
+            over = thematic - t_cap
+            for b in THEMATIC_BUCKETS:
+                share = sums.get(b, 0.0) / thematic
+                excess[b] = max(excess.get(b, 0.0), over * share)
+
+        if not excess:
+            return None   # violations we cannot fix by capping (e.g. core below its floor)
+
+        freed = 0.0
+        for bucket, over in excess.items():
+            members = [e for e in w if etf_bucket.get(e) == bucket and w[e] > 0]
+            b_tot = sum(w[e] for e in members)
+            if b_tot <= _EPS:
+                continue
+            scale = max(0.0, (b_tot - over)) / b_tot
+            for e in members:
+                freed += w[e] * (1.0 - scale)
+                w[e] *= scale
+        if freed <= _EPS:
+            return None
+        for e in core_etfs:
+            w[e] = w.get(e, 0.0) + freed / len(core_etfs)
+        w = normalize(w)
+
+    return w if not validate_allocation(w, buckets, constraints, universe) else None
+
+
 def etf_target_weights(
     regime: str,
     universe: list[str],
     params: dict | None = None,
+    on_violation: str = "repair",
 ) -> dict[str, float]:
     """Target per-ETF weights for the ETF sleeve in the given regime.
 
@@ -219,14 +307,49 @@ def etf_target_weights(
         logger.error("etf_allocation unknown mode %r — using equal weight", mode)
         return equal_weights(universe)
 
-    violations = validate_allocation(weights, p.get("buckets", {}) or {}, p["constraints"], universe)
-    if violations:
-        logger.error(
-            "etf_allocation %s allocation invalid (%s) — falling back to equal weight",
-            mode, "; ".join(violations),
+    buckets = p.get("buckets", {}) or {}
+    violations = validate_allocation(weights, buckets, p["constraints"], universe)
+    if not violations:
+        return weights
+
+    # A violation here usually means the tradeable universe shrank (VXUS/SCHD have no
+    # history before 2011) and renormalization pushed a bucket past its cap. Repair
+    # preserves the allocation's intent; the old silent equal-weight substitution scored
+    # a DIFFERENT allocation than the one under test and reported it as a pass.
+    if on_violation == "raise":
+        raise ValueError(
+            f"etf_allocation {mode} allocation invalid for regime={regime!r} "
+            f"over universe {sorted(universe)}: {'; '.join(violations)}"
+        )
+    if on_violation == "repair":
+        repaired = repair_allocation(weights, buckets, p["constraints"], universe)
+        if repaired is not None:
+            _log_once(
+                logger.warning,
+                f"repair:{mode}:{regime}:{','.join(sorted(universe))}",
+                "etf_allocation %s regime=%s invalid over the available universe (%s) — "
+                "REPAIRED into the constraint set (capped offenders, excess to core_market). "
+                "Intent preserved; this is not the incumbent.",
+                mode, regime, "; ".join(violations),
+            )
+            return repaired
+        _log_once(
+            logger.error,
+            f"unrepairable:{mode}:{regime}:{','.join(sorted(universe))}",
+            "etf_allocation %s regime=%s invalid (%s) and NOT repairable over universe %s "
+            "— falling back to equal weight. Any gate scoring this allocation is scoring "
+            "the INCUMBENT, not the candidate.",
+            mode, regime, "; ".join(violations), sorted(universe),
         )
         return equal_weights(universe)
-    return weights
+
+    _log_once(
+        logger.error,
+        f"fallback:{mode}:{regime}:{','.join(sorted(universe))}",
+        "etf_allocation %s allocation invalid (%s) — falling back to equal weight",
+        mode, "; ".join(violations),
+    )
+    return equal_weights(universe)
 
 
 # ---------------------------------------------------------------------------

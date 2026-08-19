@@ -343,6 +343,28 @@ def test_config_frozen_parameters_survive_preset_unfreeze():
     )
 
 
+def test_price_blend_knobs_are_permanently_frozen():
+    """Both scoring blends stay un-tunable under EVERY preset.
+
+    momentum_residual_blend (49) is simulator-only — a tuned value would move backtest
+    results while live scoring ignored it. quality_low_vol_blend (48) is implemented live
+    since peer-3, but a multi-seed system test recorded it as monotonically harmful
+    (-0.3% to -1.4% active-sleeve excess) and the 2026-08-18 ladder tune reached for it
+    anyway (0.365). A knob already measured as harmful must not be re-searched each run.
+    """
+    import tuning.constants as tc
+    from tuning.presets import _PRESETS
+
+    for path in ("scoring.momentum_residual_blend", "scoring.quality_low_vol_blend"):
+        assert path in tc.TUNING_PARAMS.get("frozen_parameters", []), (
+            f"{path} must stay in cfg tuning.frozen_parameters"
+        )
+        slot = tc._CONFIG_PATH_TO_PARAM_IDX[path]
+        for preset in _PRESETS:
+            active = _active(scope="active_sleeve_compounding", preset=preset)
+            assert slot not in active, f"{preset} unfroze {path}"
+
+
 def test_operator_freeze_is_honored_for_any_preset(monkeypatch):
     """Generic: whatever is in frozen_parameters stays frozen under every preset."""
     import tuning.constants as tc

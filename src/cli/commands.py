@@ -22,7 +22,7 @@ import tuning.reports as _t
 logger = logging.getLogger(__name__)
 
 
-def cmd_fetch_data() -> None:
+def cmd_fetch_data(*, skip_account_data: bool = False) -> None:
     """
     Fetch all market data and save CSVs + snapshot — no trades placed.
 
@@ -46,18 +46,25 @@ def cmd_fetch_data() -> None:
         save_holdings_csv,
     )
 
-    try:
-        login()
-        authed = True
-    except Exception as exc:
-        # Unauthenticated mode still refreshes valuations/universe/fundamentals;
-        # account-bound steps are SKIPPED so a dead session can't overwrite good
-        # snapshots (a failed login once saved a 0-position holdings CSV).
+    if skip_account_data:
         authed = False
         logger.warning(
-            "Robinhood login failed (%s) — running UNAUTHENTICATED: "
-            "dividends and holdings steps will be skipped.", exc,
+            "Account data explicitly skipped — preserving existing dividends and holdings "
+            "without attempting Robinhood login."
         )
+    else:
+        try:
+            login()
+            authed = True
+        except Exception as exc:
+            # Unauthenticated mode still refreshes valuations/universe/fundamentals;
+            # account-bound steps are SKIPPED so a dead session can't overwrite good
+            # snapshots (a failed login once saved a 0-position holdings CSV).
+            authed = False
+            logger.warning(
+                "Robinhood login failed (%s) — running UNAUTHENTICATED: "
+                "dividends and holdings steps will be skipped.", exc,
+            )
     logger.info("=== Fetch-Data run (no trades) ===")
 
     logger.info("Step 1/5: industry valuations")

@@ -87,13 +87,14 @@ def _cmd_list_presets(rest: list[str]) -> None:
 def _cmd_fetch_data(rest: list[str]) -> None:
     if "-h" in rest or "--help" in rest:
         print(
-            "usage: daily-investor fetch-data [--skip-fetch-news]\n\n"
+            "usage: daily-investor fetch-data [--skip-fetch-news] [--skip-account-data]\n\n"
             "Fetch valuations, dividends, holdings, fundamentals, news, and a "
-            "scored snapshot. Places no trades."
+            "scored snapshot. Places no trades. --skip-account-data preserves "
+            "existing dividends/holdings and avoids local Robinhood login."
         )
         return
     from cli.commands import cmd_fetch_data
-    cmd_fetch_data()
+    cmd_fetch_data(skip_account_data="--skip-account-data" in rest)
 
 
 def _cmd_run(rest: list[str]) -> None:
@@ -1455,6 +1456,8 @@ OPTIONS (run / fetch-data)
                            scrape (skips the slowest stage; any age). 0DTE options
                            sentiment is unaffected. Env NEWS_FORCE_REFETCH=1 overrides
                            the default 8h news-freshness reuse window.
+  --skip-account-data      fetch-data only: preserve existing dividends/holdings and
+                           skip local Robinhood login; useful for public-data recovery runs.
 
 OPTIONS (tune / auto-tune)
   --apply                  Write config.yaml if validation passes

@@ -99,6 +99,11 @@ class TestFetchDataHelp:
         mock_fetch.assert_not_called()
         assert "usage: daily-investor fetch-data" in capsys.readouterr().out
 
+    def test_skip_account_data_is_forwarded(self):
+        with patch("cli.commands.cmd_fetch_data") as mock_fetch:
+            cli_main(["fetch-data", "--skip-account-data"])
+        mock_fetch.assert_called_once_with(skip_account_data=True)
+
 
 # ---------------------------------------------------------------------------
 # cmd_backtest

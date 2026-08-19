@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -60,3 +61,25 @@ def test_news_concurrency_honors_bounded_environment_override(monkeypatch) -> No
 
     monkeypatch.setenv("NEWS_CONCURRENCY", "not-a-number")
     assert _news_concurrency() == 3
+
+
+def test_skip_account_data_avoids_login_and_preserves_account_snapshots() -> None:
+    from cli.commands import cmd_fetch_data
+
+    result = pd.DataFrame({"symbol": ["AAPL"]})
+    with (
+        patch("main.login") as login,
+        patch("main._fetch_and_save_dividends") as dividends,
+        patch("main._broker.get_holdings") as holdings,
+        patch("main._maybe_fill_outcomes") as outcomes,
+        patch("data.valuation.update_industry_valuations") as valuations,
+        patch("data.market.get_data", return_value=result) as market_data,
+    ):
+        cmd_fetch_data(skip_account_data=True)
+
+    login.assert_not_called()
+    dividends.assert_not_called()
+    holdings.assert_not_called()
+    valuations.assert_called_once_with(verbose=True)
+    market_data.assert_called_once_with(refresh=True)
+    outcomes.assert_called_once_with()

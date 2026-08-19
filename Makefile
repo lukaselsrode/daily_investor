@@ -26,6 +26,7 @@ ui:                          ## Launch the Streamlit dashboard
 ##@ Data
 
 SKIP_NEWS ?=
+SKIP_ACCOUNT_DATA ?=
 HERMES ?= hermes
 TELEGRAM_TARGET ?= telegram
 
@@ -37,7 +38,7 @@ fetch-data:                  ## Fetch all market data + snapshot, no trades; not
 		printf '%s\n' 'Warning: could not send fetch-data start notification.' >&2; \
 	fi; \
 	status=0; \
-	$(DI) fetch-data $(if $(SKIP_NEWS),--skip-fetch-news,) || status=$$?; \
+	$(DI) fetch-data $(if $(SKIP_NEWS),--skip-fetch-news,) $(if $(SKIP_ACCOUNT_DATA),--skip-account-data,) || status=$$?; \
 	elapsed=$$(($$(date +%s) - $$started_at)); \
 	if [ "$$status" -eq 0 ]; then \
 		message="Daily Investor: fetch-data completed successfully in $${elapsed}s."; \

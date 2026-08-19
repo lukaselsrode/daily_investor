@@ -118,14 +118,23 @@ def test_expand_drops_buckets_with_no_universe_member():
 # 5. invalid allocations rejected (fall back to equal); never leave universe
 # ---------------------------------------------------------------------------
 
-def test_invalid_allocation_falls_back_to_equal():
+def test_invalid_allocation_is_never_used_as_given():
+    """100% semis violates min_core_market and max_semis. It must never be used as-is.
+
+    2026-08-19: this used to assert an equal-weight substitution. That silent swap made
+    the stress gauntlet score the incumbent while reporting the CANDIDATE passed, so the
+    allocator now REPAIRS into the constraint set instead (semis capped, remainder to
+    core_market). The invariant that matters is unchanged: whatever comes back is valid.
+    """
     p = copy.deepcopy(ETF_ALLOCATION_PARAMS)
     p["enabled"] = True
     p["mode"] = "regime_weights"
-    # 100% semis violates min_core_market and max_semis → must fall back to equal.
     p["regime_weights"] = {"bullish": {"semis": 1.0}, "neutral": {}, "defensive": {}}
     w = ea.etf_target_weights("bullish", _UNIVERSE, params=p)
-    assert w == pytest.approx({e: 1.0 / len(_UNIVERSE) for e in _UNIVERSE})
+    assert not ea.validate_allocation(w, _BUCKETS, _CONS, _UNIVERSE)
+    sums = ea.bucket_weight_sums(w, _BUCKETS)
+    assert sums["semis"] == pytest.approx(float(_CONS["max_semis_weight"]), abs=1e-6)
+    assert sums["core_market"] >= float(_CONS["min_core_market_weight"]) - 1e-9
 
 
 def test_never_emits_weight_outside_universe():
@@ -288,3 +297,116 @@ def test_apply_etf_allocation_writes_only_etf_section(tmp_path, monkeypatch):
         assert after[key] == before[key], f"writer mutated unrelated section: {key}"
     # A provenance comment was prepended.
     assert "tune-etf-allocation" in tmp_cfg.read_text()
+
+
+# ---------------------------------------------------------------------------
+# 9. Shrinking universe: REPAIR, never a silent incumbent substitution
+#
+# Regression (2026-08-19): VXUS/SCHD have no prices before 2011 and VOO none before
+# 2010, so historical windows resolve a SMALLER universe. expand_bucket_weights
+# renormalizes over the survivors, which inflated a candidate's SMH 21.8% -> 29.5%,
+# breaching max_semis_weight. The allocator then silently returned EQUAL WEIGHT, so the
+# stress gauntlet scored the incumbent while reporting the candidate had "PASSED ALL
+# GATES". Repair preserves intent; substitution manufactures a false green light.
+# ---------------------------------------------------------------------------
+
+_PRE2011 = [e for e in _UNIVERSE if e not in ("VXUS", "SCHD", "VOO")]
+
+
+def _semis_tilted_spec():
+    """Bucket weights that are valid on the full universe but breach caps once the
+    post-2011 ETFs drop out."""
+    return {"core_market": 0.54, "semis": 0.218, "growth": 0.023,
+            "international": 0.136, "dividend_defensive": 0.125,
+            "small_cap": 0.052, "real_estate": 0.044}
+
+
+def test_shrinking_universe_breaches_a_cap_before_repair():
+    bw = _semis_tilted_spec()
+    assert not ea.validate_allocation(
+        ea.expand_bucket_weights(bw, _BUCKETS, _UNIVERSE), _BUCKETS, _CONS, _UNIVERSE
+    ), "spec must be valid on today's universe"
+    shrunk = ea.expand_bucket_weights(bw, _BUCKETS, _PRE2011)
+    violations = ea.validate_allocation(shrunk, _BUCKETS, _CONS, _PRE2011)
+    assert any("semis" in v for v in violations), violations
+
+
+def test_repair_projects_into_the_constraint_set():
+    shrunk = ea.expand_bucket_weights(_semis_tilted_spec(), _BUCKETS, _PRE2011)
+    repaired = ea.repair_allocation(shrunk, _BUCKETS, _CONS, _PRE2011)
+    assert repaired is not None
+    assert not ea.validate_allocation(repaired, _BUCKETS, _CONS, _PRE2011)
+    assert sum(repaired.values()) == pytest.approx(1.0)
+    assert set(repaired) <= set(_PRE2011), "repair must not invent ETFs outside the universe"
+
+
+def test_repair_preserves_intent_not_equal_weight():
+    """The repaired allocation must still look like the candidate — capped, not replaced."""
+    shrunk = ea.expand_bucket_weights(_semis_tilted_spec(), _BUCKETS, _PRE2011)
+    repaired = ea.repair_allocation(shrunk, _BUCKETS, _CONS, _PRE2011)
+    eq = ea.equal_weights(_PRE2011)
+    assert repaired != pytest.approx(eq), "repair collapsed to the incumbent"
+    sums = ea.bucket_weight_sums(repaired, _BUCKETS)
+    assert sums["semis"] == pytest.approx(float(_CONS["max_semis_weight"]), abs=0.03), (
+        "semis should sit AT its cap — the tilt is preserved, merely bounded"
+    )
+    assert sums["core_market"] > ea.bucket_weight_sums(shrunk, _BUCKETS)["core_market"], (
+        "freed weight should land in core_market"
+    )
+
+
+def test_target_weights_repairs_instead_of_substituting():
+    p = {**ETF_ALLOCATION_PARAMS, "enabled": True, "mode": "regime_weights",
+         "regime_weights": {r: _semis_tilted_spec() for r in ("bullish", "neutral", "defensive")}}
+    w = ea.etf_target_weights("bullish", _PRE2011, params=p)
+    assert w != pytest.approx(ea.equal_weights(_PRE2011)), (
+        "a repairable allocation must NOT silently become the equal-weight incumbent"
+    )
+    assert not ea.validate_allocation(w, _BUCKETS, _CONS, _PRE2011)
+
+
+def test_target_weights_can_raise_for_callers_that_must_not_guess():
+    p = {**ETF_ALLOCATION_PARAMS, "enabled": True, "mode": "regime_weights",
+         "regime_weights": {r: {"semis": 1.0} for r in ("bullish", "neutral", "defensive")}}
+    with pytest.raises(ValueError, match="invalid"):
+        ea.etf_target_weights("bullish", _PRE2011, params=p, on_violation="raise")
+
+
+def test_unrepairable_allocation_still_falls_back_but_says_so(caplog):
+    """With NO core_market ETF tradeable there is no sink for the excess, so the
+    allocation cannot be projected into the constraint set. Falling back is correct
+    here — but it must be announced, because any gate scoring it scores the incumbent."""
+    no_core = [e for e in _UNIVERSE if e not in (_BUCKETS.get("core_market") or [])]
+    p = {**ETF_ALLOCATION_PARAMS, "enabled": True, "mode": "regime_weights",
+         "regime_weights": {r: {"semis": 1.0} for r in ("bullish", "neutral", "defensive")}}
+    assert ea.repair_allocation(
+        ea.expand_bucket_weights({"semis": 1.0}, _BUCKETS, no_core), _BUCKETS, _CONS, no_core
+    ) is None, "no core_market sink → unrepairable"
+    ea._LOGGED_ONCE.clear()
+    with caplog.at_level("ERROR"):
+        w = ea.etf_target_weights("bullish", no_core, params=p)
+    assert w == pytest.approx(ea.equal_weights(no_core))
+    assert any("not repairable" in r.message.lower() for r in caplog.records), (
+        "an incumbent substitution must be announced"
+    )
+
+
+def test_repeated_violations_log_once_not_once_per_rebalance(caplog):
+    """522 identical lines is how the silent substitution stayed buried."""
+    p = {**ETF_ALLOCATION_PARAMS, "enabled": True, "mode": "regime_weights",
+         "regime_weights": {r: _semis_tilted_spec() for r in ("bullish", "neutral", "defensive")}}
+    ea._LOGGED_ONCE.clear()
+    with caplog.at_level("WARNING"):
+        for _ in range(50):
+            ea.etf_target_weights("bullish", _PRE2011, params=p)
+    repairs = [r for r in caplog.records if "REPAIRED" in r.message]
+    assert len(repairs) == 1, f"expected one log line, got {len(repairs)}"
+
+
+def test_full_universe_allocation_is_untouched_by_repair():
+    """Repair must be inert when nothing is violated — no drift on the normal path."""
+    p = {**ETF_ALLOCATION_PARAMS, "enabled": True, "mode": "regime_weights",
+         "regime_weights": {r: _semis_tilted_spec() for r in ("bullish", "neutral", "defensive")}}
+    w = ea.etf_target_weights("bullish", _UNIVERSE, params=p)
+    expected = ea.expand_bucket_weights(_semis_tilted_spec(), _BUCKETS, _UNIVERSE)
+    assert w == pytest.approx(expected)
