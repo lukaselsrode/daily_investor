@@ -1888,3 +1888,21 @@ def test_fences_day_over_folds_floor_and_budget():
     f = r["live_rails"]["fences"]
     assert f["daily_loss_floor_reached"] is True
     assert f["day_over"] is True
+
+
+def test_fences_advertise_signal_ages_with_stale_flags():
+    """2026-08-19: four convert cycles burned in an hour on confirms the freshness gate vetoed
+    every time — the rails now carry each recent move's age on the gate's own clock so the
+    controller can skip converting a move the gate must refuse."""
+    import data.odte_config as _oc
+    old = {"event_type": "candidate_evaluation", "symbol": "SPY", "direction": "bullish",
+           "ts": (NOW - __import__("datetime").timedelta(minutes=55)).isoformat()}
+    fresh = {"event_type": "candidate_evaluation", "symbol": "QQQ", "direction": "bearish",
+             "ts": (NOW - __import__("datetime").timedelta(minutes=5)).isoformat()}
+    r = ls.derive_loop_state(journal_events=[old, fresh], now=NOW)
+    ages = r["live_rails"]["fences"]["signal_ages"]
+    assert ages["SPY:bullish"]["stale"] is True
+    assert ages["SPY:bullish"]["age_minutes"] == 55.0
+    assert ages["QQQ:bearish"]["stale"] is False
+    assert ages["QQQ:bearish"]["age_minutes"] == 5.0
+    assert _oc.MAX_SIGNAL_AGE_MINUTES == 20.0            # the flag's threshold is the live gate

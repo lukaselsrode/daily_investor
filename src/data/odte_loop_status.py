@@ -706,19 +706,41 @@ def _live_rails(events: list[dict] | None, broker: dict, now: datetime) -> dict:
         # not see the day was over — it converted a clean confirm straight into a gate veto. The
         # gate stays the enforcement; this block lets the agent stop spending conversion cycles
         # on entries that cannot pass. `day_over` folds the floor and the budget into one bit.
-        "fences": _fences_block(budget),
+        "fences": _fences_block(budget, events, now),
         "basis": ("authoritative live rails — read these numbers every tick; never act on "
                   "remembered policy"),
     }
 
 
-def _fences_block(budget: dict) -> dict:
+def _fences_block(budget: dict, events: list[dict] | None = None,
+                  now: datetime | None = None) -> dict:
     from data.odte_config import (
         DAILY_LOSS_FLOOR_DOLLARS,
         MAX_SIGNAL_AGE_MINUTES,
         MIDDAY_FULL_TIER_AFTER_ET_HOUR,
         MIN_ENTRY_PREMIUM,
     )
+    # SIGNAL AGES ADVERTISED (2026-08-19): four convert cycles burned in one hour on confirms
+    # the freshness gate vetoed every time — the controller could not see a move's age without
+    # paying for the convert. Same clock as the gate (first_signal_age_minutes); a move at/past
+    # the limit is one the FAST PATH should skip, stating the fence.
+    signal_ages: dict[str, dict] = {}
+    if events and now is not None and MAX_SIGNAL_AGE_MINUTES > 0:
+        from data.odte_journal import SIGNAL_AGE_LOOKBACK_MINUTES, first_signal_age_minutes
+        seen: set[tuple[str, str]] = set()
+        for e in events:
+            if e.get("event_type") != "candidate_evaluation":
+                continue
+            sym = str(e.get("symbol") or "").upper()
+            direc = str(e.get("direction") or "").lower()
+            if not sym or not direc or (sym, direc) in seen:
+                continue
+            seen.add((sym, direc))
+        for sym, direc in sorted(seen):
+            age = first_signal_age_minutes(events, sym, direc, now=now)
+            if age is not None and age <= SIGNAL_AGE_LOOKBACK_MINUTES:
+                signal_ages[f"{sym}:{direc}"] = {
+                    "age_minutes": age, "stale": age > MAX_SIGNAL_AGE_MINUTES}
     day_net = budget.get("day_net_pnl")
     floor_armed = DAILY_LOSS_FLOOR_DOLLARS > 0
     floor_reached = bool(floor_armed and isinstance(day_net, (int, float))
@@ -731,6 +753,7 @@ def _fences_block(budget: dict) -> dict:
         "daily_loss_floor_reached": floor_reached,
         "max_signal_age_minutes": (MAX_SIGNAL_AGE_MINUTES
                                    if MAX_SIGNAL_AGE_MINUTES > 0 else None),
+        "signal_ages": signal_ages or None,
         # Honest even off the resume posture: an exhausted budget with the a_plus exception
         # still active is NOT a finished day — an a_plus confirm could trade it.
         "day_over": bool(floor_reached or (budget.get("exhausted")
