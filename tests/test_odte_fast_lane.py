@@ -346,12 +346,15 @@ def test_live_mode_still_owns_the_canonical_plan(tmp_path):
     assert daemon._plan_write_path() == daemon._plan_path() == tmp_path / "active_trade.json"
 
 
-def test_exits_mode_also_keeps_off_the_shared_plan(tmp_path):
-    """`exits` may place real sell-to-close orders but does not own the ENTRY, so the controller
-    is still the plan's author — only MODE_LIVE writes the canonical copy."""
+def test_exits_mode_writes_the_canonical_plan(tmp_path):
+    """REVERSED 2026-08-19 on live evidence. At `exits` this lane OWNS exit management, but its
+    `management` updates were redirected to the shadow copy — so the canonical plan looked
+    unmanaged: the watchdog guard alarmed on an actively managed position and the controller
+    (told to defer to `active_trade.json.management.decision`) could never see a decision.
+    Only SHADOW redirects; the 2026-08-07 shadow-purity invariant stands."""
     daemon, _ = _setup(tmp_path, stage="exits_live", mode="exits")
     assert daemon.mode == fl.MODE_EXITS
-    assert daemon._plan_write_path().parent.name == fl.SHADOW_DIRNAME
+    assert daemon._plan_write_path() == daemon._plan_path() == tmp_path / "active_trade.json"
 
 
 # --- adopting a position this lane did not open (2026-08-13) ------------------------------------
@@ -472,3 +475,37 @@ def test_cancelled_exit_order_stands_down_quietly(tmp_path):
     rows = ([json.loads(x) for x in sj.read_text().splitlines() if x.strip()]
             if sj.exists() else [])          # nothing journaled at all is the passing case
     assert [e for e in rows if e.get("event_type") == "order_rejected"] == []
+
+
+# --- phantom-position recheck (2026-08-19: daemon adopted 5s before the controller's exit
+# filled and then managed the dead position on quote polls alone for 15 minutes) -----------------
+
+def test_phantom_position_releases_on_broker_recheck(tmp_path):
+    daemon, session = _setup(tmp_path, stage="exits_live", mode="exits")
+    (tmp_path / "active_trade.json").write_text(json.dumps(
+        {"status": "open", "underlying": "QQQ", "option_id": "opt-dead", "quantity": 1,
+         "entry_price": 1.34, "mode": "scalp", "trade_id": "t-phantom"}))
+    daemon.state = fl.MANAGING
+    daemon._started = True
+    daemon._manage_polls = fl.POSITION_RECHECK_TICKS - 1    # this poll triggers the recheck
+    _queue_tape(session)
+    session.queue("get_option_positions", {"data": {"positions": []}, "guide": ""})
+    _tick(daemon)
+    assert daemon.state == fl.IDLE
+    assert "phantom_position_released" in {e["event_type"] for e in _shadow_events(tmp_path)}
+
+
+def test_position_recheck_failure_keeps_managing(tmp_path):
+    # Uncertainty is NOT evidence of absence: a failed positions read must keep managing.
+    daemon, session = _setup(tmp_path, stage="exits_live", mode="exits")
+    (tmp_path / "active_trade.json").write_text(json.dumps(
+        {"status": "open", "underlying": "QQQ", "option_id": "opt-live", "quantity": 1,
+         "entry_price": 1.34, "mode": "scalp", "trade_id": "t-live"}))
+    daemon.state = fl.MANAGING
+    daemon._started = True
+    daemon._manage_polls = fl.POSITION_RECHECK_TICKS - 1
+    _queue_tape(session)
+    # No get_option_positions queued -> the fake session raises -> recheck fails open.
+    session.queue("get_option_quotes", _option_quote_payload(bid=1.30, ask=1.36))
+    _tick(daemon)
+    assert daemon.state == fl.MANAGING

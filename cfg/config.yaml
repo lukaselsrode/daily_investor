@@ -1142,11 +1142,10 @@ odte:
   b_plus_max_dissenters: 1
   b_plus_min_vehicle_score: 3     # WATCH verdict acceptable for B+ at/above this score
   good_day_min_score: 4           # unchanged default; tune only on telemetry evidence
-  daily_trade_budget: 1           # RESUME 2026-08-18 (operator, "make it live"): trading resumes
-                                  # under the re-derived freshness spec at MINIMUM cost — one
-                                  # entry per day. The 15:20 halt (account $346.68, a_plus
-                                  # 0-for-3) stands as the reason the old posture (2/day) does
-                                  # not return without O2 evidence.
+  daily_trade_budget: 2           # 2026-08-19 (operator, mid-session): "allow the system to make
+                                  # one more trade today" after the 10:17 QQQ scratch (thesis
+                                  # stop at 104s, ~$0). Freshness gate + floor unchanged; the
+                                  # resume's 1/day returns only by operator decision.
   daily_budget_aplus_uncapped: false  # STAYS false (was the halt setting): a_plus was the losing
                                   # cohort — it gets NO budget bypass under the resume spec.
                                   # (a net-red day hard-stops at the cap — anti-tilt survives).

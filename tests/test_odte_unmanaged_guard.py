@@ -122,3 +122,32 @@ def test_undated_lease_is_not_an_alarm():
     """Absent expires_at means we cannot show it lapsed; the position guard is the loud one."""
     d = {"lease": {"lease_id": "x", "underlying": "SPY"}}
     assert guard.evaluate_lease(d, [], now=NOW) is None
+
+
+# --- 2026-08-19: a 3-min-old daemon-managed trade alarmed "unmanaged 65,176s" -----------------
+
+def test_position_age_floors_the_alarm():
+    # Live case: YESTERDAY'S position_state.json was the only heartbeat read, so a brand-new
+    # position alarmed with an 18-hour age. A position cannot have been unmanaged longer than it
+    # has existed — opened_at floors the clock, and a 3-minute-old position stays silent.
+    stale_pos = {"updated_at": (NOW - timedelta(hours=18)).isoformat()}
+    young = _trade(updated_at=None, opened_at=(NOW - timedelta(seconds=180)).isoformat())
+    assert guard.evaluate(young, stale_pos, now=NOW) is None
+
+
+def test_fresh_daemon_heartbeat_in_managing_is_management():
+    # exits_live: the daemon manages at seconds cadence and its heartbeat is the proof — no alarm
+    # while it is MANAGING and fresh, whatever the controller-era files say.
+    stale_pos = {"updated_at": (NOW - timedelta(hours=18)).isoformat()}
+    old_trade = _trade(updated_at=(NOW - timedelta(seconds=900)).isoformat(),
+                       opened_at=(NOW - timedelta(seconds=1800)).isoformat())
+    hb = {"state": "MANAGING", "ts": (NOW - timedelta(seconds=5)).isoformat()}
+    assert guard.evaluate(old_trade, stale_pos, now=NOW, daemon_status=hb) is None
+
+
+def test_stale_daemon_heartbeat_does_not_mask_the_alarm():
+    old_trade = _trade(updated_at=(NOW - timedelta(seconds=900)).isoformat(),
+                       opened_at=(NOW - timedelta(seconds=1800)).isoformat())
+    dead_hb = {"state": "MANAGING", "ts": (NOW - timedelta(seconds=1200)).isoformat()}
+    out = guard.evaluate(old_trade, {}, now=NOW, daemon_status=dead_hb)
+    assert out is not None and "900s ago" in out

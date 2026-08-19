@@ -71,7 +71,8 @@ def _parse_ts(value):
 
 
 def evaluate(trade: dict | None, position: dict | None, *, now: datetime,
-             stale_after: float = STALE_AFTER_SECONDS) -> str | None:
+             stale_after: float = STALE_AFTER_SECONDS,
+             daemon_status: dict | None = None) -> str | None:
     """Return the alarm line, or None to stay silent. Pure: no IO, no clock of its own."""
     trade = trade if isinstance(trade, dict) else {}
     position = position if isinstance(position, dict) else {}
@@ -79,9 +80,26 @@ def evaluate(trade: dict | None, position: dict | None, *, now: datetime,
     if status not in _OPEN_STATUS:
         return None                      # flat, or no plan on disk — nothing to guard
 
+    # EXITS-LIVE MANAGEMENT (2026-08-19): at stage exits_live the DAEMON manages positions at
+    # seconds cadence, and its heartbeat — not position_state.json — is the proof. A fresh
+    # heartbeat in MANAGING state is management; without this the guard alarmed on an actively
+    # daemon-managed position (and the controller, honoring the alarm as its emergency-valve
+    # trigger, is invited to double-manage).
+    ds = daemon_status if isinstance(daemon_status, dict) else {}
+    hb_ts = _parse_ts(ds.get("ts"))
+    if (str(ds.get("state") or "").upper() == "MANAGING" and hb_ts is not None
+            and (now - hb_ts).total_seconds() <= stale_after):
+        return None
+
     # An open position whose management timestamp we cannot read is the dangerous ambiguity, not a
-    # reason to stay quiet: we cannot show it is being managed, so say so.
+    # reason to stay quiet: we cannot show it is being managed, so say so. position_state.json is
+    # the management heartbeat; the trade file's own timestamps only FLOOR the age (2026-08-19: a
+    # 3-minute-old position alarmed as "unmanaged 65,176s" because YESTERDAY'S position file was
+    # the only timestamp read — a position cannot have been unmanaged longer than it has existed).
     last = _parse_ts(position.get("updated_at")) or _parse_ts(trade.get("updated_at"))
+    born = _parse_ts(trade.get("opened_at") or trade.get("entry_time"))
+    if born is not None and (last is None or born > last):
+        last = born
     label = "%s %s%s" % (trade.get("underlying") or "?", trade.get("strike_price") or "?",
                          "P" if str(trade.get("option_type")) == "put" else "C")
     if last is None:
@@ -130,7 +148,8 @@ def evaluate_lease(lease: dict | None, consumed: list | None, *, now: datetime,
 def main(argv=None) -> int:
     now = datetime.now(timezone.utc)
     for line in (evaluate(_load(ODTE / "active_trade.json"),
-                          _load(ODTE / "position_state.json"), now=now),
+                          _load(ODTE / "position_state.json"), now=now,
+                          daemon_status=_load(ODTE / "fast_lane_status.json")),
                  evaluate_lease(_load(ODTE / "execution_lease.json"),
                                 _load(ODTE / "consumed_leases.json"), now=now)):
         if line:

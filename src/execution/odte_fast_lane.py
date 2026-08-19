@@ -95,6 +95,9 @@ REFIRE_COOLDOWN_SECONDS = 60.0
 EXIT_REPRICE_AFTER_SECONDS = 10.0
 EXIT_REPRICE_MIN_TICK = 0.01
 EXIT_MAX_REPLACEMENTS = 5
+# Phantom check (2026-08-19): every Nth MANAGING poll, verify the broker still shows the
+# position — quote polls alone cannot tell a live position from a dead one.
+POSITION_RECHECK_TICKS = 20
 
 # Trigger ACTIONS that demand a close NOW. Mode semantics stay honest: a trend/lotto/runner
 # TAKE_PROFIT alert (protect_profit / hold_but_alert / trail_runner) is NOT force-exited.
@@ -341,8 +344,15 @@ class FastLaneDaemon:
 
         This mirrors what the daemon already does for its journal: `shadow_journal_path` beside
         `journal_path`, selected per event at `_journal`. Same idea, same directory.
+
+        EXITS MODE WRITES THE CANONICAL PLAN (2026-08-19). At `exits` this lane OWNS the exit
+        management — but its `management` updates were still redirected to the shadow copy, so
+        the real `active_trade.json` looked unmanaged: the watchdog's unmanaged-position guard
+        alarmed on a managed position, and the controller (told to defer to
+        `active_trade.json.management.decision`) could never see a decision to defer to. Only
+        SHADOW redirects; the 2026-08-07 invariant (shadow must not mutate shared state) stands.
         """
-        if self.mode == MODE_LIVE:
+        if self.mode != MODE_SHADOW:
             return self._plan_path()
         self.shadow_dir.mkdir(parents=True, exist_ok=True)
         return self.shadow_dir / DEFAULT_PLAN_FILENAME
@@ -776,6 +786,24 @@ class FastLaneDaemon:
             self.exit_order, self.lease = None, None
             self.state = IDLE
             return
+        # PHANTOM CHECK (2026-08-19): the daemon adopted a plan FIVE SECONDS before the
+        # controller's own exit filled, then managed the dead position on quote polls alone —
+        # quotes exist whether or not we hold the contract. Every Nth poll, confirm the broker
+        # actually shows the position; a missing position releases to IDLE (the plan file is the
+        # controller's to close). Uncertainty is NOT evidence of absence: any read failure keeps
+        # managing (fail-open toward safety of the position).
+        self._manage_polls = getattr(self, "_manage_polls", 0) + 1
+        if POSITION_RECHECK_TICKS and self._manage_polls % POSITION_RECHECK_TICKS == 0:
+            if await self._position_gone_at_broker(plan):
+                self._journal({"trade_id": plan.get("trade_id"),
+                               "option_id": plan.get("option_id"),
+                               "underlying": plan.get("underlying"),
+                               "reason": "broker_shows_no_position_releasing"},
+                              "phantom_position_released",
+                              shadow=self.mode != MODE_LIVE, now=now)
+                self.exit_order, self.lease = None, None
+                self.state = IDLE
+                return
         if self.exit_order:
             await self._poll_exit(plan, now, paused)
             return
@@ -807,6 +835,27 @@ class FastLaneDaemon:
                            decision)
             return
         await self._place_exit(plan, bid, decision, now)
+
+    async def _position_gone_at_broker(self, plan: dict) -> bool:
+        """True ONLY when the broker positively shows no nonzero position for the plan's
+        option_id. Any failure to read returns False — keep managing."""
+        try:
+            from data.odte_snapshot_build import broker_rows
+            from execution.odte_mcp_client import TOOL_OPTION_POSITIONS
+            raw = await self.client.call(TOOL_OPTION_POSITIONS,
+                                         {"account_number": self.account_number})
+            oid = str(plan.get("option_id") or "")
+            if not oid:
+                return False
+            for r in broker_rows(raw):
+                rid = str(r.get("option_id") or r.get("option") or "")
+                if "/" in rid:
+                    rid = rid.rstrip("/").rsplit("/", 1)[-1]
+                if rid == oid and (_num(r.get("quantity")) or 0) != 0:
+                    return False
+            return True
+        except Exception:
+            return False
 
     async def _place_exit(self, plan: dict, limit: float, trigger_type: str,
                           now: datetime) -> None:

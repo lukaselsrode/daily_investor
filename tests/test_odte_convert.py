@@ -729,7 +729,9 @@ def test_live_posture_pins_the_w33_fences():
     # 1 entry/day, any full stop ends the day (floor 15 < a ~$20 1-lot stop), a_plus keeps no
     # budget bypass, and the 20-min freshness gate vetoes the 0-for-7 late-entry cohort. The
     # pre-halt posture (budget 2, floor 30) does not return without O2-grade evidence.
-    assert _oc.DAILY_TRADE_BUDGET == 1
+    # 2026-08-19 (operator, mid-session): budget 1 -> 2 after the 10:17 QQQ thesis-stop scratch
+    # ("allow the system to make one more trade today"). Floor and freshness unchanged.
+    assert _oc.DAILY_TRADE_BUDGET == 2
     assert _oc.DAILY_BUDGET_APLUS_UNCAPPED is False
     assert _oc.DAILY_LOSS_FLOOR_DOLLARS == 15.0
     assert _oc.MAX_SIGNAL_AGE_MINUTES == 20.0
