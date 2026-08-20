@@ -180,9 +180,13 @@ def _cmd_tune_etf_allocation(rest: list[str]) -> None:
     random_topk = int(_flag_value(rest, "--random-topk") or 10)
     apply = "--apply" in rest
     force_apply = "--force-apply" in rest
+    # --seed changes the random candidate pool. The winner of a 29-candidate tournament
+    # is a maximum over noisy draws, so re-running with a different seed is the cheapest
+    # test of whether a winning allocation is structural or one seed's luck.
+    seed = int(_flag_value(rest, "--seed") or 42)
     from tuning.etf_tune import run_etf_allocation_tune
     run_etf_allocation_tune(n_days=n_days, preset=preset, random_topk=random_topk,
-                            apply=apply, force_apply=force_apply)
+                            apply=apply, force_apply=force_apply, seed=seed)
 
 
 def _cmd_report_etf_allocation(rest: list[str]) -> None:

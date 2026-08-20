@@ -67,6 +67,7 @@ from data.odte_shadow_report import (
     SHADOW_INCIDENT,
     SHADOW_ORDER_INTENT,
 )
+from execution.odte_mcp_client import normalize_order_placement_row
 from execution.odte_pre_place_guard import consume_then, order_for_guard, pre_place_check
 from execution.odte_tape import build_tape
 
@@ -652,8 +653,7 @@ class FastLaneDaemon:
                           "no_trade_decision", shadow=False, now=now)
             self.state = WATCHING
             return
-        placed = placed if isinstance(placed, dict) else {}
-        placed_row = placed.get("data") if isinstance(placed.get("data"), dict) else placed
+        placed_row = normalize_order_placement_row(placed)
         order_id = (placed_row or {}).get("id") or (placed_row or {}).get("order_id")
         self.counts["placed"] += 1
         self.lease = dict(lease)
@@ -919,8 +919,7 @@ class FastLaneDaemon:
             return
         ref_id = str(uuid.uuid4())
         placed = await self.client.place_option_order(order_args, ref_id=ref_id)
-        placed_row = placed.get("data") if isinstance(placed, dict) and isinstance(
-            placed.get("data"), dict) else placed
+        placed_row = normalize_order_placement_row(placed)
         self.exit_order = {"order_id": (placed_row or {}).get("id")
                            or (placed_row or {}).get("order_id"),
                            "limit": limit, "trigger_type": trigger_type,

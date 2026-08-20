@@ -477,6 +477,27 @@ def test_cancelled_exit_order_stands_down_quietly(tmp_path):
     assert [e for e in rows if e.get("event_type") == "order_rejected"] == []
 
 
+def test_exit_placement_recovers_string_wrapped_order_identity(tmp_path):
+    """A successful close must not crash/re-submit when MCP returns stringified JSON."""
+    daemon, _ = _setup(tmp_path, stage="exits_live", mode="exits")
+
+    class StringPlacementClient:
+        @staticmethod
+        def build_order_args(**kwargs):
+            return mc.OdteMcpClient.build_order_args(**kwargs)
+
+        async def place_option_order(self, order_args, ref_id):
+            return '{"result":"{\\"data\\":{\\"id\\":\\"exit-string-1\\"}}"}'
+
+    daemon.client = StringPlacementClient()
+    plan = {"trade_id": "iwm-string-exit", "underlying": "IWM",
+            "option_id": "opt-iwm-299p", "quantity": 1}
+    asyncio.run(daemon._place_exit(plan, 0.89, "MAX_LOSS", NOW))
+    assert daemon.exit_order is not None
+    assert daemon.exit_order["order_id"] == "exit-string-1"
+    assert daemon.counts["exits"] == 1
+
+
 # --- phantom-position recheck (2026-08-19: daemon adopted 5s before the controller's exit
 # filled and then managed the dead position on quote polls alone for 15 minutes) -----------------
 

@@ -100,6 +100,22 @@ def test_extraction_structured_then_json_text_then_raw(tmp_path):
     _run(scenario())
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"id": "ord-1"},
+        {"data": {"id": "ord-1"}},
+        {"data": {"order": {"id": "ord-1"}}},
+        {"result": '{"data":{"id":"ord-1"}}'},
+        '{"data":{"order":{"order_id":"ord-1"}}}',
+        "11111111-2222-3333-4444-555555555555",
+    ],
+)
+def test_normalize_order_placement_row_recovers_live_envelopes(payload):
+    row = mc.normalize_order_placement_row(payload)
+    assert row.get("id") == "ord-1" or row.get("order_id") == "ord-1" or row.get("id") == payload
+
+
 def test_is_error_result_raises_tool_error(tmp_path):
     from fakes.fake_mcp_session import FakeToolResult
     session = FakeMcpSession()

@@ -38,7 +38,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from data.odte_journal import append_decision_journal
-from execution.odte_mcp_client import OdteMcpClient
+from execution.odte_mcp_client import OdteMcpClient, normalize_order_placement_row
 from execution.odte_pre_place_guard import consume_then, order_for_guard
 
 logger = logging.getLogger(__name__)
@@ -183,8 +183,7 @@ async def place_converted(payload: dict, *, account_number: str, ledger_path: st
                 "stage": "convert_place"}, now)
             return report
 
-        row = _dict(placed)
-        row = _dict(row.get("data")) or row
+        row = normalize_order_placement_row(placed)
         report.update({"placed": True, "order_id": row.get("id") or row.get("order_id"),
                        "ref_id": ref_id,
                        "review_alerts": (review or {}).get("alerts")

@@ -113,6 +113,44 @@ def _num(value: Any) -> float | None:
     return out if out == out else None
 
 
+def normalize_order_placement_row(value: Any) -> dict:
+    """Recover an order row from Robinhood's inconsistent placement envelopes.
+
+    The live server has returned direct dicts, nested ``data``/``order`` dicts, a
+    stringified JSON payload, and ``{"result": "<json>"}``. Placement is already a
+    side effect, so callers must recover the identity instead of crashing and
+    accidentally submitting the same close again on the next tick.
+    """
+    current = value
+    for _ in range(8):
+        if isinstance(current, str):
+            text = current.strip()
+            try:
+                current = json.loads(text)
+            except (json.JSONDecodeError, ValueError):
+                if len(text) == 36 and text.count("-") == 4:
+                    return {"id": text}
+                return {}
+            continue
+        if isinstance(current, list):
+            current = current[0] if current else None
+            continue
+        if not isinstance(current, dict):
+            return {}
+        if current.get("id") or current.get("order_id"):
+            return current
+        nested = next(
+            (current.get(key) for key in
+             ("data", "order", "result", "structuredContent", "orders", "results")
+             if current.get(key) is not None),
+            None,
+        )
+        if nested is None or nested is current:
+            return {}
+        current = nested
+    return {}
+
+
 class OdteMcpClient:
     """One long-lived MCP session with typed broker helpers. All calls are async.
 
