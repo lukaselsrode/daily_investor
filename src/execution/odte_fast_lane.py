@@ -98,6 +98,9 @@ EXIT_MAX_REPLACEMENTS = 5
 # Phantom check (2026-08-19): every Nth MANAGING poll, verify the broker still shows the
 # position — quote polls alone cannot tell a live position from a dead one.
 POSITION_RECHECK_TICKS = 20
+# Deference heartbeat (2026-08-20): stamp management.decision at least this often so the
+# controller can SEE the daemon managing (best-seen-only writes were silent on losing trades).
+MANAGEMENT_STAMP_SECONDS = 15.0
 
 # Trigger ACTIONS that demand a close NOW. Mode semantics stay honest: a trend/lotto/runner
 # TAKE_PROFIT alert (protect_profit / hold_but_alert / trail_runner) is NOT force-exited.
@@ -414,6 +417,16 @@ class FastLaneDaemon:
             return
         if not plan.get("underlying"):
             return
+        # Skip a plan the phantom recheck just proved dead, until the file actually changes
+        # (2026-08-20: correct release, then re-adoption 15s later on the stale "open" file).
+        released = getattr(self, "_released_plan", None)
+        if released and released[0] == str(plan.get("trade_id") or ""):
+            try:
+                if self._plan_path().stat().st_mtime == released[1]:
+                    return
+            except OSError:
+                pass
+            self._released_plan = None
         self.state = MANAGING
         self._journal({"underlying": plan.get("underlying"),
                        "option_id": plan.get("option_id"),
@@ -805,6 +818,15 @@ class FastLaneDaemon:
                                "reason": "broker_shows_no_position_releasing"},
                               "phantom_position_released",
                               shadow=self.mode != MODE_LIVE, now=now)
+                # NO RE-ADOPTION UNTIL THE FILE CHANGES (2026-08-20): the broker was flat but
+                # the controller hadn't closed the plan yet — the daemon re-adopted the dead
+                # position 15s after a CORRECT release. Remember what was released; adoption
+                # skips it until the plan file actually changes.
+                try:
+                    mtime = self._plan_path().stat().st_mtime
+                except OSError:
+                    mtime = None
+                self._released_plan = (str(plan.get("trade_id") or ""), mtime)
                 self.exit_order, self.lease = None, None
                 self.state = IDLE
                 return
@@ -815,11 +837,30 @@ class FastLaneDaemon:
         snapshot = self._position_snapshot(plan, quote, now)
         result = evaluate_position(plan, snapshot, now=now)
         best_seen = result.get("best_seen_bid")
-        if best_seen is not None and best_seen != (plan.get("management") or {}).get(
-                "best_seen_bid"):
-            plan.setdefault("management", {})["best_seen_bid"] = best_seen
-            atomic_write_text(self._plan_write_path(), json.dumps(plan, indent=2, default=str))
         decision = result["decision"]
+        # DEFERENCE HEARTBEAT (2026-08-20): management.decision was only written when
+        # best_seen_bid IMPROVED — in a falling trade it never does, so the plan showed
+        # `management: None` exactly when management mattered most. Three sessions of
+        # controller-placed exits happened because the controller (correctly, per its prompt)
+        # treated a silent plan as unmanaged. Stamp the verdict on a cadence so deference has a
+        # live signal; best_seen still updates on change.
+        mgmt = plan.setdefault("management", {})
+        last_stamp = mgmt.get("stamped_at")
+        stamp_due = True
+        if last_stamp:
+            try:
+                stamp_due = (now - datetime.fromisoformat(str(last_stamp))
+                             ).total_seconds() >= MANAGEMENT_STAMP_SECONDS
+            except ValueError:
+                pass
+        best_changed = best_seen is not None and best_seen != mgmt.get("best_seen_bid")
+        if best_changed or stamp_due:
+            if best_seen is not None:
+                mgmt["best_seen_bid"] = best_seen
+            mgmt.update({"decision": decision, "managed_by": "fast_lane",
+                         "cadence_seconds": TICK_SECONDS.get(MANAGING, 3.0),
+                         "stamped_at": now.isoformat(timespec="seconds")})
+            atomic_write_text(self._plan_write_path(), json.dumps(plan, indent=2, default=str))
         trigger = next((t for t in result["triggers"] if t["type"] == decision), {})
         exit_needed = str(trigger.get("action") or "").lower() in _EXIT_ACTIONS
         if not exit_needed:
@@ -844,7 +885,7 @@ class FastLaneDaemon:
         """True ONLY when the broker positively shows no nonzero position for the plan's
         option_id. Any failure to read returns False — keep managing."""
         try:
-            from data.odte_snapshot_build import broker_rows
+            from data.odte_snapshot_build import broker_rows, position_row_quantity
             from execution.odte_mcp_client import TOOL_OPTION_POSITIONS
             raw = await self.client.call(TOOL_OPTION_POSITIONS,
                                          {"account_number": self.account_number})
@@ -855,7 +896,9 @@ class FastLaneDaemon:
                 rid = str(r.get("option_id") or r.get("option") or "")
                 if "/" in rid:
                     rid = rid.rstrip("/").rsplit("/", 1)[-1]
-                if rid == oid and (_num(r.get("quantity")) or 0) != 0:
+                # settled + intraday — Robinhood reports same-day holdings ONLY in
+                # intraday_quantity (2026-08-20: `quantity` alone released a live position).
+                if rid == oid and position_row_quantity(r) != 0:
                     return False
             return True
         except Exception:

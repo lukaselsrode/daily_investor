@@ -250,3 +250,16 @@ def test_unusable_bars_are_dropped_not_guessed():
 def test_undated_bars_are_kept_in_order():
     rows = sb.session_bars([(10.0, 11.0, 9.0, 10.5, 100), (10.5, 12.0, 10.0, 11.0, 200)])
     assert len(rows) == 2 and rows[0]["close"] == pytest.approx(10.5)
+
+
+def test_intraday_positions_count_as_open():
+    # 2026-08-20: same-day positions carry quantity "0.0000" + intraday_quantity "1.0000" —
+    # the one-open-idea count must see them.
+    from data.odte_snapshot_build import build_broker_snapshot
+    snap = build_broker_snapshot(
+        {"data": {"buying_power": {"buying_power": "200.00"}}},
+        {"data": {"results": [
+            {"option_id": "a", "quantity": "0.0000", "intraday_quantity": "1.0000"},
+            {"option_id": "b", "quantity": "0.0000", "intraday_quantity": "0.0000"}]}},
+        {"data": {"orders": []}}, account_number="435050133")
+    assert snap["nonzero_option_positions_count"] == 1

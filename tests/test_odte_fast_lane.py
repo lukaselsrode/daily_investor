@@ -509,3 +509,70 @@ def test_position_recheck_failure_keeps_managing(tmp_path):
     session.queue("get_option_quotes", _option_quote_payload(bid=1.30, ask=1.36))
     _tick(daemon)
     assert daemon.state == fl.MANAGING
+
+
+def test_intraday_position_is_not_a_phantom(tmp_path):
+    # 2026-08-20 LIVE incident: Robinhood reports same-day holdings with settled quantity
+    # "0.0000" and the real size in intraday_quantity — the recheck released an actively held
+    # position mid-session. Settled+intraday is the true quantity.
+    daemon, session = _setup(tmp_path, stage="exits_live", mode="exits")
+    (tmp_path / "active_trade.json").write_text(json.dumps(
+        {"status": "open", "underlying": "IWM", "option_id": "opt-intraday", "quantity": 1,
+         "entry_price": 1.21, "mode": "scalp", "trade_id": "t-intraday"}))
+    daemon.state = fl.MANAGING
+    daemon._started = True
+    daemon._manage_polls = fl.POSITION_RECHECK_TICKS - 1
+    _queue_tape(session)
+    session.queue("get_option_positions", {"data": {"results": [
+        {"option_id": "opt-intraday", "quantity": "0.0000",
+         "intraday_quantity": "1.0000", "type": "long"}]}, "guide": ""})
+    session.queue("get_option_quotes", _option_quote_payload(bid=1.18, ask=1.24))
+    _tick(daemon)
+    assert daemon.state == fl.MANAGING                     # present via intraday quantity
+
+
+def test_management_heartbeat_stamps_on_losing_trades(tmp_path):
+    # 2026-08-20: management.decision only wrote when best_seen_bid IMPROVED — silent on losing
+    # trades, so the controller saw `management: None` and exited itself (3 sessions, 0 daemon
+    # exits). The verdict now stamps on a cadence regardless of direction.
+    daemon, session = _setup(tmp_path, stage="exits_live", mode="exits")
+    plan = {"status": "open", "underlying": "IWM", "option_id": "opt-hb", "quantity": 1,
+            "entry_price": 1.21, "mode": "scalp", "trade_id": "t-hb",
+            "profit_rules": {"take_profit_pct": 0.25},
+            "risk_rules": {"initial_bid_floor": 0.30}}
+    (tmp_path / "active_trade.json").write_text(json.dumps(plan))
+    daemon.state = fl.MANAGING
+    daemon._started = True
+    _queue_tape(session)
+    session.queue("get_option_quotes", _option_quote_payload(bid=1.10, ask=1.16))  # losing, no exit
+    _tick(daemon)
+    written = json.loads((tmp_path / "active_trade.json").read_text())
+    mgmt = written.get("management") or {}
+    assert mgmt.get("managed_by") == "fast_lane"
+    assert mgmt.get("decision") is not None
+    assert mgmt.get("stamped_at")
+
+
+def test_released_plan_is_not_readopted_until_file_changes(tmp_path):
+    daemon, session = _setup(tmp_path, stage="exits_live", mode="exits")
+    plan_path = tmp_path / "active_trade.json"
+    plan_path.write_text(json.dumps(
+        {"status": "open", "underlying": "IWM", "option_id": "opt-dead2", "quantity": 1,
+         "entry_price": 1.21, "mode": "scalp", "trade_id": "t-dead2"}))
+    daemon.state = fl.MANAGING
+    daemon._started = True
+    daemon._manage_polls = fl.POSITION_RECHECK_TICKS - 1
+    _queue_tape(session)
+    session.queue("get_option_positions", {"data": {"results": []}, "guide": ""})
+    _tick(daemon)
+    assert daemon.state == fl.IDLE                        # released (broker flat)
+    _queue_tape(session)
+    _tick(daemon)                                          # same stale file: must NOT re-adopt
+    assert daemon.state == fl.IDLE
+    plan_path.write_text(plan_path.read_text())            # rewrite -> new mtime
+    import os as _os
+    _os.utime(plan_path, None)
+    _queue_tape(session)
+    session.queue("get_option_quotes", _option_quote_payload(bid=1.18, ask=1.24))
+    _tick(daemon)
+    assert daemon.state == fl.MANAGING                     # changed file may re-adopt

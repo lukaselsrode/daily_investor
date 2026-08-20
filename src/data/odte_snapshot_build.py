@@ -489,6 +489,20 @@ def broker_rows(payload: Any) -> list[dict]:
     return []
 
 
+def position_row_quantity(row: dict) -> float:
+    """A position row's TRUE current quantity: settled + intraday.
+
+    2026-08-20 live incident: Robinhood's option-position rows report `quantity` as the SETTLED
+    quantity — a position opened TODAY shows quantity "0.0000" with the real holding in
+    `intraday_quantity`. Every position this system trades is same-day, so counting `quantity`
+    alone reads every live position as flat: the daemon's phantom recheck released an actively
+    held IWM 299P mid-session, and the one-open-idea snapshot count has been structurally blind
+    to same-day positions."""
+    settled = _num(row.get("quantity")) or 0.0
+    intraday = _num(row.get("intraday_quantity")) or 0.0
+    return settled + intraday
+
+
 def build_broker_snapshot(portfolio: Any, positions: Any, orders: Any, *,
                           account_number: str, now: datetime | None = None,
                           source: str = "odte_snapshot_build") -> dict:
@@ -515,7 +529,7 @@ def build_broker_snapshot(portfolio: Any, positions: Any, orders: Any, *,
         "buying_power": _num(bp_raw),
         "day_trades_left": _num(deep_find(portfolio, ("day_trades_left",))),
         "nonzero_option_positions_count": sum(
-            1 for r in pos_rows if (_num(r.get("quantity")) or 0) != 0),
+            1 for r in pos_rows if position_row_quantity(r) != 0),
         "open_option_orders_count": sum(
             1 for r in order_rows if _row_state(r) in PENDING_ORDER_STATES),
         "today_option_orders_count": sum(1 for r in order_rows if _is_today(r)),
